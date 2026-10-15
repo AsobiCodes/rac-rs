@@ -173,7 +173,11 @@ function Read-Remote([string]$name, [int]$timeoutMs = 4000) {
         try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
         $wc = New-Object System.Net.WebClient
         $wc.Headers['User-Agent'] = 'rac-rs-updater'
-        $task = $wc.DownloadStringTaskAsync(($base.TrimEnd('/') + '/' + $name))
+        # Started without the window's synchronization context: WebClient hands its result to the context it was started on, and the
+        # window's thread is blocked in Wait below, so with a window open (the change list, "Check for updates") it always timed out.
+        $ctx = [System.Threading.SynchronizationContext]::Current
+        [System.Threading.SynchronizationContext]::SetSynchronizationContext($null)
+        try { $task = $wc.DownloadStringTaskAsync(($base.TrimEnd('/') + '/' + $name)) } finally { [System.Threading.SynchronizationContext]::SetSynchronizationContext($ctx) }
         if (-not $task.Wait($timeoutMs)) { try { $wc.CancelAsync() } catch { }; return $null }
         return [string]$task.Result
     } catch { return $null }

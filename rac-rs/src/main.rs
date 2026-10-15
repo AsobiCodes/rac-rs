@@ -223,12 +223,14 @@ fn main() -> ExitCode {
 		crash_log(&format!("panic in thread {}: {info}", thread.name().unwrap_or("?")));
 	}));
 	let mut args: Vec<String> = std::env::args().skip(1).collect();
+	// Started by the player: double-clicked (no arguments: the desktop shortcut, Setup's Play) or by Play.cmd (the same cold boot with
+	// its arguments spelled out). Both ask about updates first; Play.cmd skipped the question up to v0.1.2.
+	#[cfg(all(windows, feature = "windows_gui"))]
+	if (args.is_empty() || args.iter().any(|a| a == "--retail-cold")) && update_check() {
+		return ExitCode::SUCCESS;
+	}
 	// Double-clicked (no arguments): start the game the way Play.cmd does, from generated/play.cfg written by setup.
 	if args.is_empty() {
-		#[cfg(all(windows, feature = "windows_gui"))]
-		if update_check() {
-			return ExitCode::SUCCESS;
-		}
 		match launch_args() {
 			Ok(a) => args = a,
 			Err(msg) => {
