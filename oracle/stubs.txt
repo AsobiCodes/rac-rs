@@ -1,0 +1,10 @@
+# addr ret name   (boot code, shared by all levels)
+# Pad state: the IOP pad driver is not emulated; report a connected pad.
+124da0 1 pad_get_state
+# SIF RPC (IOP not emulated): calls complete at once, nothing is busy.
+11b1c8 0 sceSifCallRpc
+11b3b8 0 sceSifCheckStatRpc
+11aff8 0 sceSifBindRpc
+# Level overlays: "@level addr ret name".
+# (The skinned moby vertex stream, skin_draw_list, is no longer stubbed: VU0 micro prog0 runs parked/resumable,
+# see vu.rs, and natively, see vu0aot.rs.)

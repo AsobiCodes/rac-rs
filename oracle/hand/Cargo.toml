@@ -1,0 +1,12 @@
+[package]
+name = "ee-hand"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ee-oracle = { path = ".." }
+cutapi = { path = "cutapi" }
+
+[features]
+proofs = []
+cutfin_probe = []

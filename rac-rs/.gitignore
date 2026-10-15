@@ -1,0 +1,4 @@
+/target
+# game-derived audio and screenshots stay out of the repo
+/movie22_en_10s.wav
+/x.png

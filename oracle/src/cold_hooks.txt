@@ -1,0 +1,17 @@
+# cold-boot hooks (see examples/coldboot.rs header)
+# libkernel InitSys: FindAddress(0x80000000..0x80080000, pattern) scans the BIOS kernel image in RAM -> skip the scan
+ret 11d798 0
+# SIF cmd/RPC init wait for the IOP's reply packet (SIF0 DMA) -> skip (BindRpc/CallRpc/CheckStatRpc are oracle stubs)
+ret 11ab20 0
+ret 11a480 0
+# sceSifRebootIop(img) / sceSifSyncIop: IOP "rebooted" at once
+ret 11cf48 1
+ret 11cf10 1
+# Semaphores: the oracle's IOP callbacks (cdvd end callback etc.) are emulated, not run, so their iSignalSema never happens.
+# Wait/Poll/iPoll therefore always succeed (as hle.rs does): jump to `jr ra; move v0,a0` placed in free low RAM.
+w32 12d728 1000 03e00008
+w32 12d728 1004 0080102d
+jmp 1189b0 1000
+jmp 1189c0 1000
+jmp 1189d0 1000
+ret 239ec8 1

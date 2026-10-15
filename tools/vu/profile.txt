@@ -1,0 +1,242 @@
+prog 2 entry 0
+prog 2 entry a0
+prog 3 entry 0
+prog 3 entry 88
+prog 3 entry a8
+prog 3 entry 318
+prog 4 entry 0
+prog 4 entry 88
+prog 4 entry a8
+prog 4 entry 318
+prog 4 jr 11b0 8c8
+prog 4 jr 11b0 a38
+prog 4 jr 11b0 bb0
+prog 4 jr 11b0 e98
+prog 4 jr 1228 8c8
+prog 4 jr 1228 a38
+prog 4 jr 1228 bb0
+prog 4 jr 1228 e98
+prog 4 jr 1258 8c8
+prog 4 jr 1258 a38
+prog 4 jr 1258 bb0
+prog 4 jr 1258 d20
+prog 4 jr 1258 e98
+prog 5 entry 0
+prog 5 entry 30
+prog 5 entry 40
+prog 5 entry 50
+prog 5 entry 70
+prog 5 entry 80
+prog 5 entry a0
+prog 5 jr 440 100
+prog 5 jr 440 140
+prog 5 jr 440 180
+prog 5 jr 440 1d0
+prog 5 jr 7c8 150
+prog 5 jr 7c8 190
+prog 5 jr 7c8 1e0
+prog 5 jr aa0 150
+prog 5 jr aa0 190
+prog 5 jr aa0 1e0
+prog 5 jr ea8 110
+prog 5 jr ea8 1a0
+prog 5 jr ee0 110
+prog 5 jr f18 110
+prog 5 jr f18 1a0
+prog 5 jr f88 1a0
+prog 5 jr 12d0 110
+prog 5 jr 12d0 1a0
+prog 5 jr 1308 110
+prog 5 jr 1308 1a0
+prog 5 jr 1340 110
+prog 5 jr 1340 1a0
+prog 5 jr 1378 1a0
+prog 5 jr 13b0 1a0
+prog 5 jr 15c8 120
+prog 5 jr 15c8 1b0
+prog 5 jr 1878 1b0
+prog 5 jr 19d8 2488
+prog 5 jr 19d8 2530
+prog 5 jr 19d8 2760
+prog 5 jr 19d8 2808
+prog 5 jr 1aa8 2488
+prog 5 jr 1aa8 2530
+prog 5 jr 1aa8 2760
+prog 5 jr 1aa8 2808
+prog 5 jr 1b20 2488
+prog 5 jr 1b20 2530
+prog 5 jr 1b20 2760
+prog 5 jr 1b20 2808
+prog 5 jr 1bc8 2488
+prog 5 jr 1bc8 2530
+prog 5 jr 1bc8 2760
+prog 5 jr 1bc8 2808
+prog 5 jr 3038 3490
+prog 5 jr 3038 3580
+prog 5 jr 3038 3838
+prog 5 jr 3038 3928
+prog 5 jr 3108 3490
+prog 5 jr 3108 3580
+prog 5 jr 3108 3838
+prog 5 jr 3108 3928
+prog 5 jr 3188 3490
+prog 5 jr 3188 3580
+prog 5 jr 3188 3928
+prog 5 jr 3240 3580
+prog 5 jr 3240 3838
+prog 5 jr 3240 3928
+prog 6 entry 0
+prog 6 entry 10
+prog 6 jr 158 5b8
+prog 6 jr 158 698
+prog 6 jr 158 f38
+prog 6 jr 158 1018
+prog 6 jr 228 5b8
+prog 6 jr 228 698
+prog 6 jr 228 f38
+prog 6 jr 228 1018
+prog 6 jr 2a8 5b8
+prog 6 jr 2a8 698
+prog 6 jr 2a8 f38
+prog 6 jr 2a8 1018
+prog 6 jr 360 5b8
+prog 6 jr 360 698
+prog 6 jr 360 f38
+prog 6 jr 840 990
+prog 6 jr 840 ac0
+prog 6 jr 840 bf0
+prog 6 jr 840 d20
+prog 6 jr 840 11d8
+prog 6 jr 840 1308
+prog 6 jr 840 1438
+prog 6 jr 840 1568
+prog 6 jr 8e0 9f8
+prog 6 jr 8e0 b28
+prog 6 jr 8e0 c58
+prog 6 jr 8e0 d88
+prog 6 jr 8e0 1240
+prog 6 jr 8e0 1370
+prog 6 jr 8e0 14a0
+prog 6 jr 8e0 15d0
+prog 6 jr 1788 1b98
+prog 6 jr 1788 1ba8
+prog 6 jr 1788 1bb8
+prog 6 jr 1788 1bc8
+prog 6 jr 1788 1bd8
+prog 6 jr 1788 1be8
+prog 6 jr 17d8 1b98
+prog 6 jr 17d8 1ba8
+prog 6 jr 17d8 1bb8
+prog 6 jr 17d8 1bc8
+prog 6 jr 17d8 1bd8
+prog 6 jr 17d8 1be8
+prog 6 jr 1988 1708
+prog 6 jr 1988 1718
+prog 6 jr 1988 1728
+prog 6 jr 1988 1a78
+prog 6 jr 19e0 1b98
+prog 6 jr 19e0 1ba8
+prog 6 jr 19e0 1bb8
+prog 6 jr 19e0 1bc8
+prog 6 jr 19e0 1bd8
+prog 6 jr 19e0 1be8
+prog 6 jr 1b88 9e8
+prog 6 jr 1b88 b18
+prog 6 jr 1b88 c48
+prog 6 jr 1b88 d78
+prog 6 jr 1b88 1230
+prog 6 jr 1b88 1360
+prog 6 jr 1b88 1490
+prog 6 jr 1b88 15c0
+prog 6 jr 1b98 1798
+prog 6 jr 1b98 17e8
+prog 6 jr 1b98 19f0
+prog 6 jr 1ba8 1798
+prog 6 jr 1ba8 17e8
+prog 6 jr 1ba8 19f0
+prog 6 jr 1bb8 1798
+prog 6 jr 1bb8 17e8
+prog 6 jr 1bb8 19f0
+prog 6 jr 1bc8 1798
+prog 6 jr 1bc8 17e8
+prog 6 jr 1bc8 19f0
+prog 6 jr 1bd8 1798
+prog 6 jr 1bd8 17e8
+prog 6 jr 1bd8 19f0
+prog 6 jr 1be8 1798
+prog 6 jr 1be8 17e8
+prog 6 jr 1be8 19f0
+prog 6 jr 1c30 1848
+prog 6 jr 1c30 1890
+prog 6 jr 1c30 1a40
+prog 7 entry 0
+prog 7 entry 20
+prog 7 entry 30
+prog 7 entry 40
+prog 10 entry 0
+prog 10 entry 70
+prog 11 entry 0
+prog 11 entry 50
+prog 11 entry 70
+prog 5 jr f50 1a0
+prog 5 jr 3188 3838
+prog 5 jr 3240 3490
+prog 6 jr 360 1018
+prog 8 entry 0
+prog 8 entry 20
+prog 8 entry 30
+prog 8 entry 40
+prog 8 jr 31c8 2030
+prog 8 jr 31c8 2070
+prog 8 jr 31c8 20b0
+prog 8 jr 31c8 20f0
+prog 8 jr 3320 36b8
+prog 8 jr 3320 36c8
+prog 8 jr 3320 36d8
+prog 8 jr 3320 36e8
+prog 8 jr 3320 36f8
+prog 8 jr 3320 3708
+prog 8 jr 3370 36b8
+prog 8 jr 3370 36c8
+prog 8 jr 3370 36d8
+prog 8 jr 3370 36e8
+prog 8 jr 3370 36f8
+prog 8 jr 3370 3708
+prog 8 jr 3510 32a0
+prog 8 jr 3510 32b0
+prog 8 jr 3510 32c0
+prog 8 jr 3510 3600
+prog 8 jr 3510 3658
+prog 8 jr 3568 36b8
+prog 8 jr 3568 36c8
+prog 8 jr 3568 36d8
+prog 8 jr 3568 36e8
+prog 8 jr 3568 36f8
+prog 8 jr 3568 3708
+prog 8 jr 36a8 3158
+prog 8 jr 36a8 32c0
+prog 8 jr 36a8 3658
+prog 8 jr 36b8 3330
+prog 8 jr 36b8 3380
+prog 8 jr 36b8 3578
+prog 8 jr 36c8 3330
+prog 8 jr 36c8 3380
+prog 8 jr 36c8 3578
+prog 8 jr 36d8 3330
+prog 8 jr 36d8 3380
+prog 8 jr 36d8 3578
+prog 8 jr 36e8 3330
+prog 8 jr 36e8 3380
+prog 8 jr 36e8 3578
+prog 8 jr 36f8 3330
+prog 8 jr 36f8 3380
+prog 8 jr 36f8 3578
+prog 8 jr 3708 3330
+prog 8 jr 3708 3380
+prog 8 jr 3708 3578
+prog 8 jr 3750 33e0
+prog 8 jr 3750 3428
+prog 8 jr 3750 35c8
+prog 8 jr 3750 3620
+prog 5 jr ee0 1a0
+prog 10 entry 60

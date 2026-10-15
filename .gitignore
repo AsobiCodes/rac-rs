@@ -1,0 +1,13 @@
+/generated/
+/build/
+/player/
+/toolchain/
+/Play.cmd
+*.iso
+# written on the player's PC by setup.ps1 (tools/recgen_iso.py, tools/vugen_iso.py)
+/oracle/rec/
+/oracle/game/
+/oracle/src/vu0_prog0.rs
+/rac-rs/src/gsfull/vu1_prog*.rs
+/rac-rs/src/gsfull/vu1aot_gen.rs
+/rac-rs/src/particles/orb_tables.rs

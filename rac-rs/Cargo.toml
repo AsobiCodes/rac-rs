@@ -1,0 +1,26 @@
+[package]
+name = "rac-rs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bytemuck = { version = "1.25.2", features = ["derive"] }
+cpal = "0.18.2"
+pollster = "1.0.1"
+rayon = "1.12.0"
+wgpu = "30.0.1"
+winit = "0.30.13"
+ee-oracle = { path = "../oracle" }
+ee-game = { path = "../oracle/game" }
+
+[features]
+# Public build: the exe uses the Windows GUI subsystem (no console window) and logs panics to <player dir>/crash.log. Off for dev builds and test tools.
+windows_gui = []
+
+[dev-dependencies]
+naga = { version = "30.0.1", features = ["wgsl-in"] }
+
+# Headless Eudora acceptance test (src/accept_main.rs): same module tree as main.rs, so it drives retail::Retail as the exe does.
+[[bin]]
+name = "eudora_accept"
+path = "src/accept_main.rs"

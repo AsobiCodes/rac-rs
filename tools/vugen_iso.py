@@ -1,0 +1,267 @@
+#!/usr/bin/env python3
+"""vugen_iso.py - generates the native VU microprogram translations from YOUR disc image (nothing game-derived is shipped).
+
+  python tools/vugen_iso.py --iso "<your .iso>"            (writes into the source tree, see below)
+  python tools/vugen_iso.py --iso "<your .iso>" --out DIR  (everything into one folder instead)
+
+Reads the boot ELF (SCES_509.16) straight from the disc image, cuts the VU microprograms out of its .vutext section
+(chunk table below: the program is stored as 0x800-byte chunks, each preceded by an 8-byte header), checks every program
+against its SHA-256, then runs the two translators in tools/vu:
+  vu0gen.py  prog0 (VU0, moby setup)   -> <tree>/oracle/src/vu0_prog0.rs      (used by oracle/src/vu0aot.rs)
+  vu1gen.py  progs 2-8, 10, 11 (VU1)    -> <tree>/rac-rs/src/gsfull/vu1_progN.rs, vu1aot_gen.rs   (used by rac-rs/src/gsfull/vu1aot.rs)
+  orb tables -> <tree>/rac-rs/src/particles/orb_tables.rs  (nanotech orb mesh, f32 bits read from the Veldin level overlay on the
+                disc, section 0 of the level-0 TOC entry, each table checked against its SHA-256; used by rac-rs/src/particles/orbs.rs)
+<tree> is the folder above tools/ (--tree overrides). In the published source those files are not shipped; this script writes them.
+In the dev tree it rewrites the same bytes. Output is deterministic. The intermediate microcode files (<tree>/generated/vu_bins,
+or OUT/bins) are deleted at the end unless --keep-bins.
+"""
+import argparse
+import hashlib
+import os
+import struct
+import subprocess
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ISO_SEC = 0x800
+
+# prog -> (size in bytes, file offset of chunk 0, 1, 2, ... in the boot ELF, SHA-256 of the assembled microcode)
+PROGS = {
+    0: (2624, [0x1010, 0x1818], '47ea7d1c2c42b850a770a7af39932ee552d423ec8f7bc5860186d0b3fa89dde6'),
+    2: (1736, [0x2008], '2016c42b68d54263ffefa7756b9a088270a3757d79735b643cee469ec18c88e2'),
+    3: (2912, [0x26e8, 0x2ef0], '556e8facd05c66615c9f0d5d5e0d7a63b4383e2f9415cebbe7447d592ca42c3d'),
+    4: (4712, [0x3268, 0x3a70, 0x4278], '8f39178ec8d1c51c81e0681b7bdb6989b7c44997e14c6f7b76e452198bd425e2'),
+    5: (14944, [0x44f8, 0x4d00, 0x5508, 0x5d10, 0x6518, 0x6d20, 0x7528, 0x7d30], 'ef440f7dcb75a8ab0f82706100831db53811ec9e2d73c868a92f992571d9c794'),
+    6: (7632, [0x7fa8, 0x87b0, 0x8fb8, 0x97c0], '7952469db1cc4a24f6d9f8901856583186bd617ec8511f1f7a94f94f6e6225e6'),
+    7: (7880, [0x9da8, 0xa5b0, 0xadb8, 0xb5c0], '6f068115623fafa38e65d70af7c5562473ce662d75c158b41953c342485d2ec4'),
+    8: (14176, [0xbca8, 0xc4b0, 0xccb8, 0xd4c0, 0xdcc8, 0xe4d0, 0xecd8], '97743031c02b96ab2f32cc0aa0f412af51ae9c4a90e1d25c5fb23c774356e8d9'),
+    10: (4704, [0xf798, 0xffa0, 0x107a8], '5a912e4cf393d61f71de5ca4b36977cc021083d5b783df6c82e7686e3da6aafe'),
+    11: (10304, [0x10a28, 0x11230, 0x11a38, 0x12240, 0x12a48, 0x13250], 'e0d6afb9404b804936bcdba123e3a6352a367761683a3ab29d1d5b3069999202'),
+}
+CHUNK = 0x800
+
+# Nanotech orb mesh (PAR-2a, FUN_002d91b8): name, element type, vec width, count, byte size, offset in level 0's overlay section, SHA-256.
+# The tables sit in the Veldin overlay data (RAM 0x1e1440 ..), not in the boot ELF.
+ORB_TABLES = [
+    ('ORB_POS', 'u32', 4, 290, 4640, 0x824d0, 'd7de0bb8b147d1445ee2efd13bc2050ac89450c681228bd32cdb5bdb6cd214f5',
+     'Body positions (x, y, z, w), 290 vertices.'),
+    ('ORB_ST', 'u32', 2, 290, 2320, 0x836f0, '0219cbba0b4e77438c33131b6232bb756f496b46f4b2ace9291d582a12e8c9e3',
+     'Body ST per vertex.'),
+    ('ORB_RIM_V', 'u32', 4, 96, 1536, 0x84490, '5cad1af2504101b24e1b260398ede777b7c68f99b54692e7e63519c8d3aacfc7',
+     'Rim corner vertices (x, y, z, w): 0..32 inner, 32.. outer.'),
+    ('ORB_RIM_IDX', 'usize', 4, 32, 256, 0x84a90, '5e1208c491ba649e78c57ce397eb8a53032579c7a6fa677a41c8f2df50f48f95',
+     'Rim quads: four vertex indices each.'),
+    ('ORB_GLASS_V', 'u32', 4, 16, 256, 0x84b90, 'a86546e50c1656e16d4af46dcc0425ccfbbf78b36026cb60a3195fc35d943453',
+     'Glass corner vertices (x, y, z, w) in the crate frame.'),
+    ('ORB_GLASS_IDX', 'usize', 4, 4, 32, 0x84c90, '6d393bf799abce5f21c38500f916d075404119fadf5383f3af73732107cf0e08',
+     'Glass quads: four vertex indices each, strip order.'),
+]
+ORB_HEAD = """//! PAR-2a nanotech orb mesh tables (FUN_002d91b8): exact f32 bit patterns of the body positions and ST, the rim
+//! and glass corner vertices and their index quads (decomp/notes/particles.md PAR-2a).
+"""
+
+
+
+
+def u32(b, o):
+    return struct.unpack_from('<I', b, o)[0]
+
+
+class IsoDisc:
+    def __init__(self, path):
+        self.f = open(path, 'rb')
+
+    def bytes(self, lba, n):
+        self.f.seek(lba * ISO_SEC)
+        return self.f.read(n)
+
+
+def boot_elf(d):
+    """SCES_509.16 via a minimal ISO9660 walk (root directory record)."""
+    pvd = d.bytes(16, ISO_SEC)
+    assert pvd[1:6] == b'CD001', 'not an ISO9660 image'
+    root_lba, root_len = u32(pvd, 156 + 2), u32(pvd, 156 + 10)
+    dirdata = d.bytes(root_lba, root_len)
+    o = 0
+    while o < len(dirdata):
+        ln = dirdata[o]
+        if ln == 0:
+            o = (o // ISO_SEC + 1) * ISO_SEC
+            continue
+        name = dirdata[o + 33:o + 33 + dirdata[o + 32]].decode('latin1')
+        if name.upper().startswith('SCES_509.16'):
+            return d.bytes(u32(dirdata, o + 2), u32(dirdata, o + 10))
+        o += ln
+    raise FileNotFoundError('SCES_509.16 not found on the disc image')
+
+
+def wad_decompress(data):
+    """Insomniac WAD LZ (port of rac-rs/src/wad.rs)."""
+    assert data[:3] == b'WAD'
+    end = min(u32(data, 3), len(data))
+    out = bytearray()
+    src = 16
+    last = 0xff
+    if src < end and data[src] > 0x11:
+        n = data[src] - 0x11
+        out += data[src + 1:src + 1 + n]
+        src += 1 + n
+        last = 0
+    while src < end:
+        flag = data[src]
+        if flag < 0x10:
+            if last < 0x10:
+                raise ValueError('double literal')
+            if flag == 0:
+                ln, st = data[src + 1] + 18, src + 2
+            else:
+                ln, st = flag + 3, src + 1
+            out += data[st:st + ln]
+            src = st + ln
+        else:
+            if flag >= 0x40:
+                b = data[src + 1]
+                cl = (flag >> 5) + 1
+                dist = b * 8 + ((flag >> 2) & 7) + 1
+                tail = flag & 3
+                nxt = src + 2
+            elif flag >= 0x20:
+                if flag == 0x20:
+                    cl, p = data[src + 1] + 33, src + 2
+                else:
+                    cl, p = (flag & 0x1f) + 2, src + 1
+                an, b = data[p], data[p + 1]
+                dist = (an >> 2) + b * 0x40 + 1
+                tail = an & 3
+                nxt = p + 2
+            else:
+                a = (flag >> 3) & 1
+                m3 = flag & 7
+                if m3 == 0:
+                    cl, p = data[src + 1] + 9, src + 2
+                else:
+                    cl, p = m3 + 2, src + 1
+                bn, c = data[p], data[p + 1]
+                b = bn >> 2
+                tail = bn & 3
+                nxt = p + 2
+                if a == 0 and b == 0 and c == 0:
+                    if m3 != 1:
+                        s = nxt
+                        while s < end and (s % 0x2000) != 0x10:
+                            s += 1
+                        src = s
+                        last = flag
+                        continue
+                    cl = 0
+                    dist = 0
+                else:
+                    dist = 0x4000 + a * 0x4000 + b + c * 0x40
+            if cl > 0:
+                if dist > len(out):
+                    raise ValueError('bad offset')
+                frm = len(out) - dist
+                for i in range(cl):
+                    out.append(out[frm + i])
+            out += data[nxt:nxt + tail]
+            src = nxt + tail
+        last = flag
+    return bytes(out)
+
+
+def level_section(d, lvl, idx):
+    """Section idx of level lvl's asset (TOC at LBA 1500, header, section table), WAD-decompressed when packed."""
+    toc = d.bytes(1500, 0x2960)
+    assert u32(toc, 0) == 1 and u32(toc, 4) == 0x2960, 'unexpected disc TOC'
+    hdr = d.bytes(u32(toc, 0x28c8 + lvl * 8), 0x2434)
+    assert u32(hdr, 0) == lvl and u32(hdr, 4) == 0x2434, 'unexpected level header'
+    data = d.bytes(u32(hdr, 8), u32(hdr, 12) * ISO_SEC)
+    off, size = u32(data, idx * 8), u32(data, idx * 8 + 4)
+    raw = data[off:off + size]
+    return wad_decompress(raw) if raw[:3] == b'WAD' else raw
+
+
+def orb_rs(d):
+    """Text of rac-rs/src/particles/orb_tables.rs, built from the Veldin overlay on the disc."""
+    ov = level_section(d, 0, 0)
+    out = [ORB_HEAD]
+    for name, ty, w, n, size, off, want, doc in ORB_TABLES:
+        b = ov[off:off + size]
+        h = hashlib.sha256(b).hexdigest()
+        if h != want:
+            sys.exit('%s: orb table does not match the PAL v1.00 disc (sha256 %s)' % (name, h))
+        fmt = '<%d%s' % (len(b) // (4 if ty == 'u32' else 2), 'I' if ty == 'u32' else 'h')
+        vals = struct.unpack(fmt, b)
+        rows = []
+        for r in range(n):
+            v = vals[r * w:(r + 1) * w]
+            rows.append('\t[' + ', '.join(('0x%08x' % x) if ty == 'u32' else str(x) for x in v) + '],')
+        out.append('/// %s\npub const %s: [[%s; %d]; %d] = [\n%s\n];\n' % (doc, name, ty, w, n, '\n'.join(rows)))
+    return '\n'.join(out)
+
+
+def cut(elf, n):
+    size, offs, _ = PROGS[n]
+    out = bytearray(size)
+    for i, o in enumerate(offs):
+        lo = i * CHUNK
+        ln = min(CHUNK, size - lo)
+        out[lo:lo + ln] = elf[o:o + ln]
+    return bytes(out)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--iso', required=True)
+    ap.add_argument('--out', help='write vu0_prog0.rs and the VU1 files into this one folder')
+    ap.add_argument('--tree', default=os.path.join(HERE, '..'), help='source tree root (default: the folder above tools/)')
+    ap.add_argument('--keep-bins', action='store_true')
+    a = ap.parse_args()
+    if a.out:
+        out0 = out1 = os.path.abspath(a.out)
+        bins = os.path.join(out1, 'bins')
+    else:
+        tree = os.path.abspath(a.tree)
+        out0 = os.path.join(tree, 'oracle', 'src')
+        out1 = os.path.join(tree, 'rac-rs', 'src', 'gsfull')
+        bins = os.path.join(tree, 'generated', 'vu_bins')
+        os.makedirs(out0, exist_ok=True)
+        os.makedirs(out1, exist_ok=True)
+    os.makedirs(bins, exist_ok=True)
+    disc = IsoDisc(a.iso)
+    elf = boot_elf(disc)
+    sys.path.insert(0, os.path.join(HERE, 'vu'))
+    import vu_disasm
+    for n in sorted(PROGS):
+        b = cut(elf, n)
+        want = PROGS[n][2]
+        h = hashlib.sha256(b).hexdigest()
+        if want is not None and h != want:
+            sys.exit('prog%d: microcode does not match the PAL v1.00 boot code (sha256 %s)' % (n, h))
+        with open(os.path.join(bins, 'prog%d.bin' % n), 'wb') as f:
+            f.write(b)
+    txt = vu_disasm.render(open(os.path.join(bins, 'prog0.bin'), 'rb').read(), 0)[0]
+    with open(os.path.join(bins, 'prog0.s'), 'w', encoding='utf-8', newline='\n') as f:
+        f.write(txt)
+    orbdir = out1 if a.out else os.path.join(tree, 'rac-rs', 'src', 'particles')
+    os.makedirs(orbdir, exist_ok=True)
+    with open(os.path.join(orbdir, 'orb_tables.rs'), 'w', encoding='ascii', newline='\n') as f:
+        f.write(orb_rs(disc))
+    env = dict(os.environ, VU_BINS=bins)
+    vu = os.path.join(HERE, 'vu')
+    r = subprocess.run([sys.executable, os.path.join(vu, 'vu0gen.py'), os.path.join(out0, 'vu0_prog0.rs')], cwd=vu, env=env)
+    if r.returncode:
+        sys.exit('vu0gen.py failed')
+    r = subprocess.run([sys.executable, os.path.join(vu, 'vu1gen.py'), '--bins', bins, '--out', out1,
+                        '--profile', os.path.join(vu, 'profile.txt')], cwd=vu, env=env)
+    if r.returncode:
+        sys.exit('vu1gen.py failed')
+    if not a.keep_bins:
+        for f in os.listdir(bins):
+            os.remove(os.path.join(bins, f))
+        os.rmdir(bins)
+    print('vu: generated vu0_prog0.rs in', out0, '+ 9 VU1 programs in', out1, '+ orb_tables.rs in', orbdir)
+
+
+if __name__ == '__main__':
+    main()
