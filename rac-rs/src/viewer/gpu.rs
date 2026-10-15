@@ -188,7 +188,9 @@ impl Gpu {
 			color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Constant, dst_factor: wgpu::BlendFactor::OneMinusConstant, operation: wgpu::BlendOperation::Add },
 			alpha: wgpu::BlendComponent::OVER,
 		};
-		let strip_pipeline = make("vs", "fs_part_fix", Some(fix_blend), false, wgpu::CompareFunction::Less);
+		// The strip callbacks inherit the frame's TEST_1 0x5360b (ZTST GEQUAL, set after the sky pass; decomp/notes/aridia_presentation.md):
+		// the nearer or equal z passes = LessEqual on rac-rs depth (decomp/notes/draw_producers.md, Kalebo glass).
+		let strip_pipeline = make("vs", "fs_part_fix", Some(fix_blend), false, wgpu::CompareFunction::LessEqual);
 		// The Hoven pools: TEST_1/2 0x50000 (ZTE, ZTST GEQUAL: the nearer or equal z passes, so pass 2 lands on pass 1) and Z written
 		// (decomp/notes/fx_census_late.md, Hoven water pools).
 		let pool_pipeline = make("vs", "fs_part_fix", Some(fix_blend), true, wgpu::CompareFunction::LessEqual);
@@ -1462,7 +1464,7 @@ impl Gpu {
 			}
 			shown[pi] = true;
 			// PC-FPS-1: the placement drawn between the last two ticks when smooth motion blends it.
-			let (m, scale) = super::smooth::prop_xf(pi).unwrap_or_else(|| (place(p.pos, p.rot), p.scale));
+			let (m, scale) = super::smooth::prop_xf(pi).unwrap_or_else(|| (place_mirrored(p.pos, p.rot, p.mirror), p.scale));
 			let light = Self::moby_light(p.light);
 			let id = dyn_id(&self.table, &mut self.moby_dyn, [m[12], m[13], m[14]]);
 			let tint = PROP_TINTS.with(|t| t.borrow().get(pi).copied().flatten());

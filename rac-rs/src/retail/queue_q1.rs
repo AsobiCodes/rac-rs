@@ -246,6 +246,9 @@ fn glass_level(level: u32) -> Option<(usize, u8, f32, u32)> {
 	}
 }
 
+/// The fx textures of `glass_level` (sampled without mips, `particles::FX_NOMIP`).
+pub const GLASS_TEX: [usize; 2] = [0x29, 0x30];
+
 /// FUN_001fc0d8: `v * len / |v|`, the zero vector stays zero.
 fn set_len(v: [f32; 3], len: f32) -> [f32; 3] {
 	let n = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
@@ -286,7 +289,7 @@ fn glass(m: &Machine, level: u32, f: u32, patches: u32, out: &mut Vec<WorldStrip
 		let pos: Vec<[f32; 3]> = (0..n as u32).map(|j| m.rdv3(pp + 12 * j)).collect();
 		let uv = (0..n as u32).map(|j| glass_uv(pos[j as usize], m.rdv3(np + 12 * j), cam, scale)).collect();
 		let colour = (0..n as u32).map(|j| [0, 8, 16].map(|s| ((m.rd32(cp + 4 * j) >> s) & 0xff) as f32 / 128.0)).map(|c| [c[0], c[1], c[2], 0.0]).collect();
-		out.push(WorldStrip { pos, uv, colour, tex, fix, add: false });
+		out.push(WorldStrip { pos, uv, colour, tex: tex | crate::particles::FX_NOMIP, fix, add: false });
 	}
 }
 

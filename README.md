@@ -53,15 +53,12 @@ If you downloaded v0.1.0, it has no automatic updates. Download the new ZIP, unz
 
 ## Controls
 
-The game's own button prompts show the keyboard and mouse keys. You can change the camera style and language in the game's Options menu. Gamepads (XInput) work too; with the modern camera on, hold R2 to strafe.
+The game's own button prompts show the keyboard and mouse keys. You can change the camera style and language in the game's Options menu. Controllers work too: Xbox-style controllers (XInput) and PlayStation controllers (PS4 DualShock 4 and PS5 DualSense, over USB or Bluetooth), also when you switch one on or plug it in after the game has started. With the modern camera on, hold R2 to strafe.
 
 ## Known issues
 
-- Weapon models are missing in the cutscene when you buy a weapon.
-- The tank on the second Veldin visit is missing its right-side wheels.
 - Clank's jetpack can drift out of sync with Ratchet.
 - Some glass surfaces can flicker.
-- The portrait panel on the screen after the final battle is empty.
 
 ## Legal
 

@@ -21,8 +21,10 @@
 //! "Space" plus the label would be wider than retail's legend box (see `substitute`).
 //!
 //! The gamepad (XInput): A = Cross, B = Circle, X = Square, Y = Triangle, LB = L1, RB = R1, LT = L2, RT = R2, Back = Select,
-//! Start = Start, d-pad, both sticks analog with radial deadzones, L3 / R3. It is merged with the keyboard (OR of buttons, the
-//! larger deflection of each stick axis) and works without any switch; only the keyboard prompts follow `RAC_PC_EXT`.
+//! Start = Start, d-pad, both sticks analog with radial deadzones, L3 / R3. A PlayStation controller (pspad.rs: DualShock 4,
+//! DualSense, read over HID) arrives as an XInput report with its buttons in their PS2 places and goes the same way. The pads
+//! are merged with the keyboard (OR of buttons, the larger deflection of each stick axis) and work without any switch; only
+//! the keyboard prompts follow `RAC_PC_EXT`.
 //!
 //! Dev: `RAC_PROMPT_DEV` = `from-to:kb|pad;...` (fields, `to` may be empty = open end) forces the device per field in scripted
 //! runs; `RAC_PROMPT_CANARY=1` fills the pool range with 0xA5 and logs any field that finds a byte of it changed by anything but
@@ -441,7 +443,7 @@ pub fn note_window_event(e: &winit::event::WindowEvent) {
 
 /// Start of the run (Retail::load): says which pad is there (the device stays the keyboard until the pad is used).
 pub fn init() {
-	if super::pcext::enabled() && xinput::connected() {
+	if super::pcext::enabled() && (xinput::connected() | super::pspad::connected()) {
 		eprintln!("retail: prompts: gamepad found, keyboard prompts until it is used");
 	}
 }
@@ -739,10 +741,22 @@ pub fn pad_activity(prev: &PadState, now: &PadState) -> bool {
 	now.buttons & !prev.buttons != 0 || (0..4).any(|i| now.sticks[i] != 0x80 && (prev.sticks[i] == 0x80 || (now.sticks[i] as i32 - prev.sticks[i] as i32).abs() > 24))
 }
 
+/// Every connected pad as one: the XInput controller and the PlayStation controller (pspad.rs), merged as `merge` does.
+fn pad_state() -> Option<PadState> {
+	let ps = super::pspad::state().map(|r| map_xinput(&r));
+	match (xinput::state(), ps) {
+		(Some(x), Some(p)) => {
+			let (buttons, sticks) = merge((x.buttons, x.sticks), &p);
+			Some(PadState { buttons, sticks })
+		}
+		(x, p) => x.or(p),
+	}
+}
+
 /// Gamepad input for this field (Retail::tick_keys, window thread): merges the pad's buttons and sticks into the keyboard's and
 /// makes the gamepad the device when `pad_activity` says so. Nothing without a connected pad.
 pub fn poll_pad(buttons: &mut u16, sticks: &mut [u8; 4]) {
-	let Some(mut p) = xinput::state() else { return };
+	let Some(mut p) = pad_state() else { return };
 	static PREV: Mutex<PadState> = Mutex::new(PadState::IDLE);
 	if let Ok(mut prev) = PREV.lock() {
 		if pad_activity(&prev, &p) {
@@ -767,8 +781,9 @@ mod xinput {
 	mod sys {
 		use super::super::XRaw;
 		use std::ffi::c_void;
-		use std::sync::OnceLock;
-		use std::time::{Duration, Instant};
+		use std::sync::atomic::{AtomicU32, Ordering};
+		use std::sync::{Once, OnceLock};
+		use std::time::Duration;
 
 		#[repr(C)]
 		#[derive(Default, Clone, Copy)]
@@ -810,21 +825,40 @@ mod xinput {
 			})
 		}
 
-		/// The first connected controller; a missing one is looked for once a second (polling an empty slot is slow).
+		/// The slot of the controller in use; NONE while there is none.
+		static SLOT: AtomicU32 = AtomicU32::new(NONE);
+		const NONE: u32 = u32::MAX;
+
+		/// The first slot with a connected controller.
+		fn find(f: GetState) -> Option<u32> {
+			(0..4).find(|&i| unsafe { f(i, &mut State::default()) } == 0)
+		}
+
+		/// The connected controller. The first call looks at once; after that a missing one (switched on, plugged in or woken
+		/// up later, or lost) is looked for once a second on a thread of its own, since polling an empty slot is slow.
 		pub fn raw() -> Option<XRaw> {
-			static LAST_TRY: std::sync::Mutex<Option<(Instant, Option<u32>)>> = std::sync::Mutex::new(None);
 			let f = get_state()?;
-			let mut g = LAST_TRY.lock().ok()?;
-			let slot = match *g {
-				Some((_, Some(s))) => Some(s),
-				Some((t, None)) if t.elapsed() < Duration::from_secs(1) => None,
-				_ => (0..4).find(|&i| unsafe { f(i, &mut State::default()) } == 0),
-			};
-			*g = Some((Instant::now(), slot));
-			let s = slot?;
+			static SEARCH: Once = Once::new();
+			SEARCH.call_once(|| {
+				if let Some(s) = find(f) {
+					SLOT.store(s, Ordering::Relaxed);
+				}
+				let _ = std::thread::Builder::new().name("xinput search".into()).spawn(move || loop {
+					std::thread::sleep(Duration::from_secs(1));
+					if SLOT.load(Ordering::Relaxed) == NONE {
+						if let Some(s) = find(f) {
+							SLOT.store(s, Ordering::Relaxed);
+						}
+					}
+				});
+			});
+			let s = SLOT.load(Ordering::Relaxed);
+			if s == NONE {
+				return None;
+			}
 			let mut st = State::default();
 			if unsafe { f(s, &mut st) } != 0 {
-				*g = Some((Instant::now(), None));
+				let _ = SLOT.compare_exchange(s, NONE, Ordering::Relaxed, Ordering::Relaxed);
 				return None;
 			}
 			let p = st.pad;

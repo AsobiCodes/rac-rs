@@ -12,6 +12,9 @@
 
 mod draw;
 
+use crate::gsfull::vif::{Out, Vif1};
+use crate::gsfull::vu1::Vu1;
+
 #[derive(Clone, Copy, Default, Debug)]
 pub struct Vtx {
     pub x: u16,
@@ -144,6 +147,28 @@ pub struct Gs {
     /// `tex_cache`'s decoded texels and their rectangle (x, y, w, h).
     tcache: Vec<[f32; 4]>,
     tcr: (i32, i32, u32, u32),
+    /// P1 mode (`P1_ON`): the VU1 model of the path-1 jobs of a render-to-texture menu page, see `P1`.
+    p1: Option<Box<P1>>,
+    /// Directory whose vu1Memory.bin / vu1MicroMem.bin start the model (the savestate; none on a cold boot).
+    p1_dir: String,
+    /// The path-1 packet being fed (`p1_pump`): only prims into buffers other than the display / main ones are drawn.
+    p1_only: bool,
+    /// DIRECT qwords of the current VIF1 job fed so far (the anchor of the queued path-1 packets).
+    p1_nd: u32,
+}
+
+/// P1 mode: the menu page draws an actor (the post-game page's green robot, class 1957) through VU1 (path 1) into a
+/// render-to-texture panel; the capture draws only paths 2 and 3, so the panel stayed empty. While a page that does
+/// this is up (retail.rs sends `P1_ON` / `P1_OFF`), the job's VIF1 stream also runs through the GS-full VIF1 + VU1
+/// model (gsfull/vif.rs, vu1.rs: the same programs `--gsfull` runs). Its path-1 packets are fed to the capture
+/// between the DIRECT qwords where the program ran (`p1_pump`), drawing only into non-display buffers (`p1_only`),
+/// with the Z buffer on (draw.rs `ZB`).
+struct P1 {
+    vif: Vif1,
+    vu: Vu1,
+    out: Out,
+    /// Path-1 packets of the current job: (DIRECT qwords before it, the qwords).
+    q: std::collections::VecDeque<(u32, Vec<u128>)>,
 }
 
 /// VU1 programs a frame starts before its scene: the sky's own (0 on Eudora, 2 on Rilgar); the scene starts ~2700.
@@ -157,6 +182,9 @@ pub const DRAW_ON: u64 = u64::MAX - 3;
 /// Worker markers: the front end shows the GS's own display-buffer picture (see `Gs::full`) / is back to the mirror's picture.
 pub const FULL_ON: u64 = u64::MAX - 4;
 pub const FULL_OFF: u64 = u64::MAX - 5;
+/// Worker markers: a menu page with a VU1-drawn render-to-texture actor is up (see `P1`) / is gone.
+pub const P1_ON: u64 = u64::MAX - 6;
+pub const P1_OFF: u64 = u64::MAX - 7;
 
 const W: u32 = 512;
 const H: u32 = 512;
@@ -215,6 +243,10 @@ impl Gs {
             pm: draw::pmemo::PMemo::new(),
             tcache: Vec::new(),
             tcr: (0, 0, 0, 0),
+            p1: None,
+            p1_dir: String::new(),
+            p1_only: false,
+            p1_nd: 0,
             trace: std::env::var("RAC_GSCAP_TRACE").ok().and_then(|v| {
                 let (a, b) = v.split_once('-')?;
                 Some((a.parse().ok()?, b.parse().ok()?))
@@ -277,7 +309,13 @@ impl Gs {
                 }
                 self.dispfb = d;
                 self.vif1_reset();
+                if self.p1.is_some() {
+                    let t0 = self.prof.is_some().then(std::time::Instant::now);
+                    self.p1_feed(&w, &marks);
+                    self.prof_add("p1 feed (VIF1 + VU1 model)", t0);
+                }
                 self.vif1(&w, &marks);
+                self.p1_pump(true);
                 self.blocks.clear();
             }
             // The field's end (retail.rs worker, after each field): a display-buffer picture drawn this field shows now.
@@ -297,6 +335,8 @@ impl Gs {
             Job::Gif(qs, DRAW_ON) if qs.is_empty() => self.no_draw = false,
             Job::Gif(qs, FULL_ON) if qs.is_empty() => self.full_mode(true),
             Job::Gif(qs, FULL_OFF) if qs.is_empty() => self.full_mode(false),
+            Job::Gif(qs, P1_ON) if qs.is_empty() => self.p1_on(),
+            Job::Gif(qs, P1_OFF) if qs.is_empty() => self.p1 = None,
             Job::Gif(qs, d) => {
                 if self.tracing() {
                     eprintln!("gscap f{} gif {} qwords dispfb {d:x}", self.fields, qs.len());
@@ -369,6 +409,10 @@ impl Gs {
             if self.qn == 4 {
                 self.qn = 0;
                 let q = self.qw;
+                if self.p1.is_some() {
+                    self.p1_pump(false);
+                    self.p1_nd += 1;
+                }
                 self.gif(q[0] as u128 | (q[1] as u128) << 32 | (q[2] as u128) << 64 | (q[3] as u128) << 96);
             }
             self.vif_direct -= 1;
@@ -432,6 +476,63 @@ impl Gs {
                 self.stat(format!("vif1 bad code {code:08x}"));
                 self.vif_bad = true;
             }
+        }
+    }
+
+    /// Directory with the savestate's VU1 memories (`P1_ON` starts the model from them).
+    pub fn set_vu1_dir(&mut self, dir: &str) {
+        self.p1_dir = dir.to_string();
+    }
+
+    /// `P1_ON`: starts the VIF1 + VU1 model (as `gsfull::pipe::Pipe::new`; zeroed memories without the savestate files).
+    fn p1_on(&mut self) {
+        if self.p1.is_some() {
+            return;
+        }
+        // RAC_P1_ZERO=1 (debug): start from empty VU1 memories (shows that the page's chains carry their own programs and data).
+        let zero = std::env::var_os("RAC_P1_ZERO").is_some();
+        let rd = |n: &str| if zero { Vec::new() } else { std::fs::read(format!("{}/{n}", self.p1_dir)).unwrap_or_default() };
+        let (d, m) = (rd("vu1Memory.bin"), rd("vu1MicroMem.bin"));
+        let w: Vec<u32> = m.get(..64).map(|b| b.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect()).unwrap_or_default();
+        let out = Out { prog: crate::gsfull::vif::identify(&w), ..Default::default() };
+        self.p1 = Some(Box::new(P1 { vif: Vif1::new(), vu: Vu1::new(&d, &m), out, q: Default::default() }));
+        self.p1_nd = 0;
+    }
+
+    /// Runs the job's VIF1 stream through the model and queues its path-1 packets, each with the number of DIRECT
+    /// qwords (path 2) that come before it in the stream.
+    fn p1_feed(&mut self, w: &[u32], marks: &[(usize, u32)]) {
+        let Some(p) = self.p1.as_mut() else { return };
+        p.out.qs.clear();
+        p.out.segs.clear();
+        p.q.clear();
+        p.vif.feed(w, marks, &mut p.vu, &mut p.out);
+        let mut direct = 0u32;
+        for (i, &(s, path, _)) in p.out.segs.iter().enumerate() {
+            let e = p.out.segs.get(i + 1).map_or(p.out.qs.len(), |n| n.0 as usize);
+            match path {
+                2 => direct += (e - s as usize) as u32,
+                1 => p.q.push_back((direct, p.out.qs[s as usize..e].to_vec())),
+                _ => {}
+            }
+        }
+        self.p1_nd = 0;
+    }
+
+    /// Feeds the queued path-1 packets that are due before the next DIRECT qword (between GIF packets only), or all of
+    /// them (`all`: the end of the job).
+    fn p1_pump(&mut self, all: bool) {
+        loop {
+            let due = |s: &Gs| s.p1.as_ref().and_then(|p| p.q.front()).is_some_and(|f| all || (f.0 <= s.p1_nd && s.tag.nloop == 0));
+            if !due(self) {
+                return;
+            }
+            let Some((_, qs)) = self.p1.as_mut().and_then(|p| p.q.pop_front()) else { return };
+            self.p1_only = true;
+            for q in qs {
+                self.gif(q);
+            }
+            self.p1_only = false;
         }
     }
 
@@ -970,6 +1071,22 @@ fn luts() -> &'static Luts {
         (t(64, 32, r32, 1), t(64, 64, r16, 1), t(128, 64, r8, 2), t(128, 128, r4, 2))
     })
 }
+
+/// In-page swizzle offsets (bytes) of PSMZ32 / PSMZ24: the CT32 column layout with the Z block order, by `y * 64 + x`.
+fn zlut() -> &'static Vec<u32> {
+    static L: std::sync::OnceLock<Vec<u32>> = std::sync::OnceLock::new();
+    L.get_or_init(|| {
+        (0..64 * 32u32)
+            .map(|i| {
+                let (x, y) = (i % 64, i / 64);
+                let blk = BTZ32[((y % 32) / 8) as usize][((x % 64) / 8) as usize] as u32;
+                (blk * 64 + CT32[(y % 8) as usize][(x % 8) as usize] as u32) * 4
+            })
+            .collect()
+    })
+}
+
+const BTZ32: [[u8; 8]; 4] = [[24, 25, 28, 29, 8, 9, 12, 13], [26, 27, 30, 31, 10, 11, 14, 15], [16, 17, 20, 21, 0, 1, 4, 5], [18, 19, 22, 23, 2, 3, 6, 7]];
 
 fn r32(bp: u32, bw: u32, x: u32, y: u32) -> usize {
     let page = (y / 32) * bw + x / 64;

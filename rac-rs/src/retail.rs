@@ -28,6 +28,7 @@ pub mod modcam;
 pub mod aim;
 pub mod pcext;
 pub mod prompts;
+pub mod pspad;
 pub mod vendor;
 pub mod pcopts;
 pub mod strafe;
@@ -312,6 +313,8 @@ pub struct Moby {
 	pub class: u32,
 	pub pos: [f32; 3],
 	pub rot: [f32; 3],
+	/// The draw basis is mirrored in model Y (+0x34 bit 0x8000 negates basis row 1): `rot` is the plain rotation (`basis_pose`).
+	pub mirror: bool,
 	/// Scale over the class header's base scale.
 	pub scale: f32,
 	pub shown: bool,
@@ -596,15 +599,29 @@ fn layer_list(m: &ee_oracle::Machine, hero: u32) -> Vec<crate::anim::ListLayer> 
 /// rac-rs Euler angles (viewer `place`) of the draw basis rows the update leaves at moby `+0xc0..+0xef` (actor_transform_bsphere
 /// FUN_00265770: Euler of `+0x40`, or the rows themselves under `+0x34` bit 0x100, as for held items on a hero joint).
 fn basis_euler(m: &ee_oracle::Machine, a: u32) -> [f32; 3] {
+	basis_pose(m, a, false).0
+}
+
+/// `basis_euler` plus the mirror of the draw basis (`unmirror`): +0x34 bit 0x8000 makes the standard transform negate basis row 1
+/// (actor_transform_bsphere OV:56461-56467, collision_and_gameplay.md), a reflection in model Y that Euler angles cannot carry (the
+/// class-331 right track of the Veldin return tank is the left track's model so drawn). Then the angles come from the rows with
+/// row 1 negated back, i.e. the plain rotation, and the caller applies the mirror on top (`Prop::mirror`, viewer `place_mirrored`).
+fn basis_pose(m: &ee_oracle::Machine, a: u32, unmirror: bool) -> ([f32; 3], bool) {
 	let n = |v: [f32; 3]| {
 		let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
 		if l > 0.0 { v.map(|x| x / l) } else { v }
 	};
-	let (r0, r1, r2) = (n(m.rdv3(a + 0xc0)), n(m.rdv3(a + 0xd0)), n(m.rdv3(a + 0xe0)));
+	let (r0, mut r1, r2) = (n(m.rdv3(a + 0xc0)), n(m.rdv3(a + 0xd0)), n(m.rdv3(a + 0xe0)));
 	if r0 == [0.0; 3] {
-		return m.rdv3(a + 0x40);
+		return (m.rdv3(a + 0x40), false);
 	}
-	[r1[2].atan2(r2[2]), (-r0[2]).clamp(-1.0, 1.0).asin(), r0[1].atan2(r0[0])]
+	// Left-handed rows (r0 . r1 x r2 < 0) under the flag: the update really negated row 1 (not the 0x100 supplied-rows path).
+	let det = r0[0] * (r1[1] * r2[2] - r1[2] * r2[1]) - r0[1] * (r1[0] * r2[2] - r1[2] * r2[0]) + r0[2] * (r1[0] * r2[1] - r1[1] * r2[0]);
+	let mirror = unmirror && m.rd16(a + 0x34) & 0x8000 != 0 && det < -0.5;
+	if mirror {
+		r1 = r1.map(|x| -x);
+	}
+	([r1[2].atan2(r2[2]), (-r0[2]).clamp(-1.0, 1.0).asin(), r0[1].atan2(r0[0])], mirror)
 }
 
 /// The sound of one field: the SPU2 register writes of the exact 989snd driver port (spumix.rs).
@@ -850,6 +867,9 @@ const NO_PRESENT: u32 = 0x15f5b8;
 pub fn frozen_view(mode: u32, ship: u32) -> bool {
 	frozen_mode(mode) || (mode == 6 && !matches!(ship, 0 | 3 | 7 | 8))
 }
+
+/// Game mode of the vendor (`0x15f5a4`): the shop and the gadget cinematic that follows a purchase (`FUN_002ae128`).
+const VENDOR_MODE: u32 = 5;
 
 /// A scene plays its actors (scene_chunk_parse, Veldin FUN_00244e58; cutscenes.md "Scene actors"): mode 2, or mode 6 in
 /// the takeoff / landing streams (substates 0 and 8, which run the same chunk player).
@@ -1220,16 +1240,23 @@ fn front_snap(m: &ee_oracle::Machine) -> Snap {
 }
 
 fn capture_gs(m: &mut ee_oracle::Machine, dir: &str) -> Option<Capture> {
-	capture_gs_vram(m, ee_oracle::gs::Gs::load_vram(&format!("{dir}/GS.bin"))?)
+	capture_gs_vram(m, ee_oracle::gs::Gs::load_vram(&format!("{dir}/GS.bin"))?, dir)
+}
+
+/// Pages of the page-menu engine (level overlay) whose render-to-texture panel holds an actor drawn through VU1 (path 1),
+/// which the capture draws only in P1 mode (gscap `P1`): the post-game page (id 0x22) with the green robot (class 1957).
+fn rtt_page(s: &Snap) -> bool {
+	s.menu.as_ref().is_some_and(|m| !m.front && m.id == 0x22)
 }
 
 /// The capture thread on a given 4 MB VRAM (a cold boot has no GS.bin: empty VRAM, attached from the first field).
-fn capture_gs_vram(m: &mut ee_oracle::Machine, vram: Vec<u8>) -> Option<Capture> {
+fn capture_gs_vram(m: &mut ee_oracle::Machine, vram: Vec<u8>, vu_dir: &str) -> Option<Capture> {
 	let mut c = Capture { tx: None, slot: Arc::new(Mutex::new(Default::default())), ends: Arc::new(AtomicU64::new(0)), queued: Arc::new(AtomicU64::new(0)), ran: Arc::new(AtomicU64::new(0)), dead: Arc::new(AtomicBool::new(false)), lag: std::env::var("RAC_RETAIL_GS_LAG").ok().and_then(|v| v.parse().ok()).unwrap_or(GS_LAG) };
 	// The machine's sender feeds a relay that counts the jobs, then the capture thread.
 	let (tx, rx) = std::sync::mpsc::channel::<ee_oracle::gs::Job>();
 	let (tx2, rx2) = std::sync::mpsc::channel::<ee_oracle::gs::Job>();
 	let (queued, ran, dead2, out, ends) = (c.queued.clone(), c.ran.clone(), c.dead.clone(), c.slot.clone(), c.ends.clone());
+	let vu_dir = vu_dir.to_string();
 	std::thread::Builder::new()
 		.name("gs-relay".into())
 		.spawn(move || {
@@ -1253,6 +1280,7 @@ fn capture_gs_vram(m: &mut ee_oracle::Machine, vram: Vec<u8>) -> Option<Capture>
 			let _flag = Flag(dead2);
 			// rac-rs's multi-threaded copy of the oracle capture (retail/gscap.rs): same pixels, menus 4x faster.
 			let mut g = gscap::Gs::new(vram);
+			g.set_vu1_dir(&vu_dir);
 			while let Ok(j) = rx2.recv() {
 				let end = matches!(&j, ee_oracle::gs::Job::Gif(q, u64::MAX) if q.is_empty());
 				g.run_oracle(j);
@@ -2240,7 +2268,7 @@ pub fn snap(m: &ee_oracle::Machine) -> Snap {
 		// Retail's walk (0x248600, 0x248f98) skips slots with a negative +0x20 and stops at the first 0xff.
 		walked &= slot != 0xff;
 		if hdr != 0 && slot < 0xfd {
-			if out.scene {
+			if out.scene || mode == VENDOR_MODE {
 				if let Some(b) = scene_seq(m, a, class) {
 					out.scene_seqs.push((class, m.rd8(a + 0x53), b));
 				}
@@ -2266,11 +2294,13 @@ pub fn snap(m: &ee_oracle::Machine) -> Snap {
 					let (culls, side) = v.culls(m, a);
 					culls.side_x_only().then_some(side)
 				});
+				let (rot, mirror) = basis_pose(m, a, true);
 				out.mobys.push(Moby {
 					addr: a,
 					class,
 					pos: m.rdv3(a + 0x10),
-					rot: basis_euler(m, a),
+					rot,
+					mirror,
 					scale: if base != 0.0 { m.rdf(a + 0x2c) / base } else { 1.0 },
 					shown,
 					side_only,
@@ -2290,15 +2320,22 @@ pub fn snap(m: &ee_oracle::Machine) -> Snap {
 		}
 		a += 0x100;
 	}
+	// The gadget cinematic after a purchase runs in the vendor's mode 5 and plays its actors (Ratchet and the bought
+	// gadget's own moby) through the same chunk player as a scene: it is a scene while a moby plays a scene sequence.
+	if mode == VENDOR_MODE && !out.scene_seqs.is_empty() {
+		out.scene = true;
+	}
 	// The shop's purchase prompt (`ShopSnap::prompt`): a slot-block moby outside the table, always drawn while up.
 	if let Some(a) = out.shop.as_ref().and_then(|sh| sh.prompt).filter(|&a| m.rd32(a + 0x24) != 0) {
 		let hdr = m.rd32(a + 0x24) & 0x01ff_ffff;
 		let base = f32::from_bits(m.rd32(hdr + 0x24));
+		let (rot, mirror) = basis_pose(m, a, true);
 		out.mobys.push(Moby {
 			addr: a,
 			class: m.rd16(a + 0xa6) as u32,
 			pos: m.rdv3(a + 0x10),
-			rot: basis_euler(m, a),
+			rot,
+			mirror,
 			scale: if base != 0.0 { m.rdf(a + 0x2c) / base } else { 1.0 },
 			shown: true,
 			side_only: None,
@@ -2575,6 +2612,22 @@ pub struct Retail {
 	tb: Option<title_boot::Boot>,
 }
 
+/// oracle/stubs.txt for the cold boot: the first one from the exe's folder upwards (an install, or a test build copied elsewhere,
+/// keeps working after it was moved or its build folder is gone), else the one of the source tree the exe was built from. The
+/// oracle skips a missing file silently, and a cold boot without it hangs on the title screen (seen 2026-10-15), so that is logged.
+fn stubs_path() -> String {
+	let exe = std::env::current_exe().ok();
+	let near = exe.as_deref().and_then(|e| e.parent()).and_then(|d| d.ancestors().map(|a| a.join("oracle").join("stubs.txt")).find(|p| p.is_file()));
+	if let Some(p) = near {
+		return p.to_string_lossy().into_owned();
+	}
+	let built = concat!(env!("CARGO_MANIFEST_DIR"), "/../oracle/stubs.txt");
+	if !std::path::Path::new(built).is_file() {
+		eprintln!("retail: oracle/stubs.txt found neither above the exe nor at {built}: the cold boot will hang on the title screen");
+	}
+	built.into()
+}
+
 impl Retail {
 	pub fn load() -> Option<Retail> {
 		let dir = STATE.get()?;
@@ -2583,7 +2636,7 @@ impl Retail {
 		prompts::init();
 		let mut m = match cold {
 			Some(iso) => {
-				let stubs = std::env::var("ORACLE_STUBS").unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../oracle/stubs.txt").into());
+				let stubs = std::env::var("ORACLE_STUBS").unwrap_or_else(|_| stubs_path());
 				match ee_oracle::Machine::cold(iso, &stubs) {
 					Ok(m) => m,
 					Err(e) => {
@@ -2669,7 +2722,7 @@ impl Retail {
 		let cap = if gsf.is_some() || std::env::var("RAC_RETAIL_HUD").is_ok_and(|v| v == "0") {
 			None
 		} else if cold.is_some() {
-			capture_gs_vram(&mut m, vec![0u8; 4 << 20])
+			capture_gs_vram(&mut m, vec![0u8; 4 << 20], &gs_dir)
 		} else {
 			capture_gs(&mut m, dir)
 		};
@@ -2735,6 +2788,8 @@ impl Retail {
 				// The capture draws the display buffer in full (gscap FULL_ON): the front end's mode 6 (New Game intro: caption
 				// screens, fades around the movies), whose picture is not the title scene the mirror draws.
 				let mut full_on = false;
+				// P1 mode of the capture (gscap `P1`): a menu page with a VU1-drawn render-to-texture actor is up.
+				let mut p1_on = false;
 				// RAC_FRONT_GS=1: the front end shows the GS's own picture (debug / -GsFull references); else the mirror draws it.
 				let gs_front = title_boot::gs_picture();
 				let (mut front_n, mut front_ns) = (0u32, 0u64);
@@ -2973,6 +3028,13 @@ impl Retail {
 					wperf.extra(0, t_prep.elapsed().as_nanos() as u64);
 					let t_snap = std::time::Instant::now();
 					let mut s = if front || booting { front_snap(&m) } else { snap(&m) };
+					let want_p1 = !front && !booting && rtt_page(&s);
+					if want_p1 != p1_on {
+						if let Some(q) = cap.as_ref().and_then(|c| c.tx.as_ref()) {
+							let _ = q.send(ee_oracle::gs::Job::Gif(Vec::new(), if want_p1 { gscap::P1_ON } else { gscap::P1_OFF }));
+							p1_on = want_p1;
+						}
+					}
 					wperf.extra(1, t_snap.elapsed().as_nanos() as u64);
 					// EFFECTS LAYER: the VU1 feed and the owned DIRECT-GIF callbacks this field drew (retail/efx_draw.rs, after the
 					// ported ones) are built on the VU1 thread while the EE runs the next field; `Retail::tick` appends them.
@@ -3756,9 +3818,11 @@ impl Retail {
 			g.player.yaw = yaw;
 			g.player.body_tilt = self.snap.hero_tilt;
 		}
-		// The held moby drives the viewer's held rigs (game/pyro.rs `mirror_held`); a moby a rig took is not a prop.
+		// The held moby drives the viewer's held rigs (game/pyro.rs `mirror_held`); a moby a rig took is not a prop. The Bomb
+		// Glove (192) has a viewer rig of its own (viewer.rs GLOVE_CLASS) and a prop pool for the purchase scene: its held moby
+		// stays out of the props too.
 		let held_addr = match self.snap.held {
-			Some((a, c, clock)) => g.mirror_held(Some(c), |p| clock.apply(p)).then_some(a),
+			Some((a, c, clock)) => (g.mirror_held(Some(c), |p| clock.apply(p)) || c == 192).then_some(a),
 			None => {
 				g.mirror_held(None, |_| ());
 				None
@@ -3783,6 +3847,7 @@ impl Retail {
 				let p = &mut g.props[i];
 				p.pos = mb.pos;
 				p.rot = mb.rot;
+				p.mirror = mb.mirror;
 				p.scale = mb.scale;
 				// Retail's verdict stays as it is in RAM (gameplay reads it); rac-rs's wide window also shows what retail culled only
 			// at its 4:3 side plane.

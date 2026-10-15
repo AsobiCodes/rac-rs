@@ -93,6 +93,16 @@ pub(super) fn slerp(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
 	q.map(|c| c / n)
 }
 
+/// A mirrored prop's blended rotation with model Y reflected again (`place_mirrored`: column 1 negated).
+fn mirror_column(mut m: [f32; 16], mirror: bool) -> [f32; 16] {
+	if mirror {
+		for v in &mut m[4..8] {
+			*v = -*v;
+		}
+	}
+	m
+}
+
 /// Placement matrix between two rigid placements: slerped rotation, lerped translation.
 pub(super) fn blend_place(a: &[f32; 16], b: &[f32; 16], t: f32) -> [f32; 16] {
 	let [x, y, z, w] = slerp(quat_of(a), quat_of(b), t);
@@ -133,6 +143,7 @@ pub(super) fn blend_posed(a: &Posed, b: &Posed, t: f32) -> Option<Posed> {
 pub(super) struct PropXf {
 	pub pos: V3,
 	pub rot: V3,
+	pub mirror: bool,
 	pub scale: f32,
 	pub shown: bool,
 	pub class: u32,
@@ -141,13 +152,13 @@ pub(super) struct PropXf {
 
 impl PropXf {
 	pub(super) fn of(p: &Prop) -> PropXf {
-		PropXf { pos: p.pos, rot: p.rot, scale: p.scale, shown: p.shown, class: p.class_id, key: pose_key(p) }
+		PropXf { pos: p.pos, rot: p.rot, mirror: p.mirror, scale: p.scale, shown: p.shown, class: p.class_id, key: pose_key(p) }
 	}
 }
 
 /// Whether a prop may be drawn blended from `prev` to its current state.
 pub(super) fn prop_blends(prev: &PropXf, cur: &PropXf) -> bool {
-	prev.shown && cur.shown && prev.class == cur.class && near(prev.pos, cur.pos)
+	prev.shown && cur.shown && prev.class == cur.class && prev.mirror == cur.mirror && near(prev.pos, cur.pos)
 }
 
 #[derive(Default)]
@@ -245,7 +256,7 @@ impl Smooth {
 					continue;
 				}
 				if prev.pos != cur.pos || prev.rot != cur.rot || prev.scale != cur.scale {
-					xf[pi] = Some((blend_place(&place(prev.pos, prev.rot), &place(cur.pos, cur.rot), t), prev.scale + (cur.scale - prev.scale) * t));
+					xf[pi] = Some((mirror_column(blend_place(&place(prev.pos, prev.rot), &place(cur.pos, cur.rot), t), cur.mirror), prev.scale + (cur.scale - prev.scale) * t));
 				}
 				let now = self.fx_last.get(&pi).or_else(|| self.posed_last.get(&cur.key));
 				let was = self.fx_before.get(&pi).or_else(|| self.posed_before.get(&prev.key));
@@ -362,7 +373,7 @@ mod tests {
 	#[test]
 	fn prop_snap_rules() {
 		let key: PoseKey = (1, 0, 0, 0, 0, 0);
-		let p = PropXf { pos: [0.0; 3], rot: [0.0; 3], scale: 1.0, shown: true, class: 7, key };
+		let p = PropXf { pos: [0.0; 3], rot: [0.0; 3], mirror: false, scale: 1.0, shown: true, class: 7, key };
 		assert!(prop_blends(&p, &PropXf { pos: [0.5, 0.0, 0.0], ..p }));
 		assert!(!prop_blends(&p, &PropXf { pos: [SNAP_DIST + 0.1, 0.0, 0.0], ..p }), "teleport");
 		assert!(!prop_blends(&PropXf { shown: false, ..p }, &p), "spawned / shown this tick");

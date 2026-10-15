@@ -245,6 +245,10 @@ pub struct WorldQuad {
 /// (CLAMP_1 = 0, the other fx contexts) [C: the context words that FUN_001ef7c0 sends as CLAMP_1 / TEX0_1].
 pub const FX_CLAMP: usize = 1 << 20;
 
+/// `WorldStrip.tex` flag: sample the fx texture with REPEAT, linear and no mip levels (GS CLAMP_1 0, TEX1_1 0xff9000000260:
+/// MXL 0, MMAG / MMIN linear), fx table key `tex | FX_NOMIP` (the Kalebo / Fleet glass of `retail::queue_q1`).
+pub const FX_NOMIP: usize = 1 << 21;
+
 /// BRIDGE-23: a world-space textured triangle strip drawn with the GS FIX blend `out = (Cs - Cd) * fix / 128 + Cd`
 /// (ALPHA A=Cs B=Cd C=FIX D=Cd); texture and vertex alpha are ignored, depth-tested, fogged. Triangles (i, i+1, i+2).
 #[derive(Clone, Debug, PartialEq)]

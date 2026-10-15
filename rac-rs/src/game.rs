@@ -187,6 +187,8 @@ pub struct Prop {
 	pub class_id: u32,
 	pub pos: V3,
 	pub rot: V3,
+	/// Retail mode: the draw basis is mirrored in model Y (moby +0x34 bit 0x8000, retail.rs `basis_pose`); `rot` is the plain rotation.
+	pub mirror: bool,
 	pub shown: bool,
 	/// Animation sequence and its retail clock (stepped once per game tick, anim.rs `PropAnim`).
 	pub anim: crate::anim::PropAnim,
@@ -206,7 +208,7 @@ pub struct Prop {
 impl Prop {
 	/// An inert prop of a retail-mode pool (retail.rs moves and shows it from the interpreter's moby table).
 	pub fn retail(class_id: u32, level: i32) -> Prop {
-		Prop { class_id, pos: [0.0; 3], rot: [0.0; 3], shown: false, anim: crate::anim::PropAnim::new(0), scale: 1.0, tint: None, light: None, index: None, sched: sched::spawned(level, class_id),  kind: Kind::Retail { alpha: 0x80, ovr: None } }
+		Prop { class_id, pos: [0.0; 3], rot: [0.0; 3], mirror: false, shown: false, anim: crate::anim::PropAnim::new(0), scale: 1.0, tint: None, light: None, index: None, sched: sched::spawned(level, class_id),  kind: Kind::Retail { alpha: 0x80, ovr: None } }
 	}
 	pub fn is_retail(&self) -> bool {
 		self.index.is_none() && matches!(self.kind, Kind::Retail { .. })

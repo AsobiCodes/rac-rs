@@ -1267,7 +1267,10 @@ crate::loadlog::say(|| "host: hero anim + clips done".into());
 			// held moby 0x1403e0 (e1_0000 f1198: the Devastator 168 drawn with 0x1403e0 = 0 and item 0 during the switch) [C];
 			// `sync` keeps the held moby itself out of the props.
 			if crate::retail::active() && !front {
-				let rigged: Vec<u32> = vec![mobies::WRENCH_CLASS, GLOVE_CLASS, game::pyro::PYRO_CLASS, 849];
+				// The held rigs (Bomb Glove 192, Pyrocitor 176, Suck Cannon 849) are props too: the purchase show-off scene (mode 5,
+				// `Retail::sync`) plays the bought gadget's moby with its scene sequence like any prop, and the held moby itself never
+				// reaches the props (`sync` leaves it to its rig). Only the wrench stays out: its loose copies are `HeroParts::loose`.
+				let rigged: Vec<u32> = vec![mobies::WRENCH_CLASS];
 				let mut added = Vec::new();
 				let ids: Vec<u32> = gadgets.iter().filter(|(id, c)| !rigged.contains(id) && !c.mesh.faces.is_empty() && !prop_meshes.contains_key(*id)).map(|(&id, _)| id).collect();
 				for id in ids {
@@ -2103,6 +2106,18 @@ crate::loadlog::say(|| "host: t set_hud_art".into());
 				for (k, t) in fx_textures.iter().filter(|(k, _)| crate::retail::queue_b::FX_CLAMPED.contains(k) || crate::retail::queue_q2::FX_CLAMPED.contains(k) || *k < crate::particles::FX_TEX as usize) {
 					let b = gpu.upload(Some(t), &gpu.clamp_sampler);
 					gpu.fx_tex.insert(k | crate::particles::FX_CLAMP, b);
+				}
+				// GS CLAMP_1 0 + TEX1_1 MXL 0 (`particles::FX_NOMIP`): the glass textures repeat, filter linearly and have no mips.
+				let nomip = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+					address_mode_u: wgpu::AddressMode::Repeat,
+					address_mode_v: wgpu::AddressMode::Repeat,
+					mag_filter: wgpu::FilterMode::Linear,
+					min_filter: wgpu::FilterMode::Linear,
+					..Default::default()
+				});
+				for (k, t) in fx_textures.iter().filter(|(k, _)| crate::retail::queue_q1::GLASS_TEX.contains(k)) {
+					let b = gpu.upload(Some(t), &nomip);
+					gpu.fx_tex.insert(k | crate::particles::FX_NOMIP, b);
 				}
 				let (part_defs, (flame_frames, pyro_frames, dust_frames, orb_frames, puff10_frames, debris_frame), fx_meshes) = part_defs;
 				gpu.part_defs = part_defs;

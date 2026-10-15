@@ -1963,6 +1963,18 @@ fn scale_rows(mut at: [f32; 16], s: f32) -> [f32; 16] {
 	at
 }
 
+/// `place` of a retail prop: a mirrored one (moby +0x34 bit 0x8000, `Prop::mirror`) has retail's basis row 1 negated, a reflection in
+/// model Y: column 1 of the placement (the image of model Y) is negated, `rot` stays the plain rotation.
+fn place_mirrored(pos: [f32; 3], rot: [f32; 3], mirror: bool) -> [f32; 16] {
+	let mut m = place(pos, rot);
+	if mirror {
+		for v in &mut m[4..8] {
+			*v = -*v;
+		}
+	}
+	m
+}
+
 fn place(pos: [f32; 3], rot: [f32; 3]) -> [f32; 16] {
 	let (sx, cx) = rot[0].sin_cos();
 	let (sy, cy) = rot[1].sin_cos();
@@ -2842,6 +2854,18 @@ mod moby_matrix_tests {
 		assert_eq!(at.iter().filter(|v| **v == 0.0).count(), 9);
 		let base = place([1.0, 2.0, 3.0], [0.3, 0.2, 0.1]);
 		assert_eq!(scale_rows(base, 1.0), base);
+	}
+
+	#[test]
+	fn mirrored_placement_reflects_model_y_only() {
+		let (pos, rot) = ([1.0, 2.0, 3.0], [0.3, 0.2, 0.1]);
+		let (a, m) = (place(pos, rot), place_mirrored(pos, rot, true));
+		assert_eq!(place_mirrored(pos, rot, false), a);
+		assert_eq!((&m[0..4], &m[8..16]), (&a[0..4], &a[8..16]));
+		assert_eq!(m[4..8], a[4..8].iter().map(|v| -v).collect::<Vec<_>>()[..]);
+		// Left-handed: column 0 x column 1 . column 2 < 0 (a plain placement is right-handed).
+		let det = |m: &[f32; 16]| m[0] * (m[5] * m[10] - m[6] * m[9]) - m[1] * (m[4] * m[10] - m[6] * m[8]) + m[2] * (m[4] * m[9] - m[5] * m[8]);
+		assert!(det(&a) > 0.99 && det(&m) < -0.99);
 	}
 }
 

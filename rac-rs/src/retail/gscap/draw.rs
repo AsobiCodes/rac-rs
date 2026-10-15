@@ -21,6 +21,29 @@ struct St {
     ofy: f32,
     sc: [i32; 4],
     ov: bool,
+    /// The Z buffer, for the prims of P1 mode that draw into a VRAM target (see `Zb`).
+    zb: Option<Zb>,
+}
+
+/// The Z buffer of a prim drawn in P1 mode (the post-game page's robot is a Z-buffered 3D render): ZBUF_n and the
+/// TEST register's ZTE / ZTST, PSMZ32 / PSMZ24 only. The capture otherwise has no Z buffer (menus and HUD draw back to
+/// front); the Z clears of the page's render pass are ordinary colour draws into the Z buffer's pages, so VRAM holds it.
+#[derive(Clone, Copy)]
+struct Zb {
+    /// Block address of the buffer, the frame's width in pages, PSMZ24 (else PSMZ32), ZMSK.
+    bp: u32,
+    bw: u32,
+    z24: bool,
+    msk: bool,
+    /// ZTST: 0 never, 1 always, 2 greater or equal, 3 greater (ZTE off counts as always, as on the GS).
+    tst: u32,
+}
+
+impl Zb {
+    fn addr(&self, x: u32, y: u32) -> usize {
+        let page = (y / 32) * self.bw + x / 64;
+        ((self.bp * 256 + page * 8192 + super::zlut()[((y % 32) * 64 + x % 64) as usize]) & 0x3f_ffff) as usize
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -32,6 +55,7 @@ struct Px {
     u: f32,
     v: f32,
     f: f32,
+    z: f32,
 }
 
 impl Gs {
@@ -65,6 +89,10 @@ impl Gs {
         let tbp = (tex0 & 0x3fff) as u32;
         let test = self.r[0x47 + c];
         let disp = (self.dispfb & 0x1ff) as u32;
+        // A path-1 packet of P1 mode: only the render-to-texture targets (the display and main buffers are rac-rs's own).
+        if self.p1_only && (self.full || fbp == disp || Some(fbp) == self.main_fbp) {
+            return;
+        }
         if self.tracing() {
             let v1 = vs.get(1).copied().unwrap_or_default();
             eprintln!(
@@ -216,6 +244,19 @@ impl Gs {
             ofy: ((xy >> 32) & 0xffff) as f32 / 16.0,
             sc: [(sc & 0x7ff) as i32, ((sc >> 16) & 0x7ff) as i32, ((sc >> 32) & 0x7ff) as i32, ((sc >> 48) & 0x7ff) as i32],
             ov: ov || dsp,
+            zb: {
+                let zbuf = self.r[0x4e + c];
+                let zsm = (zbuf >> 24) & 0xf;
+                let zbp = ((zbuf & 0x1ff) * 32) as u32;
+                // Not when the frame is the Z buffer itself (the Z clears are colour draws into its pages).
+                (self.p1.is_some() && !(ov || dsp) && zsm <= 1 && zbp != fbp * 32).then(|| Zb {
+                    bp: zbp,
+                    bw: ((frame >> 16) & 0x3f) as u32,
+                    z24: zsm == 1,
+                    msk: (zbuf >> 32) & 1 != 0,
+                    tst: if test & 0x10000 != 0 { ((test >> 17) & 3) as u32 } else { 1 },
+                })
+            },
         };
         self.to_disp = dsp;
         let tr = self.prof.is_some().then(std::time::Instant::now);
@@ -293,6 +334,7 @@ impl Gs {
             u: if fst { v.u as f32 / 16.0 } else { 0.0 },
             v: if fst { v.v as f32 / 16.0 } else { 0.0 },
             f: v.f as f32,
+            z: v.z as f32,
         }
     }
 
@@ -428,7 +470,7 @@ impl Gs {
         let (ix0, ix1) = ((lx.ceil() as i32).max(st.sc[0]), (hx.ceil() as i32).min(st.sc[1] + 1));
         let (iy0, iy1) = ((ly.ceil() as i32).max(st.sc[2]), (hy.ceil() as i32).min(st.sc[3] + 1));
         let fst = st.at & 0x100 != 0;
-        let tok = self.pm_begin(st, 6, &[a, b], (ix0, ix1, iy0, iy1));
+        let tok = if st.zb.is_some() { pmemo::Tok::None } else { self.pm_begin(st, 6, &[a, b], (ix0, ix1, iy0, iy1)) };
         if matches!(tok, pmemo::Tok::Hit) {
             return;
         }
@@ -441,7 +483,7 @@ impl Gs {
             if let Some((c, wa)) = v.shade(st, &pb) {
                 let row = |y: i32| {
                     for x in ix0.max(0)..ix1 {
-                        v.put(st, x, y, &c, wa);
+                        v.put(st, x, y, &c, wa, pb.z);
                     }
                 };
                 if par {
@@ -489,14 +531,14 @@ impl Gs {
         let maxx = p.iter().map(|q| q.0).fold(f32::MIN, f32::max).floor().min(st.sc[1] as f32) as i32;
         let miny = p.iter().map(|q| q.1).fold(f32::MAX, f32::min).ceil().max(st.sc[2] as f32) as i32;
         let maxy = p.iter().map(|q| q.1).fold(f32::MIN, f32::max).floor().min(st.sc[3] as f32) as i32;
-        let tok = self.pm_begin(st, 4, &v[..3], (minx, maxx + 1, miny, maxy + 1));
+        let tok = if st.zb.is_some() { pmemo::Tok::None } else { self.pm_begin(st, 4, &v[..3], (minx, maxx + 1, miny, maxy + 1)) };
         if matches!(tok, pmemo::Tok::Hit) {
             return;
         }
         let par = self.par_ok(st, minx, maxx, miny, maxy);
         self.tex_cache(st, &pxs, (minx, maxx, miny, maxy));
         let vw = self.view();
-        let (fst, fog) = (st.at & 0x100 != 0, st.at & 0x20 != 0);
+        let (fst, fog, zon) = (st.at & 0x100 != 0, st.at & 0x20 != 0, st.zb.is_some());
         let neg = area < 0.0;
         let row = |y: i32| {
             let fy = y as f32;
@@ -537,6 +579,9 @@ impl Gs {
                 }
                 if fog {
                     q.f = mix(pxs[0].f, pxs[1].f, pxs[2].f);
+                }
+                if zon {
+                    q.z = mix(pxs[0].z, pxs[1].z, pxs[2].z);
                 }
                 vw.pixel(st, x, y, &q);
             }
@@ -756,7 +801,7 @@ impl View {
             return;
         }
         if let Some((c, wa)) = self.shade(st, p) {
-            self.put(st, x, y, &c, wa);
+            self.put(st, x, y, &c, wa, p.z);
         }
     }
 
@@ -837,7 +882,7 @@ impl View {
 
     /// Blend and write of a shaded fragment at (x, y), x and y >= 0.
     #[inline]
-    fn put(&self, st: &St, x: i32, y: i32, c: &[f32; 4], wa: bool) {
+    fn put(&self, st: &St, x: i32, y: i32, c: &[f32; 4], wa: bool, z: f32) {
         let at = st.at;
         let c = *c;
         let abe = at & 0x40 != 0;
@@ -879,6 +924,24 @@ impl View {
             return;
         }
         // VRAM target.
+        let mut zw = None;
+        if let Some(zb) = &st.zb {
+            let zi = (z.max(0.0) as u32).min(if zb.z24 { 0xff_ffff } else { u32::MAX });
+            let a = zb.addr(x as u32, y as u32);
+            let old = u32::from_le_bytes(self.rd::<4>(a)) & if zb.z24 { 0xff_ffff } else { u32::MAX };
+            let pass = match zb.tst {
+                0 => false,
+                1 => true,
+                2 => zi >= old,
+                _ => zi > old,
+            };
+            if !pass {
+                return;
+            }
+            if !zb.msk && wa {
+                zw = Some((a, zi, if zb.z24 { 3 } else { 4 }));
+            }
+        }
         let frame = st.frame;
         let (fbp, fbw, psm) = (((frame & 0x1ff) * 32) as u32, ((frame >> 16) & 0x3f) as u32, ((frame >> 24) & 0x3f) as u32);
         let msk = (frame >> 32) as u32;
@@ -917,6 +980,9 @@ impl View {
         };
         let v = (v & !msk) | (dst & msk);
         self.wr_px(psm, fbp, fbw, x as u32, y as u32, v);
+        if let Some((a, zi, n)) = zw {
+            self.wr(a, &zi.to_le_bytes()[..n]);
+        }
     }
 
     fn wrap(m: u64, c: i32, size: u32, lo: u32, hi: u32) -> u32 {

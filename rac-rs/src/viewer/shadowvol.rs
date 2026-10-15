@@ -207,7 +207,7 @@ impl Gpu {
 			}
 			let (Some(&c), Some(w)) = (centres.get(pi), radii.get(pi).copied().flatten()) else { continue };
 			let Some((fade, straddle)) = caster_fade(&view, dist, c, w) else { continue };
-			let (m, scale) = super::smooth::prop_xf(pi).unwrap_or_else(|| (place(p.pos, p.rot), p.scale));
+			let (m, scale) = super::smooth::prop_xf(pi).unwrap_or_else(|| (place_mirrored(p.pos, p.rot, p.mirror), p.scale));
 			list.push(VolumeCaster { spheres: spheres.clone(), m, k: scale * fade as f32 / 4096.0, band, straddle });
 			late.push(pi);
 		}

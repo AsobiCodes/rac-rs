@@ -578,6 +578,7 @@ rac-rs/src/retail/oldsim.rs
 rac-rs/src/retail/pcext.rs
 rac-rs/src/retail/pcopts.rs
 rac-rs/src/retail/prompts.rs
+rac-rs/src/retail/pspad.rs
 rac-rs/src/retail/queue_b.rs
 rac-rs/src/retail/queue_fxa.rs
 rac-rs/src/retail/queue_fxb.rs
