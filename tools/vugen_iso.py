@@ -18,6 +18,7 @@ or OUT/bins) are deleted at the end unless --keep-bins.
 import argparse
 import hashlib
 import os
+import shutil
 import struct
 import subprocess
 import sys
@@ -217,16 +218,20 @@ def main():
     ap.add_argument('--tree', default=os.path.join(HERE, '..'), help='source tree root (default: the folder above tools/)')
     ap.add_argument('--keep-bins', action='store_true')
     a = ap.parse_args()
+    final = None
     if a.out:
         out0 = out1 = os.path.abspath(a.out)
         bins = os.path.join(out1, 'bins')
     else:
+        # Everything is made in a staging folder first and then copied into the source tree only where the content differs:
+        # a regenerate of an up-to-date install leaves the files (and their mtime) alone, so cargo rebuilds nothing.
         tree = os.path.abspath(a.tree)
-        out0 = os.path.join(tree, 'oracle', 'src')
-        out1 = os.path.join(tree, 'rac-rs', 'src', 'gsfull')
-        bins = os.path.join(tree, 'generated', 'vu_bins')
-        os.makedirs(out0, exist_ok=True)
-        os.makedirs(out1, exist_ok=True)
+        final = (os.path.join(tree, 'oracle', 'src'), os.path.join(tree, 'rac-rs', 'src', 'gsfull'), os.path.join(tree, 'rac-rs', 'src', 'particles'))
+        for d in final:
+            os.makedirs(d, exist_ok=True)
+        out0 = out1 = os.path.join(tree, 'generated', 'vu_stage')
+        shutil.rmtree(out1, ignore_errors=True)
+        bins = os.path.join(out1, 'bins')
     os.makedirs(bins, exist_ok=True)
     disc = IsoDisc(a.iso)
     elf = boot_elf(disc)
@@ -243,8 +248,7 @@ def main():
     txt = vu_disasm.render(open(os.path.join(bins, 'prog0.bin'), 'rb').read(), 0)[0]
     with open(os.path.join(bins, 'prog0.s'), 'w', encoding='utf-8', newline='\n') as f:
         f.write(txt)
-    orbdir = out1 if a.out else os.path.join(tree, 'rac-rs', 'src', 'particles')
-    os.makedirs(orbdir, exist_ok=True)
+    orbdir = out1
     with open(os.path.join(orbdir, 'orb_tables.rs'), 'w', encoding='ascii', newline='\n') as f:
         f.write(orb_rs(disc))
     env = dict(os.environ, VU_BINS=bins)
@@ -260,6 +264,27 @@ def main():
         for f in os.listdir(bins):
             os.remove(os.path.join(bins, f))
         os.rmdir(bins)
+    if final:
+        made = [f for f in os.listdir(out1) if os.path.isfile(os.path.join(out1, f))]
+        changed = 0
+        for f in made:
+            dst = os.path.join(final[0] if f == 'vu0_prog0.rs' else final[2] if f == 'orb_tables.rs' else final[1], f)
+            new = open(os.path.join(out1, f), 'rb').read()
+            try:
+                same = open(dst, 'rb').read() == new
+            except OSError:
+                same = False
+            if not same:
+                open(dst, 'wb').write(new)
+                changed += 1
+        for f in os.listdir(final[1]):          # VU1 programs an older run made and this one does not
+            if f.startswith('vu1_prog') and f.endswith('.rs') and f not in made:
+                os.remove(os.path.join(final[1], f))
+                changed += 1
+        if not a.keep_bins:
+            shutil.rmtree(out1, ignore_errors=True)
+        print('vu: %d of %d generated files differed and were written' % (changed, len(made)))
+        out0, out1, orbdir = final
     print('vu: generated vu0_prog0.rs in', out0, '+ 9 VU1 programs in', out1, '+ orb_tables.rs in', orbdir)
 
 

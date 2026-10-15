@@ -37,7 +37,17 @@ param(
     [switch]$TestNoShow,            # test only: build the launcher without showing it and save PNGs of its views
     [string]$TestShot = '',
     [string]$TestIso = '',
-    [switch]$TestInstall
+    [switch]$TestInstall,
+    [switch]$Launch,                # started by the game exe: looks for an update; silent unless there is one
+    [switch]$Update,                # the update window: waits for the game to close, then updates and rebuilds
+    [switch]$ApplyUpdate,           # worker of the update window (with -Console): download + apply the update, then the normal steps
+    [switch]$FinishOnly,            # with -Update: the files are already updated, only the rebuild is left
+    [string]$NewVersion = '',
+    [int]$ExePid = 0,               # the game exe that started -Launch (the update waits for it to close)
+    [switch]$SkipUnblock,
+    [string]$WindowFlag = '',       # -Launch: a file it creates when it shows a window (the exe then waits for the answer)
+    [string]$TestUpdateBase = '',   # test only: folder / file:// / http URL that serves VERSION, CHANGELOG.md and v<version>.zip instead of GitHub
+    [string]$TestChoice = ''        # test only (-Launch -TestNoShow): 'update' or 'notnow' instead of a click; 'firstview' (launcher test): only the first view
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -102,8 +112,9 @@ function Get-GamePsi {
     return $psi
 }
 
-function Start-Game {
+function Start-Game([bool]$noUpdateCheck = $false) {
     $psi = Get-GamePsi
+    if ($noUpdateCheck) { $psi.EnvironmentVariables['RAC_NO_UPDATE_CHECK'] = '1' }
     $pl = Join-Path $root 'player'
     if (-not (Test-Path -LiteralPath $pl)) { New-Item -ItemType Directory -Force -Path $pl | Out-Null }
     # safety copies of the save card before each start (the newest two starts), as Play.cmd does
@@ -130,6 +141,265 @@ function New-GameShortcut([string]$dir) {
     return $lnk
 }
 
+# ================================================================ updates (shared by -Launch, the update window, the launcher and the -Console worker)
+# Version = the one line in VERSION (missing = 0.1.0, the first public release). generated\built_version.txt = the version the game exe was built from.
+$RepoRaw = 'https://raw.githubusercontent.com/AsobiCodes/rac-rs/main'
+$RepoArchive = 'https://github.com/AsobiCodes/rac-rs/archive'
+
+function Get-LocalVersion {
+    $f = Join-Path $root 'VERSION'
+    if (Test-Path -LiteralPath $f -PathType Leaf) { try { $v = ([System.IO.File]::ReadAllText($f)).Trim(); if ($v -match '^\d+\.\d+\.\d+$') { return $v } } catch { } }
+    return '0.1.0'
+}
+
+function Get-BuiltVersion {
+    $f = Join-Path $root 'generated\built_version.txt'
+    if (Test-Path -LiteralPath $f -PathType Leaf) { try { $v = ([System.IO.File]::ReadAllText($f)).Trim(); if ($v -match '^\d+\.\d+\.\d+$') { return $v } } catch { } }
+    if (Test-Installed) { return '0.1.0' }      # built before versions existed
+    return ''
+}
+
+function Compare-Version([string]$a, [string]$b) { return ([version]$a).CompareTo([version]$b) }
+
+function Read-Remote([string]$name, [int]$timeoutMs = 4000) {
+    # Text of VERSION / CHANGELOG.md from GitHub (or from -TestUpdateBase: a folder, a file:// or an http URL). $null on any failure; never throws.
+    try {
+        $base = $(if ($TestUpdateBase) { $TestUpdateBase } else { $RepoRaw })
+        if ($base -notmatch '^(https?|file)://') {
+            $f = Join-Path $base $name
+            if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { return $null }
+            return [System.IO.File]::ReadAllText($f)
+        }
+        try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
+        $wc = New-Object System.Net.WebClient
+        $wc.Headers['User-Agent'] = 'rac-rs-updater'
+        $task = $wc.DownloadStringTaskAsync(($base.TrimEnd('/') + '/' + $name))
+        if (-not $task.Wait($timeoutMs)) { try { $wc.CancelAsync() } catch { }; return $null }
+        return [string]$task.Result
+    } catch { return $null }
+}
+
+function Get-ChangelogFor([string]$text, [string]$from, [string]$to) {
+    # CHANGELOG.md has one section per version, newest first, starting with "## v<version>". Returns the versions newer than $from up to $to.
+    $out = New-Object System.Collections.ArrayList
+    $take = $false
+    foreach ($l in ($text -split "`r?`n")) {
+        if ($l -match '^##\s+v?(\d+\.\d+\.\d+)') {
+            $v = $Matches[1]
+            $take = ((Compare-Version $v $from) -gt 0) -and ((Compare-Version $v $to) -le 0)
+            if ($take) { if ($out.Count -gt 0) { [void]$out.Add('') }; [void]$out.Add('Version ' + $v) }
+            continue
+        }
+        if ($take -and $l.Trim().Length -gt 0) { [void]$out.Add(($l -replace '^\s*[-*]\s+', ([string][char]0x2022 + ' '))) }
+    }
+    return ($out -join "`r`n")
+}
+
+function Get-FilesHash([string[]]$rels) {
+    # SHA-256 over the files (path, NUL, content without CR) so that line-ending changes by git or an unzipper do not matter.
+    $latin = [System.Text.Encoding]::GetEncoding(28591)
+    $ms = New-Object System.IO.MemoryStream
+    foreach ($r in $rels) {
+        $nb = $latin.GetBytes($r + [string][char]0); $ms.Write($nb, 0, $nb.Length)
+        $b = $latin.GetBytes($latin.GetString([System.IO.File]::ReadAllBytes((Join-Path $root $r))).Replace("`r", '')); $ms.Write($b, 0, $b.Length)
+    }
+    $ms.Position = 0
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    return ([System.BitConverter]::ToString($sha.ComputeHash($ms))).Replace('-', '').ToLowerInvariant()
+}
+
+function Get-VuGenFiles {
+    $names = [string[]]@([System.IO.Directory]::GetFiles((Join-Path $root 'tools\vu')) | ForEach-Object { [System.IO.Path]::GetFileName($_) })
+    [Array]::Sort($names, [System.StringComparer]::Ordinal)
+    return @('tools/vugen_iso.py') + @($names | ForEach-Object { 'tools/vu/' + $_ })
+}
+
+function Test-ProtectedPath([string]$rel) {
+    # What an update never touches: the toolchain, the build, the generated code, the player's saves, the disc image.
+    $r = $rel.Replace('\', '/').TrimStart('/').ToLowerInvariant()
+    foreach ($p in @('toolchain/', 'build/', 'generated/', 'player/', 'oracle/rec/', 'oracle/game/', 'test_shots/')) { if ($r.StartsWith($p)) { return $true } }
+    if ($r -in @('play.cmd', 'oracle/src/vu0_prog0.rs', 'rac-rs/src/gsfull/vu1aot_gen.rs', 'rac-rs/src/particles/orb_tables.rs')) { return $true }
+    if ($r -match '^rac-rs/src/gsfull/vu1_prog\d+\.rs$') { return $true }
+    return $r.EndsWith('.iso')
+}
+
+function Get-Sha256Hex([string]$path) {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $fs = [System.IO.File]::OpenRead($path)
+    try { return [System.BitConverter]::ToString($sha.ComputeHash($fs)) } finally { $fs.Dispose() }
+}
+
+function Save-Url([string]$url, [string]$file) {
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
+    if ($url -like 'file://*') { (New-Object System.Net.WebClient).DownloadFile($url, $file); return }
+    $old = $ProgressPreference; $ProgressPreference = 'SilentlyContinue'
+    try { Invoke-WebRequest -Uri $url -OutFile $file -UseBasicParsing -TimeoutSec 600 } finally { $ProgressPreference = $old }
+}
+
+function Get-UpdateZip([string]$ver, [string]$zip) {
+    # v<ver>.zip from the GitHub tag (the main branch only if the tag does not exist); with -TestUpdateBase from there. Throws on failure.
+    if ($TestUpdateBase) {
+        if ($TestUpdateBase -match '^(https?|file)://') { Save-Url ($TestUpdateBase.TrimEnd('/') + "/v$ver.zip") $zip; return }
+        $f = Join-Path $TestUpdateBase "v$ver.zip"
+        if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { throw "not found: $f" }
+        Copy-Item -LiteralPath $f -Destination $zip -Force
+        return
+    }
+    $notFound = $false
+    for ($try = 1; $try -le 3; $try++) {
+        try { Save-Url "$RepoArchive/refs/tags/v$ver.zip" $zip; return }
+        catch {
+            $code = 0; try { $code = [int]$_.Exception.Response.StatusCode } catch { }
+            if ($code -eq 404) { $notFound = $true; break }
+            Write-Host "  download failed ($($_.Exception.Message)), retrying" -ForegroundColor Yellow
+            if ($try -eq 3) { throw }
+            Start-Sleep -Seconds (3 * $try)
+        }
+    }
+    if ($notFound) { Write-Host '  no tag for this version yet: using the main branch'; Save-Url "$RepoArchive/refs/heads/main.zip" $zip }
+}
+
+function Expand-UpdateZip([string]$zip, [string]$outDir) {
+    # Unpacks the zip without its single top folder (GitHub: rac-rs-<version>/). Refuses paths that leave $outDir.
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+    $outFull = [System.IO.Path]::GetFullPath($outDir).TrimEnd('\') + '\'
+    $za = [System.IO.Compression.ZipFile]::OpenRead($zip)
+    $top = $null
+    try {
+        foreach ($e in $za.Entries) {
+            $n = $e.FullName.Replace('\', '/')
+            if ($n.StartsWith('/') -or $n -match '(^|/)\.\.(/|$)') { throw "unsafe path in the update file: $n" }
+            $i = $n.IndexOf('/')
+            if ($i -lt 1) { continue }
+            $t = $n.Substring(0, $i)
+            if ($null -eq $top) { $top = $t } elseif ($top -ne $t) { throw 'the update file has an unexpected layout' }
+            $rel = $n.Substring($i + 1)
+            if ($rel.Length -eq 0 -or $rel.EndsWith('/')) { continue }
+            $dst = [System.IO.Path]::GetFullPath((Join-Path $outFull ($rel.Replace('/', '\'))))
+            if (-not $dst.StartsWith($outFull, [System.StringComparison]::OrdinalIgnoreCase)) { throw "unsafe path in the update file: $n" }
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst) | Out-Null
+            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($e, $dst, $true)
+        }
+    } finally { $za.Dispose() }
+    foreach ($need in @('VERSION', 'setup.ps1', 'rac-rs\Cargo.toml')) { if (-not (Test-Path -LiteralPath (Join-Path $outFull $need))) { throw "the update file is not a rac-rs release ($need missing)" } }
+}
+
+function Sync-Update([string]$src, [string]$dst) {
+    # Copies the new version over this install. Only files that are new or differ (SHA-256) are copied, and they get the CURRENT time
+    # (cargo rebuilds by file time); unchanged files are not touched, so nothing that did not change is rebuilt. Files the old
+    # release_files.txt lists and the new one does not are deleted (no old list = no deletions). Protected paths are never touched.
+    # VERSION and release_files.txt come last: an interrupted copy leaves the old VERSION, so the update is offered again.
+    $src = [System.IO.Path]::GetFullPath($src).TrimEnd('\') + '\'
+    $dst = [System.IO.Path]::GetFullPath($dst).TrimEnd('\') + '\'
+    $oldList = @(); $newList = @()
+    if (Test-Path -LiteralPath (Join-Path $dst 'release_files.txt')) { $oldList = @(Get-Content -LiteralPath (Join-Path $dst 'release_files.txt') | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+    if (Test-Path -LiteralPath (Join-Path $src 'release_files.txt')) { $newList = @(Get-Content -LiteralPath (Join-Path $src 'release_files.txt') | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+    $last = @('VERSION', 'release_files.txt')
+    $items = New-Object System.Collections.ArrayList
+    foreach ($f in (Get-ChildItem -LiteralPath $src -Recurse -File)) {
+        $rel = $f.FullName.Substring($src.Length).Replace('\', '/')
+        if ((Test-ProtectedPath $rel) -or ($last -contains $rel)) { continue }
+        [void]$items.Add([pscustomobject]@{ Rel = $rel; Full = $f.FullName; Len = $f.Length })
+    }
+    foreach ($rel in $last) { $p = Join-Path $src $rel; if (Test-Path -LiteralPath $p) { [void]$items.Add([pscustomobject]@{ Rel = $rel; Full = $p; Len = (Get-Item -LiteralPath $p).Length }) } }
+    $changed = New-Object System.Collections.ArrayList
+    foreach ($it in $items) {
+        $d = Join-Path $dst ($it.Rel.Replace('/', '\'))
+        $copy = $true
+        if (Test-Path -LiteralPath $d -PathType Leaf) {
+            if ((Get-Item -LiteralPath $d).Length -eq $it.Len -and (Get-Sha256Hex $d) -eq (Get-Sha256Hex $it.Full)) { $copy = $false }
+        }
+        if ($copy) {
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $d) | Out-Null
+            [System.IO.File]::Copy($it.Full, $d, $true)
+            [System.IO.File]::SetLastWriteTimeUtc($d, [DateTime]::UtcNow)
+            [void]$changed.Add($it.Rel)
+            Write-Host "  updated $($it.Rel)"
+        }
+    }
+    $removed = New-Object System.Collections.ArrayList
+    if ($oldList.Count -gt 0 -and $newList.Count -gt 0) {
+        $keep = @{}; foreach ($n in $newList) { $keep[$n] = $true }
+        foreach ($o in $oldList) {
+            if ($keep.ContainsKey($o) -or ($last -contains $o) -or (Test-ProtectedPath $o) -or $o -match '(^|/)\.\.(/|$)' -or $o.StartsWith('/')) { continue }
+            $d = Join-Path $dst ($o.Replace('/', '\'))
+            if (Test-Path -LiteralPath $d -PathType Leaf) {
+                Remove-Item -LiteralPath $d -Force
+                [void]$removed.Add($o)
+                Write-Host "  removed $o"
+                $dir = Split-Path -Parent $d
+                while ($dir.Length -gt $dst.Length -and @(Get-ChildItem -LiteralPath $dir -Force).Count -eq 0) { Remove-Item -LiteralPath $dir -Force; $dir = Split-Path -Parent $dir }
+            }
+        }
+    }
+    # Marker for the -ApplyUpdate worker: this version's files were put in place HERE (changed files carry the current time). The setup build removes it when it succeeds.
+    $gdir = Join-Path $dst 'generated'
+    New-Item -ItemType Directory -Force -Path $gdir | Out-Null
+    $ver = $(try { ([System.IO.File]::ReadAllText((Join-Path $dst 'VERSION'))).Trim() } catch { '' })
+    if ($ver -match '^\d+\.\d+\.\d+$') { [System.IO.File]::WriteAllText((Join-Path $gdir ("synced_$ver")), "$ver`n", (New-Object System.Text.UTF8Encoding($false))) }
+    return [pscustomobject]@{ Changed = $changed; Removed = $removed }
+}
+
+function Set-ReleaseFileTimes {
+    # Sets the time of every release file (release_files.txt) to now; returns how many. Used when the files of a new version were NOT copied by
+    # Sync-Update but unzipped by hand: a ZIP keeps the times of its files (the commit time), and if the last build is newer than those, cargo would
+    # think nothing changed and silently keep the old game. With the times set to now, the next build compiles everything once.
+    $rels = @()
+    $list = Join-Path $root 'release_files.txt'
+    if (Test-Path -LiteralPath $list -PathType Leaf) { $rels = @(Get-Content -LiteralPath $list | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+    else {
+        foreach ($d in @('oracle', 'rac-rs', 'tools')) {
+            $dd = Join-Path $root $d
+            if (Test-Path -LiteralPath $dd) { foreach ($f in (Get-ChildItem -LiteralPath $dd -Recurse -File)) { $rels += $f.FullName.Substring($root.Length).TrimStart('\').Replace('\', '/') } }
+        }
+    }
+    $now = [DateTime]::UtcNow; $n = 0
+    foreach ($r in $rels) {
+        if ((Test-ProtectedPath $r) -or $r.StartsWith('/') -or $r -match '(^|/)\.\.(/|$)') { continue }
+        $f = Join-Path $root ($r.Replace('/', '\'))
+        if (Test-Path -LiteralPath $f -PathType Leaf) { [System.IO.File]::SetLastWriteTimeUtc($f, $now); $n++ }
+    }
+    return $n
+}
+
+function Get-GameProcs {
+    $exe = Join-Path $root 'build\release\rac-rs.exe'
+    $r = @()
+    foreach ($p in @(Get-Process -Name 'rac-rs' -ErrorAction SilentlyContinue)) { try { if ($p.Path -eq $exe) { $r += $p } } catch { } }
+    return $r
+}
+
+function Wait-GameClosed {
+    # The build cannot replace rac-rs.exe while it runs: wait for the exe that started the update (and any other of this install).
+    if ($ExePid -gt 0) { try { $p = [System.Diagnostics.Process]::GetProcessById($ExePid); [void]$p.WaitForExit(60000) } catch { } }
+    $end = (Get-Date).AddSeconds(10)
+    while (((Get-GameProcs).Count -gt 0) -and ((Get-Date) -lt $end)) { Start-Sleep -Milliseconds 300 }
+}
+
+function Start-UpdateProcess([string]$ver, [bool]$finish) {
+    # A separate hidden setup.ps1 -Update: it outlives this process (which tells the game exe to exit) and shows the update window.
+    $a = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + (Join-Path $root 'setup.ps1') + '" -Update -NewVersion ' + $ver + ' -ExePid ' + $ExePid
+    if ($finish) { $a += ' -FinishOnly' }
+    if ($TestUpdateBase) { $a += ' -TestUpdateBase "' + $TestUpdateBase.TrimEnd('\') + '"' }
+    if ($TestNoShow) { $a += ' -TestNoShow -TestShot "' + $(if ($TestShot) { $TestShot.TrimEnd('\') } else { Join-Path $root 'test_shots' }) + '"' }
+    $null = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -ArgumentList $a -WorkingDirectory $root -WindowStyle Hidden
+}
+
+# -Launch (started by the game exe): is there something to update? Offline, an error or "not newer" = exit 0 at once, no window.
+$launchMode = ''; $launchNew = ''
+if ($Launch) {
+    try {
+        $lv = Get-LocalVersion; $bv = Get-BuiltVersion
+        if ($bv -and ($bv -ne $lv)) { $launchMode = 'finish'; $launchNew = $lv }
+        # Also when an update is unfinished: a newer version online replaces it (the unfinished one may be what fails to build, e.g. a bad release).
+        $rv = Read-Remote 'VERSION'
+        if ($rv) { $rv = $rv.Trim(); if (($rv -match '^\d+\.\d+\.\d+$') -and ((Compare-Version $rv $lv) -gt 0)) { $launchMode = 'offer'; $launchNew = $rv } }
+    } catch { $launchMode = '' }
+    if (-not $launchMode) { exit 0 }
+    if ($WindowFlag) { try { [System.IO.File]::WriteAllText($WindowFlag, 'window') } catch { } }     # the exe now waits for the answer without a time limit
+}
+
 # ================================================================ launcher window (default; -Console skips it and runs the steps below in the console)
 if (-not $Console) {
     $S = @{
@@ -137,9 +407,12 @@ if (-not $Console) {
         proc = $null; outPath = ''; errPath = ''; outPos = [long]0; errPos = [long]0; outRest = ''; errRest = ''
         log = (New-Object System.Text.StringBuilder); step = 0; levels = 0; compiled = 0; progress = 0.0
         t0 = $null; lastError = ''; status = ''; shortcut = $false; ranOk = $false; finished = $false
+        update = $false; newV = ''; finish = $false; finishPending = $false; workerExtra = ''; workerCode = 0; buildT0 = $null; expect = 0; exitCode = 0
         test = [bool]$TestNoShow; toolsSub = 0.0; vu = $false; suppress = $false; shortcutDir = ''; shortcutPath = ''
     }
     $StepNames = @('Download tools', 'Check disc', 'Prepare game code', 'Build game', 'Finish')
+    $StepNamesInstall = $StepNames
+    $StepNamesUpdate = @('Download update', 'Check tools', 'Prepare game code', 'Build game', 'Finish')
     $ExpectedCompiles = 528      # "Compiling" lines of a complete first build (measured); the bar never goes above 98% for the build
     $AppTitle = 'Ratchet & Clank (rac-rs)'
     $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
@@ -164,9 +437,10 @@ if (-not $Console) {
     $Mutex = $null
     if (-not $TestNoShow) {
         $created = $false
-        $Mutex = New-Object System.Threading.Mutex($true, 'Local\RacRsLauncher', [ref]$created)
+        $mname = $(if ($Launch) { 'Local\RacRsUpdateOffer' } elseif ($Update) { 'Local\RacRsUpdate' } else { 'Local\RacRsLauncher' })
+        $Mutex = New-Object System.Threading.Mutex($true, $mname, [ref]$created)
         if (-not $created) {
-            [void][System.Windows.Forms.MessageBox]::Show('The Ratchet & Clank launcher is already open.', $AppTitle, 'OK', 'Information')
+            if (-not $Launch -and -not $Update) { [void][System.Windows.Forms.MessageBox]::Show('The Ratchet & Clank launcher is already open.', $AppTitle, 'OK', 'Information') }
             exit 0
         }
     }
@@ -288,7 +562,8 @@ if (-not $Console) {
     $UI.lblPct = New-Label '0%' 452 284 100 22 $fN $cText
     $UI.lblPct.TextAlign = 'TopRight'
     $pInst.Controls.Add($UI.lblPct)
-    $pInst.Controls.Add((New-Label 'This takes about 15 minutes. You can keep using your PC.' 28 312 524 22 $fN $cText))
+    $UI.lblInstNote = New-Label 'This takes about 15 minutes. You can keep using your PC.' 28 312 524 22 $fN $cText
+    $pInst.Controls.Add($UI.lblInstNote)
     $UI.lnkDetails = New-Link 'Show details' 28 346 200 22
     $pInst.Controls.Add($UI.lnkDetails)
     $UI.txtLog = New-Object System.Windows.Forms.TextBox
@@ -313,6 +588,11 @@ if (-not $Console) {
     $pDone.Controls.Add($UI.lnkRepair)
     $UI.lblDoneNote = New-Label '' 28 340 524 60 $fSmall $cGrey
     $pDone.Controls.Add($UI.lblDoneNote)
+    $UI.lblVersion = New-Label '' 28 408 200 20 $fSmall $cGrey
+    $pDone.Controls.Add($UI.lblVersion)
+    $UI.lnkCheck = New-Link 'Check for updates' 392 406 160 22
+    $UI.lnkCheck.Font = $fSmall; $UI.lnkCheck.TextAlign = 'MiddleRight'
+    $pDone.Controls.Add($UI.lnkCheck)
 
     # --- view: error
     $pErr = New-Panel; $UI.pErr = $pErr
@@ -330,7 +610,23 @@ if (-not $Console) {
     $UI.btnErrClose = New-Button 'Close' 442 372 110 34 $false
     $pErr.Controls.Add($UI.btnErrClose)
 
-    foreach ($p in @($pPick, $pInst, $pDone, $pErr)) { $form.Controls.Add($p) }
+    # --- view: an update is available (shown by -Launch)
+    $pOffer = New-Panel; $UI.pOffer = $pOffer
+    $UI.lblOfferTitle = New-Label 'Update available' 28 22 524 36 $fTitle $cText
+    $pOffer.Controls.Add($UI.lblOfferTitle)
+    $pOffer.Controls.Add((New-Label 'What is new' 28 66 300 22 $fN $cGrey))
+    $UI.txtChanges = New-Object System.Windows.Forms.TextBox
+    $UI.txtChanges.Multiline = $true; $UI.txtChanges.ReadOnly = $true; $UI.txtChanges.ScrollBars = 'Vertical'; $UI.txtChanges.Font = $fN
+    $UI.txtChanges.Location = New-Object System.Drawing.Point(28, 90); $UI.txtChanges.Size = New-Object System.Drawing.Size(524, 130)
+    $pOffer.Controls.Add($UI.txtChanges)
+    $UI.lblOfferNote = New-Label '' 28 232 524 44 $fN $cText
+    $pOffer.Controls.Add($UI.lblOfferNote)
+    $UI.btnUpdNow = New-Button 'Update now' 312 292 140 40 $true
+    $pOffer.Controls.Add($UI.btnUpdNow)
+    $UI.btnNotNow = New-Button 'Not now' 462 292 90 40 $false
+    $pOffer.Controls.Add($UI.btnNotNow)
+
+    foreach ($p in @($pPick, $pInst, $pDone, $pErr, $pOffer)) { $form.Controls.Add($p) }
 
     # ---------------------------------------------------------------- views
     function Get-Scale { return ($form.CurrentAutoScaleDimensions.Width / 96.0) }
@@ -338,9 +634,10 @@ if (-not $Console) {
 
     function Show-View([string]$name) {
         $S.view = $name
-        foreach ($p in @($pPick, $pInst, $pDone, $pErr)) { $p.Visible = $false }
-        Set-FormHeight 440
+        foreach ($p in @($pPick, $pInst, $pDone, $pErr, $pOffer)) { $p.Visible = $false }
+        Set-FormHeight $(if ($name -eq 'offer') { 350 } else { 440 })
         switch ($name) {
+            'offer' { $pOffer.Visible = $true; $form.AcceptButton = $UI.btnUpdNow }
             'pick' {
                 $pPick.Visible = $true; $form.AcceptButton = $UI.btnInstall
                 if ($S.repair) {
@@ -371,7 +668,22 @@ if (-not $Console) {
             if ($iso -and -not (Test-Path -LiteralPath $iso -PathType Leaf)) { $note = 'Your disc image was not found where it was during setup. Use Repair / rebuild to pick it again.' }
             $UI.lblDoneNote.Text = $note
             $UI.lblDoneNote.ForeColor = $(if ($note -like 'Your disc*') { $cRed } else { $cGrey })
+            $S.finishPending = $false; $UI.btnPlay.Text = 'Play'
+            if ($isDone -and $S.update) {
+                $UI.lblDoneTitle.Text = 'Updated to v' + $S.newV; $UI.lblDoneText.Text = 'Click Play to start the game.'
+                $UI.lblDoneNote.Text = 'Your saves and settings were kept.'; $UI.lblDoneNote.ForeColor = $cGrey
+            }
+            if (-not $isDone) {
+                $bv = Get-BuiltVersion; $lv = Get-LocalVersion
+                if ($bv -and ($bv -ne $lv)) {
+                    $UI.lblDoneTitle.Text = 'Finish the update'
+                    $UI.lblDoneText.Text = "Version $lv is here, but the game is still version $bv. Click Update to finish (about 2 to 10 minutes; your disc image is used as before)."
+                    $UI.btnPlay.Text = 'Update'; $S.finishPending = $true; $S.newV = $lv
+                }
+            }
+            $UI.lblVersion.Text = 'Version ' + (Get-LocalVersion)
         }
+        $UI.lblVersion.Visible = ($name -eq 'done' -or $name -eq 'installed'); $UI.lnkCheck.Visible = ($name -eq 'installed')
         $form.PerformLayout()
     }
 
@@ -486,7 +798,7 @@ if (-not $Console) {
         $S.log = New-Object System.Text.StringBuilder
         $S.step = 0; $S.levels = 0; $S.compiled = 0; $S.progress = 0.0; $S.lastError = ''; $S.status = ''
         $S.shortcut = $false; $S.shortcutPath = ''; $S.ranOk = $false; $S.finished = $false
-        $S.outPos = [long]0; $S.errPos = [long]0; $S.outRest = ''; $S.errRest = ''
+        $S.outPos = [long]0; $S.errPos = [long]0; $S.outRest = ''; $S.errRest = ''; $S.expect = 0; $S.buildT0 = $null
         $UI.txtLog.Clear(); $UI.txtErrLog.Clear()
         Set-Bar $UI.pb 0; $UI.lblPct.Text = '0%'; $UI.lblStatus.Text = ''; $UI.lblElapsed.Text = 'Elapsed: 00:00'
         Set-Step 0
@@ -512,7 +824,12 @@ if (-not $Console) {
             0 { $v = 1.0 + 7.0 * $S.toolsSub }
             1 { $v = 9.0 }
             2 { $v = 10.0 + 18.0 * [math]::Min(1.0, $S.levels / 19.0); if ($S.vu) { $v = 29.0 } }
-            3 { $v = 30.0 + 68.0 * [math]::Min(1.0, $S.compiled / [double]$ExpectedCompiles) }
+            3 {
+                $exp = $(if ($S.expect -gt 0) { $S.expect } else { $ExpectedCompiles })
+                $done = $(if ($S.update) { [math]::Max(0, $S.compiled - 1) } else { $S.compiled })      # cargo prints "Compiling" when a crate STARTS
+                $v = 30.0 + 68.0 * [math]::Min(1.0, $done / [double]$exp)
+                if ($S.update -and $S.buildT0) { $v = [math]::Max($v, 30.0 + 60.0 * (1.0 - [math]::Exp(-((Get-Date) - $S.buildT0).TotalSeconds / 150.0))) }
+            }
             4 { $v = 99.0 }
         }
         if ($S.finished) { $v = 100.0 }
@@ -527,13 +844,15 @@ if (-not $Console) {
         $UI.txtLog.AppendText($line + "`r`n")
         $t = $line.Trim()
         if ($t.Length -gt 0 -and $t -notlike '==*') { $S.status = $(if ($t.Length -gt 100) { $t.Substring(0, 100) } else { $t }) }
-        if ($line -match '^== \((a|b|c|c2|d|e)\)') {
-            $map = @{ 'a' = 0; 'b' = 1; 'c' = 2; 'c2' = 2; 'd' = 3; 'e' = 4 }
+        if ($line -match '^== \((u|a|b|c|c2|d|e)\)') {
+            $map = @{ 'u' = 0; 'a' = $(if ($S.update) { 1 } else { 0 }); 'b' = 1; 'c' = 2; 'c2' = 2; 'd' = 3; 'e' = 4 }
             $k = $Matches[1]
             if ($k -eq 'c2') { $S.vu = $true }
-            $S.status = @{ 'a' = 'Getting the tools ready ...'; 'b' = 'Checking the disc image ...'; 'c' = 'Making the game code from your disc ...'; 'c2' = 'Making the graphics code from your disc ...'; 'd' = 'Building the game (the long part) ...'; 'e' = 'Finishing ...' }[$k]
+            $S.status = @{ 'u' = 'Downloading and applying the update ...'; 'a' = 'Getting the tools ready ...'; 'b' = 'Checking the disc image ...'; 'c' = 'Making the game code from your disc ...'; 'c2' = 'Making the graphics code from your disc ...'; 'd' = 'Building the game (the long part) ...'; 'e' = 'Finishing ...' }[$k]
             if ($map[$k] -ne $S.step) { Set-Step $map[$k] }
+            if ($k -eq 'd' -and -not $S.buildT0) { $S.buildT0 = Get-Date }
         }
+        elseif ($line -match '^expect-compiles: (\d+)') { $S.expect = [int]$Matches[1] }
         elseif ($line -match '^== done') { $S.finished = $true; Set-Step 4 }
         elseif ($line -match '^\s*level \d+ done') { $S.levels++ }
         elseif ($line -match '^\s+Compiling ') { $S.compiled++ }
@@ -565,6 +884,55 @@ if (-not $Console) {
         for ($i = 0; $i -lt $parts.Count - 1; $i++) { if ($parts[$i].Length -gt 0) { Feed-Line $parts[$i] } }
     }
 
+    function Set-Mode([bool]$upd) {
+        $S.update = $upd
+        if (-not $upd) { $S.workerExtra = '' }
+        $script:StepNames = $(if ($upd) { $StepNamesUpdate } else { $StepNamesInstall })
+        for ($i = 0; $i -lt $StepNames.Count; $i++) { $UI.stepText[$i].Text = $StepNames[$i] }
+        $UI.lblInstTitle.Text = $(if ($upd) { 'Updating to v' + $S.newV } else { 'Installing' })
+        $UI.lblInstNote.Text = $(if ($upd) { 'This takes about 2 to 10 minutes. You can keep using your PC.' } else { 'This takes about 15 minutes. You can keep using your PC.' })
+        $UI.btnErrClose.Text = $(if ($upd) { 'Play old version' } else { 'Close' })
+    }
+
+    function Start-UpdateRun {
+        # the update runs as a hidden worker (setup.ps1 -Console -ApplyUpdate ...); this window shows its steps
+        Set-Mode $true
+        $iso = Get-InstalledIso
+        $msg = ''
+        if (@(Get-GameProcs).Count -gt 0) { $msg = "The game is still running.`r`n`r`nClose it, then click Try again." }
+        elseif (-not $iso -or -not (Test-Path -LiteralPath $iso -PathType Leaf)) { $msg = "Your disc image was not found at:`r`n$iso`r`n`r`nPut it back where it was, or open Setup.cmd and use Repair / rebuild to pick it again." }
+        if ($msg) {
+            Reset-InstallState
+            $S.workerCode = 1
+            $UI.lblErrMsg.Text = $msg; $UI.txtErrLog.Text = ''
+            Show-View 'error'
+            return
+        }
+        $S.workerExtra = '-ApplyUpdate -NewVersion ' + $S.newV + $(if ($S.finish) { ' -FinishOnly' } else { '' }) + ' -SkipUnblock' + $(if ($TestUpdateBase) { ' -TestUpdateBase "' + $TestUpdateBase.TrimEnd('\') + '"' } else { '' })
+        $deskDir = $(if ($S.shortcutDir) { $S.shortcutDir } else { [Environment]::GetFolderPath('Desktop') })
+        $hasShortcut = Test-Path -LiteralPath (Join-Path $deskDir 'Ratchet & Clank (rac-rs).lnk')
+        Start-Install $iso $hasShortcut $false
+    }
+
+    function Set-OfferContent {
+        $lv = Get-LocalVersion; $nv = $S.newV; $from = $lv
+        $local = Join-Path $root 'CHANGELOG.md'
+        if ($S.finish) {
+            $from = Get-BuiltVersion
+            $UI.lblOfferTitle.Text = "Finish the update to v$nv"
+            $UI.lblOfferNote.Text = 'An earlier update was not finished. It takes about 2 to 10 minutes. Your saves and settings are kept.'
+            $ct = $(if (Test-Path -LiteralPath $local) { [System.IO.File]::ReadAllText($local) } else { Read-Remote 'CHANGELOG.md' })
+        } else {
+            $bvx = Get-BuiltVersion; if ($bvx -and ((Compare-Version $bvx $lv) -lt 0)) { $from = $bvx }      # an unfinished update: the game you have is the built one
+            $UI.lblOfferTitle.Text = "Update available: v$from " + [string][char]0x2192 + " v$nv"
+            $UI.lblOfferNote.Text = 'This takes about 2 to 10 minutes. Your saves and settings are kept.'
+            $ct = Read-Remote 'CHANGELOG.md'
+        }
+        $txt = $(if ($ct) { Get-ChangelogFor $ct $from $nv } else { '' })
+        if (-not $txt) { $txt = '(The list of changes could not be loaded.)' }
+        $UI.txtChanges.Text = $txt
+    }
+
     function Start-Install([string]$iso, [bool]$shortcut, [bool]$regen) {
         Reset-InstallState
         $S.toolsSub = 0.0; $S.vu = $false
@@ -573,6 +941,7 @@ if (-not $Console) {
         $S.outPath = Join-Path $tmp 'out.log'; $S.errPath = Join-Path $tmp 'err.log'
         Remove-Item -LiteralPath $S.outPath, $S.errPath -Force -ErrorAction SilentlyContinue
         $a = '-NoProfile -ExecutionPolicy Bypass -File "' + (Join-Path $root 'setup.ps1') + '" -Console -Iso "' + $iso + '" -SkipHash'
+        if ($S.workerExtra) { $a += ' ' + $S.workerExtra }
         if (-not $shortcut) { $a += ' -NoShortcut' }
         if ($S.shortcutDir) { $a += ' -ShortcutDir "' + $S.shortcutDir + '"' }
         if ($regen) { $a += ' -Regenerate' }
@@ -592,6 +961,7 @@ if (-not $Console) {
     }
 
     function Get-ErrorText {
+        if ($S.update -and $S.workerCode -eq 3) { return "The update could not be downloaded.`r`n`r`nPlease check your internet connection and click Try again. Nothing on your PC was changed." }
         $all = $S.log.ToString()
         $name = $StepNames[[math]::Min($S.step, $StepNames.Count - 1)]
         $m = "The step '$name' did not finish."
@@ -605,6 +975,7 @@ if (-not $Console) {
             if ($S.lastError) { $m += "`r`n`r`n" + $S.lastError }
             $m += "`r`n`r`nClick Try again. If it keeps failing, click Copy details and share them when you ask for help."
         }
+        if ($S.update) { $m += "`r`n`r`nYour old version is still installed. Click Play old version to keep playing it." }
         return $m
     }
 
@@ -617,6 +988,7 @@ if (-not $Console) {
 
     function Show-Error {
         $UI.lblErrMsg.Text = Get-ErrorText
+        $UI.btnCopy.Visible = (-not ($S.update -and $S.workerCode -eq 3)); $UI.btnCopy.Text = 'Copy details'
         $UI.txtErrLog.Text = $S.log.ToString()
         Show-View 'error'
         $UI.txtErrLog.SelectionStart = $UI.txtErrLog.TextLength
@@ -635,6 +1007,7 @@ if (-not $Console) {
             foreach ($w in @('out', 'err')) { if ($S["${w}Rest"].Length -gt 0) { Feed-Line $S["${w}Rest"]; $S["${w}Rest"] = '' } }
             $S.proc = $null
             $code = $p.ExitCode
+            $S.workerCode = $code
             if ($code -eq 0) {
                 $S.finished = $true; $S.ranOk = $true
                 Set-Step 4; Update-Progress
@@ -677,11 +1050,13 @@ if (-not $Console) {
     })
     $UI.btnInstall.Add_Click({
         if (-not $S.discOk) { return }
+        Set-Mode $false
         Start-Install $S.discPath $UI.chkShortcut.Checked $S.repair
     })
     $UI.lnkDetails.Add_LinkClicked({ Switch-Details })
     $UI.btnPlay.Add_Click({
-        try { Start-Game; $form.Close() }
+        if ($S.finishPending) { $S.finish = $true; Start-UpdateRun; return }
+        try { Start-Game $S.update; $form.Close() }
         catch { [void][System.Windows.Forms.MessageBox]::Show($form, "The game could not be started.`r`n`r`n" + $_.Exception.Message, $AppTitle, 'OK', 'Warning') }
     })
     $UI.btnFolder.Add_Click({ try { Start-Process -FilePath 'explorer.exe' -ArgumentList ('"' + $root + '"') } catch { } })
@@ -695,10 +1070,26 @@ if (-not $Console) {
         try { [System.Windows.Forms.Clipboard]::SetText((Get-DetailsText)); $UI.btnCopy.Text = 'Copied' } catch { $UI.btnCopy.Text = 'Copy failed' }
     })
     $UI.btnRetry.Add_Click({
+        if ($S.update) { Start-UpdateRun; return }
         Show-View 'pick'
         if ($S.discOk) { Set-InstallEnabled $true }
     })
-    $UI.btnErrClose.Add_Click({ $form.Close() })
+    $UI.btnErrClose.Add_Click({
+        if ($S.update) { try { Start-Game $true } catch { } }
+        $form.Close()
+    })
+    $UI.btnUpdNow.Add_Click({ try { Start-UpdateProcess $S.newV $S.finish; $S.exitCode = 10 } catch { $S.exitCode = 0 }; $form.Close() })      # could not start the update window: play instead
+    $UI.btnNotNow.Add_Click({ $S.exitCode = 0; $form.Close() })
+    $UI.lnkCheck.Add_LinkClicked({
+        $UI.lnkCheck.Text = 'Checking ...'; $form.Refresh()
+        $lv = Get-LocalVersion; $rv = Read-Remote 'VERSION'
+        $UI.lnkCheck.Text = 'Check for updates'
+        if (-not $rv -or ($rv.Trim() -notmatch '^\d+\.\d+\.\d+$')) { [void][System.Windows.Forms.MessageBox]::Show($form, 'Could not check for updates. Are you online?', $AppTitle, 'OK', 'Information'); return }
+        $rv = $rv.Trim()
+        if ((Compare-Version $rv $lv) -le 0) { [void][System.Windows.Forms.MessageBox]::Show($form, "You have the latest version (v$lv).", $AppTitle, 'OK', 'Information'); return }
+        $r = [System.Windows.Forms.MessageBox]::Show($form, "Version $rv is available (you have $lv).`r`n`r`nUpdate now? It takes about 2 to 10 minutes. Your saves and settings are kept.", $AppTitle, 'YesNo', 'Question')
+        if ($r -eq [System.Windows.Forms.DialogResult]::Yes) { $S.newV = $rv; $S.finish = $false; Start-UpdateRun }
+    })
     $form.Add_FormClosing({
         param($sender, $e)
         if ($S.proc -and -not $S.proc.HasExited) {
@@ -717,8 +1108,13 @@ if (-not $Console) {
     $UI.timer.Start()
 
     Set-InstallEnabled $false
-    # first view: installed -> Play, otherwise pick the disc
-    if (Test-Installed) { Show-View 'installed' } else { Show-View 'pick' }
+    # first view: -Launch = the update offer, -Update = the update window, otherwise installed -> Play, or pick the disc
+    if ($Launch) { $S.newV = $launchNew; $S.finish = ($launchMode -eq 'finish'); Set-OfferContent; Show-View 'offer' }
+    elseif ($Update) {
+        $S.newV = $NewVersion; $S.finish = [bool]$FinishOnly
+        if (-not $TestNoShow) { Wait-GameClosed; Start-UpdateRun }
+    }
+    elseif (Test-Installed) { Show-View 'installed' } else { Show-View 'pick' }
 
     # ---------------------------------------------------------------- hidden test mode: nothing is shown, the views are saved as PNG
     function Wait-Until([scriptblock]$cond, [int]$sec) {
@@ -755,6 +1151,36 @@ if (-not $Console) {
         try { [void]$form.GetType().GetMethod('CreateControl', [Reflection.BindingFlags]'NonPublic,Instance', $null, [Type[]]@([bool]), $null).Invoke($form, @($true)) } catch { }
         $S.shortcutDir = Join-Path $TestShot 'desk'
         New-Item -ItemType Directory -Force -Path $S.shortcutDir | Out-Null
+        if ($Launch) {
+            # -Launch test: the offer window is built but never shown; the choice comes from -TestChoice
+            Write-Host ('  title: ' + $UI.lblOfferTitle.Text); Write-Host ('  changes: ' + ($UI.txtChanges.Text -replace "`r`n", ' | '))
+            Save-Shot $(if ($S.finish) { 'launch_finish' } else { 'launch_offer' })
+            $code = $(if ($TestChoice -eq 'update') { 10 } else { 0 })
+            if ($code -eq 10) { Start-UpdateProcess $S.newV $S.finish }
+            Write-Host "  choice '$TestChoice' -> exit $code"
+            exit $code
+        }
+        if ($Update) {
+            # -Update test: the whole update runs hidden; the window is built but never shown
+            Wait-GameClosed
+            Save-Shot 'upd_00_start'
+            Start-UpdateRun
+            [void](Wait-Until { $S.step -ge 3 -or -not $S.proc } 1800)
+            if ($S.proc) { Save-Shot 'upd_01_building' }
+            [void](Wait-Until { -not $S.proc } 3600)
+            Save-Shot $(if ($S.view -eq 'done') { 'upd_02_done' } else { 'upd_02_error' })
+            Write-Host ("  update view: {0}, worker exit code {1}" -f $S.view, $S.workerCode)
+            if ($S.view -ne 'done') { Write-Host ('  error text: ' + ($UI.lblErrMsg.Text -replace "`r`n", ' | ')) }
+            Set-Content -LiteralPath (Join-Path $TestShot 'upd_log.txt') -Value $S.log.ToString() -Encoding UTF8
+            Stop-Install
+            exit $(if ($S.view -eq 'done') { 0 } else { 1 })
+        }
+        if ($TestChoice -eq 'firstview') {
+            # test only: just the first view of the launcher (the installed view says "Finish the update" after a ZIP was unzipped over an older folder)
+            Save-Shot 'first_view'
+            Write-Host ('  view: ' + $S.view + '; title: ' + $UI.lblDoneTitle.Text + '; text: ' + $UI.lblDoneText.Text + '; button: ' + $UI.btnPlay.Text)
+            exit 0
+        }
         Write-Host "launcher test (nothing is shown); shots in $TestShot"
 
         Test-Check 'first view matches the installed check' (($S.view -eq 'installed') -eq (Test-Installed))
@@ -865,12 +1291,66 @@ if (-not $Console) {
         exit 1
     }
     if ($Mutex) { try { $Mutex.ReleaseMutex() } catch { } }
-    exit 0
+    exit $S.exitCode
 }
 
 
 # Files from a downloaded ZIP carry the 'from the internet' mark; clear it so the scripts and build run without prompts.
-try { Get-ChildItem -LiteralPath $root -Recurse -File -ErrorAction SilentlyContinue | Unblock-File -ErrorAction SilentlyContinue } catch { }
+if ($ApplyUpdate) {
+    # Worker of the update window. Downloads the new version, copies it over this install (Sync-Update), then runs the normal steps below with
+    # the NEW setup.ps1 as a fresh process (the tools, stamps and build of the new version decide what is redone).
+    Step "(u) updating to v$NewVersion"
+    if (-not $FinishOnly) {
+        $utmp = Join-Path ([System.IO.Path]::GetTempPath()) "rac-rs-update\$NewVersion"
+        try {
+            if (Test-Path -LiteralPath $utmp) { Remove-Item -LiteralPath $utmp -Recurse -Force }
+            New-Item -ItemType Directory -Force -Path $utmp | Out-Null
+            Write-Host "  downloading v$NewVersion ..."
+            Get-UpdateZip $NewVersion (Join-Path $utmp 'update.zip')
+            Write-Host '  unpacking ...'
+            Expand-UpdateZip (Join-Path $utmp 'update.zip') (Join-Path $utmp 'x')
+        } catch {
+            Write-Host "ERROR: could not download the update: $($_.Exception.Message)" -ForegroundColor Red
+            Remove-Item -LiteralPath $utmp -Recurse -Force -ErrorAction SilentlyContinue
+            exit 3
+        }
+        try {
+            $got = ([System.IO.File]::ReadAllText((Join-Path $utmp 'x\VERSION'))).Trim()
+            if ($got -notmatch '^\d+\.\d+\.\d+$' -or (Compare-Version $got (Get-LocalVersion)) -le 0) { throw "the downloaded version ($got) is not newer than this one ($(Get-LocalVersion))" }
+            Write-Host "  applying v$got ..."
+            $res = Sync-Update (Join-Path $utmp 'x') $root
+        } catch {
+            Write-Host "ERROR: could not apply the update: $($_.Exception.Message)" -ForegroundColor Red
+            Remove-Item -LiteralPath $utmp -Recurse -Force -ErrorAction SilentlyContinue
+            exit 1
+        }
+        Remove-Item -LiteralPath $utmp -Recurse -Force -ErrorAction SilentlyContinue
+        $ch = @($res.Changed)
+        $exp = 1
+        if (@($ch | Where-Object { $_ -like 'oracle/src/*' -or $_ -eq 'oracle/Cargo.toml' }).Count -gt 0) { $exp = 528 }
+        elseif (@($ch | Where-Object { $_ -like 'oracle/hand/*' }).Count -gt 0) { $exp = 3 }
+        Write-Host "  $($ch.Count) files updated, $(@($res.Removed).Count) removed"
+        Write-Host "expect-compiles: $exp"
+    } else {
+        Write-Host '  the files are already updated; only the rebuild is left'
+        Write-Host 'expect-compiles: 528'
+    }
+    # Files that were not copied by Sync-Update (no generated\synced_<version>: a ZIP unzipped over the folder) carry the ZIP's times: stamp them, or cargo may keep the old game.
+    $syncMark = Join-Path $root ('generated\synced_' + (Get-LocalVersion))
+    if (-not (Test-Path -LiteralPath $syncMark -PathType Leaf)) {
+        $nst = Set-ReleaseFileTimes
+        Write-Host "  the files were put in place by hand: set the time of $nst files to now, so that everything is rebuilt once"
+        New-Item -ItemType Directory -Force -Path (Join-Path $root 'generated') | Out-Null
+        [System.IO.File]::WriteAllText($syncMark, ((Get-LocalVersion) + "`n"), (New-Object System.Text.UTF8Encoding($false)))
+    }
+    $a2 = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $root 'setup.ps1'), '-Console', '-Iso', $Iso, '-SkipHash', '-SkipUnblock')
+    if ($NoShortcut) { $a2 += '-NoShortcut' }
+    if ($ShortcutDir) { $a2 += @('-ShortcutDir', $ShortcutDir) }
+    & (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') @a2
+    exit $LASTEXITCODE
+}
+
+if (-not $SkipUnblock) { try { Get-ChildItem -LiteralPath $root -Recurse -File -ErrorAction SilentlyContinue | Unblock-File -ErrorAction SilentlyContinue } catch { } }
 
 # ---------------------------------------------------------------- (a) tools
 # A private, pinned copy of Rust, Python and the GNU assembler is downloaded INTO this folder (.\toolchain, about 1.2 GB on disk): nothing is installed
@@ -1027,14 +1507,29 @@ Step '(c) generating game code from the disc image'
 $gen = Join-Path $root 'generated'          # logs and stamps
 $orc = Join-Path $root 'oracle'             # the generated crates go to oracle\rec and oracle\game (the layout of the dev tree)
 $stamp = Join-Path $gen 'done.txt'
-$want = "$ExpectedSha1 $ExpectedSize flags=$($GenFlags -join ' ')"
+$wantBase = "$ExpectedSha1 $ExpectedSize flags=$($GenFlags -join ' ')"
+$genHash = Get-FilesHash @('tools/recgen_iso.py', 'tools/fn_bounds.tsv', 'oracle/stubs.txt')
+# Earlier generator revisions (the first is v0.1.0, whose stamp has no gen= part) that make byte-identical output: an install made by one of them
+# is still current, so an update that only changed HOW the files are written does not regenerate. Add the old hash here when a generator
+# change does not change its output.
+$GenCompatible = @('9a84d825c333842cd58ed6d12d1ed54c7141ffab30276e6add765ef00c859c51')
+$want = "$wantBase gen=$genHash"
 $have = ''
 if (Test-Path -LiteralPath $stamp) { $have = (Get-Content -LiteralPath $stamp -Raw).Trim() }
 if (-not (Test-Path -LiteralPath (Join-Path $orc 'game\src\lib.rs'))) { $have = '' }
-if ($Regenerate -or $have -ne $want) {
-    foreach ($d in @($gen, (Join-Path $orc 'rec'), (Join-Path $orc 'game'))) {
-        if (Test-Path -LiteralPath $d) { Remove-Item -LiteralPath $d -Recurse -Force }
+if ($have -and $have -ne $want) {
+    $oldGen = ''
+    if ($have -eq $wantBase) { $oldGen = $GenCompatible[0] } elseif ($have.StartsWith($wantBase + ' gen=')) { $oldGen = $have.Substring($wantBase.Length + 5) }
+    if ($oldGen -and ($GenCompatible -contains $oldGen)) {
+        Set-Content -LiteralPath $stamp -Value $want -Encoding ASCII
+        $have = $want
+        Write-Host '  the generator changed but makes the same files: stamp updated, nothing to redo'
     }
+}
+if ($Regenerate -or $have -ne $want) {
+    # The generators write in place and only touch files whose content differs (cargo rebuilds by file time): nothing is deleted first.
+    Remove-Item -LiteralPath $stamp -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath (Join-Path $gen 'logs')) { Remove-Item -LiteralPath (Join-Path $gen 'logs') -Recurse -Force }
     New-Item -ItemType Directory -Force -Path (Join-Path $gen 'logs') | Out-Null
     $t = Get-Date
     $queue = New-Object System.Collections.Queue
@@ -1085,10 +1580,21 @@ if ($Regenerate -or $have -ne $want) {
 Step '(c2) generating the VU microcode translations from the disc image'
 New-Item -ItemType Directory -Force -Path $gen | Out-Null
 $vuStamp = Join-Path $gen 'vu_done.txt'
-$vuWant = "$ExpectedSha1 vu1"
+$vuBase = "$ExpectedSha1 vu1"
+$VuCompatible = @('5b49455da24a986799cd727bb9a4563a70609ab5759df4c060f5df0b00bec669')      # as $GenCompatible, for tools\vugen_iso.py and tools\vu\ (the first is v0.1.0)
+$vuWant = "$vuBase gen=$(Get-FilesHash (Get-VuGenFiles))"
 $vuHave = ''
 if (Test-Path -LiteralPath $vuStamp) { $vuHave = (Get-Content -LiteralPath $vuStamp -Raw).Trim() }
 if (-not (Test-Path -LiteralPath (Join-Path $orc 'src\vu0_prog0.rs')) -or -not (Test-Path -LiteralPath (Join-Path $root 'rac-rs\src\gsfull\vu1aot_gen.rs')) -or -not (Test-Path -LiteralPath (Join-Path $root 'rac-rs\src\particles\orb_tables.rs'))) { $vuHave = '' }
+if ($vuHave -and $vuHave -ne $vuWant) {
+    $oldGen = ''
+    if ($vuHave -eq $vuBase) { $oldGen = $VuCompatible[0] } elseif ($vuHave.StartsWith($vuBase + ' gen=')) { $oldGen = $vuHave.Substring($vuBase.Length + 5) }
+    if ($oldGen -and ($VuCompatible -contains $oldGen)) {
+        Set-Content -LiteralPath $vuStamp -Value $vuWant -Encoding ASCII
+        $vuHave = $vuWant
+        Write-Host '  the VU generator changed but makes the same files: stamp updated, nothing to redo'
+    }
+}
 if ($Regenerate -or $vuHave -ne $vuWant) {
     $t = Get-Date
     & $python (Join-Path $root 'tools\vugen_iso.py') --iso $Iso --tree $root
@@ -1121,6 +1627,8 @@ $timings['build'] = [math]::Round(((Get-Date) - $t).TotalSeconds, 1)
 $exe = Join-Path $root 'build\release\rac-rs.exe'
 if (-not (Test-Path -LiteralPath $exe)) { Fail "build finished but $exe is missing" }
 Write-Host "  built $exe ($([math]::Round((Get-Item -LiteralPath $exe).Length / 1MB)) MB) in $($timings['build']) s"
+[System.IO.File]::WriteAllText((Join-Path $root 'generated\built_version.txt'), ((Get-LocalVersion) + "`n"), (New-Object System.Text.UTF8Encoding($false)))      # the version this build was made from
+Get-ChildItem -LiteralPath (Join-Path $root 'generated') -Filter 'synced_*' -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue      # (see Sync-Update / -ApplyUpdate)
 
 # ---------------------------------------------------------------- (e) Play.cmd
 Step '(e) play.cfg and Play.cmd'

@@ -102,17 +102,78 @@ fn message_box(text: &str) {
 	eprintln!("{text}");
 }
 
+/// The install root: the first folder from the exe's folder upwards that holds `generated/play.cfg`. Err is the text for a message box.
+fn install_root() -> Result<std::path::PathBuf, String> {
+	let exe = std::env::current_exe().map_err(|e| format!("Cannot find the game folder ({e}). Run Setup.cmd first."))?;
+	exe.parent()
+		.and_then(|d| d.ancestors().find(|d| d.join("generated").join("play.cfg").is_file()))
+		.map(|d| d.to_path_buf())
+		.ok_or_else(|| "Run Setup.cmd first: the game has not been set up yet (generated/play.cfg not found).".to_string())
+}
+
+/// Public Windows build only: before the game starts, ask `setup.ps1 -Launch` (a hidden PowerShell) whether an update is waiting.
+/// Returns true when the update window took over (PowerShell exit code 10): the game must not start, this exe must exit so that the
+/// update can replace it. Every other outcome (no setup.ps1, offline, up to date, "Not now", spawn failure, a hang) returns false = start the game.
+/// The script writes `generated/update_window.flag` when it shows a window: until then it gets 15 s; once the flag exists the exe waits for the
+/// answer without a time limit. A flag file (not a pipe) keeps this single-threaded, as `launch_args` needs (`set_var`).
+/// Skipped with RAC_NO_UPDATE_CHECK (Play old version), and in the automated test runs (RAC_TEST_WINDOW / RAC_RETAIL_SMOKE) unless RAC_TEST_UPDATE_BASE is set.
+/// Test hooks: RAC_TEST_UPDATE_BASE -> `-TestUpdateBase`, RAC_TEST_UPDATE_CHOICE=update|notnow -> `-TestNoShow -TestChoice`, RAC_TEST_UPDATE_SHOT -> `-TestShot`.
+#[cfg(all(windows, feature = "windows_gui"))]
+fn update_check() -> bool {
+	use std::os::windows::process::CommandExt;
+	use std::process::{Command, Stdio};
+	use std::time::{Duration, Instant};
+	const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+	let has = |k: &str| std::env::var_os(k).is_some();
+	if has("RAC_NO_UPDATE_CHECK") || ((has("RAC_TEST_WINDOW") || has("RAC_RETAIL_SMOKE")) && !has("RAC_TEST_UPDATE_BASE")) {
+		return false;
+	}
+	let Ok(root) = install_root() else { return false };
+	let setup = root.join("setup.ps1");
+	if !setup.is_file() {
+		return false;
+	}
+	let flag = root.join("generated").join("update_window.flag");
+	let _ = std::fs::remove_file(&flag);
+	let sysroot = std::env::var_os("SystemRoot").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));
+	let mut cmd = Command::new(sysroot.join(r"System32\WindowsPowerShell\v1.0\powershell.exe"));
+	cmd.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]).arg(&setup);
+	cmd.args(["-Launch", "-ExePid"]).arg(std::process::id().to_string()).arg("-WindowFlag").arg(&flag);
+	if let Some(v) = std::env::var_os("RAC_TEST_UPDATE_BASE") {
+		cmd.arg("-TestUpdateBase").arg(v);
+	}
+	if let Ok(c) = std::env::var("RAC_TEST_UPDATE_CHOICE") {
+		if c == "update" || c == "notnow" {
+			cmd.args(["-TestNoShow", "-TestChoice"]).arg(c);
+			if let Some(v) = std::env::var_os("RAC_TEST_UPDATE_SHOT") {
+				cmd.arg("-TestShot").arg(v);
+			}
+		}
+	}
+	cmd.current_dir(&root).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).creation_flags(CREATE_NO_WINDOW);
+	let Ok(mut child) = cmd.spawn() else { return false };
+	let t0 = Instant::now();
+	loop {
+		match child.try_wait() {
+			Ok(Some(status)) => return status.code() == Some(10),
+			Ok(None) => {}
+			Err(_) => return false,
+		}
+		if t0.elapsed() > Duration::from_secs(15) && !flag.is_file() {
+			let _ = child.kill();
+			let _ = child.wait();
+			return false;
+		}
+		std::thread::sleep(Duration::from_millis(40));
+	}
+}
+
 /// The no-argument start (what Play.cmd did): find the install root (the first folder from the exe's folder upwards that holds
 /// `generated/play.cfg`), read `iso=<path>` and optional `lang=en|fr|de|es|it` from it, set the environment Play.cmd set, rotate the
 /// card safety copies and return the arguments of `view <iso> 0 --retail-cold --modern-cam`. Err is the text for a message box.
 /// Runs first thing in `main`, before any thread starts (`set_var` is only sound then).
 fn launch_args() -> Result<Vec<String>, String> {
-	let exe = std::env::current_exe().map_err(|e| format!("Cannot find the game folder ({e}). Run Setup.cmd first."))?;
-	let root = exe
-		.parent()
-		.and_then(|d| d.ancestors().find(|d| d.join("generated").join("play.cfg").is_file()))
-		.ok_or("Run Setup.cmd first: the game has not been set up yet (generated/play.cfg not found).")?
-		.to_path_buf();
+	let root = install_root()?;
 	let cfg = std::fs::read(root.join("generated").join("play.cfg")).map_err(|e| format!("Cannot read generated/play.cfg ({e}). Run Setup.cmd again."))?;
 	let cfg = String::from_utf8_lossy(&cfg);
 	let (mut iso, mut lang) = (None, None);
@@ -164,6 +225,10 @@ fn main() -> ExitCode {
 	let mut args: Vec<String> = std::env::args().skip(1).collect();
 	// Double-clicked (no arguments): start the game the way Play.cmd does, from generated/play.cfg written by setup.
 	if args.is_empty() {
+		#[cfg(all(windows, feature = "windows_gui"))]
+		if update_check() {
+			return ExitCode::SUCCESS;
+		}
 		match launch_args() {
 			Ok(a) => args = a,
 			Err(msg) => {

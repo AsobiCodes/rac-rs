@@ -45,6 +45,12 @@ Your saves are kept in the `player` folder.
 
 **Do not share or upload the generated files or the built game.** They contain code generated from the game disc. Everything setup creates stays inside this folder.
 
+## Updating
+
+When you start the game, it checks online whether a newer version is out. If there is one, a window shows what is new. Click **Update now** to update, or **Not now** to just play. Your saves, your disc setting and the downloaded tools are kept, and only the parts that changed are rebuilt. Most updates take a few minutes; a few take about as long as the first build (about 15 minutes). You can also check by hand: open Setup.cmd and click **Check for updates**. The check only downloads a small version file from GitHub; nothing about you or your game is sent.
+
+If you downloaded v0.1.0, it has no automatic updates. Download the new ZIP, unzip it over your old folder (replace the files) and double-click **Setup.cmd**. If the window says "Finish the update", click **Update**; otherwise click **Repair / rebuild**. Either way the game is rebuilt once, completely, and your saves and disc settings are kept.
+
 ## Controls
 
 The game's own button prompts show the keyboard and mouse keys. You can change the camera style and language in the game's Options menu. Gamepads (XInput) work too; with the modern camera on, hold R2 to strafe.
