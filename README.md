@@ -16,7 +16,13 @@ Project site: https://asobicodes.dev
 
 ## How it works
 
-The original game code runs on a PS2 CPU core written in Rust. When you run setup, it translates the code from your disc into native Rust ("static recompilation"). Rewritten Rust replaces the original functions one at a time. Graphics, sound, movies, input and saving are native PC code.
+The game runs on its own original code. When you run setup, it translates the PS2 code from your disc into native Rust ("static recompilation"), and that code runs on a PS2 CPU core written in Rust. Because the game logic is the original code, gameplay behaves exactly like the PS2 version.
+
+Everything around the game code is native PC code written for this port: graphics, sound, movies, input, saving, and the PC features. Where a fix or a PC feature needs it, an original function is rewritten in readable Rust. Changes are tested against the original: test runs play the same frames on both versions and compare the game's memory.
+
+## Goal
+
+A faithful, fully playable PC version of Ratchet & Clank that you build from your own disc, with PC improvements on top. The game logic stays the original code. Rewriting the whole game from scratch is not a goal of this project.
 
 ## What you need
 
