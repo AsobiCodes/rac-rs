@@ -17,6 +17,9 @@ const GAP: usize = 0x164000;
 /// Overlay virtual address `va` in the level image (`Level::sections[0]`): the def's low base below `GAP` when it has
 /// one, its image base otherwise.
 fn elf_at<'a>(img: &'a [u8], va: usize, len: usize, def: &OceanDef) -> Option<&'a [u8]> {
+	if crate::retail::disc::usa() {
+		return crate::retail::disc::ov_bytes(img, va, len);
+	}
 	let base = match def.low_base {
 		Some(low) if va < GAP => low,
 		_ => def.image_base,
@@ -162,18 +165,19 @@ impl Ocean {
 	/// `ov` = the level overlay image (`Level::sections[0]`), `pvars` = the ocean instance's pvars (Aridia's region
 	/// cuboid ids; unused when the def is not gated). None when the overlay or the def's fx records are missing.
 	pub fn new(ov: &[u8], level: &Level, pvars: &[u8], def: &OceanDef) -> Option<Ocean> {
+		crate::viewer::gs_state::guard_path("ocean");
 		let mut groups: [Vec<Desc>; 3] = Default::default();
 		for (g, list) in def.groups.iter().enumerate() {
 			for &va in *list {
-				groups[g].push(Desc::read(ov, va, def)?);
+				groups[g].push(Desc::read(ov, crate::retail::disc::va_level(level.id, va as u32) as usize, def)?);
 			}
 		}
 		let word = |k: usize| pvars.get(k * 4..k * 4 + 4).map_or(-1, |b| i32::from_le_bytes(b.try_into().unwrap()));
 		let cuboid = [word(0), word(1), word(2)];
-		let raw = elf_at(ov, def.st_table, STRIP_LEN * 8, def)?;
+		let raw = elf_at(ov, crate::retail::disc::va_level(level.id, def.st_table as u32) as usize, STRIP_LEN * 8, def)?;
 		let f = |o: usize| f32::from_le_bytes(raw[o..o + 4].try_into().unwrap());
 		let st = std::array::from_fn(|k| [f(k * 8) * def.st_scale, f(k * 8 + 4) * def.st_scale]);
-		let raw = elf_at(ov, def.strip_index, STRIP_LEN * 2, def)?;
+		let raw = elf_at(ov, crate::retail::disc::va_level(level.id, def.strip_index as u32) as usize, STRIP_LEN * 2, def)?;
 		let idx = std::array::from_fn(|k| (i16::from_le_bytes([raw[k * 2], raw[k * 2 + 1]]) / 8) as u8);
 		let frames = (0..def.frame_count).map(|k| fx_frame(level, def.first_fx + k)).collect::<Option<Vec<_>>>()?;
 		Some(Ocean { groups, cuboid, st, idx, frames, fix: def.fix, gated: def.gated, first_frame: def.first_frame, fog: None })
@@ -287,6 +291,7 @@ fn patch_near(px: f32, py: f32, d: &Desc, eye: [f32; 3]) -> bool {
 /// Retail mode (retail/oldsim.rs `RamOcean`, the oceans of Batalia, Gaspar, Oltanis, Rilgar and Umbris): the patch strips of
 /// one descriptor whose strip tables, ALPHA FIX and colours were read from retail RAM. Never gated by a region cuboid.
 pub fn ram_strips(d: &Desc, st: &[[f32; 2]; STRIP_LEN], idx: &[u8; STRIP_LEN], fix: u8, eye: [f32; 3]) -> Vec<WorldStrip> {
+	crate::viewer::gs_state::guard_path("ocean");
 	let o = Ocean { groups: Default::default(), cuboid: [-1; 3], st: *st, idx: *idx, frames: Vec::new(), fix, gated: false, first_frame: 0, fog: None };
 	let mut out = Vec::new();
 	o.desc_patches(d, eye, &mut out);

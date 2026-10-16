@@ -11,6 +11,8 @@ Project site: https://asobicodes.dev
 
 - The whole game is playable from power-on to the end credits, including New Game+.
 - Gameplay follows the original PS2 game one to one. On top of that, the PC version has widescreen, keyboard and mouse controls, gamepad support, and an optional modern camera (mouse look and strafing).
+- Optional modern graphics on the Graphics page (Pause > Options > Graphics): enhanced lighting, ambient occlusion, dynamic shadows, clear reflective water, enhanced smoke, fire and explosions, and sun rays. The Classic settings keep the original PS2 look.
+- Plays from the PAL / Europe disc and, since v0.2, from the USA disc.
 - Windows only for now.
 - Known issues are listed under [Known issues](#known-issues) below.
 
@@ -26,7 +28,8 @@ A faithful, fully playable PC version of Ratchet & Clank that you build from you
 
 ## What you need
 
-- **The game disc:** Ratchet & Clank, **PAL / Europe, v1.00** (serial SCES-50916). Make an `.iso` image of **your own** disc. Other versions (US, Japan, Platinum re-releases) are not supported yet. Setup checks the image.
+- **The game disc:** Ratchet & Clank, **PAL / Europe v1.00** (serial SCES-50916) or **USA v1.00** (serial SCUS-97199). Make an `.iso` image of **your own** disc. Other versions (Japan, Platinum and Greatest Hits re-releases) are not supported yet. Setup checks the image.
+- **About the USA version:** it should play the same as the PAL version (at 60 frames per second, like the original US game), but it has had less testing so far. If something looks or behaves differently from the PAL version, please open an issue here on GitHub.
 - **Windows 10 or 11, 64-bit**, with about **5 GB of free disk space** (the finished install takes about 3.5 GB) and an internet connection for the first setup.
 
 That's all. Setup downloads anything else it needs into its own folder.

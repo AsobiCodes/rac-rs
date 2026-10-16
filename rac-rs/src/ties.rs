@@ -23,12 +23,24 @@ pub fn tie_mesh(data: &[u8], remap: &[u8], name: String) -> R<Mesh> {
 pub type TieSlot = ([usize; 3], bool);
 
 /// A tie face key: the texture key with the material's GS TEX1 K in the shrub K bits (`shrubs::key_k`), so the draw knows its
-/// mip level choice. Tie texture indices are below 256 in every level; a larger one (or no usable K) keeps the plain key.
-fn tie_key(texture: u32, k: Option<u32>) -> u32 {
-	let key = texture_key(TextureGroup::Tie, texture);
+/// mip level choice, and its GS CLAMP wrap in the shrub wrap bits (`shrubs::WRAP_SHIFT`: bit 26 WMS clamp, bit 27 WMT clamp).
+/// Tie texture indices are below 256 in every level; a larger one (or no usable K) keeps the plain key and the wrap.
+fn tie_key(texture: u32, k: Option<u32>, wrap: u32) -> u32 {
+	let key = texture_key(TextureGroup::Tie, texture) | (wrap & 3) << crate::shrubs::WRAP_SHIFT;
 	match k {
 		Some(k) if texture < 256 => key | (k & 0xff) << crate::shrubs::K_LO_SHIFT | (k >> 8) << crate::shrubs::K_HI_SHIFT,
 		_ => key,
+	}
+}
+
+/// The GS CLAMP wrap of a tie material record (80 bytes): the fourth A+D qword is +0x30 WMS, +0x34 WMT, +0x38 register 8
+/// (CLAMP_1), as the shrub record's +0x10 / +0x14 source words (runtime CLAMP_1 = WMS | WMT << 2). 0 = REPEAT both, bit 0 = u
+/// clamped, bit 1 = v clamped. A REPEAT sample at the edge of a clamped tie material (tree canopies, shoal mounds) bled the
+/// opposite texture edge in as a thin dark line along the polygon border. Region modes (2, 3) and other registers keep REPEAT.
+fn tie_wrap(record: &[u8]) -> u32 {
+	match (u32_at(record, 0x30), u32_at(record, 0x34), u32_at(record, 0x38)) {
+		(Ok(wms @ 0..=1), Ok(wmt @ 0..=1), Ok(8)) => wms | wmt << 1,
+		_ => 0,
 	}
 }
 
@@ -63,6 +75,19 @@ fn tie_mesh_indexed(data: &[u8], remap: &[u8], name: String, lod: usize) -> R<(M
 		.chunks_exact(80)
 		.map(|r| Some(u32_at(r, 0x10).ok()? & 0xfff).filter(|_| u32_at(r, 0x14).ok() == Some(4) && u32_at(r, 0x18).ok() == Some(0x14)))
 		.collect();
+	let material_wrap: Vec<u32> = materials.chunks_exact(80).map(tie_wrap).collect();
+	if crate::viewer::gs_state::enabled() {
+		for r in materials.chunks_exact(80) {
+			// The record's TEX1 / CLAMP source words as the GS registers (runtime CLAMP = WMS | WMT << 2); a record that is not the
+			// registers the decode above expects (+0x18 != 0x14, +0x38 != 8) logs as a state the path ignores.
+			let w = |o| u32_at(r, o).unwrap_or(0) as u64;
+			let (tex1, clamp) = (w(0x10) << 32 | w(0x14) << 6 | 0x20, w(0x30) | w(0x34) << 2);
+			if w(0x18) != 0x14 || w(0x38) != 8 {
+				crate::viewer::gs_state::note("tie", "record.registers", (w(0x18) << 8 | w(0x38)) as u32);
+			}
+			crate::viewer::gs_state::guard_world("tie", crate::viewer::gs_state::TEST_TIE, tex1, clamp);
+		}
+	}
 	let table = span(data, packet_table, header[0x20 + lod] as usize * 16)?;
 	let mut mesh = Mesh::new(name);
 	for (packet_id, entry) in table.chunks_exact(16).enumerate() {
@@ -124,7 +149,7 @@ fn tie_mesh_indexed(data: &[u8], remap: &[u8], name: String, lod: usize) -> R<(M
 			for i in 2..primitive.len() {
 				let f = [primitive[i - 2], primitive[i - 1], primitive[i]];
 				let f = if i % 2 == winding as usize { f } else { [f[2], f[1], f[0]] };
-				mesh.faces.push((tie_key(textures[material] as u32, material_k[material]), f));
+				mesh.faces.push((tie_key(textures[material] as u32, material_k[material], material_wrap[material]), f));
 			}
 			Ok(())
 		};
@@ -474,6 +499,36 @@ mod tests {
 		assert!(near * 10 >= lens.len() * 9);
 		let lights = crate::gameplay::lighting(&level).unwrap().lights;
 		assert!(!lit_instances(&level, &lights).unwrap().is_empty());
+	}
+
+	/// `tie_wrap`: the CLAMP source qword of every tie material on Veldin, Novalis and Pokitaru is register 8 with WMS / WMT 0
+	/// or 1 (no region mode), and Veldin classes 2020 / 2027 give the vertex_colours.md sources (u32 lo = WMS, hi = WMT).
+	#[test]
+	fn tie_material_clamp_wraps() {
+		let mut disc = iso::Disc::open(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../Ratchet & Clank (Europe) (En,Fr,De,Es,It) (v1.00).iso"))).unwrap();
+		let levels = toc::read_levels(&mut disc).unwrap();
+		for info in levels.iter().filter(|l| [0, 1, 11].contains(&l.id)) {
+			let level = Level::load(&mut disc, info).unwrap();
+			let mut count = [0usize; 4];
+			for e in level.table(0x20, 32).unwrap() {
+				let data = level.block(u32_at(e, 0).unwrap() as usize).unwrap();
+				let n = data[0x23] as usize;
+				let records = &data[u32_at(data, 0x2c).unwrap() as usize..][..n * 80];
+				let wraps: Vec<u32> = records.chunks_exact(80).map(tie_wrap).collect();
+				for r in records.chunks_exact(80) {
+					assert_eq!(u32_at(r, 0x38).unwrap(), 8, "class {} CLAMP register", u32_at(e, 4).unwrap());
+					assert!(u32_at(r, 0x30).unwrap() <= 1 && u32_at(r, 0x34).unwrap() <= 1, "class {} region mode", u32_at(e, 4).unwrap());
+				}
+				wraps.iter().for_each(|&w| count[w as usize] += 1);
+				match (info.id, u32_at(e, 4).unwrap()) {
+					(0, 2020) => assert_eq!(wraps, vec![2, 2, 0, 2]),
+					(0, 2027) => assert_eq!(wraps, vec![3, 2, 2, 0, 3, 0]),
+					_ => {}
+				}
+			}
+			println!("level {}: tie materials repeat / u clamp / v clamp / both {count:?}", info.id);
+			assert!(count[1] + count[2] + count[3] > 0);
+		}
 	}
 
 	/// The instance bounding sphere (class sphere x placement) encloses the instance's vertices on Veldin and Novalis.

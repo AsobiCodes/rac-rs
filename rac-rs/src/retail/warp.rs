@@ -19,6 +19,7 @@
 
 use super::{read_cam, Cam, LEVEL_SHIFT, SHIP_STATE};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use crate::retail::disc::va;
 
 type V3 = [f32; 3];
 
@@ -84,9 +85,9 @@ pub struct WarpRam {
 /// substate 4, else fx 0x15 [C Eudora OV:109466-109477, FUN_001ebb00(tex)]; GS alpha 0x44. Corner order as `ShipGloss::step` (1, 0, 2, 3).
 pub(super) fn gloss(m: &ee_oracle::Machine, class: u32, at: impl Fn(u32) -> u32, tex: usize) -> Vec<crate::particles::WorldQuad> {
 	let Some(idx) = class.checked_sub(0x212).filter(|&i| i < 4) else { return Vec::new() };
-	let nq = m.rd32(0x160580 + 4 * idx).min(128);
-	let d = m.rd32(0x1605b0 + 4 * idx) & 0x01ff_ffff;
-	let w = m.rd32(0x160560 + 4 * idx);
+	let nq = m.rd32(va(0x160580) + 4 * idx).min(128);
+	let d = m.rd32(va(0x1605b0) + 4 * idx) & 0x01ff_ffff;
+	let w = m.rd32(va(0x160560) + 4 * idx);
 	let colour: [f32; 4] = std::array::from_fn(|k| ((w >> (8 * k)) & 0xff) as f32 / 128.0);
 	if d == 0 {
 		return Vec::new();
@@ -106,6 +107,11 @@ pub(super) fn gloss(m: &ee_oracle::Machine, class: u32, at: impl Fn(u32) -> u32,
 const FLAME_DRAW: [u32; 19] = [
 	0x28e970, 0x2a23e8, 0x28e068, 0x27b240, 0x27f7e8, 0x2b70a8, 0x29b9e8, 0x2b5598, 0x296c80, 0x2ab240, 0x27f3f0, 0x2b17f0, 0x2a5180, 0x298d00, 0x294d20,
 	0x27c840, 0x2877b0, 0x286b50, 0x28e4a0,
+];
+/// `FLAME_DRAW` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+const FLAME_DRAW_USA: [u32; 19] = [
+	0x28efc8, 0x2a2ab8, 0x28e738, 0x27b910, 0x27fec0, 0x2b7718, 0x29c0c0, 0x2b5c70, 0x297350, 0x2ab918, 0x27fac8, 0x2b1ec0, 0x2a5850, 0x2993d8, 0x295370,
+	0x27cf10, 0x287ea0, 0x287228, 0x28eb70,
 ];
 
 /// The address a `lui` at `f + hi` forms with the addiu at `f + lo` on the same register (None when the code differs).
@@ -132,7 +138,7 @@ fn lui_addiu(m: &ee_oracle::Machine, f: u32, hi: u32, lo: u32) -> Option<u32> {
 /// ORACLE_CALL 0x1160d8 / Kerwan rand_below 0x246258: the 8 calls from 0x27b368 always end the field) [C], so they are
 /// recovered from the end-of-field rand state by stepping the LCG back (`rand_back`).
 pub(super) fn flames(m: &ee_oracle::Machine, level: u32) -> Vec<crate::particles::WorldQuad> {
-	let (Some((fns, args, _)), Some(&f)) = (super::orb_queue(level), FLAME_DRAW.get(level as usize)) else { return Vec::new() };
+	let (Some((fns, args, _)), Some(&f)) = (super::orb_queue(level), (*crate::retail::disc::pick(&FLAME_DRAW, &FLAME_DRAW_USA)).get(level as usize)) else { return Vec::new() };
 	if m.rd32(f) != 0x27bd_fea0 {
 		return Vec::new();
 	}
@@ -144,7 +150,7 @@ pub(super) fn flames(m: &ee_oracle::Machine, level: u32) -> Vec<crate::particles
 	};
 	let (Some(eng), Some(uvs), Some(cor)) = (lui_addiu(m, f, hi, lo), lui_addiu(m, f, 0xa0, 0xa8), lui_addiu(m, f, 0x184, 0x18c)) else { return Vec::new() };
 	let gp = if matches!(level, 0 | 5 | 14 | 16) { 0x166c40u32 } else { 0x166c00 };
-	let n = (m.rd32(gp.wrapping_sub(0x6700).wrapping_add(4 * ty as u32)) as i32).clamp(0, 8) as u32;
+	let n = (m.rd32(va(gp.wrapping_sub(0x6700)).wrapping_add(4 * ty as u32)) as i32).clamp(0, 8) as u32;
 	let ship = m.rd32(0x13e030) & 0x01ff_ffff;
 	if ship == 0 {
 		return Vec::new();
@@ -180,7 +186,7 @@ pub(super) fn flames(m: &ee_oracle::Machine, level: u32) -> Vec<crate::particles
 			let steps = (0..=4096).find(|_| x == now || { x = x.wrapping_mul(0x41c6_4e6d).wrapping_add(0x3039); false });
 			// Stream counter: Novalis DAT_0016cc94, Kerwan DAT_0016c914 (OV:103215), Eudora 0x16c994 [C Ghidra].
 			eprintln!("retail: ship flame rand steps since last field {steps:?}");
-			eprintln!("retail: ship flame sub {} counter {} moby {a:#x} class {} bc {base} b2 {} engines {n} base {b:?} q0 {:?}", m.rd32(0x13e050), m.rd32(match level { 1 => 0x16cc94, 3 => 0x16c914, _ => 0x16c994 }) as i32, m.rd16(a + 0xa6), m.rd16(a + 0xb2), out.last().map(|q| (q.pos, q.uv)));
+			eprintln!("retail: ship flame sub {} counter {} moby {a:#x} class {} bc {base} b2 {} engines {n} base {b:?} q0 {:?}", m.rd32(0x13e050), m.rd32(match level { 1 => va(0x16cc94), 3 => va(0x16c914), _ => va(0x16c994) }) as i32, m.rd16(a + 0xa6), m.rd16(a + 0xb2), out.last().map(|q| (q.pos, q.uv)));
 		}
 	}
 	out
@@ -244,7 +250,7 @@ fn read_departed(m: &ee_oracle::Machine, level: u32) -> Option<WarpRam> {
 		l => l,
 	};
 	let d = *LEVEL_SHIFT.get(ov as usize)?;
-	let at = |a: u32| a.wrapping_add_signed(d);
+	let at = |a: u32| va(a.wrapping_add_signed(d));
 	let ty = m.rd32(0x13e088) as usize;
 	if ty > 4 {
 		return None;
@@ -253,7 +259,7 @@ fn read_departed(m: &ee_oracle::Machine, level: u32) -> Option<WarpRam> {
 	for (i, h) in hist.iter_mut().enumerate() {
 		*h = (m.rdv3(0x13e0f0 + 16 * i as u32), m.rdv3(0x13e2f0 + 16 * i as u32));
 	}
-	let dr = m.rdv3(0x160530);
+	let dr = m.rdv3(va(0x160530));
 	let (from, to, kerwan) = (m.rd32(0x15ed88) as usize, m.rd32(0x15ed84) as usize, m.rd8(0x13dd43) != 0);
 	let actors: Vec<_> = (0..m.rd32(at(0x16cca4)).min(8)).filter_map(|i| {
 		let p = m.rd32(at(0x16cdd8) + 4 * i) & 0x01ff_ffff;
@@ -272,7 +278,7 @@ fn read_departed(m: &ee_oracle::Machine, level: u32) -> Option<WarpRam> {
 		cc98: m.rd32(at(0x16cc98)),
 		end: m.rd32(at(0x16cca0)),
 		fade: m.rdf(0x15f3fc),
-		drift: [dr[0], dr[1], dr[2], m.rdf(0x16053c)],
+		drift: [dr[0], dr[1], dr[2], m.rdf(va(0x16053c))],
 		head: (m.rd32(0x13e080) & 31) as usize,
 		count: m.rd32(0x13e084).min(32) as usize,
 		hist,

@@ -7,10 +7,19 @@
 //! camera=modern    modern classic   (Pause -> Options -> Camera Options -> Camera)
 //! strafe=on        on off           (Pause -> Options -> Camera Options -> Strafe aiming)
 //! buyall=on        on off           (Pause -> Options -> Camera Options -> Buy all ammo: Square at a Gadgetron vendor)
+//! lighting=enhanced   classic enhanced   (Pause -> Options -> Graphics -> Lighting; viewer/post.rs. Older files: original reads
+//!                   as classic, modern / experimental as enhanced)
+//! ao=on             on off           (Pause -> Options -> Graphics -> Ambient occlusion: with Lighting Enhanced)
+//! shadows=on        on off           (Pause -> Options -> Graphics -> Dynamic shadows: with Lighting Enhanced)
+//! display=fullscreen   windowed fullscreen   (Pause -> Options -> Graphics -> Display mode: borderless on the window's monitor)
+//! water=enhanced    classic enhanced (Pause -> Options -> Graphics -> Water: with Lighting Enhanced; viewer/waterfx.rs)
+//! particles=enhanced   classic enhanced   (Pause -> Options -> Graphics -> Particles: with Lighting Enhanced)
+//! sunrays=on        on off           (Pause -> Options -> Graphics -> Sun rays: with Lighting Enhanced)
 //! ```
 //!
 //! A missing file, a missing key or a value that cannot be read gives that key's default (camera modern, strafe on, language
-//! not chosen yet = the console language of the cold boot). Keys this build does not know are kept when the file is rewritten.
+//! not chosen yet = the console language of the cold boot, lighting classic = the retail picture, ambient occlusion and
+//! dynamic shadows on, water and particles enhanced and sun rays on for when the player picks Lighting Enhanced, display windowed). Keys this build does not know are kept when the file is rewritten.
 //! The file is written to a temporary name and renamed, so a crash never leaves half a file.
 use std::path::{Path, PathBuf};
 
@@ -62,8 +71,34 @@ pub struct PcOptions {
 	pub strafe: Option<bool>,
 	/// Some(true) = On (Square buys all ammo at a vendor); None: never changed.
 	pub buyall: Option<bool>,
+	/// Graphics -> Lighting: 0 Classic (the retail picture), 1 Enhanced; None: never changed (Classic).
+	pub lighting: Option<u8>,
+	/// Graphics -> Ambient occlusion: Some(true) = On; None: never changed (On).
+	pub ao: Option<bool>,
+	/// Graphics -> Dynamic shadows: Some(true) = On; None: never changed (On).
+	pub shadows: Option<bool>,
+	/// Graphics -> Display mode: Some(true) = Fullscreen; None: never changed (Windowed).
+	pub fullscreen: Option<bool>,
+	/// Graphics -> Water: Some(true) = Enhanced; None: never changed (Enhanced).
+	pub water: Option<bool>,
+	/// Graphics -> Particles: Some(true) = Enhanced; None: never changed (Enhanced).
+	pub particles: Option<bool>,
+	/// Graphics -> Sun rays: Some(true) = On; None: never changed (On).
+	pub sun_rays: Option<bool>,
 	/// Lines this build does not know, kept verbatim on rewrite.
 	extra: Vec<(String, String)>,
+}
+
+/// The Lighting values as the file writes them (index = the Graphics page's value byte).
+pub const LIGHTING: [&str; 2] = ["classic", "enhanced"];
+
+/// A stored Lighting value: the names above, plus the first test build's (original = classic, modern / experimental = enhanced).
+fn lighting_value(v: &str) -> Option<u8> {
+	match v.trim().to_ascii_lowercase().as_str() {
+		"classic" | "original" => Some(0),
+		"enhanced" | "modern" | "experimental" => Some(1),
+		_ => None,
+	}
 }
 
 fn flag(v: &str, yes: &str, no: &str) -> Option<bool> {
@@ -77,7 +112,52 @@ fn flag(v: &str, yes: &str, no: &str) -> Option<bool> {
 
 impl PcOptions {
 	pub const fn new() -> PcOptions {
-		PcOptions { lang: None, camera: None, strafe: None, buyall: None, extra: Vec::new() }
+		PcOptions { lang: None, camera: None, strafe: None, buyall: None, lighting: None, ao: None, shadows: None, fullscreen: None, water: None, particles: None, sun_rays: None, extra: Vec::new() }
+	}
+
+	/// Lighting with the default: Classic (0).
+	pub fn lighting_or_default(&self) -> u8 {
+		self.lighting.unwrap_or(0).min(1)
+	}
+
+	/// Ambient occlusion with the default: On.
+	pub fn ao_on(&self) -> bool {
+		self.ao.unwrap_or(true)
+	}
+
+	/// Dynamic shadows with the default: On.
+	pub fn shadows_on(&self) -> bool {
+		self.shadows.unwrap_or(true)
+	}
+
+	/// The Graphics page's row bytes (retail/pcext.rs `GROWS` order: lighting, ambient occlusion, dynamic shadows, display mode,
+	/// water, particles, sun rays) with the defaults.
+	pub fn graphics_rows(&self) -> [u8; 7] {
+		[
+			self.lighting_or_default(),
+			self.ao_on() as u8,
+			self.shadows_on() as u8,
+			self.fullscreen_on() as u8,
+			self.water.unwrap_or(true) as u8,
+			self.particles.unwrap_or(true) as u8,
+			self.sun_rays.unwrap_or(true) as u8,
+		]
+	}
+
+	/// The player chose `g` (`graphics_rows` order): every Graphics key is written.
+	pub fn set_graphics_rows(&mut self, g: [u8; 7]) {
+		self.lighting = Some(g[0].min(1));
+		self.ao = Some(g[1] == 1);
+		self.shadows = Some(g[2] == 1);
+		self.fullscreen = Some(g[3] == 1);
+		self.water = Some(g[4] == 1);
+		self.particles = Some(g[5] == 1);
+		self.sun_rays = Some(g[6] == 1);
+	}
+
+	/// Display mode with the default: Windowed (false).
+	pub fn fullscreen_on(&self) -> bool {
+		self.fullscreen.unwrap_or(false)
 	}
 
 	/// Camera style with the default: Modern.
@@ -108,6 +188,13 @@ impl PcOptions {
 				"camera" => o.camera = flag(v, "modern", "classic"),
 				"strafe" => o.strafe = flag(v, "on", "off"),
 				"buyall" => o.buyall = flag(v, "on", "off"),
+				"lighting" => o.lighting = lighting_value(v),
+				"ao" => o.ao = flag(v, "on", "off"),
+				"shadows" => o.shadows = flag(v, "on", "off"),
+				"display" => o.fullscreen = flag(v, "fullscreen", "windowed"),
+				"water" => o.water = flag(v, "enhanced", "classic"),
+				"particles" => o.particles = flag(v, "enhanced", "classic"),
+				"sunrays" => o.sun_rays = flag(v, "on", "off"),
 				_ if !k.is_empty() && !k.starts_with('#') => {
 					o.extra.retain(|(e, _)| *e != k);
 					o.extra.push((k, v.to_string()));
@@ -132,6 +219,27 @@ impl PcOptions {
 		}
 		if let Some(t) = self.buyall {
 			s += &format!("buyall={}\n", if t { "on" } else { "off" });
+		}
+		if let Some(l) = self.lighting {
+			s += &format!("lighting={}\n", LIGHTING[(l as usize).min(LIGHTING.len() - 1)]);
+		}
+		if let Some(t) = self.ao {
+			s += &format!("ao={}\n", if t { "on" } else { "off" });
+		}
+		if let Some(t) = self.shadows {
+			s += &format!("shadows={}\n", if t { "on" } else { "off" });
+		}
+		if let Some(f) = self.fullscreen {
+			s += &format!("display={}\n", if f { "fullscreen" } else { "windowed" });
+		}
+		if let Some(t) = self.water {
+			s += &format!("water={}\n", if t { "enhanced" } else { "classic" });
+		}
+		if let Some(t) = self.particles {
+			s += &format!("particles={}\n", if t { "enhanced" } else { "classic" });
+		}
+		if let Some(t) = self.sun_rays {
+			s += &format!("sunrays={}\n", if t { "on" } else { "off" });
 		}
 		for (k, v) in &self.extra {
 			s += &format!("{k}={v}\n");
@@ -180,6 +288,8 @@ mod tests {
 		assert!(o.camera_modern(), "a new player starts with the modern camera");
 		assert!(o.strafe_on(), "a new player starts with strafe aiming on");
 		assert!(o.buyall_on(), "a new player starts with buy all ammo on");
+		assert_eq!(o.lighting_or_default(), 0, "a new player sees the retail picture (Lighting Classic)");
+		assert!(o.ao_on() && o.shadows_on(), "ambient occlusion and dynamic shadows wait switched on for Modern");
 		assert_eq!(o.to_text(), "version=1\n", "nothing is written until the player chooses something");
 	}
 
@@ -211,6 +321,28 @@ mod tests {
 		let o = PcOptions::parse("lang=klingon\ncamera=classic\n");
 		assert_eq!(o.lang, None);
 		assert_eq!(o.camera, Some(false));
+	}
+
+	#[test]
+	fn graphics_keys_round_trip() {
+		let o = PcOptions::parse("version=1\nlighting=Enhanced\nao=off\nshadows=ON\n");
+		assert_eq!((o.lighting, o.ao, o.shadows), (Some(1), Some(false), Some(true)));
+		assert_eq!(o.to_text(), "version=1\nlighting=enhanced\nao=off\nshadows=on\n");
+		// The first test build's names still read: original = classic, modern / experimental = enhanced; rewritten new.
+		assert_eq!(PcOptions::parse("lighting=original\n").to_text(), "version=1\nlighting=classic\n");
+		assert_eq!(PcOptions::parse("lighting=Modern\n").to_text(), "version=1\nlighting=enhanced\n");
+		let o = PcOptions::parse("display=Fullscreen\n");
+		assert!(o.fullscreen_on());
+		assert_eq!(o.to_text(), "version=1\ndisplay=fullscreen\n");
+		assert_eq!(PcOptions::parse("display=windowed\n").fullscreen, Some(false));
+		assert!(!PcOptions::parse("display=huge\n").fullscreen_on(), "unreadable value: Windowed");
+		let o = PcOptions::parse("water=classic\nparticles=Enhanced\nsunrays=off\n");
+		assert_eq!(o.graphics_rows(), [0, 1, 1, 0, 0, 1, 0]);
+		assert_eq!(o.to_text(), "version=1\nwater=classic\nparticles=enhanced\nsunrays=off\n");
+		assert_eq!(PcOptions::default().graphics_rows(), [0, 1, 1, 0, 1, 1, 1], "defaults: Classic lighting, the rest ready for Enhanced");
+		assert_eq!(PcOptions::parse("lighting=experimental\n").lighting, Some(1));
+		let bad = PcOptions::parse("lighting=rtx\nao=maybe\n");
+		assert_eq!((bad.lighting_or_default(), bad.ao_on()), (0, true), "a bad value falls back to the default");
 	}
 
 	#[test]

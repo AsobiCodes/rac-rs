@@ -10,6 +10,7 @@
 
 use crate::particles::WorldQuad;
 use ee_oracle::Machine;
+use crate::retail::disc::va;
 
 /// The gloss callback per level (where.py LEVELS order: veldin novalis aridia kerwan eudora rilgar blarg umbris batalia
 /// gaspar orxon pokitaru hoven oltanis_orbit oltanis quartu kalebo veldin_orbit veldin_finale; `twins.py`, binary twins) [C].
@@ -17,12 +18,17 @@ const GLOSS_FN: [u32; 19] = [
 	0x292f60, 0x2a69d8, 0x292658, 0x27f830, 0x283dd8, 0x2bb698, 0x29ffd8, 0x2b9b88, 0x29b270, 0x2af830, 0x2839e0, 0x2b5de0, 0x2a9770, 0x29d2f0, 0x299310,
 	0x280e30, 0x28bda0, 0x28b140, 0x292a90,
 ];
+/// `GLOSS_FN` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+const GLOSS_FN_USA: [u32; 19] = [
+	0x2935b8, 0x2a70a8, 0x292d28, 0x27ff00, 0x2844b0, 0x2bbd08, 0x2a06b0, 0x2ba260, 0x29b940, 0x2aff08, 0x2840b8, 0x2b64b0, 0x2a9e40, 0x29d9c8, 0x299960,
+	0x281500, 0x28c490, 0x28b818, 0x293160,
+];
 /// First code word of the callback (`addiu sp, sp, -0x1d0`); a level whose RAM differs draws nothing [C].
 const PROLOGUE: u32 = 0x27bd_fe30;
 
 /// The gloss quads retail drew this field outside mode 6 (empty when no ship is queued).
 pub fn cutscene_gloss(m: &Machine, level: u32) -> Vec<WorldQuad> {
-	let (Some(&f), Some((fa, aa))) = (GLOSS_FN.get(level as usize), super::draw_queue(level)) else { return Vec::new() };
+	let (Some(&f), Some((fa, aa))) = ((*crate::retail::disc::pick(&GLOSS_FN, &GLOSS_FN_USA)).get(level as usize), super::draw_queue(level)) else { return Vec::new() };
 	if m.rd32(f) != PROLOGUE {
 		return Vec::new();
 	}
@@ -34,7 +40,7 @@ pub fn cutscene_gloss(m: &Machine, level: u32) -> Vec<WorldQuad> {
 	let class = m.rd16(moby + 0xa6) as u32;
 	let q = gloss_for(m, level, class, 0x15);
 	if std::env::var_os("RAC_SCENE_LOG").is_some() {
-		eprintln!("retail: story ship gloss level {level} mode {} class {class:#x} quads {} q0 {:?}", m.rd32(0x15f5a4), q.len(), q.first().map(|q| (q.pos, q.uv, q.colour[0])));
+		eprintln!("retail: story ship gloss level {level} mode {} class {class:#x} quads {} q0 {:?}", m.rd32(va(0x15f5a4)), q.len(), q.first().map(|q| (q.pos, q.uv, q.colour[0])));
 	}
 	q
 }
@@ -49,10 +55,10 @@ pub fn gloss_for(m: &Machine, level: u32, class: u32, tex: usize) -> Vec<WorldQu
 	let Some(idx) = class.checked_sub(0x212).filter(|&i| i < 4) else { return Vec::new() };
 	let t = if matches!(level, 0 | 5 | 14 | 16) { 0x40 } else { 0 };
 	let d = super::LEVEL_SHIFT[level as usize] + if matches!(level, 5 | 16) { 0x80 } else { 0 };
-	let at = |a: u32| a.wrapping_add_signed(d);
-	let nq = m.rd32(0x160580 + t + 4 * idx).min(128);
-	let tab = m.rd32(0x1605b0 + t + 4 * idx) & 0x01ff_ffff;
-	let w = m.rd32(0x160560 + t + 4 * idx);
+	let at = |a: u32| va(a.wrapping_add_signed(d));
+	let nq = m.rd32(va(0x160580 + t) + 4 * idx).min(128);
+	let tab = m.rd32(va(0x1605b0 + t) + 4 * idx) & 0x01ff_ffff;
+	let w = m.rd32(va(0x160560 + t) + 4 * idx);
 	let colour: [f32; 4] = std::array::from_fn(|k| ((w >> (8 * k)) & 0xff) as f32 / 128.0);
 	if tab == 0 {
 		return Vec::new();
@@ -69,5 +75,5 @@ pub fn gloss_for(m: &Machine, level: u32, class: u32, tex: usize) -> Vec<WorldQu
 
 /// Effects layer claimed set (retail/efx_draw.rs): the gloss callback this module draws.
 pub fn claims(level: u32, f: u32) -> bool {
-	f != 0 && GLOSS_FN.get(level as usize) == Some(&f)
+	f != 0 && (*crate::retail::disc::pick(&GLOSS_FN, &GLOSS_FN_USA)).get(level as usize) == Some(&f)
 }

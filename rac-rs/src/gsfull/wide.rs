@@ -59,7 +59,11 @@ struct Lv {
 }
 
 const EUDORA: Lv = Lv { name: "eudora", slot: 0, entry: 0x1ea1e8, base: 0x16cb40, atan2: 0x1f1e48, cos: 0x1f1d80 };
+/// `EUDORA` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+const EUDORA_USA: Lv = Lv { name: "eudora", slot: 0, entry: 0x1ea2e8, base: 0x16cbc0, atan2: 0x1f2318, cos: 0x1f2250 };
 const RILGAR: Lv = Lv { name: "rilgar", slot: 1, entry: 0x226568, base: 0x16ce40, atan2: 0x22e148, cos: 0x22e080 };
+/// `RILGAR` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+const RILGAR_USA: Lv = Lv { name: "rilgar", slot: 1, entry: 0x2265e8, base: 0x16ce40, atan2: 0x22e598, cos: 0x22e4d0 };
 
 // Offsets from `base`.
 const H: u32 = 0xb0;
@@ -93,11 +97,11 @@ impl Drop for Guard {
 }
 
 fn eudora(cpu: &mut Cpu) -> bool {
-    wrap(cpu, &EUDORA)
+    wrap(cpu, &(*crate::retail::disc::pick(&EUDORA, &EUDORA_USA)))
 }
 
 fn rilgar(cpu: &mut Cpu) -> bool {
-    wrap(cpu, &RILGAR)
+    wrap(cpu, &(*crate::retail::disc::pick(&RILGAR, &RILGAR_USA)))
 }
 
 static HANDS: [Hand; 2] = [
@@ -107,7 +111,7 @@ static HANDS: [Hand; 2] = [
 
 /// Registers the wrapping hands (before `Machine::enable_rec`). They apply only to code that matches their hash.
 pub fn register() {
-    register_hand(&HANDS);
+    register_hand(crate::retail::disc::hands(&HANDS));
 }
 
 /// Test switch: false makes the registered hands step aside (the plain retail function runs).

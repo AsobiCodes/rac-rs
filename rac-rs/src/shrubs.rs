@@ -178,6 +178,10 @@ fn shrub_mesh_normals(data: &[u8], remap: &[u8], name: String) -> R<(Mesh, Vec<[
 					return Err("shrub material has no texture".into());
 				}
 				let (wms, wmt) = (u32_at(records[mi], 16)?, u32_at(records[mi], 20)?);
+				if crate::viewer::gs_state::enabled() {
+					let (k, mmin) = (u32_at(records[mi], 0)? as u64, u32_at(records[mi], 4)? as u64);
+					crate::viewer::gs_state::guard_world("shrub", crate::viewer::gs_state::TEST_SHRUB, (k & 0xfff) << 32 | mmin << 6 | 0x20, wms as u64 | (wmt as u64) << 2);
+				}
 				if wms > 1 || wmt > 1 {
 					return Err("unsupported shrub CLAMP region mode".into());
 				}

@@ -44,8 +44,11 @@ pub const STREAM_COUNT: usize = 4;
 pub const SLOT_LBAS: u32 = 0x13a628;
 pub const STREAM_BUFFER: u32 = 0xf000;
 
-/// tick(vb) = floor(vb * 240 / 50).
+/// tick(vb) = floor(vb * 240 / 50); NTSC (the USA disc, 59.94 fields a second): floor(vb * 240 * 1001 / 60000).
 pub fn tick_of(vb: u32) -> u32 {
+    if crate::ver::ntsc() {
+        return (vb as u64 * 240 * 1001 / 60000) as u32;
+    }
     (vb as u64 * 240 / 50) as u32
 }
 

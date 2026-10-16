@@ -1,4 +1,4 @@
-# setup.ps1 - builds the PC port of Ratchet & Clank (PAL) from YOUR OWN disc image. Windows PowerShell 5.1.
+# setup.ps1 - builds the PC port of Ratchet & Clank (PAL / Europe or USA, v1.00) from YOUR OWN disc image. Windows PowerShell 5.1.
 #
 #   Double-click Setup.cmd: a small window opens (pick the .iso, Install, Play); no console window is shown.
 #   For troubleshooting, the old console mode: Setup.cmd -Console, or
@@ -8,7 +8,7 @@
 # What it does, in order:
 #   (a) downloads a private, pinned copy of Rust (GNU host, linker included), Python (embeddable) and the GNU assembler into .\toolchain
 #       (once; nothing is installed on the PC, no admin rights, no PATH or registry change)
-#   (b) checks that the disc image is Ratchet & Clank PAL v1.00 (size and SHA-1)
+#   (b) checks that the disc image is Ratchet & Clank PAL / Europe v1.00 (SCES-50916) or USA v1.00 (SCUS-97199) (size and SHA-1)
 #   (c) generates the game code from the disc image with tools\recgen_iso.py (boot code + 19 levels) into .\oracle\rec and .\oracle\game
 #   (c2) generates the VU microcode translations (graphics code) from the disc image with tools\vugen_iso.py into
 #        .\oracle\src\vu0_prog0.rs and .\rac-rs\src\gsfull\vu1_prog*.rs + vu1aot_gen.rs
@@ -53,9 +53,16 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location -LiteralPath $root
 
-# Ratchet & Clank (Europe) (En,Fr,De,Es,It) (v1.00), serial SCES-50916
-$ExpectedSize = 4213997568
-$ExpectedSha1 = 'B0DFBD8EAC0D84F173B6FC25D8A02A5FF22C652F'
+# The supported discs (v1.00 of each): Ratchet & Clank (Europe) (En,Fr,De,Es,It) (v1.00), serial SCES-50916, and
+# Ratchet & Clank (USA) (En,Fr,De,Es,It), serial SCUS-97199. They have different sizes; the SHA-1 then proves the copy.
+$Discs = @(
+    @{ Size = [long]4213997568; Sha1 = 'B0DFBD8EAC0D84F173B6FC25D8A02A5FF22C652F'; Name = 'PAL / Europe v1.00 (SCES-50916)' },
+    @{ Size = [long]4214095872; Sha1 = 'AEE9275384F739C9B24CD5DE6F7E200292DB7B01'; Name = 'USA v1.00 (SCUS-97199)' }
+)
+# The PAL values until a disc is picked; (b) sets them from the disc found.
+$ExpectedSize = $Discs[0].Size
+$ExpectedSha1 = $Discs[0].Sha1
+$DiscName = $Discs[0].Name
 $GenFlags = @('--no-comments', '--compact', '--shared-slow', '--outline-mem')
 if ($NoSharedSlow) { $GenFlags = @('--no-comments', '--compact', '--outline-mem') }   # inline slow paths: bigger source and slower build, speed measured in SETUP_NOTES 7b
 $Levels = 0..18
@@ -524,7 +531,7 @@ if (-not $Console) {
     # --- view: pick the disc image
     $pPick = New-Panel; $UI.pPick = $pPick
     $pPick.Controls.Add((New-Label 'Set up Ratchet & Clank' 28 22 520 36 $fTitle $cText))
-    $UI.lblPickText = New-Label 'Pick the .iso image of your own Ratchet & Clank disc (PAL / Europe v1.00)' 28 68 520 44 $fN $cText
+    $UI.lblPickText = New-Label 'Pick the .iso image of your own Ratchet & Clank disc (PAL / Europe or USA, v1.00)' 28 68 520 44 $fN $cText
     $pPick.Controls.Add($UI.lblPickText)
     $UI.txtIso = New-Object System.Windows.Forms.TextBox
     $UI.txtIso.Location = New-Object System.Drawing.Point(28, 124); $UI.txtIso.Size = New-Object System.Drawing.Size(404, 26); $UI.txtIso.Font = $fN
@@ -645,10 +652,10 @@ if (-not $Console) {
             'pick' {
                 $pPick.Visible = $true; $form.AcceptButton = $UI.btnInstall
                 if ($S.repair) {
-                    $UI.lblPickText.Text = 'Repair / rebuild: this makes the game code again from your disc and rebuilds the game (about 15 minutes). Pick the .iso image of your Ratchet & Clank disc (PAL / Europe v1.00).'
+                    $UI.lblPickText.Text = 'Repair / rebuild: this makes the game code again from your disc and rebuilds the game (about 15 minutes). Pick the .iso image of your Ratchet & Clank disc (PAL / Europe or USA, v1.00).'
                     $UI.btnInstall.Text = 'Repair'
                 } else {
-                    $UI.lblPickText.Text = 'Pick the .iso image of your own Ratchet & Clank disc (PAL / Europe v1.00)'
+                    $UI.lblPickText.Text = 'Pick the .iso image of your own Ratchet & Clank disc (PAL / Europe or USA, v1.00)'
                     $UI.btnInstall.Text = 'Install'
                 }
             }
@@ -693,13 +700,14 @@ if (-not $Console) {
 
     # ---------------------------------------------------------------- disc check (background runspace: size, then SHA-1 with progress)
     $DiscScript = {
-        param($path, $size, $sha1, $sync)
+        param($path, $discs, $sync)
         try {
             if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { $sync.msg = 'That file could not be found.'; $sync.state = 'bad'; return }
             $len = (Get-Item -LiteralPath $path).Length
-            if ($len -ne $size) {
+            $disc = $discs | Where-Object { $_.Size -eq $len } | Select-Object -First 1
+            if (-not $disc) {
                 $sz = $(if ($len -ge 1GB) { ('{0:N1} GB' -f ($len / 1GB)) } elseif ($len -ge 1MB) { ('{0:N0} MB' -f ($len / 1MB)) } else { ('{0:N0} KB' -f [math]::Ceiling($len / 1KB)) })
-                $sync.msg = "This is not the right disc image. It must be the PAL / Europe version (v1.00) of Ratchet & Clank, one .iso file of about 3.9 GB. This file is only $sz. Other regions, other versions and Platinum re-releases do not work."
+                $sync.msg = "This is not the right disc image. It must be Ratchet & Clank PAL / Europe v1.00 or USA v1.00, one .iso file of about 3.9 GB. This file is $sz. Other regions, other versions and Platinum / Greatest Hits re-releases do not work."
                 $sync.state = 'bad'; return
             }
             $sync.total = $len
@@ -717,10 +725,11 @@ if (-not $Console) {
                 $null = $h.TransformFinalBlock($buf, 0, 0)
                 $hex = ([System.BitConverter]::ToString($h.Hash)).Replace('-', '')
             } finally { $fs.Dispose() }
-            if ($hex -ne $sha1) {
-                $sync.msg = 'This file has the right size but it is not the PAL / Europe v1.00 disc (its checksum is different). Try making the .iso again from your disc, or use another copy.'
+            if ($hex -ne $disc.Sha1) {
+                $sync.msg = "This file has the right size but it is not the $($disc.Name) disc (its checksum is different). Try making the .iso again from your disc, or use another copy."
                 $sync.state = 'bad'; return
             }
+            $sync.name = $disc.Name
             $sync.state = 'ok'
         } catch {
             $sync.msg = 'The file could not be read: ' + $_.Exception.Message
@@ -737,7 +746,7 @@ if (-not $Console) {
         switch ($kind) {
             'none' { $UI.lblDisc.Text = ''; $UI.lblDisc.ForeColor = $cGrey }
             'run'  { $UI.lblDisc.Text = 'Checking the disc image ...'; $UI.lblDisc.ForeColor = $cGrey }
-            'ok'   { $UI.lblDisc.Text = 'Disc OK: Ratchet & Clank, PAL / Europe v1.00.'; $UI.lblDisc.ForeColor = $cGreen }
+            'ok'   { $UI.lblDisc.Text = "Disc OK: Ratchet & Clank, $(if ($msg) { $msg } else { 'v1.00' })."; $UI.lblDisc.ForeColor = $cGreen }
             'bad'  { $UI.lblDisc.Text = $msg; $UI.lblDisc.ForeColor = $cRed }
         }
         $UI.pbCheck.Visible = ($kind -eq 'run')
@@ -757,9 +766,9 @@ if (-not $Console) {
         $S.discOk = $false; $S.discPath = ''
         Set-InstallEnabled $false
         if (-not $path) { Set-DiscStatus 'none' ''; return }
-        $sync = [hashtable]::Synchronized(@{ pos = [long]0; total = [long]0; state = 'run'; msg = ''; cancel = $false })
+        $sync = [hashtable]::Synchronized(@{ pos = [long]0; total = [long]0; state = 'run'; msg = ''; name = ''; cancel = $false })
         $ps = [powershell]::Create()
-        $null = $ps.AddScript($DiscScript).AddArgument($path).AddArgument($ExpectedSize).AddArgument($ExpectedSha1).AddArgument($sync)
+        $null = $ps.AddScript($DiscScript).AddArgument($path).AddArgument($Discs).AddArgument($sync)
         $S.check = [pscustomobject]@{ Ps = $ps; Sync = $sync; Handle = $ps.BeginInvoke(); Path = $path }
         Set-Bar $UI.pbCheck 0
         Set-DiscStatus 'run' ''
@@ -782,7 +791,7 @@ if (-not $Console) {
         try { $c.Ps.Dispose() } catch { }
         if ($st -eq 'ok') {
             $S.discOk = $true; $S.discPath = $c.Path
-            Set-DiscStatus 'ok' ''
+            Set-DiscStatus 'ok' $c.Sync.name
             Set-InstallEnabled $true
         } elseif ($st -eq 'bad') {
             Set-DiscStatus 'bad' $c.Sync.msg
@@ -972,7 +981,7 @@ if (-not $Console) {
         $noCompile = (($all -split "`r?`n") | Where-Object { $_ -notmatch '^\s+Compiling ' }) -join "`n"
         $net = ($S.step -eq 0) -or ($noCompile -match '(?i)could not download|failed to download|download of .* failed|couldn.t resolve|could not resolve|resolve host|timed out|unable to connect|spurious network|network failure|failed to get ')
         $disk = ($all -match '(?i)no space left|not enough space|os error 112|there is not enough space')
-        if ($S.step -eq 1) { $m = "The disc image was not accepted.`r`n`r`nIt must be the PAL / Europe version (v1.00) of Ratchet & Clank as one .iso file. Click Try again and pick the right file." }
+        if ($S.step -eq 1) { $m = "The disc image was not accepted.`r`n`r`nIt must be Ratchet & Clank PAL / Europe v1.00 or USA v1.00 as one .iso file. Click Try again and pick the right file." }
         elseif ($disk) { $m += "`r`n`r`nThere may not be enough free disk space (about 5 GB are needed). Free some space and click Try again." }
         elseif ($net) { $m += "`r`n`r`nPlease check your internet connection, then click Try again. Setup continues where it stopped." }
         else {
@@ -1047,7 +1056,7 @@ if (-not $Console) {
     })
     $UI.btnBrowse.Add_Click({
         $dlg = New-Object System.Windows.Forms.OpenFileDialog
-        $dlg.Title = 'Pick your Ratchet & Clank (Europe) (v1.00) disc image'
+        $dlg.Title = 'Pick your Ratchet & Clank (Europe or USA, v1.00) disc image'
         $dlg.Filter = 'Disc image (*.iso)|*.iso|All files (*.*)|*.*'
         if ($UI.txtIso.Text -and (Test-Path -LiteralPath (Split-Path -Parent $UI.txtIso.Text) -ErrorAction SilentlyContinue)) { $dlg.InitialDirectory = Split-Path -Parent $UI.txtIso.Text }
         if ($dlg.ShowDialog($form) -eq [System.Windows.Forms.DialogResult]::OK) { Set-IsoPath $dlg.FileName }
@@ -1480,27 +1489,32 @@ if (-not $Iso) {
     try {
         Add-Type -AssemblyName System.Windows.Forms
         $dlg = New-Object System.Windows.Forms.OpenFileDialog
-        $dlg.Title = 'Pick your Ratchet & Clank (Europe) (v1.00) disc image'
+        $dlg.Title = 'Pick your Ratchet & Clank (Europe or USA, v1.00) disc image'
         $dlg.Filter = 'Disc image (*.iso)|*.iso|All files (*.*)|*.*'
         if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $Iso = $dlg.FileName }
     } catch { }
 }
-if (-not $Iso) { $Iso = Read-Host 'Path to your Ratchet & Clank (Europe) (v1.00) .iso file' }
+if (-not $Iso) { $Iso = Read-Host 'Path to your Ratchet & Clank (Europe or USA, v1.00) .iso file' }
 $Iso = $Iso.Trim().Trim('"')
 if (-not (Test-Path -LiteralPath $Iso -PathType Leaf)) { Fail "disc image not found: $Iso" }
 $Iso = (Resolve-Path -LiteralPath $Iso).ProviderPath
 $len = (Get-Item -LiteralPath $Iso).Length
 Write-Host "  $Iso ($len bytes)"
-if ($len -ne $ExpectedSize) {
-    Fail "wrong size: expected $ExpectedSize bytes (Ratchet & Clank PAL/EU v1.00, serial SCES-50916, En/Fr/De/Es/It). Other regions and versions are not supported."
+$disc = $Discs | Where-Object { $_.Size -eq $len } | Select-Object -First 1
+if (-not $disc) {
+    Fail "wrong size: expected $($Discs[0].Size) bytes (Ratchet & Clank PAL/EU v1.00, serial SCES-50916) or $($Discs[1].Size) bytes (USA v1.00, serial SCUS-97199), both En/Fr/De/Es/It. Other regions and versions are not supported."
 }
+$ExpectedSize = $disc.Size
+$ExpectedSha1 = $disc.Sha1
+$DiscName = $disc.Name
+Write-Host "  disc: Ratchet & Clank $DiscName (by size)"
 if (-not $SkipHash) {
     Write-Host '  computing SHA-1 (about half a minute) ...'
     $t = Get-Date
     $h = (Get-FileHash -LiteralPath $Iso -Algorithm SHA1).Hash.ToUpper()
     $timings['sha1'] = [math]::Round(((Get-Date) - $t).TotalSeconds, 1)
-    if ($h -ne $ExpectedSha1) { Fail "SHA-1 mismatch: $h (expected $ExpectedSha1). This is not the PAL v1.00 disc image (re-dump, or another version)." }
-    Write-Host '  SHA-1 ok: Ratchet & Clank PAL v1.00'
+    if ($h -ne $ExpectedSha1) { Fail "SHA-1 mismatch: $h (expected $ExpectedSha1). This is not the $DiscName disc image (re-dump, or another version)." }
+    Write-Host "  SHA-1 ok: Ratchet & Clank $DiscName"
 } else {
     Write-Host '  SHA-1 skipped (-SkipHash); size matches'
 }
@@ -1512,11 +1526,13 @@ $gen = Join-Path $root 'generated'          # logs and stamps
 $orc = Join-Path $root 'oracle'             # the generated crates go to oracle\rec and oracle\game (the layout of the dev tree)
 $stamp = Join-Path $gen 'done.txt'
 $wantBase = "$ExpectedSha1 $ExpectedSize flags=$($GenFlags -join ' ')"
-$genHash = Get-FilesHash @('tools/recgen_iso.py', 'tools/fn_bounds.tsv', 'oracle/stubs.txt')
+$genFiles = @('tools/recgen_iso.py', 'tools/fn_bounds.tsv', 'oracle/stubs.txt')
+if ($ExpectedSha1 -eq 'AEE9275384F739C9B24CD5DE6F7E200292DB7B01') { $genFiles += 'tools/fn_bounds_usa.tsv' }
+$genHash = Get-FilesHash $genFiles
 # Earlier generator revisions (the first is v0.1.0, whose stamp has no gen= part) that make byte-identical output: an install made by one of them
 # is still current, so an update that only changed HOW the files are written does not regenerate. Add the old hash here when a generator
 # change does not change its output.
-$GenCompatible = @('9a84d825c333842cd58ed6d12d1ed54c7141ffab30276e6add765ef00c859c51')
+$GenCompatible = @('9a84d825c333842cd58ed6d12d1ed54c7141ffab30276e6add765ef00c859c51', '1c5c1935a7b98a397719acf76287677cdf061816bbd749c6e07e42ce50afa050')
 $want = "$wantBase gen=$genHash"
 $have = ''
 if (Test-Path -LiteralPath $stamp) { $have = (Get-Content -LiteralPath $stamp -Raw).Trim() }
@@ -1585,7 +1601,7 @@ Step '(c2) generating the VU microcode translations from the disc image'
 New-Item -ItemType Directory -Force -Path $gen | Out-Null
 $vuStamp = Join-Path $gen 'vu_done.txt'
 $vuBase = "$ExpectedSha1 vu1"
-$VuCompatible = @('5b49455da24a986799cd727bb9a4563a70609ab5759df4c060f5df0b00bec669')      # as $GenCompatible, for tools\vugen_iso.py and tools\vu\ (the first is v0.1.0)
+$VuCompatible = @('5b49455da24a986799cd727bb9a4563a70609ab5759df4c060f5df0b00bec669', '066ba6b16b9293793872b68e6a66c106bb2e4f4c8a2e184b1a83ce29eedf26d0')      # as $GenCompatible, for tools\vugen_iso.py and tools\vu\ (the first is v0.1.0)
 $vuWant = "$vuBase gen=$(Get-FilesHash (Get-VuGenFiles))"
 $vuHave = ''
 if (Test-Path -LiteralPath $vuStamp) { $vuHave = (Get-Content -LiteralPath $vuStamp -Raw).Trim() }

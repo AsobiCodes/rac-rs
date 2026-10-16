@@ -14,4 +14,6 @@ w32 12d728 1004 0080102d
 jmp 1189b0 1000
 jmp 1189c0 1000
 jmp 1189d0 1000
-ret 239ec8 1
+pal ret 239ec8 1
+# USA: the same player in the USA boot ELF (vermap bootov map)
+usa ret 23a3b8 1

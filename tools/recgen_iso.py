@@ -29,6 +29,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # Layout facts from rac-rs/src/{iso,toc,level,wad}.rs. No savestate, no extracted/ dir, no decomp output.
 ISO_SIZE = 4213997568
 ISO_SHA1 = 'b0dfbd8eac0d84f173b6fc25d8a02a5ff22c652f'
+# Supported discs: tag -> (image size, SHA-1, boot ELF, serial, bounds file next to this script). The USA build is the same
+# program with its level code moved (tools/vermap.py writes fn_bounds_usa.tsv from the PAL list).
+ISO_VERSIONS = {
+    'pal': (4213997568, 'b0dfbd8eac0d84f173b6fc25d8a02a5ff22c652f', 'SCES_509.16', 'SCES-50916', 'fn_bounds.tsv'),
+    'usa': (4214095872, 'aee9275384f739c9b24cd5de6f7e200292db7b01', 'SCUS_971.99', 'SCUS-97199', 'fn_bounds_usa.tsv'),
+}
+ISO_VER = 'pal'
 ISO_SEC = 0x800
 ISO_LEVELS = ['0_veldin_tutorial', '1_novalis', '2_aridia', '3_kerwan', '4_eudora', '5_rilgar', '6_nebula_g34', '7_umbris',
           '8_batalia', '9_gaspar', '10_orxon', '11_pokitaru', '12_hoven', '13_oltanis_orbit', '14_oltanis', '15_quartu',
@@ -128,7 +135,7 @@ def iso_wad_decompress(data):
 
 
 def iso_boot_elf(d):
-    """SCES_509.16 via a minimal ISO9660 walk (root directory record)."""
+    """The boot ELF (SCES_509.16 or SCUS_971.99, see ISO_VER) via a minimal ISO9660 walk (root directory record)."""
     pvd = d.sectors(16, 1)
     assert pvd[1:6] == b'CD001'
     root_lba, root_len = iso_u32(pvd, 156 + 2), iso_u32(pvd, 156 + 10)
@@ -140,10 +147,10 @@ def iso_boot_elf(d):
             o = (o // ISO_SEC + 1) * ISO_SEC
             continue
         name = dirdata[o + 33:o + 33 + dirdata[o + 32]].decode('latin1')
-        if name.upper().startswith('SCES_509.16'):
+        if name.upper().startswith(ISO_VERSIONS[ISO_VER][2]):
             return d.bytes(iso_u32(dirdata, o + 2), iso_u32(dirdata, o + 10))
         o += ln
-    raise FileNotFoundError('SCES_509.16')
+    raise FileNotFoundError(ISO_VERSIONS[ISO_VER][2])
 
 
 def iso_level_section(d, lvl, idx):
@@ -194,10 +201,15 @@ def iso_build_image(d, lvl, size=0x2000000, zero_from=None):
 
 
 def iso_check(path, sha1=False):
-    """Size (and optionally SHA-1) of R&C PAL v1.00 (SCES-50916); the boot ELF lookup then checks the serial file."""
+    """Size (and optionally SHA-1) of R&C PAL v1.00 (SCES-50916) or USA v1.00 (SCUS-97199); sets ISO_VER. The boot ELF
+    lookup then checks the serial file."""
+    global ISO_VER, ISO_SIZE, ISO_SHA1
     n = os.path.getsize(path)
-    if n != ISO_SIZE:
-        sys.exit(f'{path}: {n} bytes, expected {ISO_SIZE} (Ratchet & Clank PAL v1.00, SCES-50916)')
+    hit = [k for k, v in ISO_VERSIONS.items() if v[0] == n]
+    if not hit:
+        sys.exit(f'{path}: {n} bytes, expected ' + ' or '.join(f'{v[0]} (Ratchet & Clank {k.upper()} v1.00, {v[3]})' for k, v in ISO_VERSIONS.items()))
+    ISO_VER = hit[0]
+    ISO_SIZE, ISO_SHA1 = ISO_VERSIONS[ISO_VER][:2]
     if sha1:
         import hashlib
         h = hashlib.sha1()
@@ -212,7 +224,7 @@ ap.add_argument('--src', default='iso')
 ap.add_argument('--iso', default=None)
 ap.add_argument('--level', type=int, default=None)
 ap.add_argument('--facade-only', action='store_true', help='only rewrite game/ (Cargo.toml + lib.rs) from the crates under OUT/rec')
-ap.add_argument('--bounds', default=os.path.join(HERE, 'fn_bounds.tsv'))
+ap.add_argument('--bounds', default=None, help='function bounds (default: fn_bounds.tsv for PAL, fn_bounds_usa.tsv for USA, next to this script)')
 ap.add_argument('--out', default=os.path.join(HERE, '..', 'generated'))
 ap.add_argument('--oracle', default=os.path.join(HERE, '..', 'oracle'))
 ap.add_argument('--stubs', default=os.path.join(HERE, '..', 'oracle', 'stubs.txt'))
@@ -292,10 +304,14 @@ if A.src == 'iso':
     if not A.iso:
         sys.exit('--iso PATH is required (the game disc image)')
     iso_check(A.iso, A.verify_sha1)
+    if A.bounds is None:
+        A.bounds = os.path.join(HERE, ISO_VERSIONS[ISO_VER][4])
     _d = IsoDisc(A.iso)
     ram = bytes(iso_build_image(_d, lvl, zero_from=OV_START)[0])
 else:
     ram = open(os.path.join(A.src.split(':', 1)[1], 'eeMemory.bin'), 'rb').read()
+if A.bounds is None:
+    A.bounds = os.path.join(HERE, 'fn_bounds.tsv')
 W = array('I', ram[:len(ram) // 4 * 4])
 if A.ptrs_iso and A.src != 'iso':
     _r = bytes(iso_build_image(IsoDisc(A.iso), lvl, zero_from=OV_START)[0])

@@ -20,6 +20,7 @@ use ee_oracle::rec::{register_hand, Hand};
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use crate::retail::disc::va;
 
 const HERO_YAW: u32 = 0x13f3e8;
 /// The hero's heading vector (cos yaw, sin yaw, 0, 0): the direction the Pyrocitor flame leaves along.
@@ -82,7 +83,7 @@ fn masks() -> &'static [u32] {
 pub fn register() {
 	// RAC_AIM_OFF=1 (tests): no hooks at all, the baseline of the released-button comparison.
 	if strafe::enabled() && std::env::var_os("RAC_AIM_OFF").is_none() {
-		register_hand(&HANDS);
+		register_hand(crate::retail::disc::hands(&HANDS));
 	}
 }
 
@@ -443,7 +444,7 @@ pub fn pre_field(m: &mut ee_oracle::Machine, _fin: &super::FieldIn) {
 	if !active() {
 		return;
 	}
-	let (mode, form) = (m.rd32(GAME_MODE), m.cpu.mem.rd8(BODY_FORM));
+	let (mode, form) = (m.rd32(va(GAME_MODE)), m.cpu.mem.rd8(BODY_FORM));
 	let Some((base, cnt)) = modcam::sprite_queue(m.level()) else { return };
 	let n = m.rd32(cnt);
 	let hero = m.rd32(HERO_MOBY);

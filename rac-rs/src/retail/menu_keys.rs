@@ -99,10 +99,15 @@ pub const DIALOG_CODE: [u32; 19] = [
 	0x173040, 0x173440, 0x1735c0, 0x1730c0, 0x173140, 0x173440, 0x173740, 0x173040, 0x1737c0, 0x173140,
 	0x173440, 0x1739c0, 0x173440, 0x1732c0, 0x173740, 0x1735c0, 0x1733c0, 0x1738c0, 0x1739c0,
 ];
+/// `DIALOG_CODE` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+pub const DIALOG_CODE_USA: [u32; 19] = [
+	0x173040, 0x1734c0, 0x173640, 0x173140, 0x1731c0, 0x173440, 0x1737c0, 0x1730c0, 0x173840, 0x1731c0,
+	0x1734c0, 0x173a40, 0x1734c0, 0x173340, 0x173740, 0x173640, 0x173440, 0x173940, 0x173a40,
+];
 
 /// The dialog on screen in game mode `mode` of `level` (`rd` reads EE RAM), None outside mode 4.
 pub fn dialog_on(rd: &dyn Fn(u32) -> u32, level: u32, mode: u32) -> Option<Screen> {
-	(mode == 4).then(|| DIALOG_CODE.get(level as usize)).flatten().map(|&a| dialog(rd(a)))
+	(mode == 4).then(|| (*crate::retail::disc::pick(&DIALOG_CODE, &DIALOG_CODE_USA)).get(level as usize)).flatten().map(|&a| dialog(rd(a)))
 }
 
 /// A hint line's role.
@@ -431,6 +436,11 @@ mod tests {
 		const ENTRY: [u32; 19] = [
 			0x2012e0, 0x223170, 0x2122c8, 0x1fabf8, 0x1f4840, 0x22ffc8, 0x219300, 0x2290c8, 0x213de0, 0x220f40,
 			0x1f48c8, 0x232bc8, 0x224170, 0x20cd48, 0x2148f0, 0x1fa9d8, 0x1ffac8, 0x1fe308, 0x20a048,
+		];
+		/// `ENTRY` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+		const ENTRY_USA: [u32; 19] = [
+			0x201730, 0x223640, 0x212798, 0x1fb0c8, 0x1f4d10, 0x230418, 0x2197d0, 0x229598, 0x2142b0, 0x221410,
+			0x1f4d98, 0x233098, 0x224640, 0x20d218, 0x214d40, 0x1faea8, 0x1fff98, 0x1fe7d8, 0x20a518,
 		];
 		for (lv, name) in names.iter().enumerate() {
 			let elf = std::fs::read(format!("{dir}/{name}/overlay.elf")).unwrap();

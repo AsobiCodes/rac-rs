@@ -6,6 +6,7 @@ use crate::game::Game;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use crate::retail::disc::va;
 
 mod gscap;
 mod rec;
@@ -38,6 +39,9 @@ pub mod oldsim;
 pub mod mouse_menu;
 pub mod menu_keys;
 pub mod title_boot;
+pub mod disc;
+pub mod disc_hands;
+pub mod disc_map;
 
 /// One field's input as the interpreter thread consumes it (what the recorder writes and the replayer reads).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -78,7 +82,7 @@ static MODELLED: Mutex<Option<HashSet<u32>>> = Mutex::new(None);
 /// Moby table start / end pointers: Veldin, Rilgar, Oltanis and Gemlik keep them 0x40 higher (each overlay's code
 /// windows referencing them paired with Novalis's, as for `camera_globals`).
 pub fn table(level: u32) -> (u32, u32) {
-	if matches!(level, 0 | 5 | 14 | 16) { (0x15ff98, 0x15ffa0) } else { (0x15ff58, 0x15ff60) }
+	if matches!(level, 0 | 5 | 14 | 16) { (va(0x15ff98), va(0x15ffa0)) } else { (va(0x15ff58), va(0x15ff60)) }
 }
 
 /// Each level's shift of the overlay globals from Novalis's addresses (`camera_globals`).
@@ -89,7 +93,7 @@ const LEVEL_SHIFT: [i32; 19] = [-0x400, 0, 0x180, -0x380, -0x300, 0, 0x300, -0x4
 /// reference them, masked of immediates, paired with Novalis's: about 1100 / 190 / 60 votes, no other candidate).
 fn camera_globals(level: u32) -> Option<(u32, u32, u32)> {
 	let d = *LEVEL_SHIFT.get(level as usize)?;
-	let at = |a: u32| a.wrapping_add_signed(d);
+	let at = |a: u32| va(a.wrapping_add_signed(d));
 	Some((at(0x1671c0), at(0x1673d0), at(0x16cef0)))
 }
 
@@ -122,6 +126,8 @@ pub fn enable(dir: &str) -> Result<(), String> {
 	let at = |a: u32| ram.get(a as usize..a as usize + 4).map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()));
 	let level = ram[LEVEL as usize] as u32;
 	set_pools(count_pools(level, at, |a| at(a) as u16));
+	// The disc of the run (ORACLE_ISO, else the oracle's default PAL image) and its video mode (retail/disc.rs).
+	ee_oracle::ver::from_iso(&std::env::var("ORACLE_ISO").unwrap_or_else(|_| ee_oracle::DEFAULT_ISO.into()));
 	let _ = STATE.set(dir.to_string());
 	let _ = START_LEVEL.set(level);
 	Ok(())
@@ -138,6 +144,10 @@ pub fn enable_cold(iso: &str) -> Result<(), String> {
 		unsafe { std::env::set_var("ORACLE_ISO", iso) };
 	}
 	let _ = COLD.set(iso.to_string());
+	// The disc (PAL or USA) and its video mode (retail/disc.rs).
+	ee_oracle::ver::from_iso(iso);
+	disc::announce();
+	ee_oracle::ver::on_rebuild(disc::rescope);
 	let _ = STATE.set("cold:".to_string());
 	let _ = START_LEVEL.set(0);
 	Ok(())
@@ -405,7 +415,7 @@ struct DrawView {
 impl DrawView {
 	fn read(m: &ee_oracle::Machine, level: u32) -> Option<DrawView> {
 		let d = *LEVEL_SHIFT.get(level as usize)?;
-		let at = |a: u32| a.wrapping_add_signed(d);
+		let at = |a: u32| va(a.wrapping_add_signed(d));
 		Some(DrawView {
 			eye: m.rdv3(at(0x1671c0)),
 			rows: [m.rdv3(at(0x167080)), m.rdv3(at(0x167090)), m.rdv3(at(0x1670a0))],
@@ -414,7 +424,7 @@ impl DrawView {
 			near: m.rdf(at(0x16cee0)),
 			sx: m.rdf(at(0x16d020)),
 			sy: m.rdf(at(0x16d024)),
-			cap: m.rd32(if matches!(level, 0 | 5 | 14 | 16) { 0x15ffb0 } else { 0x15ff70 }) as i32,
+			cap: m.rd32(if matches!(level, 0 | 5 | 14 | 16) { va(0x15ffb0) } else { va(0x15ff70) }) as i32,
 			mask: std::array::from_fn(|i| m.rd8(at(0x174100) + i as u32)),
 		})
 	}
@@ -1205,26 +1215,28 @@ pub struct FrontDialog {
 /// loops at 0x2321b0 / 0x2321f8 / 0x232238, decomp/notes/loading.md): while one of them is on the game thread's stack, the front
 /// end only waits for the level data to arrive, it reads no pad and shows no change that depends on the wall clock [C].
 const LOAD_LOOP_RA: [u32; 3] = [0x2321b8, 0x232208, 0x232248];
+/// `LOAD_LOOP_RA` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+const LOAD_LOOP_RA_USA: [u32; 3] = [0x2326a8, 0x2326f8, 0x232738];
 
 /// The front end's game thread is parked inside one of the load loops (see `LOAD_LOOP_RA`): its stack above `sp` (and `ra`) holds a
 /// return address into FUN_00231b00's wait calls.
 fn in_load_loop(m: &ee_oracle::Machine) -> bool {
-	if m.rd32(title_boot::FRONT_MODE) != 6 {
+	if m.rd32(title_boot::front_mode()) != 6 {
 		return false;
 	}
 	let ra = m.cpu.g(31) as u32;
-	if LOAD_LOOP_RA.contains(&ra) {
+	if (*crate::retail::disc::pick(&LOAD_LOOP_RA, &LOAD_LOOP_RA_USA)).contains(&ra) {
 		return true;
 	}
 	let sp = m.cpu.g(29) as u32;
 	(0..0x100u32).any(|k| {
 		let a = sp.wrapping_add(k * 8);
-		a < 0x200_0000 - 8 && m.rd32(a + 4) == 0 && LOAD_LOOP_RA.contains(&m.rd32(a))
+		a < 0x200_0000 - 8 && m.rd32(a + 4) == 0 && (*crate::retail::disc::pick(&LOAD_LOOP_RA, &LOAD_LOOP_RA_USA)).contains(&m.rd32(a))
 	})
 }
 
 fn front_snap(m: &ee_oracle::Machine) -> Snap {
-	let mode = m.rd32(title_boot::FRONT_MODE);
+	let mode = m.rd32(title_boot::front_mode());
 	let slots = (0..5u32)
 		.map(|i| {
 			let a = 0x13d2b0 + i * 0x1c;
@@ -1232,7 +1244,7 @@ fn front_snap(m: &ee_oracle::Machine) -> Snap {
 			(level < 19).then(|| (level, m.rd32(a + 4), m.rd32(a + 0xc), [m.rd8(a + 0x15), m.rd8(a + 0x16), m.rd8(a + 0x17)]))
 		})
 		.collect();
-	let front_ram = FrontRam { tick: m.rd32(0x18cad4), logo: m.rd32(0x15ef50), press: m.rd32(0x15ef54), fade: f32::from_bits(m.rd32(0x15f43c)), lang: m.rd32(0x15ed88), slots, slot_cur: [m.rd32(0x1d17b0 + 0x40), m.rd32(0x1d4ce8 + 0x40)], dialog: FrontDialog { mode, kind: m.rd32(0x193280), state: m.rd32(0x15eeb0), flags: m.rd32(0x15eeb4), card: m.rd32(0x15f5c8), fade_in: m.rd32(0x193284), box_t: m.rd32(0x1932a0), hint_t: m.rd32(0x1932a4), step: m.rd32(0x19329c), height: m.rd32(0x13e504) } };
+	let front_ram = FrontRam { tick: m.rd32(va(0x18cad4)), logo: m.rd32(0x15ef50), press: m.rd32(0x15ef54), fade: f32::from_bits(m.rd32(0x15f43c)), lang: m.rd32(0x15ed88), slots, slot_cur: [m.rd32(va(0x1d17b0) + 0x40), m.rd32(va(0x1d4ce8) + 0x40)], dialog: FrontDialog { mode, kind: m.rd32(va(0x193280)), state: m.rd32(0x15eeb0), flags: m.rd32(0x15eeb4), card: m.rd32(va(0x15f5c8)), fade_in: m.rd32(va(0x193284)), box_t: m.rd32(va(0x1932a0)), hint_t: m.rd32(va(0x1932a4)), step: m.rd32(va(0x19329c)), height: m.rd32(0x13e504) } };
 	let menu = title_boot::front_menu(m, mode);
 	prompts::set_menu(menu.is_some());
 	menu_keys::publish(menu.as_ref().map(menu_keys::screen));
@@ -1384,7 +1396,29 @@ fn orb_queue(level: u32) -> Option<(u32, u32, u32)> {
 		(0x16e100, 0x16e200, 0x2dae18), // 17 veldin orbit
 		(0x16e200, 0x16e300, 0x2e32d0), // 18 veldin finale
 	];
-	Q.get(level as usize).copied()
+	/// `Q` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+	const Q_USA: [(u32, u32, u32); 19] = [
+		(0x16d880, 0x16d980, 0x2d9810), // 0 veldin
+		(0x16dd00, 0x16de00, 0x301c00), // 1 novalis
+		(0x16de80, 0x16df80, 0x2e4280), // 2 aridia
+		(0x16d980, 0x16da80, 0x2d2b20), // 3 kerwan
+		(0x16da00, 0x16db00, 0x2db9a0), // 4 eudora
+		(0x16dc80, 0x16dd80, 0x30b820), // 5 rilgar
+		(0x16e000, 0x16e100, 0x2e80c0), // 6 nebula g34
+		(0x16d900, 0x16da00, 0x304180), // 7 umbris
+		(0x16e080, 0x16e180, 0x2fb390), // 8 batalia
+		(0x16da00, 0x16db00, 0x2faac0), // 9 gaspar
+		(0x16dd00, 0x16de00, 0x2cbc00), // 10 orxon
+		(0x16e280, 0x16e380, 0x301f58), // 11 pokitaru
+		(0x16dd00, 0x16de00, 0x2f9a70), // 12 hoven
+		(0x16db80, 0x16dc80, 0x2fc650), // 13 oltanis orbit
+		(0x16df80, 0x16e080, 0x2f5b70), // 14 oltanis
+		(0x16de80, 0x16df80, 0x2dd048), // 15 quartu
+		(0x16dc80, 0x16dd80, 0x2d83c0), // 16 kalebo iii
+		(0x16e180, 0x16e280, 0x2db4f0), // 17 veldin orbit
+		(0x16e280, 0x16e380, 0x2e39a0), // 18 veldin finale
+	];
+	(*crate::retail::disc::pick(&Q, &Q_USA)).get(level as usize).copied()
 }
 
 /// The ground blob queue (Eudora moby_shadow FUN_0024cba8 fills it, shadow_queue_draw FUN_001ebec8 draws it; count
@@ -1431,8 +1465,13 @@ fn effect_pool(level: u32) -> Option<(u32, u32)> {
 		0x1b1880, 0x1b1c80, 0x1b1e00, 0x1b1900, 0x1b1980, 0x1b1d00, 0x1b1f80, 0x1b1880, 0x1b2000, 0x1b1980, 0x1b1c80, 0x1b2200, 0x1b1c80, 0x1b1b00, 0x1b1f80, 0x1b1e00, 0x1b1c80, 0x1b2100,
 		0x1b2200,
 	];
-	let bm = *BITMAP.get(level as usize)?;
-	Some((if matches!(level, 0 | 5 | 14 | 16) { 0x16012c } else { 0x1600ec }, bm))
+	/// `BITMAP` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+	const BITMAP_USA: [u32; 19] = [
+		0x1b1880, 0x1b1d00, 0x1b1e80, 0x1b1980, 0x1b1a00, 0x1b1d00, 0x1b2000, 0x1b1900, 0x1b2080, 0x1b1a00, 0x1b1d00, 0x1b2280, 0x1b1d00, 0x1b1b80, 0x1b1f80, 0x1b1e80, 0x1b1d00, 0x1b2180,
+		0x1b2280,
+	];
+	let bm = *(*crate::retail::disc::pick(&BITMAP, &BITMAP_USA)).get(level as usize)?;
+	Some((if matches!(level, 0 | 5 | 14 | 16) { va(0x16012c) } else { va(0x1600ec) }, bm))
 }
 
 /// What the field draws besides mobys and orbs in normal mode: the whole effect pool (draw FUN_00267628 / Eudora
@@ -1477,6 +1516,8 @@ pub struct RetailFx {
 	/// Ground blob shadows as retail queued them this field (count 0x15f434, max 0x20, records `blob_queue`): centre (z =
 	/// ground + 0.025), half-size, ground normal; drawn by `shadows::blob_square` (Eudora FUN_001ebec8).
 	pub blobs: Vec<([f32; 3], f32, [f32; 3])>,
+	/// The hero's position (0x13f3d0, as retail/strafe.rs `HERO_POS`): the water pass's contact rings (viewer/waterfx.rs `Rings`).
+	pub hero: Option<[f32; 3]>,
 	/// The 8 dynamic light slots (`dyn_lights`), index = slot.
 	pub lights: [Option<crate::particles::PointLight>; 8],
 	/// Level-light slots 12..15 as retail RAM holds them (`reserved_lights`); None when the table is not found.
@@ -1594,6 +1635,8 @@ pub struct ShipShadow {
 /// bomb marker's body (`q.py diff` with FUN_0029eec8: only the spin vector lives in a global, 0x161330) on pvar +0x10 /
 /// +0x20. Binary twins by twins.py on 8 levels; 0 = no identical twin (not mirrored there).
 const MINE_RETICLE_FN: [u32; 19] = [0x2a95f8, 0, 0, 0, 0x29b780, 0, 0, 0x2d2688, 0, 0x2c85a0, 0x29ae30, 0, 0, 0x2be018, 0, 0x29f0f8, 0, 0, 0x2abde8];
+/// `MINE_RETICLE_FN` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+const MINE_RETICLE_FN_USA: [u32; 19] = [0x2a9c50, 0, 0, 0, 0x29be58, 0, 0, 0x2d2d60, 0, 0x2c8c78, 0x29b508, 0, 0, 0x2be6f0, 0, 0x29f7c8, 0, 0, 0x2ac4b8];
 
 /// The level's class-203 landing-marker draw (Eudora FUN_002b5ba8, queued by FUN_002b64e0): the bomb marker's body
 /// (`q.py diff:0x29eec8@eudora:0x2b5ba8@eudora`: only the pvar offsets differ) on pvar +0x20 (centre) / +0x30 (normal).
@@ -1602,11 +1645,21 @@ const MARKER203_FN: [u32; 19] = [
 	0x2c2b68, 0x2d8758, 0x2c2500, 0x2b4558, 0x2b5ba8, 0x2ee7d8, 0x2cfcf0, 0x2ebbf8, 0x2cbaf8, 0x2e38a8, 0x2b43a8, 0x2e88d8, 0x2daed0, 0x2dc908, 0x2d1790,
 	0x2be108, 0x2bd3e0, 0x2c0b28, 0x2c5358,
 ];
+/// `MARKER203_FN` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+const MARKER203_FN_USA: [u32; 19] = [
+	0x2c31c0, 0x2d8e28, 0x2c2bd0, 0x2b4c28, 0x2b6280, 0x2eee48, 0x2d03c8, 0x2ec2d0, 0x2cc1c8, 0x2e3f80, 0x2b4a80, 0x2e8fa8, 0x2db5a0, 0x2dcfe0, 0x2d1de0,
+	0x2be7d8, 0x2bdad0, 0x2c1200, 0x2c5a28,
+];
 
 /// The level's ship ground shadow callback (Eudora FUN_0027ee90; twins by twins.py, level order as `orb_queue`).
 const SHIP_SHADOW_FN: [u32; 19] = [
 	0x28e018, 0x2a1a60, 0x28d710, 0x27a8e8, 0x27ee90, 0x2b6750, 0x29b090, 0x2b4c40, 0x296328, 0x2aa8e8, 0x27ea98, 0x2b0e98, 0x2a4828, 0x2983a8, 0x294398,
 	0x27bee8, 0x286e58, 0x2861f8, 0x28db48,
+];
+/// `SHIP_SHADOW_FN` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+const SHIP_SHADOW_FN_USA: [u32; 19] = [
+	0x28e670, 0x2a2130, 0x28dde0, 0x27afb8, 0x27f568, 0x2b6dc0, 0x29b768, 0x2b5318, 0x2969f8, 0x2aafc0, 0x27f170, 0x2b1568, 0x2a4ef8, 0x298a80, 0x2949e8,
+	0x27c5b8, 0x287548, 0x2868d0, 0x28e218,
 ];
 
 /// The frustum sphere fade (Eudora FUN_001f2970 -> FUN_001f2878; Novalis FUN_00221e18 -> FUN_00221d20), from the
@@ -1615,7 +1668,7 @@ const SHIP_SHADOW_FN: [u32; 19] = [
 /// world units (moby[0..3] * 2^-10), `lim` the fade length (32.0). None = culled (-1); else the alpha
 /// clamp(ftoi(lim * 1024 - (Vz - R)) >> 7, 0, 0x80). [C] decoded from the raw COP2 words (0x1f2878..0x1f29a8 Eudora).
 fn sphere_fade(m: &ee_oracle::Machine, level: u32, buf: [f32; 4], lim: f32) -> Option<i32> {
-	let b = 0x16d0c0u32.wrapping_add_signed(*LEVEL_SHIFT.get(level as usize)?);
+	let b = va(0x16d0c0u32.wrapping_add_signed(*LEVEL_SHIFT.get(level as usize)?));
 	let q = |o: u32| [0, 4, 8, 12].map(|k| m.rdf(b + o + k));
 	let (r0, r1, r2, e, v20, v21, v22) = (q(0), q(0x10), q(0x20), q(0x30), q(0x40), q(0x50), q(0x60));
 	let p = buf.map(|c| c * e[3]);
@@ -1645,7 +1698,7 @@ fn sphere_fade(m: &ee_oracle::Machine, level: u32, buf: [f32; 4], lim: f32) -> O
 fn ship_shadow(m: &ee_oracle::Machine, level: u32, a: u32) -> Option<ShipShadow> {
 	let buf = [0, 4, 8, 12].map(|o| m.rdf(a + o) * (1.0 / 1024.0));
 	let mut alpha = sphere_fade(m, level, buf, 32.0)?;
-	let ground = m.rd32(0x15f5a4) == 6;
+	let ground = m.rd32(va(0x15f5a4)) == 6;
 	if ground && m.rd32(0x13e050) == 3 {
 		let (t, s) = (m.rd16(0x13e054) as i16 as i32, crate::gameplay::pal_ticks(0x96));
 		if s < t {
@@ -1676,12 +1729,12 @@ pub struct SwapWords {
 
 impl SwapWords {
 	fn read(m: &ee_oracle::Machine, level: u32) -> Option<SwapWords> {
-		let b = 0x16d058u32.wrapping_add_signed(*LEVEL_SHIFT.get(level as usize)?);
+		let b = va(0x16d058u32.wrapping_add_signed(*LEVEL_SHIFT.get(level as usize)?));
 		let small = if matches!(level, 0 | 5 | 14 | 16) { 0x40 } else { 0 };
 		Some(SwapWords {
 			fog_rgb: [m.rd32(b + 0x18) as u8, m.rd32(b + 0x1c) as u8, m.rd32(b + 0x20) as u8],
 			fog: [m.rdf(b) / 1024.0, m.rdf(b + 4) / 1024.0, m.rdf(b + 0x10), m.rdf(b + 0x14)],
-			part_far: m.rd32(0x1600fc + small) as i32 as f32 / 4096.0,
+			part_far: m.rd32(va(0x1600fc + small)) as i32 as f32 / 4096.0,
 		})
 	}
 }
@@ -1716,6 +1769,11 @@ const GLOW_FN: [u32; 19] = [
 	0x207888, 0x228f08, 0x218060, 0x200998, 0x1fade8, 0x235df0, 0x21f668, 0x22f670, 0x219b80, 0x2274e8, 0x1fae70, 0x238960, 0x229ff0, 0x2132f0, 0x21a778,
 	0x200688, 0x205868, 0x204760, 0x20fd00,
 ];
+/// `GLOW_FN` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+const GLOW_FN_USA: [u32; 19] = [
+	0x207d40, 0x229440, 0x218598, 0x200ed0, 0x1fb320, 0x2362a8, 0x21fba0, 0x22fba8, 0x21a0b8, 0x227a20, 0x1fb3a8, 0x238e98, 0x22a528, 0x213828, 0x21ac30,
+	0x200bc0, 0x205da0, 0x204c98, 0x210238,
+];
 /// The level's two landing-marker draws (bomb and Glove of Doom; one body, Eudora FUN_0029eec8 / FUN_002bc450).
 const RETICLE_FN: [[u32; 2]; 19] = [
 	[0x2ac598, 0x2c77a0],
@@ -1737,6 +1795,28 @@ const RETICLE_FN: [[u32; 2]; 19] = [
 	[0x2a6e10, 0x2c2018],
 	[0x2a93a8, 0x2c5e58],
 	[0x2aed88, 0x2c9f90],
+];
+/// `RETICLE_FN` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+const RETICLE_FN_USA: [[u32; 2]; 19] = [
+	[0x2acbf0, 0x2c7df8],
+	[0x2c23c0, 0x2dda60],
+	[0x2ac600, 0x2c7808],
+	[0x29e658, 0x2b9860],
+	[0x29f5a0, 0x2bcb28],
+	[0x2d7fc0, 0x2f3a80],
+	[0x2b9960, 0x2d5000],
+	[0x2d5d00, 0x2f0f08],
+	[0x2b51a8, 0x2d0e00],
+	[0x2cbc18, 0x2e8bb8],
+	[0x29e4b0, 0x2b96b8],
+	[0x2d29d8, 0x2edbe0],
+	[0x2c4980, 0x2e01d8],
+	[0x2c5278, 0x2e2e20],
+	[0x2bb810, 0x2d8200],
+	[0x2a41a8, 0x2c3aa8],
+	[0x2a7500, 0x2c2708],
+	[0x2a9a80, 0x2c6530],
+	[0x2af458, 0x2ca660],
 ];
 
 /// The hero glow callback (Eudora FUN_001fade8, OV:21972-22057) in gameplay modes (not 2 / 6), by the back-slot kind
@@ -1787,6 +1867,11 @@ const LIGHT_ALLOC_FN: [u32; 19] = [
 	0x23e320, 0x2522c0, 0x23fdf8, 0x22c580, 0x230c90, 0x2672d0, 0x24cf60, 0x2658f8, 0x247e98, 0x25d390, 0x230d18, 0x263658, 0x256498, 0x249520,
 	0x245eb8, 0x22d8a8, 0x239960, 0x238998, 0x240590,
 ];
+/// `LIGHT_ALLOC_FN` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+const LIGHT_ALLOC_FN_USA: [u32; 19] = [
+	0x23e738, 0x252750, 0x240288, 0x22ca10, 0x231128, 0x267700, 0x24d3f8, 0x265d90, 0x248328, 0x25d828, 0x2311b0, 0x263ae8, 0x256928, 0x2499b8,
+	0x2462c8, 0x22dd38, 0x239e10, 0x238e30, 0x240a20,
+];
 
 /// The 8 dynamic point-light slots (decomp/notes/lighting_fog.md 5b) as MobyProc reads them. Table 8 x 0x20: rgb
 /// floats +0, intensity +0xc, position +0x10, radius +0x1c (Eudora 0x1803c0, Rilgar 0x180740, Novalis 0x1806c0: not
@@ -1796,7 +1881,7 @@ const LIGHT_ALLOC_FN: [u32; 19] = [
 /// record) and lights every moby from them (overlay.elf.c 67779-67806) [C]; `dynlight::moby_light` is the per-moby sum.
 pub fn dyn_lights(m: &ee_oracle::Machine, level: u32) -> [Option<crate::particles::PointLight>; 8] {
 	let mut out = [None; 8];
-	let Some(&f) = LIGHT_ALLOC_FN.get(level as usize) else { return out };
+	let Some(&f) = (*crate::retail::disc::pick(&LIGHT_ALLOC_FN, &LIGHT_ALLOC_FN_USA)).get(level as usize) else { return out };
 	let (hi, lo) = (m.rd32(f + 0x78), m.rd32(f + 0x80));
 	if hi >> 16 != 0x3c02 || lo >> 16 != 0x2442 {
 		return out;
@@ -1819,7 +1904,7 @@ pub fn dyn_lights(m: &ee_oracle::Machine, level: u32) -> [Option<crate::particle
 /// (0.9, 0.9, 0.6, -0.25) at 0x180340 in s12 / fg1 4_0159 / s07 RAM), Novalis 0x1802c0 = 0x1806c0 - 0x400 [C]; the
 /// other levels use the same layout [I].
 pub fn reserved_lights(m: &ee_oracle::Machine, level: u32) -> Option<[[[f32; 4]; 4]; 4]> {
-	let f = *LIGHT_ALLOC_FN.get(level as usize)?;
+	let f = *(*crate::retail::disc::pick(&LIGHT_ALLOC_FN, &LIGHT_ALLOC_FN_USA)).get(level as usize)?;
 	let (hi, lo) = (m.rd32(f + 0x78), m.rd32(f + 0x80));
 	if hi >> 16 != 0x3c02 || lo >> 16 != 0x2442 {
 		return None;
@@ -1836,23 +1921,25 @@ pub fn reserved_lights(m: &ee_oracle::Machine, level: u32) -> Option<[[[f32; 4];
 /// delta from Novalis 0x1cac00, shift of the patch globals 0x161250 / 0x161258 / 0x1611a0). Novalis 0x2b8af8, Hoven 0x2bb5f8,
 /// Oltanis Orbit 0x2af410, Pokitaru 0x2c7c68, Rilgar 0x2cd520, Umbris 0x2cba28 [C: read in fg1 states 1_0018, 12_0554, 13_0622, 11_0421, 5_0216, 7_0284].
 const WATER_DRAW: [(u32, u32, i32, u32); 6] = [(1, 0x2b8af8, 0, 0), (12, 0x2bb5f8, 0, 0), (13, 0x2af410, -0x180, 0), (11, 0x2c7c68, 0x580, 0), (5, 0x2cd520, 0x80, 0x40), (7, 0x2cba28, -0x400, 0)];
+/// `WATER_DRAW` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+const WATER_DRAW_USA: [(u32, u32, i32, u32); 6] = [(1, 0x2b91c8, 0, 0), (12, 0x2bbcc8, 0, 0), (13, 0x2afae8, -0x180, 0), (11, 0x2c8338, 0x580, 0), (5, 0x2cdb90, 0x80, 0x40), (7, 0x2cc100, -0x400, 0)];
 
 /// Retail's water patches (class 751 state) as the draw reads them [C]. Patch table pointer 0x161250, count 0x161258, output buffer
 /// index 0x1611a0 (+ shift); record stride 0x1190: +0 pos, +0x14 / +0x18 fx textures (sphere / water pass), +0x1c / +0x1d ALPHA FIX,
 /// +0x1e visible-subblock mask, +0x20 / +0x24 UV scroll, +0x30 / +0x34 wobble angles, +0x40 amplitude, +0x44 pin flags, three
 /// 0x5c0-byte height buffers from +0x50 (the draw adds index * 0x5c0). The light vector sits at 0x1cac30 + the level delta.
 fn water_patches(m: &ee_oracle::Machine, level: u32) -> Option<([f32; 3], Vec<crate::water::RamPatch>)> {
-	let &(_, f, d, s) = WATER_DRAW.iter().find(|e| e.0 == level)?;
+	let &(_, f, d, s) = (*crate::retail::disc::pick(&WATER_DRAW, &WATER_DRAW_USA)).iter().find(|e| e.0 == level)?;
 	if [m.rd32(f), m.rd32(f + 4), m.rd32(f + 8)] != [0x27bd_fee0, 0x7fb2_0090, 0x7fbf_0100] {
 		return None;
 	}
-	let table = m.rd32(0x161250 + s) & 0x01ff_ffff;
-	let count = m.rd32(0x161258 + s);
-	let idx = m.rd32(0x1611a0 + s);
+	let table = m.rd32(va(0x161250 + s)) & 0x01ff_ffff;
+	let count = m.rd32(va(0x161258 + s));
+	let idx = m.rd32(va(0x1611a0 + s));
 	if table < 0x10_0000 || count == 0 || count > 64 || idx > 2 {
 		return None;
 	}
-	let light = m.rdv3(0x1cac30u32.wrapping_add_signed(d));
+	let light = m.rdv3(va(0x1cac30u32.wrapping_add_signed(d)));
 	let mut out = Vec::new();
 	for k in 0..count {
 		let b = table + k * 0x1190;
@@ -1886,7 +1973,7 @@ fn water_patches(m: &ee_oracle::Machine, level: u32) -> Option<([f32; 3], Vec<cr
 }
 
 fn queue_fx(m: &ee_oracle::Machine, level: u32) -> RetailFx {
-	let mut out = RetailFx { frames: m.rd32(oldsim::FRAME_COUNTER), ..RetailFx::default() };
+	let mut out = RetailFx { frames: m.rd32(va(oldsim::FRAME_COUNTER)), ..RetailFx::default() };
 	out.lights = dyn_lights(m, level);
 	out.slots = reserved_lights(m, level);
 	out.water = water_patches(m, level);
@@ -1940,25 +2027,26 @@ fn queue_fx(m: &ee_oracle::Machine, level: u32) -> RetailFx {
 		}
 	}
 	out.blobs = blob_queue(m, level);
+	out.hero = Some(m.rdv3(0x13f3d0));
 	if let Some((fns, args, _)) = orb_queue(level) {
 		let li = level as usize;
 		let mut glow_done = false;
 		for i in 0..m.rd32(0x15f424).min(0x40) {
 			let f = m.rd32(fns + 4 * i);
-			if f == GLOW_FN[li] && !glow_done {
+			if f == (*crate::retail::disc::pick(&GLOW_FN, &GLOW_FN_USA))[li] && !glow_done {
 				glow_done = true;
 				hero_glows(m, &mut out.glows);
-			} else if RETICLE_FN[li].contains(&f) || (f != 0 && MINE_RETICLE_FN[li] == f) {
+			} else if (*crate::retail::disc::pick(&RETICLE_FN, &RETICLE_FN_USA))[li].contains(&f) || (f != 0 && (*crate::retail::disc::pick(&MINE_RETICLE_FN, &MINE_RETICLE_FN_USA))[li] == f) {
 				let pv = m.rd32((m.rd32(args + 4 * i) & 0x01ff_ffff) + 0x78) & 0x01ff_ffff;
 				if pv != 0 {
 					out.reticles.push(crate::game::Reticle { pos: m.rdv3(pv + 0x10), normal: m.rdv3(pv + 0x20) });
 				}
-			} else if MARKER203_FN[li] == f {
+			} else if (*crate::retail::disc::pick(&MARKER203_FN, &MARKER203_FN_USA))[li] == f {
 				let pv = m.rd32((m.rd32(args + 4 * i) & 0x01ff_ffff) + 0x78) & 0x01ff_ffff;
 				if pv != 0 {
 					out.reticles.push(crate::game::Reticle { pos: m.rdv3(pv + 0x20), normal: m.rdv3(pv + 0x30) });
 				}
-			} else if SHIP_SHADOW_FN[li] == f {
+			} else if (*crate::retail::disc::pick(&SHIP_SHADOW_FN, &SHIP_SHADOW_FN_USA))[li] == f {
 				out.ship_shadows.extend(ship_shadow(m, level, m.rd32(args + 4 * i) & 0x01ff_ffff));
 			}
 		}
@@ -1970,7 +2058,7 @@ fn queue_fx(m: &ee_oracle::Machine, level: u32) -> RetailFx {
 	out.screen = queue_b::screen_filter(m, level);
 	out.swap = SwapWords::read(m, level);
 	out.rc = queue_b::rc_static(m, level);
-	out.shrub_cap = Some(m.rdf(if matches!(level, 0 | 5 | 14 | 16) { 0x160464 } else { 0x160424 }));
+	out.shrub_cap = Some(m.rdf(if matches!(level, 0 | 5 | 14 | 16) { va(0x160464) } else { va(0x160424) }));
 	out
 }
 
@@ -2028,25 +2116,25 @@ struct ShopAddrs {
 
 fn shop_addrs(level: u32) -> Option<ShopAddrs> {
 	match level {
-		0 => Some(ShopAddrs { state: 0x1ca448, slots: 0x1ca460, portrait: 0x1ca464, gate: 0x161e38, alt: 0x1ca480, row: 0x1ca498, rows: 0x1ca510, ammo: 0x1c8fa0, portrait_on: 0x161148 }), // veldin
-		1 => Some(ShopAddrs { state: 0x1ca848, slots: 0x1ca860, portrait: 0x1ca864, gate: 0x162238, alt: 0x1ca880, row: 0x1ca898, rows: 0x1ca910, ammo: 0x1c93a0, portrait_on: 0x161108 }), // novalis
-		2 => Some(ShopAddrs { state: 0x1ca9c8, slots: 0x1ca9e0, portrait: 0x1ca9e4, gate: 0x1623b8, alt: 0x1caa00, row: 0x1caa18, rows: 0x1caa90, ammo: 0x1c9520, portrait_on: 0x161108 }), // aridia
-		3 => Some(ShopAddrs { state: 0x1ca4c8, slots: 0x1ca4e0, portrait: 0x1ca4e4, gate: 0x161eb8, alt: 0x1ca500, row: 0x1ca518, rows: 0x1ca590, ammo: 0x1c9020, portrait_on: 0x161108 }), // kerwan
-		4 => Some(ShopAddrs { state: 0x1ca548, slots: 0x1ca560, portrait: 0x1ca564, gate: 0x161f38, alt: 0x1ca580, row: 0x1ca598, rows: 0x1ca610, ammo: 0x1c90a0, portrait_on: 0x161108 }), // eudora
-		5 => Some(ShopAddrs { state: 0x1ca8c8, slots: 0x1ca8e0, portrait: 0x1ca8e4, gate: 0x162238, alt: 0x1ca900, row: 0x1ca918, rows: 0x1ca990, ammo: 0x1c9420, portrait_on: 0x161148 }), // rilgar
-		6 => Some(ShopAddrs { state: 0x1cab48, slots: 0x1cab60, portrait: 0x1cab64, gate: 0x162538, alt: 0x1cab80, row: 0x1cab98, rows: 0x1cac10, ammo: 0x1c96a0, portrait_on: 0x161108 }), // nebula
-		7 => Some(ShopAddrs { state: 0x1ca448, slots: 0x1ca460, portrait: 0x1ca464, gate: 0x161e38, alt: 0x1ca480, row: 0x1ca498, rows: 0x1ca510, ammo: 0x1c8fa0, portrait_on: 0x161108 }), // umbris
-		8 => Some(ShopAddrs { state: 0x1cabc8, slots: 0x1cabe0, portrait: 0x1cabe4, gate: 0x1625b8, alt: 0x1cac00, row: 0x1cac18, rows: 0x1cac90, ammo: 0x1c9720, portrait_on: 0x161108 }), // batalia
-		9 => Some(ShopAddrs { state: 0x1ca548, slots: 0x1ca560, portrait: 0x1ca564, gate: 0x161f38, alt: 0x1ca580, row: 0x1ca598, rows: 0x1ca610, ammo: 0x1c90a0, portrait_on: 0x161108 }), // gaspar
-		10 => Some(ShopAddrs { state: 0x1ca848, slots: 0x1ca860, portrait: 0x1ca864, gate: 0x162238, alt: 0x1ca880, row: 0x1ca898, rows: 0x1ca910, ammo: 0x1c93a0, portrait_on: 0x161108 }), // orxon
-		11 => Some(ShopAddrs { state: 0x1cadc8, slots: 0x1cade0, portrait: 0x1cade4, gate: 0x1627b8, alt: 0x1cae00, row: 0x1cae18, rows: 0x1cae90, ammo: 0x1c9920, portrait_on: 0x161108 }), // pokitaru
-		12 => Some(ShopAddrs { state: 0x1ca848, slots: 0x1ca860, portrait: 0x1ca864, gate: 0x162238, alt: 0x1ca880, row: 0x1ca898, rows: 0x1ca910, ammo: 0x1c93a0, portrait_on: 0x161108 }), // hoven
-		13 => Some(ShopAddrs { state: 0x1ca6c8, slots: 0x1ca6e0, portrait: 0x1ca6e4, gate: 0x1620b8, alt: 0x1ca700, row: 0x1ca718, rows: 0x1ca790, ammo: 0x1c9220, portrait_on: 0x161108 }), // oltanis_orbit
-		14 => Some(ShopAddrs { state: 0x1cab48, slots: 0x1cab60, portrait: 0x1cab64, gate: 0x162538, alt: 0x1cab80, row: 0x1cab98, rows: 0x1cac10, ammo: 0x1c96a0, portrait_on: 0x161148 }), // oltanis
-		15 => Some(ShopAddrs { state: 0x1ca9c8, slots: 0x1ca9e0, portrait: 0x1ca9e4, gate: 0x1623b8, alt: 0x1caa00, row: 0x1caa18, rows: 0x1caa90, ammo: 0x1c9520, portrait_on: 0x161108 }), // quartu
-		16 => Some(ShopAddrs { state: 0x1ca848, slots: 0x1ca860, portrait: 0x1ca864, gate: 0x1621b8, alt: 0x1ca880, row: 0x1ca898, rows: 0x1ca910, ammo: 0x1c93a0, portrait_on: 0x161148 }), // kalebo
-		17 => Some(ShopAddrs { state: 0x1cacc8, slots: 0x1cace0, portrait: 0x1cace4, gate: 0x1626b8, alt: 0x1cad00, row: 0x1cad18, rows: 0x1cad90, ammo: 0x1c9820, portrait_on: 0x161108 }), // veldin_orbit
-		18 => Some(ShopAddrs { state: 0x1cadc8, slots: 0x1cade0, portrait: 0x1cade4, gate: 0x1627b8, alt: 0x1cae00, row: 0x1cae18, rows: 0x1cae90, ammo: 0x1c9920, portrait_on: 0x161108 }), // veldin_finale
+		0 => Some(ShopAddrs { state: va(0x1ca448), slots: va(0x1ca460), portrait: va(0x1ca464), gate: va(0x161e38), alt: va(0x1ca480), row: va(0x1ca498), rows: va(0x1ca510), ammo: va(0x1c8fa0), portrait_on: va(0x161148) }), // veldin
+		1 => Some(ShopAddrs { state: va(0x1ca848), slots: va(0x1ca860), portrait: va(0x1ca864), gate: va(0x162238), alt: va(0x1ca880), row: va(0x1ca898), rows: va(0x1ca910), ammo: va(0x1c93a0), portrait_on: va(0x161108) }), // novalis
+		2 => Some(ShopAddrs { state: va(0x1ca9c8), slots: va(0x1ca9e0), portrait: va(0x1ca9e4), gate: va(0x1623b8), alt: va(0x1caa00), row: va(0x1caa18), rows: va(0x1caa90), ammo: va(0x1c9520), portrait_on: va(0x161108) }), // aridia
+		3 => Some(ShopAddrs { state: va(0x1ca4c8), slots: va(0x1ca4e0), portrait: va(0x1ca4e4), gate: va(0x161eb8), alt: va(0x1ca500), row: va(0x1ca518), rows: va(0x1ca590), ammo: va(0x1c9020), portrait_on: va(0x161108) }), // kerwan
+		4 => Some(ShopAddrs { state: va(0x1ca548), slots: va(0x1ca560), portrait: va(0x1ca564), gate: va(0x161f38), alt: va(0x1ca580), row: va(0x1ca598), rows: va(0x1ca610), ammo: va(0x1c90a0), portrait_on: va(0x161108) }), // eudora
+		5 => Some(ShopAddrs { state: va(0x1ca8c8), slots: va(0x1ca8e0), portrait: va(0x1ca8e4), gate: va(0x162238), alt: va(0x1ca900), row: va(0x1ca918), rows: va(0x1ca990), ammo: va(0x1c9420), portrait_on: va(0x161148) }), // rilgar
+		6 => Some(ShopAddrs { state: va(0x1cab48), slots: va(0x1cab60), portrait: va(0x1cab64), gate: va(0x162538), alt: va(0x1cab80), row: va(0x1cab98), rows: va(0x1cac10), ammo: va(0x1c96a0), portrait_on: va(0x161108) }), // nebula
+		7 => Some(ShopAddrs { state: va(0x1ca448), slots: va(0x1ca460), portrait: va(0x1ca464), gate: va(0x161e38), alt: va(0x1ca480), row: va(0x1ca498), rows: va(0x1ca510), ammo: va(0x1c8fa0), portrait_on: va(0x161108) }), // umbris
+		8 => Some(ShopAddrs { state: va(0x1cabc8), slots: va(0x1cabe0), portrait: va(0x1cabe4), gate: va(0x1625b8), alt: va(0x1cac00), row: va(0x1cac18), rows: va(0x1cac90), ammo: va(0x1c9720), portrait_on: va(0x161108) }), // batalia
+		9 => Some(ShopAddrs { state: va(0x1ca548), slots: va(0x1ca560), portrait: va(0x1ca564), gate: va(0x161f38), alt: va(0x1ca580), row: va(0x1ca598), rows: va(0x1ca610), ammo: va(0x1c90a0), portrait_on: va(0x161108) }), // gaspar
+		10 => Some(ShopAddrs { state: va(0x1ca848), slots: va(0x1ca860), portrait: va(0x1ca864), gate: va(0x162238), alt: va(0x1ca880), row: va(0x1ca898), rows: va(0x1ca910), ammo: va(0x1c93a0), portrait_on: va(0x161108) }), // orxon
+		11 => Some(ShopAddrs { state: va(0x1cadc8), slots: va(0x1cade0), portrait: va(0x1cade4), gate: va(0x1627b8), alt: va(0x1cae00), row: va(0x1cae18), rows: va(0x1cae90), ammo: va(0x1c9920), portrait_on: va(0x161108) }), // pokitaru
+		12 => Some(ShopAddrs { state: va(0x1ca848), slots: va(0x1ca860), portrait: va(0x1ca864), gate: va(0x162238), alt: va(0x1ca880), row: va(0x1ca898), rows: va(0x1ca910), ammo: va(0x1c93a0), portrait_on: va(0x161108) }), // hoven
+		13 => Some(ShopAddrs { state: va(0x1ca6c8), slots: va(0x1ca6e0), portrait: va(0x1ca6e4), gate: va(0x1620b8), alt: va(0x1ca700), row: va(0x1ca718), rows: va(0x1ca790), ammo: va(0x1c9220), portrait_on: va(0x161108) }), // oltanis_orbit
+		14 => Some(ShopAddrs { state: va(0x1cab48), slots: va(0x1cab60), portrait: va(0x1cab64), gate: va(0x162538), alt: va(0x1cab80), row: va(0x1cab98), rows: va(0x1cac10), ammo: va(0x1c96a0), portrait_on: va(0x161148) }), // oltanis
+		15 => Some(ShopAddrs { state: va(0x1ca9c8), slots: va(0x1ca9e0), portrait: va(0x1ca9e4), gate: va(0x1623b8), alt: va(0x1caa00), row: va(0x1caa18), rows: va(0x1caa90), ammo: va(0x1c9520), portrait_on: va(0x161108) }), // quartu
+		16 => Some(ShopAddrs { state: va(0x1ca848), slots: va(0x1ca860), portrait: va(0x1ca864), gate: va(0x1621b8), alt: va(0x1ca880), row: va(0x1ca898), rows: va(0x1ca910), ammo: va(0x1c93a0), portrait_on: va(0x161148) }), // kalebo
+		17 => Some(ShopAddrs { state: va(0x1cacc8), slots: va(0x1cace0), portrait: va(0x1cace4), gate: va(0x1626b8), alt: va(0x1cad00), row: va(0x1cad18), rows: va(0x1cad90), ammo: va(0x1c9820), portrait_on: va(0x161108) }), // veldin_orbit
+		18 => Some(ShopAddrs { state: va(0x1cadc8), slots: va(0x1cade0), portrait: va(0x1cade4), gate: va(0x1627b8), alt: va(0x1cae00), row: va(0x1cae18), rows: va(0x1cae90), ammo: va(0x1c9920), portrait_on: va(0x161108) }), // veldin_finale
 		_ => None,
 	}
 }
@@ -2186,7 +2274,7 @@ fn arrived(s: &Snap, m: &ee_oracle::Machine) -> bool {
 
 pub fn snap(m: &ee_oracle::Machine) -> Snap {
 	let level = m.level();
-	let mode = m.rd32(0x15f5a4);
+	let mode = m.rd32(va(0x15f5a4));
 	let mut out = Snap {
 		health: m.rd32(0x1415f8) as i32,
 		bolts: m.rd32(0x15ed98),
@@ -2202,11 +2290,11 @@ pub fn snap(m: &ee_oracle::Machine) -> Snap {
 	let ship = if mode == 6 { m.rd32(SHIP_STATE) } else { 0 };
 	out.ship_fight = shipmouse::in_ship_fight(m);
 	(out.frozen, out.scene, out.ship) = (frozen_view(mode, ship), scene_view(mode, ship), ship);
-	out.no_present = m.rd32(NO_PRESENT) != 0;
+	out.no_present = m.rd32(va(NO_PRESENT)) != 0;
 	out.hold = out.frozen || out.no_present;
 	let c = crate::gsfull::crtc::Crtc::from_regs(&m.cpu.mem.gs);
 	out.crtc = (c.pmode, c.dispfb[0], c.bgcolor);
-	out.screen = (m.rd32(NO_PRESENT), m.rd32(0x15f3f4), m.rdf(0x15f3fc), m.rdf(0x15f400), m.rd32(0x16a134));
+	out.screen = (m.rd32(va(NO_PRESENT)), m.rd32(0x15f3f4), m.rdf(0x15f3fc), m.rdf(0x15f400), m.rd32(va(0x16a134)));
 	out.warp = warp::read(m, mode, level);
 	out.menu = mouse_menu::read(&|a| m.rd32(a), level, mode);
 	prompts::set_menu(out.menu.is_some());
@@ -2307,7 +2395,7 @@ pub fn snap(m: &ee_oracle::Machine) -> Snap {
 					#[cfg(test)]
 					culls: view.as_ref().map(|v| v.culls(m, a).0),
 					#[cfg(test)]
-					raw: (m.rd16(a + 0x34), m.rd16(a + 0x32) as i16, m.rd32(if matches!(level, 0 | 5 | 14 | 16) { 0x15ffb0 } else { 0x15ff70 }) as i32),
+					raw: (m.rd16(a + 0x34), m.rd16(a + 0x32) as i16, m.rd32(if matches!(level, 0 | 5 | 14 | 16) { va(0x15ffb0) } else { va(0x15ff70) }) as i32),
 					rgb: [m.rd8(a + 0x3c), m.rd8(a + 0x3d), m.rd8(a + 0x3e)],
 					light: m.rd32(a + 0x38),
 					clock: Clock::read(m, a),
@@ -2420,16 +2508,26 @@ const SHADOW_LIST: [u32; 19] = [
 	0x1ac600, 0x1aca00, 0x1acb80, 0x1ac680, 0x1ac700, 0x1aca80, 0x1acd00, 0x1ac600, 0x1acd80, 0x1ac700, 0x1aca00, 0x1acf80, 0x1aca00, 0x1ac880,
 	0x1acd00, 0x1acb80, 0x1aca00, 0x1ace80, 0x1acf80,
 ];
+/// `SHADOW_LIST` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+const SHADOW_LIST_USA: [u32; 19] = [
+	0x1ac600, 0x1aca80, 0x1acc00, 0x1ac700, 0x1ac780, 0x1aca80, 0x1acd80, 0x1ac680, 0x1ace00, 0x1ac780, 0x1aca80, 0x1ad000, 0x1aca80, 0x1ac900,
+	0x1acd00, 0x1acc00, 0x1aca80, 0x1acf00, 0x1ad000,
+];
 /// The shadow pass gate the driver's caller tests (Eudora FUN_00242850 `*0x16a118`, Blarg FUN_0025e7d8 `*0x16a718`) [C: all
 /// 19 overlays; = 0x16a118 + LEVEL_SHIFT[level] - LEVEL_SHIFT[4]].
 const SHADOW_GATE: [u32; 19] = [
 	0x16a018, 0x16a418, 0x16a598, 0x16a098, 0x16a118, 0x16a418, 0x16a718, 0x16a018, 0x16a798, 0x16a118, 0x16a418, 0x16a998, 0x16a418, 0x16a298,
 	0x16a718, 0x16a598, 0x16a398, 0x16a898, 0x16a998,
 ];
+/// `SHADOW_GATE` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+const SHADOW_GATE_USA: [u32; 19] = [
+	0x16a018, 0x16a498, 0x16a618, 0x16a118, 0x16a198, 0x16a418, 0x16a798, 0x16a098, 0x16a818, 0x16a198, 0x16a498, 0x16aa18, 0x16a498, 0x16a318,
+	0x16a718, 0x16a618, 0x16a418, 0x16a918, 0x16aa18,
+];
 /// The caster count and the shadow DMA slot the driver tests: 0x15ff7c / 0x15ff80, 0x40 higher on levels 0 5 14 16 (Rilgar
 /// driver: 0x15ffbc / 0x15ffc0) [C].
 fn shadow_count(level: u32) -> (u32, u32) {
-	if matches!(level, 0 | 5 | 14 | 16) { (0x15ffbc, 0x15ffc0) } else { (0x15ff7c, 0x15ff80) }
+	if matches!(level, 0 | 5 | 14 | 16) { (va(0x15ffbc), va(0x15ffc0)) } else { (va(0x15ff7c), va(0x15ff80)) }
 }
 
 /// M3a shadows: the Eudora shadow driver 0x242500 (Novalis FUN_002645b0) runs from 0x242850 when `*0x16a118 != 0` and the
@@ -2440,7 +2538,7 @@ fn shadow_count(level: u32) -> (u32, u32) {
 /// driver twin with its own addresses (`SHADOW_LIST`, `SHADOW_GATE`, `shadow_count`) [C: all 19 overlays, blarg_fx.md].
 fn shadow_snap(m: &ee_oracle::Machine, level: u32) -> RetailShadows {
 	let mut out = RetailShadows::default();
-	let (Some(&list), Some(&gate)) = (SHADOW_LIST.get(level as usize), SHADOW_GATE.get(level as usize)) else {
+	let (Some(&list), Some(&gate)) = ((*crate::retail::disc::pick(&SHADOW_LIST, &SHADOW_LIST_USA)).get(level as usize), (*crate::retail::disc::pick(&SHADOW_GATE, &SHADOW_GATE_USA)).get(level as usize)) else {
 		return out;
 	};
 	let (count, slot) = shadow_count(level);
@@ -2499,7 +2597,7 @@ fn shadow_snap(m: &ee_oracle::Machine, level: u32) -> RetailShadows {
 /// Effects layer claimed set (retail/efx_draw.rs): the queue-A callbacks `snap` itself turns into mirror geometry.
 fn claims(level: u32, f: u32) -> bool {
 	let li = level as usize;
-	li < 19 && f != 0 && (GLOW_FN[li] == f || RETICLE_FN[li].contains(&f) || MINE_RETICLE_FN[li] == f || MARKER203_FN[li] == f || SHIP_SHADOW_FN[li] == f)
+	li < 19 && f != 0 && ((*crate::retail::disc::pick(&GLOW_FN, &GLOW_FN_USA))[li] == f || (*crate::retail::disc::pick(&RETICLE_FN, &RETICLE_FN_USA))[li].contains(&f) || (*crate::retail::disc::pick(&MINE_RETICLE_FN, &MINE_RETICLE_FN_USA))[li] == f || (*crate::retail::disc::pick(&MARKER203_FN, &MARKER203_FN_USA))[li] == f || (*crate::retail::disc::pick(&SHIP_SHADOW_FN, &SHIP_SHADOW_FN_USA))[li] == f)
 }
 
 fn read_cam(m: &ee_oracle::Machine, level: u32) -> Option<Cam> {
@@ -2662,9 +2760,11 @@ impl Retail {
 			title_boot::hook_boot_movies(&mut m);
 		}
 		// Exact ownership of the draw-queue callbacks' packets (retail/efx_own.rs); RAC_EFX_OWN=0 leaves it out.
-		efx_own::register();
+		if !disc::extras_off() {
+			efx_own::register();
+		}
 		// --wide (GS-full only): the wrapping hands of the field-of-view function (gsfull/wide.rs).
-		if crate::gsfull::wide::enabled() {
+		if crate::gsfull::wide::enabled() && !disc::extras_off() {
 			if gsfull_on() {
 				crate::gsfull::wide::register();
 				eprintln!("retail: 16:9 view (wide field of view, HUD squeezed to the corners)");
@@ -2683,7 +2783,13 @@ impl Retail {
 		if pcext::enabled() {
 			pcext::register();
 		}
-		vendor::register();
+		if !disc::extras_off() {
+			vendor::register();
+		}
+		// A loaded savestate's level and draw queues are known now: its first field gets the effects layer too.
+		if cold.is_none() {
+			efx_own::prime(&mut m.cpu);
+		}
 		let rec = m.enable_rec();
 		eprintln!("retail: {dir} level {level}, {rec} recompiled functions");
 		rec::begin(dir, level, rec);
@@ -2704,8 +2810,9 @@ impl Retail {
 		let mut layers_used = (first.level, first.parts.layers.clone());
 		// RAC_RETAIL_HUD=0 keeps rac-rs's own HUD.
 		// RAC_GSFULL=1 / --gsfull: the whole GS output is drawn instead (no mirror overlay capture).
-		// A cold boot has no savestate dir for the pipe's start VRAM and VU1 memory: RAC_GSFULL_STATE names one (reference shots only).
-		let gs_dir = if cold.is_some() { std::env::var("RAC_GSFULL_STATE").unwrap_or_else(|_| dir.clone()) } else { dir.clone() };
+		// A cold boot has no savestate dir for the pipe's start VRAM and VU1 memory: RAC_GSFULL_STATE names one (reference shots),
+		// else the pipe starts blank ("": the boot uploads its own VU1 programs and draws everything it shows).
+		let gs_dir = if cold.is_some() { std::env::var("RAC_GSFULL_STATE").unwrap_or_default() } else { dir.clone() };
 		let gsf = if gsfull_on() { crate::gsfull::pipe::start(&gs_dir) } else { None };
 		// EFFECTS LAYER, VU1 owners (retail/efx_vu.rs): the VIF1 + VU1 model the field's jobs pass through.
 		let mut vush = efx_vu::Shadow::new(&gs_dir);
@@ -2765,7 +2872,7 @@ impl Retail {
 				// Level travel: the level whose pools were counted, and whether a non-gameplay field (the travel
 				// sequence and loader, game mode 6) ran since the level byte changed.
 				let (mut pooled, mut transit) = (level, false);
-				let (mut field, mut noted) = (0u32, (level, m.rd32(0x15f5a4)));
+				let (mut field, mut noted) = (0u32, (level, m.rd32(va(0x15f5a4))));
 				let ov_log = std::env::var("RAC_RETAIL_OVLOG").is_ok();
 				let ov_sync = ov_log || std::env::var_os("RAC_RETAIL_OVDUMP").is_some() || std::env::var_os("RAC_OV_SYNC").is_some();
 				let title_trace = std::env::var_os("RAC_TITLE_TRACE").is_some();
@@ -2808,22 +2915,22 @@ impl Retail {
 					let t = std::time::Instant::now();
 					ll_idle += t.duration_since(ll_last).as_nanos() as u64;
 					wperf.lap(0);
-					if let Some(to) = fin.travel {
-						m.cpu.mem.wr32(0x15f5a0, to);
-						m.cpu.mem.wr32(0x15f5b8, 1);
-						m.cpu.mem.wr32(0x15f550, 1);
+					if let Some(to) = fin.travel.filter(|_| !disc::extras_off()) {
+						m.cpu.mem.wr32(va(0x15f5a0), to);
+						m.cpu.mem.wr32(va(0x15f5b8), 1);
+						m.cpu.mem.wr32(va(0x15f550), 1);
 					}
 					// Ship fights: the mouse counts of the field become a virtual stick on top of the keyboard / pad sticks (shipmouse.rs);
 					// the recording keeps the raw sticks + counts, so a replay re-derives the same bytes.
-					let ship = !front && !booting && shipmouse::in_ship_fight(&m);
+					let ship = !front && !booting && !disc::extras_off() && shipmouse::in_ship_fight(&m);
 					// Turret sections (Batalia, Gaspar, Hoven): the same counts steer the turret through its stick (shipmouse.rs).
-					let turret = if front || booting { None } else { shipmouse::turret(&m, shipmouse::y_inverted(&m)) };
+					let turret = if front || booting || disc::extras_off() { None } else { shipmouse::turret(&m, shipmouse::y_inverted(&m)) };
 					let pad_sticks = shipmouse_state.step(ship, ship && shipmouse::y_inverted(&m), fin.mc.look, fin.sticks);
 					let pad_sticks = shipmouse_state.step_turret(turret, fin.mc.look, pad_sticks);
 					m.set_pad(fin.buttons, pad_sticks);
 					// Button prompts: the device of this field (prompts.rs).
 					prompts::begin_field(field, &mut m.cpu.mem);
-					if !front && !booting {
+					if !front && !booting && !disc::extras_off() {
 						let mut fin2 = pcext::pre_field(&mut m, &fin);
 						// The mouse steers the ship or the turret, not the modern camera, in a ship fight / turret section.
 						if ship || turret.is_some() {
@@ -2855,6 +2962,7 @@ impl Retail {
 					}
 					let ic0 = m.cpu.icount;
 					let r = m.frame();
+					disc::rescope(&m.cpu.mem.ram);
 					wperf.icd = m.cpu.icount.wrapping_sub(ic0);
 					vush.end(&mut m.cpu.mem.gsq);
 					let frame_ns = t_frame.elapsed().as_nanos() as u64;
@@ -2916,12 +3024,12 @@ impl Retail {
 						}
 						eprintln!("retail: front end left at field {field} after {front_n} fields");
 					}
-					if cold.is_some() {
+					if cold.is_some() && !disc::extras_off() {
 						pcext::watch_language(&m, field, in_front);
 					}
 					front = in_front;
 					// Mode 6 of the front end: the display buffer's picture comes from the capture (gscap `full`), see the overlay below.
-					let want_full = in_front && !booting && m.rd32(title_boot::FRONT_MODE) == 6;
+					let want_full = in_front && !booting && m.rd32(title_boot::front_mode()) == 6;
 					if want_full != full_on {
 						if let Some(q) = cap.as_ref().and_then(|c| c.tx.as_ref()) {
 							let _ = q.send(ee_oracle::gs::Job::Gif(Vec::new(), if want_full { gscap::FULL_ON } else { gscap::FULL_OFF }));
@@ -2930,7 +3038,7 @@ impl Retail {
 						}
 					}
 					if front && title_trace {
-						let mode = m.rd32(title_boot::FRONT_MODE);
+						let mode = m.rd32(title_boot::front_mode());
 						if mode != last_mode {
 							eprintln!("title: field {field} front mode {last_mode:#x} -> {mode:#x} crtc {:x?}", crate::gsfull::crtc::Crtc::from_regs(&m.cpu.mem.gs));
 							last_mode = mode;
@@ -2969,9 +3077,9 @@ impl Retail {
 					if field % 100 == 0 && std::env::var_os("RAC_TITLE_TRACE").is_some() {
 						let rw = |a: usize| i32::from_le_bytes(m.cpu.mem.ram[a..a + 4].try_into().unwrap());
 						eprintln!("title: ram field {field}: level {} bolts {} slot summaries {:?} autosave {}", rw(0x15ed84), rw(0x15ed98), (0..6).map(|i| rw(0x13d2b0 + i * 0x1c)).collect::<Vec<_>>(), rw(0x13d384));
-						eprintln!("title: ram field {field}: front mode {:#x} req level {} req flag {:#x} loader {:#x} pc {:08x} 15f5a4 {:#x}", rw(0x15f5e4), rw(0x15f5a0), rw(0x15f5b8), rw(0x15ee48) & 0xffff, m.cpu.pc, rw(0x15f5a4));
+						eprintln!("title: ram field {field}: front mode {:#x} req level {} req flag {:#x} loader {:#x} pc {:08x} 15f5a4 {:#x}", rw(va(0x15f5e4)), rw(va(0x15f5a0)), rw(va(0x15f5b8)), rw(0x15ee48) & 0xffff, m.cpu.pc, rw(va(0x15f5a4)));
 					}
-					if !front && !booting {
+					if !front && !booting && !disc::extras_off() {
 						modcam::post_field(&m);
 						strafe::post_field(&m);
 					}
@@ -3117,7 +3225,7 @@ impl Retail {
 					if crate::loadlog::on() {
 						let el = t.elapsed().as_nanos() as u64;
 						(ll_ee, ll_post, ll_n) = (ll_ee + frame_ns, ll_post + el.saturating_sub(frame_ns), ll_n + 1);
-						let (fm, lm) = (m.rd32(title_boot::FRONT_MODE), m.rd32(0x15f5a4));
+						let (fm, lm) = (m.rd32(title_boot::front_mode()), m.rd32(va(0x15f5a4)));
 						if front && fm != ll_fmode {
 							crate::loadlog::say(|| format!("field {field}: front mode {ll_fmode:#x} -> {fm:#x}"));
 							ll_fmode = fm;
@@ -3502,6 +3610,11 @@ impl Retail {
 		fmv_bridge::finish();
 	}
 
+	/// A ship fight is on in the latest field (`shipmouse::in_ship_fight`).
+	pub fn ship_fight(&self) -> bool {
+		self.snap.ship_fight
+	}
+
 	/// The error that stopped the interpreter, once (the viewer shows it in the title bar).
 	pub fn take_stop(&mut self) -> Option<String> {
 		self.stop.take()
@@ -3652,6 +3765,13 @@ impl Retail {
 	/// GS capture's overlay is the whole picture, so a movie's held last picture (viewer MOVIE_HOLD) must give way to it.
 	pub fn menu_presents(&self) -> bool {
 		self.snap.mode == 3 && !self.snap.no_present
+	}
+
+	/// The front end drawn by the GS itself (title_boot::gs_picture): a movie's held last picture gives way to the GS picture at
+	/// once, as the mirror's own scene does (front_mirror.rs `fm_movie_hold`), except under the New Game intro (mode 6) fades.
+	/// The front snapshot always holds (no present word there), so without this the held picture stayed up for good.
+	pub fn gs_front_drops_movie(&self) -> bool {
+		title_boot::gs_picture() && self.snap.front && !self.snap.front_ram.as_ref().is_some_and(|f| f.dialog.mode == 6)
 	}
 
 	/// Retail presents no new picture this field (`Snap::hold`): the viewer keeps the last one (a movie's last picture too).
@@ -4367,9 +4487,37 @@ mod tests {
 			let (x, y) = centre(it, 0);
 			let (fx, fy) = frac(x, y);
 			r.mouse_cursor(fx, fy);
-			let ok = until(&mut r, 150, |m| m.cur == it.addr);
-			eprintln!("mouse: hover {:#x} at ({x:.0},{y:.0}) -> cur {:#x} ok {ok}", it.addr, r.snap.menu.as_ref().map_or(0, |m| m.cur));
+			let from = r.snap.menu.as_ref().map_or(0, |m| m.cur);
+			let mut n = 0;
+			let ok = loop {
+				n += 1;
+				r.tick_keys(|_| false, false, false);
+				if r.snap.menu.as_ref().is_some_and(|m| !m.busy() && m.cur == it.addr) {
+					break true;
+				}
+				if n >= 150 {
+					break false;
+				}
+			};
+			// Fields until the game's selection (as the snap reads it, 2 fields behind) is the hovered item.
+			eprintln!("mouse: hover {:#x} at ({x:.0},{y:.0}) from {from:#x} -> cur {:#x} ok {ok} in {n} fields", it.addr, r.snap.menu.as_ref().map_or(0, |m| m.cur));
 			assert!(ok, "hover {:#x} did not select it", it.addr);
+		}
+		// A long jump: from the last root button straight to the first (several rows in one hover), and back.
+		for it in [items.first().unwrap(), items.last().unwrap()] {
+			let (x, y) = centre(it, 0);
+			let (fx, fy) = frac(x, y);
+			r.mouse_cursor(fx, fy);
+			let mut n = 0;
+			while n < 200 && !r.snap.menu.as_ref().is_some_and(|m| !m.busy() && m.cur == it.addr) {
+				r.tick_keys(|_| false, false, false);
+				n += 1;
+			}
+			// The selection must stay there (no overshoot past the target).
+			pump(&mut r, 10);
+			let cur = r.snap.menu.as_ref().map_or(0, |m| m.cur);
+			eprintln!("mouse: jump to {:#x}: {n} fields, {} rows, stays {}", it.addr, items.len() - 1, cur == it.addr);
+			assert!(n < 200 && cur == it.addr, "jump to {:#x}: {n} fields, now {cur:#x}", it.addr);
 		}
 		// Click into every page, look around, right-click back.
 		for it in &items {

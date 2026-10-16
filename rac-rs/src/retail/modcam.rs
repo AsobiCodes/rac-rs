@@ -24,6 +24,7 @@ use ee_oracle::cpu::Cpu;
 use ee_oracle::rec::{register_hand, Hand};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use crate::retail::disc::va;
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static IN: AtomicBool = AtomicBool::new(false);
@@ -38,6 +39,10 @@ pub fn enable() {
 
 /// The switch: `--modern-cam` or RAC_MODERN_CAM=1 (read when the retail machine loads).
 pub fn enabled() -> bool {
+	// Off on the USA disc with RAC_USA_EXTRAS=0 (retail/disc.rs).
+	if super::disc::extras_off() {
+		return false;
+	}
 	ENABLED.load(Ordering::SeqCst) || std::env::var("RAC_MODERN_CAM").is_ok_and(|v| v != "0" && !v.is_empty()) || super::pcext::enabled()
 }
 
@@ -224,10 +229,32 @@ static LVS: [Lv; 19] = [
 	Lv { level: 17, follow: 0x2fbb58, seg: 0x1ecbd8, res: 0x1746c0, ring: 0x178980, reg: 0x1ac280, attack: 0x211828, health: 0x256778, shift: 0x480 }, // 17_veldin_orbit
 	Lv { level: 18, follow: 0x302190, seg: 0x1f8858, res: 0x1747c0, ring: 0x178a80, reg: 0x1ac380, attack: 0x21c540, health: 0x25e210, shift: 0x580 }, // 18_veldin_finale
 ];
+/// `LVS` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+static LVS_USA: [Lv; 19] = [
+	Lv { level: 0, follow: 0x2e9c28, seg: 0x1efc70, res: 0x173e40, ring: 0x178100, reg: 0x1aba00, attack: 0x214ed8, health: 0x25c338, shift: -0x400 }, // 0_veldin_tutorial
+	Lv { level: 1, follow: 0x314e00, seg: 0x211870, res: 0x1742c0, ring: 0x178580, reg: 0x1abe80, attack: 0x2351d0, health: 0x2711f8, shift: 0x0 }, // 1_novalis
+	Lv { level: 2, follow: 0x2f7ba8, seg: 0x200b58, res: 0x174440, ring: 0x178700, reg: 0x1ac000, attack: 0x223b78, health: 0x25e960, shift: 0x180 }, // 2_aridia
+	Lv { level: 3, follow: 0x2e8590, seg: 0x1e95d8, res: 0x173f40, ring: 0x178200, reg: 0x1abb00, attack: 0x20d078, health: 0x24ad80, shift: -0x380 }, // 3_kerwan
+	Lv { level: 4, follow: 0x2ed570, seg: 0x1e25d8, res: 0x173fc0, ring: 0x178280, reg: 0x1abb80, attack: 0x2084b8, health: 0x24f368, shift: -0x300 }, // 4_eudora
+	Lv { level: 5, follow: 0x3252a8, seg: 0x21e8d8, res: 0x174240, ring: 0x178500, reg: 0x1abe80, attack: 0x242980, health: 0x2865b0, shift: 0x0 }, // 5_rilgar
+	Lv { level: 6, follow: 0x311cc8, seg: 0x207858, res: 0x1745c0, ring: 0x178880, reg: 0x1ac180, attack: 0x22bbe8, health: 0x26b148, shift: 0x300 }, // 6_nebula_g34
+	Lv { level: 7, follow: 0x3255d8, seg: 0x217a58, res: 0x173ec0, ring: 0x178180, reg: 0x1aba80, attack: 0x23cd40, health: 0x284d58, shift: -0x400 }, // 7_umbris
+	Lv { level: 8, follow: 0x3117f8, seg: 0x202680, res: 0x174640, ring: 0x178900, reg: 0x1ac200, attack: 0x2265f8, health: 0x266828, shift: 0x380 }, // 8_batalia
+	Lv { level: 9, follow: 0x311758, seg: 0x20efd8, res: 0x173fc0, ring: 0x178280, reg: 0x1abb80, attack: 0x234bb8, health: 0x27bdf0, shift: -0x300 }, // 9_gaspar
+	Lv { level: 10, follow: 0x2f2060, seg: 0x1e32d8, res: 0x1742c0, ring: 0x178580, reg: 0x1abe80, attack: 0x208540, health: 0x24ee48, shift: 0x0 }, // 10_orxon
+	Lv { level: 11, follow: 0x324fd8, seg: 0x2214d8, res: 0x174840, ring: 0x178b00, reg: 0x1ac400, attack: 0x244c88, health: 0x2821d8, shift: 0x580 }, // 11_pokitaru
+	Lv { level: 12, follow: 0x311e28, seg: 0x2126e0, res: 0x1742c0, ring: 0x178580, reg: 0x1abe80, attack: 0x236400, health: 0x275228, shift: 0x0 }, // 12_hoven
+	Lv { level: 13, follow: 0x314090, seg: 0x1fb658, res: 0x174140, ring: 0x178400, reg: 0x1abd00, attack: 0x2209c0, health: 0x268380, shift: -0x180 }, // 13_oltanis_orbit
+	Lv { level: 14, follow: 0x310728, seg: 0x202e60, res: 0x174540, ring: 0x178800, reg: 0x1ac100, attack: 0x226818, health: 0x2646b8, shift: 0x300 }, // 14_oltanis
+	Lv { level: 15, follow: 0x2f3ec8, seg: 0x1e9358, res: 0x174440, ring: 0x178700, reg: 0x1ac000, attack: 0x20cc60, health: 0x24bbe0, shift: 0x180 }, // 15_quartu
+	Lv { level: 16, follow: 0x2efdb0, seg: 0x1ee4d8, res: 0x174240, ring: 0x178500, reg: 0x1abe80, attack: 0x2126b0, health: 0x257c30, shift: -0x80 }, // 16_kalebo_iii
+	Lv { level: 17, follow: 0x2fc230, seg: 0x1eccd8, res: 0x174740, ring: 0x178a00, reg: 0x1ac300, attack: 0x211cc8, health: 0x256be8, shift: 0x480 }, // 17_veldin_orbit
+	Lv { level: 18, follow: 0x302860, seg: 0x1f8958, res: 0x174840, ring: 0x178b00, reg: 0x1ac400, attack: 0x21c9d8, health: 0x25e678, shift: 0x580 }, // 18_veldin_finale
+];
 
 impl Lv {
 	fn g(&self, novalis: u32) -> u32 {
-		(novalis as i32 + self.shift) as u32
+		va((novalis as i32 + self.shift) as u32)
 	}
 	fn cur(&self) -> u32 {
 		self.g(0x167200)
@@ -242,14 +269,14 @@ impl Lv {
 
 /// The row of the running level (every one of the 19 overlays), from the level byte or, failing that, from the pc.
 fn lv_of(level: u32) -> Option<&'static Lv> {
-	LVS.get(level as usize)
+	(*crate::retail::disc::pick(&LVS, &LVS_USA)).get(level as usize)
 }
 
 /// The row whose hand entry (`at`) is the running pc: a recompiled prologue calls the hand with `c.pc == entry`; the
 /// follow entries and the attack entries are pairwise distinct across the 19 levels [C wg_modcam_plan.md section 1].
 fn lv_here(c: &Cpu, at: fn(&Lv) -> u32) -> Option<&'static Lv> {
 	let l = c.mem.ram[0x15ed84] as usize; // level byte (Machine::level)
-	LVS.get(l).filter(|lv| at(lv) == c.pc).or_else(|| LVS.iter().find(|lv| at(lv) == c.pc))
+	(*crate::retail::disc::pick(&LVS, &LVS_USA)).get(l).filter(|lv| at(lv) == c.pc).or_else(|| (*crate::retail::disc::pick(&LVS, &LVS_USA)).iter().find(|lv| at(lv) == c.pc))
 }
 fn follow_any(c: &mut Cpu) -> bool {
 	lv_here(c, |l| l.follow).is_some_and(|lv| follow(c, lv))
@@ -302,7 +329,7 @@ static HANDS: [Hand; 38] = [
 
 /// Registers the hands (Retail::load, only when `enabled`).
 pub fn register() {
-	register_hand(&HANDS);
+	register_hand(crate::retail::disc::hands(&HANDS));
 }
 
 // ---- feel (the old port's tick_modern, camera.rs, the user's own feature) ------------------------------------
@@ -681,7 +708,7 @@ fn seg_mask(c: &mut Cpu, lv: &Lv, a: [f32; 3], b: [f32; 3], mask: u32) -> Option
 fn why_retail(c: &mut Cpu, lv: &Lv, rec: u32) -> Option<String> {
 	let class = c.mem.rd16(rec + 0x86) as i16;
 	let blend = c.mem.rd32(lv.blend());
-	let mode = c.mem.rd32(GAME_MODE);
+	let mode = c.mem.rd32(va(GAME_MODE));
 	let cam = c.mem.rd8(HERO_CAM);
 	let hs = c.mem.rd32(HERO_STATE);
 	if mode != 0 {
@@ -1033,7 +1060,7 @@ pub fn pre_field(m: &mut ee_oracle::Machine, fin: &super::FieldIn) {
 			u.on = st.active;
 		}
 	}
-	let aiming = st.active && st.aiming && st.live && st.level == m.level() && lv_of(m.level()).is_some() && m.rd32(GAME_MODE) == 0;
+	let aiming = st.active && st.aiming && st.live && st.level == m.level() && lv_of(m.level()).is_some() && m.rd32(va(GAME_MODE)) == 0;
 	if aiming {
 		// Retail's manual-aim override: the gun updaters read 0x14060c instead of the hero-forward yaw as the shot and
 		// target-search direction (their own search and green reticle run on it).
@@ -1063,7 +1090,7 @@ pub fn post_field(m: &ee_oracle::Machine) {
 		if st.live && st.ran != st.field && class != 0 {
 			st.live = false;
 			st.aiming = false;
-			eprintln!("retail: modcam hands back to retail: camera class {class} (game mode {}, field {})", m.rd32(GAME_MODE), st.field);
+			eprintln!("retail: modcam hands back to retail: camera class {class} (game mode {}, field {})", m.rd32(va(GAME_MODE)), st.field);
 		}
 	}
 }

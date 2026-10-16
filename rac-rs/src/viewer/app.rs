@@ -2102,6 +2102,7 @@ crate::loadlog::say(|| "host: pre set_hud_art/fx upload".into());
 				gpu.set_hud_art(&art_textures);
 crate::loadlog::say(|| "host: t set_hud_art".into());
 				gpu.fx_tex = fx_textures.iter().map(|(k, t)| (*k, gpu.upload_texture(Some(t)))).collect();
+				gpu.partfx.set_tints(&fx_textures);
 				// GS CLAMP_1 = 5 variants (`particles::FX_CLAMP`): the hero swing trail's textures; no mips (TEX1 MXL 0).
 				for (k, t) in fx_textures.iter().filter(|(k, _)| crate::retail::queue_b::FX_CLAMPED.contains(k) || crate::retail::queue_q2::FX_CLAMPED.contains(k) || *k < crate::particles::FX_TEX as usize) {
 					let b = gpu.upload(Some(t), &gpu.clamp_sampler);

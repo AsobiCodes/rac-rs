@@ -15,7 +15,7 @@ impl ApplicationHandler for App {
 		}
 		// Agent test runs (RAC_TEST_WINDOW=hidden, or the smoke check's RAC_RETAIL_SMOKE): the window is created off-screen, not activated and not in the taskbar, so
 		// it never shows on the user's desktop while the swapchain keeps presenting. Without those variables the window is the normal one.
-		if std::env::var_os("RAC_TEST_WINDOW").map_or(false, |v| v == "hidden") || std::env::var_os("RAC_RETAIL_SMOKE").is_some() {
+		if test_window() {
 			attrs = attrs.with_active(false).with_position(winit::dpi::PhysicalPosition::new(-32000, -32000));
 			#[cfg(windows)]
 			{
@@ -315,6 +315,19 @@ impl ApplicationHandler for App {
 						}
 					}
 				}
+				// Pause -> Options -> Graphics -> Display mode (retail/pcext.rs `fullscreen`): the window follows the menu value, also
+				// the remembered one at start-up. An off-screen test window only logs the switch, so it never covers the desktop.
+				if let (true, Some(g)) = (self.retail.is_some(), &self.gpu) {
+					let want = crate::retail::pcext::fullscreen();
+					if let Some(f) = display_change(want, self.fullscreen) {
+						self.fullscreen = want;
+						let skip = test_window();
+						eprintln!("retail: display mode {}: set_fullscreen({f:?}){}", if want { "Fullscreen" } else { "Windowed" }, if skip { " skipped (test window)" } else { "" });
+						if !skip {
+							g.window.set_fullscreen(f);
+						}
+					}
+				}
 				// Listener velocity ring (60 Hz ticks, FUN_0029ff68) and the underwater flag (the camera water probe
 				// FUN_0020e8f0, sound.rs `update_water`).
 				// The listener velocity ring and its per-tick probe run in the in-tick audio stage (`audio_stage`, RNG-4b).
@@ -361,17 +374,17 @@ impl ApplicationHandler for App {
 					// ~35 ms a field there, slower than real time, so catching up only stacked five blocking fields into each
 					// frame (5 fps, keys sampled every ~200 ms). One field per frame there.
 					if self.retail.as_ref().is_some_and(|r| r.paused() && r.ms > 20.0) {
-						self.accum = self.accum.min(0.02);
+						self.accum = self.accum.min(crate::retail::disc::field_dt());
 					} else if self.retail.as_ref().is_some_and(|r| r.ms_avg > 20.0) {
 						// The worker is the bottleneck all along (its field takes over 20 ms on average): every tick blocks until the
 						// worker's field is done, so a second tick per frame only halves the frames shown (17 fps at 27 ms a field)
 						// and adds no field: one field per frame, the game runs at the worker's pace either way.
-						self.accum = self.accum.min(0.02);
+						self.accum = self.accum.min(crate::retail::disc::field_dt());
 					} else if self.retail.as_ref().is_some_and(|r| r.ms > 20.0) {
 						// Gameplay on a busy host (the EE field over 20 ms): the 0.25 s catch-up stacked five blocking fields
 						// into every frame (8 fps at 24 ms a field, 2026-10-12). At most two fields a frame: the game runs at
 						// the interpreter's pace either way, the window stays responsive.
-						self.accum = self.accum.min(0.04);
+						self.accum = self.accum.min(crate::retail::disc::field_dt2());
 					}
 					let skip = input.jump || input.attack;
 					// RAC_SHOT_SKIP: a long --shot skips cutscenes so the capture shows play.
@@ -455,8 +468,8 @@ impl ApplicationHandler for App {
 					self.tick_cam_live = false;
 					self.smooth.ticks = 0;
 					profile::lap(profile::Phase::Input);
-					while self.accum >= 0.02 {
-						self.accum -= 0.02;
+					while self.accum >= crate::retail::disc::field_dt() {
+						self.accum -= crate::retail::disc::field_dt();
 						self.smooth.begin_tick(game);
 						// Retail mode: the interpreter runs this tick and its moby table / camera are mirrored (retail.rs).
 						if let Some(r) = &mut self.retail {
@@ -469,7 +482,7 @@ impl ApplicationHandler for App {
 							// in `front_mirror_tick`. While the front end shows in RAM but the mirror is not up yet (a slow
 							// start-up), the request stays in `Retail` and the game thread stays parked in the player hook.
 							if let Some(q) = if r.front_ram().is_some() { None } else { r.take_movie() } {
-								let m = scene::Movie {   lba: q.lba, bytes: q.bytes as u64,   fps: 25.0, };
+								let m = scene::Movie {   lba: q.lba, bytes: q.bytes as u64,   fps: crate::retail::disc::movie_fps(q.lba), };
 								let lang = [0u32, 2, 3, 4, 5].iter().position(|&t| t == q.lang).unwrap_or(0) as u8;
 								eprintln!("retail: movie lba {} bytes {} lang {} at field {} play tick {}", q.lba, q.bytes, q.lang, r.field_count(), self.play_ticks);
 								if let Some(a) = &mut self.audio {
@@ -481,7 +494,7 @@ impl ApplicationHandler for App {
 								r.aspect = g.config.width as f32 / g.config.height.max(1) as f32;
 							}
 							r.sync(game);
-							if (!r.holds() || r.overlay_covers() || r.menu_presents()) && MOVIE_HOLD.swap(false, std::sync::atomic::Ordering::Relaxed) {
+							if (!r.holds() || r.overlay_covers() || r.menu_presents() || r.gs_front_drops_movie()) && MOVIE_HOLD.swap(false, std::sync::atomic::Ordering::Relaxed) {
 								if let Some(g) = &mut self.gpu {
 									g.movie.clear();
 								}
@@ -2850,11 +2863,16 @@ match (m.hero_preview(), &self.hero_anim, self.menu_clip_base) {
 				if self.keys.contains(&KeyCode::KeyQ) { mv([0.0, 0.0, 1.0], -speed) }
 				profile::lap(profile::Phase::Audio);
 				if let Some(g) = &mut self.gpu {
+					// [PC] Graphics -> Lighting Enhanced (viewer/post.rs): only over a retail level drawn by rac-rs (set below).
+					g.modern_ok = false;
 					// Retail mode: the game's own HUD and menus (GS capture) replace rac-rs's. The 4:3 frame fills the
 					// window height, centred; the edge columns stretch to the sides (clamped).
 					if let Some(r) = self.retail.as_mut().filter(|r| r.gs && r.front_ram().is_none()) {
 						// GS-full (--gsfull / RAC_GSFULL=1): the game's whole picture (gsfull/pipe.rs) instead of the overlay.
 						let full = r.gsfull_view().is_some();
+						g.modern_ok = !full;
+						g.ship_fight = r.ship_fight();
+						g.level = self.level;
 						if full {
 							if let Some(f) = r.take_gsfull_frame() {
 								g.set_retail_overlay(f.w, f.h, bytemuck::cast_slice(&f.rgba));
@@ -3343,5 +3361,31 @@ mod tilt_tests {
 		assert!((v[0] - 0.3f32.sin()).abs() < 1e-6 && v[1].abs() < 1e-6 && (v[2] - 0.3f32.cos()).abs() < 1e-6, "{v:?}");
 		let m = hero_to_model(&r, v);
 		assert!(m[0].abs() < 1e-6 && m[1].abs() < 1e-6 && (m[2] - 1.0).abs() < 1e-6, "{m:?}");
+	}
+}
+
+/// Agent test runs (RAC_TEST_WINDOW=hidden, or the smoke check's RAC_RETAIL_SMOKE): the window lives off-screen.
+fn test_window() -> bool {
+	std::env::var_os("RAC_TEST_WINDOW").map_or(false, |v| v == "hidden") || std::env::var_os("RAC_RETAIL_SMOKE").is_some()
+}
+
+/// Graphics -> Display mode: the `set_fullscreen` argument when the wanted mode (`want`, true = Fullscreen) differs from the
+/// window's (`is`): borderless fullscreen on the window's current monitor (no video mode change, alt-tab stays instant), or
+/// None = back to the window.
+fn display_change(want: bool, is: bool) -> Option<Option<winit::window::Fullscreen>> {
+	(want != is).then(|| want.then(|| winit::window::Fullscreen::Borderless(None)))
+}
+
+#[cfg(test)]
+mod display_tests {
+	use super::display_change;
+	use winit::window::Fullscreen;
+
+	#[test]
+	fn display_mode_switches_only_on_change() {
+		assert_eq!(display_change(false, false), None);
+		assert_eq!(display_change(true, true), None);
+		assert_eq!(display_change(true, false), Some(Some(Fullscreen::Borderless(None))));
+		assert_eq!(display_change(false, true), Some(None));
 	}
 }

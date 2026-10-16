@@ -77,6 +77,29 @@ VLevel { stage: 0x1ca49c, sel: 0x1ca498, rows: 0x1ca510, alt: 0x1ca480, count: 0
 	VLevel { stage: 0x1cad1c, sel: 0x1cad18, rows: 0x1cad90, alt: 0x1cad00, count: 0x1caed0, vendor: 0x1cacdc, phase: 0x1cacc0, tick: 0x1cacc4, exitp: 0x162698, p0: 0x1c48b0, add: 0x22ec88, port: 0x293060, reb: 0x291f88, text: 0x200648, ticker: 0x292bf8, snd: 0x285770, entry: 0x293600, panel: 0x296248, boxt: 0x1f9040, clear: 0x1fe138 }, // 17 veldin_orbit
 	VLevel { stage: 0x1cae1c, sel: 0x1cae18, rows: 0x1cae90, alt: 0x1cae00, count: 0x1cafd0, vendor: 0x1caddc, phase: 0x1cadc0, tick: 0x1cadc4, exitp: 0x162798, p0: 0x1c49b0, add: 0x236f88, port: 0x29a9b0, reb: 0x2998d8, text: 0x20c388, ticker: 0x29a548, snd: 0x28cfc0, entry: 0x29af50, panel: 0x29db98, boxt: 0x204dc0, clear: 0x209e78 }, // 18 veldin_finale
 ];
+/// `LV` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+#[rustfmt::skip]
+static LV_USA: [VLevel; 19] = [
+VLevel { stage: 0x1ca51c, sel: 0x1ca518, rows: 0x1ca590, alt: 0x1ca500, count: 0x1ca6d0, vendor: 0x1ca4dc, phase: 0x1ca4c0, tick: 0x1ca4c4, exitp: 0x161e18, p0: 0x1c40b0, add: 0x233e40, port: 0x29b4d8, reb: 0x29a400, text: 0x203ad8, ticker: 0x29b070, snd: 0x28dbe8, entry: 0x29ba78, panel: 0x29e6c0, boxt: 0x1fc4a8, clear: 0x201560 }, // 0 veldin
+	VLevel { stage: 0x1ca99c, sel: 0x1ca998, rows: 0x1caa10, alt: 0x1ca980, count: 0x1cab50, vendor: 0x1ca95c, phase: 0x1ca940, tick: 0x1ca944, exitp: 0x162298, p0: 0x1c4530, add: 0x2494d8, port: 0x2af248, reb: 0x2adef0, text: 0x2259e8, ticker: 0x2aede0, snd: 0x2a1618, entry: 0x2af7e8, panel: 0x2b2430, boxt: 0x21e0a8, clear: 0x223470 }, // 1 novalis
+	VLevel { stage: 0x1cab1c, sel: 0x1cab18, rows: 0x1cab90, alt: 0x1cab00, count: 0x1cacd0, vendor: 0x1caadc, phase: 0x1caac0, tick: 0x1caac4, exitp: 0x162418, p0: 0x1c46b0, add: 0x237338, port: 0x29ace0, reb: 0x299c08, text: 0x214b40, ticker: 0x29a878, snd: 0x28d2c8, entry: 0x29b280, panel: 0x29dec8, boxt: 0x20d4e0, clear: 0x2125c8 }, // 2 aridia
+	VLevel { stage: 0x1ca61c, sel: 0x1ca618, rows: 0x1ca690, alt: 0x1ca600, count: 0x1ca7d0, vendor: 0x1ca5dc, phase: 0x1ca5c0, tick: 0x1ca5c4, exitp: 0x161f18, p0: 0x1c41b0, add: 0x223610, port: 0x287e20, reb: 0x286d48, text: 0x1fd470, ticker: 0x2879b8, snd: 0x27a430, entry: 0x2883c0, panel: 0x28b008, boxt: 0x1f5e10, clear: 0x1faef8 }, // 3 kerwan
+	VLevel { stage: 0x1ca69c, sel: 0x1ca698, rows: 0x1ca710, alt: 0x1ca680, count: 0x1ca850, vendor: 0x1ca65c, phase: 0x1ca640, tick: 0x1ca644, exitp: 0x161f98, p0: 0x1c4230, add: 0x227420, port: 0x28c3d0, reb: 0x28b2f8, text: 0x1f70b8, ticker: 0x28bf68, snd: 0x27eb48, entry: 0x28c970, panel: 0x28f5b8, boxt: 0x1eef10, clear: 0x1f4b40 }, // 4 eudora
+	VLevel { stage: 0x1ca99c, sel: 0x1ca998, rows: 0x1caa10, alt: 0x1ca980, count: 0x1cab50, vendor: 0x1ca95c, phase: 0x1ca940, tick: 0x1ca944, exitp: 0x162218, p0: 0x1c4530, add: 0x25d1b8, port: 0x2c3c28, reb: 0x2c2b50, text: 0x2327c0, ticker: 0x2c37c0, snd: 0x2b62a8, entry: 0x2c41c8, panel: 0x2c6e10, boxt: 0x22b160, clear: 0x230248 }, // 5 rilgar
+	VLevel { stage: 0x1cac9c, sel: 0x1cac98, rows: 0x1cad10, alt: 0x1cac80, count: 0x1cae50, vendor: 0x1cac5c, phase: 0x1cac40, tick: 0x1cac44, exitp: 0x162598, p0: 0x1c4830, add: 0x243c00, port: 0x2a85d0, reb: 0x2a74f8, text: 0x21bb78, ticker: 0x2a8168, snd: 0x29acd8, entry: 0x2a8b70, panel: 0x2ab7b8, boxt: 0x214190, clear: 0x219600 }, // 6 nebula
+	VLevel { stage: 0x1ca59c, sel: 0x1ca598, rows: 0x1ca610, alt: 0x1ca580, count: 0x1ca750, vendor: 0x1ca55c, phase: 0x1ca540, tick: 0x1ca544, exitp: 0x161e98, p0: 0x1c4130, add: 0x25bca8, port: 0x2c2180, reb: 0x2c10a8, text: 0x22b940, ticker: 0x2c1d18, snd: 0x2b48a8, entry: 0x2c2720, panel: 0x2c5368, boxt: 0x2242e0, clear: 0x2293c8 }, // 7 umbris
+	VLevel { stage: 0x1cad1c, sel: 0x1cad18, rows: 0x1cad90, alt: 0x1cad00, count: 0x1caed0, vendor: 0x1cacdc, phase: 0x1cacc0, tick: 0x1cacc4, exitp: 0x162618, p0: 0x1c48b0, add: 0x23f0b0, port: 0x2a38f8, reb: 0x2a2820, text: 0x216658, ticker: 0x2a3490, snd: 0x295ee0, entry: 0x2a3e98, panel: 0x2a6ae0, boxt: 0x20efb8, clear: 0x2140e0 }, // 8 batalia
+	VLevel { stage: 0x1ca69c, sel: 0x1ca698, rows: 0x1ca710, alt: 0x1ca680, count: 0x1ca850, vendor: 0x1ca65c, phase: 0x1ca640, tick: 0x1ca644, exitp: 0x161f98, p0: 0x1c4230, add: 0x253b20, port: 0x2b7e28, reb: 0x2b6d50, text: 0x2237b8, ticker: 0x2b79c0, snd: 0x2aa4a8, entry: 0x2b83c8, panel: 0x2bb010, boxt: 0x21b860, clear: 0x221240 }, // 9 gaspar
+	VLevel { stage: 0x1ca99c, sel: 0x1ca998, rows: 0x1caa10, alt: 0x1ca980, count: 0x1cab50, vendor: 0x1ca95c, phase: 0x1ca940, tick: 0x1ca944, exitp: 0x162298, p0: 0x1c4530, add: 0x2274a8, port: 0x28bfd8, reb: 0x28af00, text: 0x1f7140, ticker: 0x28bb70, snd: 0x27e678, entry: 0x28c578, panel: 0x28f1c0, boxt: 0x1efb10, clear: 0x1f4bc8 }, // 10 orxon
+	VLevel { stage: 0x1caf1c, sel: 0x1caf18, rows: 0x1caf90, alt: 0x1caf00, count: 0x1cb0d0, vendor: 0x1caedc, phase: 0x1caec0, tick: 0x1caec4, exitp: 0x162818, p0: 0x1c4ab0, add: 0x25a870, port: 0x2be3d0, reb: 0x2bd2f8, text: 0x235440, ticker: 0x2bdf68, snd: 0x2b0ac0, entry: 0x2be970, panel: 0x2c15b8, boxt: 0x22de10, clear: 0x232ec8 }, // 11 pokitaru
+	VLevel { stage: 0x1ca99c, sel: 0x1ca998, rows: 0x1caa10, alt: 0x1ca980, count: 0x1cab50, vendor: 0x1ca95c, phase: 0x1ca940, tick: 0x1ca944, exitp: 0x162298, p0: 0x1c4530, add: 0x24d6b0, port: 0x2b1d60, reb: 0x2b0c88, text: 0x2269e8, ticker: 0x2b18f8, snd: 0x2a43e0, entry: 0x2b2300, panel: 0x2b4f48, boxt: 0x21f068, clear: 0x224470 }, // 12 hoven
+	VLevel { stage: 0x1ca81c, sel: 0x1ca818, rows: 0x1ca890, alt: 0x1ca800, count: 0x1ca9d0, vendor: 0x1ca7dc, phase: 0x1ca7c0, tick: 0x1ca7c4, exitp: 0x162118, p0: 0x1c43b0, add: 0x23f928, port: 0x2a5b68, reb: 0x2a4810, text: 0x20f5c0, ticker: 0x2a5700, snd: 0x297fa0, entry: 0x2a6108, panel: 0x2a8d50, boxt: 0x207f90, clear: 0x20d048 }, // 13 oltanis_orbit
+	VLevel { stage: 0x1cac1c, sel: 0x1cac18, rows: 0x1cac90, alt: 0x1cac00, count: 0x1cadd0, vendor: 0x1cabdc, phase: 0x1cabc0, tick: 0x1cabc4, exitp: 0x162518, p0: 0x1c47b0, add: 0x23d140, port: 0x2a1880, reb: 0x2a07a8, text: 0x2170e8, ticker: 0x2a1418, snd: 0x293e40, entry: 0x2a1e20, panel: 0x2a4a68, boxt: 0x20f738, clear: 0x214b70 }, // 14 oltanis
+	VLevel { stage: 0x1cab1c, sel: 0x1cab18, rows: 0x1cab90, alt: 0x1cab00, count: 0x1cacd0, vendor: 0x1caadc, phase: 0x1caac0, tick: 0x1caac4, exitp: 0x162418, p0: 0x1c46b0, add: 0x224a38, port: 0x289420, reb: 0x288348, text: 0x1fd250, ticker: 0x288fb8, snd: 0x27bac0, entry: 0x2899c0, panel: 0x28c608, boxt: 0x1f5be0, clear: 0x1facd8 }, // 15 quartu
+	VLevel { stage: 0x1ca99c, sel: 0x1ca998, rows: 0x1caa10, alt: 0x1ca980, count: 0x1cab50, vendor: 0x1ca95c, phase: 0x1ca940, tick: 0x1ca944, exitp: 0x162218, p0: 0x1c4530, add: 0x22f8c8, port: 0x294448, reb: 0x293370, text: 0x202340, ticker: 0x293fe0, snd: 0x286a30, entry: 0x2949e8, panel: 0x297630, boxt: 0x1fad10, clear: 0x1ffdc8 }, // 16 kalebo
+	VLevel { stage: 0x1cae1c, sel: 0x1cae18, rows: 0x1cae90, alt: 0x1cae00, count: 0x1cafd0, vendor: 0x1caddc, phase: 0x1cadc0, tick: 0x1cadc4, exitp: 0x162718, p0: 0x1c49b0, add: 0x22f128, port: 0x293738, reb: 0x292660, text: 0x200b80, ticker: 0x2932d0, snd: 0x285e48, entry: 0x293cd8, panel: 0x296920, boxt: 0x1f9510, clear: 0x1fe608 }, // 17 veldin_orbit
+	VLevel { stage: 0x1caf1c, sel: 0x1caf18, rows: 0x1caf90, alt: 0x1caf00, count: 0x1cb0d0, vendor: 0x1caedc, phase: 0x1caec0, tick: 0x1caec4, exitp: 0x162818, p0: 0x1c4ab0, add: 0x237420, port: 0x29b080, reb: 0x299fa8, text: 0x20c8c0, ticker: 0x29ac18, snd: 0x28d690, entry: 0x29b620, panel: 0x29e268, boxt: 0x205290, clear: 0x20a348 }, // 18 veldin_finale
+];
 
 #[rustfmt::skip]
 static HANDS: [Hand; 38] = [
@@ -123,7 +146,7 @@ static HANDS: [Hand; 38] = [
 /// Registers the hooks (Retail::load, after pcext's text hand). RAC_VENDOR_OFF=1 (tests): none, retail's own shop.
 pub fn register() {
 	if pcext::enabled() && std::env::var_os("RAC_VENDOR_OFF").is_none() {
-		register_hand(&HANDS);
+		register_hand(crate::retail::disc::hands(&HANDS));
 	}
 }
 
@@ -168,7 +191,7 @@ impl Regs {
 /// The purchase state machine (called once per frame by the browse driver, only while the shop is up): on a new Square press in
 /// browse (stage 0, not leaving) with the option on, buys all the ammo; always declines so retail's own code runs after it.
 fn vendor_any(c: &mut Cpu) -> bool {
-	let Some(v) = LV.iter().find(|v| v.entry == c.pc) else { return false };
+	let Some(v) = (*crate::retail::disc::pick(&LV, &LV_USA)).iter().find(|v| v.entry == c.pc) else { return false };
 	let now = c.mem.rd32(PAD_NOW);
 	let prev = PREV.swap(now, Ordering::Relaxed);
 	if !pcext::buyall_on() || now & SQUARE == 0 || prev & SQUARE != 0 {
@@ -248,7 +271,7 @@ fn buy_all(c: &mut Cpu, v: &VLevel) {
 /// then draw centred by the measured height) but with the two-line text pcext `ID_BUYALL_PROMPT` ("[Cross] Buy", newline,
 /// "[Square] Buy all ammo"), so the lines sit together in retail's own line pitch. Every other stage and the option off: retail's runs.
 fn panel_any(c: &mut Cpu) -> bool {
-	let Some(v) = LV.iter().find(|v| v.panel == c.pc) else { return false };
+	let Some(v) = (*crate::retail::disc::pick(&LV, &LV_USA)).iter().find(|v| v.panel == c.pc) else { return false };
 	if !pcext::buyall_on() || c.mem.rd32(v.stage) != 0 {
 		return false;
 	}
@@ -321,7 +344,7 @@ mod tests {
 		ee_game::register();
 		pcext::register();
 		static SPY: [Hand; 1] = [Hand { entry: 0x28eee0, end: 0x28f138, hash: 0xd2277184ec7a49f4, est: 0, f: spy }];
-		register_hand(&SPY);
+		register_hand(crate::retail::disc::hands(&SPY));
 		m.enable_rec();
 		for _ in 0..4 {
 			m.frame().expect("shop frame");

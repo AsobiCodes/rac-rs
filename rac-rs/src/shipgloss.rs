@@ -20,11 +20,15 @@ const TEX: usize = 0x15;
 const TEX_FINAL: usize = 1;
 
 fn at(img: &[u8], va: usize, len: usize) -> Option<&[u8]> {
+	if crate::retail::disc::usa() {
+		return crate::retail::disc::ov_bytes(img, va, len);
+	}
 	img.get(va.checked_sub(IMAGE_BASE)?..)?.get(..len)
 }
 
 fn u32_at(img: &[u8], va: usize) -> Option<u32> {
-	Some(u32::from_le_bytes(at(img, va, 4)?.try_into().ok()?))
+	// `va` = a PAL table address (Novalis, level 1); `at` also reads the USA pointers stored in them.
+	Some(u32::from_le_bytes(at(img, crate::retail::disc::va_level(1, va as u32) as usize, 4)?.try_into().ok()?))
 }
 
 struct Ship {

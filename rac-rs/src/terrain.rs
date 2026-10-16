@@ -383,6 +383,10 @@ fn fragment_all(data: &[u8], table_offset: usize, header: &[u8], lod: u8, lights
 			// GS CLAMP_1 source (qword 2): word +0x20 WMS, word +0x24 WMT (as the shrub records); retail RAM holds the built
 			// CLAMP_1 qword (register 0x08) there.
 			let (wms, wmt) = (u32_at(common[1].data, i * 80 + 0x20)?, u32_at(common[1].data, i * 80 + 0x24)?);
+			if crate::viewer::gs_state::enabled() {
+				let mmin = u32_at(common[1].data, i * 80 + 0x14)? as u64;
+				crate::viewer::gs_state::guard_world("tfrag", crate::viewer::gs_state::TEST_TFRAG, (k as u32 as u64 & 0xfff) << 32 | mmin << 6 | 0x20, wms as u64 | (wmt as u64) << 2);
+			}
 			if wms > 1 || wmt > 1 {
 				return Err("unsupported terrain CLAMP region mode".into());
 			}

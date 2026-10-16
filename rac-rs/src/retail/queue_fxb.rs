@@ -8,6 +8,7 @@
 
 use crate::particles::WorldQuad;
 use ee_oracle::Machine;
+use crate::retail::disc::va;
 
 /// gp of every level's callbacks (see `queue_q2::gp`).
 const GP: u32 = 0x166c00;
@@ -35,7 +36,11 @@ struct Cfg {
 }
 
 const RILGAR: Cfg = Cfg { level: 5, f: 0x2d72b0, l_at: GP - 0x5860, list_tbl: 0x1abcc0, base_ptr: 0x15ff98, st_at: 0x1cdcf0, strands: 3, ring: 0x20, w: 0.15, rilgar: true };
+/// `RILGAR` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+const RILGAR_USA: Cfg = Cfg { level: 5, f: 0x2d7920, l_at: GP - 0x5860, list_tbl: 0x1abcc0, base_ptr: 0x15ffd8, st_at: 0x1cdd70, strands: 3, ring: 0x20, w: 0.15, rilgar: true };
 const POKITARU: Cfg = Cfg { level: 11, f: 0x318bf8, l_at: GP - 0x4890, list_tbl: 0x1ac1c0, base_ptr: 0x15ff58, st_at: 0x1f1390, strands: 2, ring: 0xc0, w: 0.25, rilgar: false };
+/// `POKITARU` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+const POKITARU_USA: Cfg = Cfg { level: 11, f: 0x3192c8, l_at: GP - 0x4890, list_tbl: 0x1ac240, base_ptr: 0x15ffd8, st_at: 0x1f1490, strands: 2, ring: 0xc0, w: 0.25, rilgar: false };
 
 fn rgba(w: u32) -> [f32; 4] {
 	[(w & 0xff) as f32 / 128.0, (w >> 8 & 0xff) as f32 / 128.0, (w >> 16 & 0xff) as f32 / 128.0, (w >> 24) as f32 / 128.0]
@@ -51,7 +56,7 @@ fn lerp_colour(t: f32, a: u32, b: u32) -> u32 {
 
 /// Hook (`queue_b::fill`, queue A loop): draw `f(arg)` when it is a ribbon-trail callback of this module.
 pub fn fill_a(m: &Machine, level: u32, f: u32, arg: u32, out: &mut Vec<WorldQuad>) {
-	for c in [&RILGAR, &POKITARU] {
+	for c in [&(*crate::retail::disc::pick(&RILGAR, &RILGAR_USA)), &(*crate::retail::disc::pick(&POKITARU, &POKITARU_USA))] {
 		if c.level == level && c.f == f {
 			trail(m, c, arg, out);
 		}
@@ -65,10 +70,10 @@ fn trail(m: &Machine, c: &Cfg, arg: u32, out: &mut Vec<WorldQuad>) {
 	let b21 = m.rd8(arg + 0x21) as u32;
 	// Colours and ALPHA: Rilgar reads them from gp words (gate words must be 0), Pokitaru has them as immediates.
 	let (alpha, c1, c2) = if c.rilgar {
-		if m.rd32(GP - 0x5850) != 0 || m.rd32(GP - 0x584c) != 0 {
+		if m.rd32(va(GP - 0x5850)) != 0 || m.rd32(va(GP - 0x584c)) != 0 {
 			return;
 		}
-		([GP - 0x5848, GP - 0x5844, GP - 0x5840, GP - 0x583c].map(|a| m.rd32(a)), m.rd32(GP - 0x5838), m.rd32(GP - 0x5834))
+		([GP - 0x5848, GP - 0x5844, GP - 0x5840, GP - 0x583c].map(|a| m.rd32(va(a))), m.rd32(va(GP - 0x5838)), m.rd32(va(GP - 0x5834)))
 	} else {
 		if b21 == 0xff {
 			return;
@@ -89,7 +94,7 @@ fn trail(m: &Machine, c: &Cfg, arg: u32, out: &mut Vec<WorldQuad>) {
 		return;
 	}
 	let ctrl_class = m.rd16(arg + 0xa6);
-	let a = ((m.rd32(0x15_f5ac).wrapping_add(3)) & 3) as f32;
+	let a = ((m.rd32(va(0x15_f5ac)).wrapping_add(3)) & 3) as f32;
 	let st: [[f32; 2]; 4] = std::array::from_fn(|i| [m.rdf(c.st_at + 8 * i as u32), m.rdf(c.st_at + 8 * i as u32 + 4)]);
 	// colour of corner i of segment k
 	let col = |k: i32, i: i32| -> [f32; 4] {
@@ -136,5 +141,5 @@ fn trail(m: &Machine, c: &Cfg, arg: u32, out: &mut Vec<WorldQuad>) {
 
 /// Effects layer claimed set (retail/efx_draw.rs): the callbacks `fill_a` draws.
 pub fn claims(level: u32, f: u32) -> bool {
-	[&RILGAR, &POKITARU].iter().any(|c| c.level == level && c.f == f)
+	[&(*crate::retail::disc::pick(&RILGAR, &RILGAR_USA)), &(*crate::retail::disc::pick(&POKITARU, &POKITARU_USA))].iter().any(|c| c.level == level && c.f == f)
 }

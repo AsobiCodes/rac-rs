@@ -288,6 +288,7 @@ impl Gs {
         if let Some(f) = self.main_fbp {
             o.rows = ((self.main_end.saturating_sub(f * 32)) / (self.main_bw.max(1) * 32) * 32).clamp(1, o.h);
         }
+        o.rows = o.rows.min(disp_rows());
         self.held.copy_from_slice(&o.px);
         self.held_rows = o.rows;
         for p in &mut o.px {
@@ -311,7 +312,7 @@ impl Gs {
         let Some(px) = self.dcur.take() else { return };
         self.held.copy_from_slice(&px);
         let px = px.iter().map(|p| [(p[0] / 255.0).clamp(0.0, 1.0), (p[1] / 255.0).clamp(0.0, 1.0), (p[2] / 255.0).clamp(0.0, 1.0), p[3]]).collect();
-        self.done = Some(Overlay { w: self.cur.w, h: self.cur.h, rows: self.held_rows, frozen: false, disp: true, px });
+        self.done = Some(Overlay { w: self.cur.w, h: self.cur.h, rows: self.held_rows.min(disp_rows()), frozen: false, disp: true, px });
         if std::env::var("RAC_GSDISP").is_ok() {
             eprintln!("gsdisp publish f{}", self.frames);
         }
@@ -1083,4 +1084,9 @@ fn ffloor(x: f32) -> f32 {
     } else {
         x.floor()
     }
+}
+
+/// Rows of the display buffer: 512 on PAL, 448 on NTSC (the USA disc scissors its display buffer at 448 rows).
+fn disp_rows() -> u32 {
+    if ee_oracle::ver::ntsc() { 448 } else { super::H }
 }

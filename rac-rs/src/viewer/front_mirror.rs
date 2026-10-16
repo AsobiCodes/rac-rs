@@ -21,7 +21,7 @@ const P_SOUND: u32 = 0x1d4838;
 fn page_of(m: Option<&MenuSnap>) -> Option<frontend::Page> {
 	use frontend::Page::*;
 	let Some(m) = m else { return Some(Title) };
-	Some(match m.page {
+	Some(match crate::retail::disc::unva(m.page) {
 		P_ROOT => Root,
 		P_NEW => NewGame,
 		P_LOAD => LoadGame,
@@ -100,19 +100,19 @@ impl App {
 	/// The retail fields of the front end (no `Game` runs there): keys in, sound and movies out, one per 50 Hz step.
 	pub(super) fn front_mirror_tick(&mut self, dt: f32) {
 		let (Some(r), Some(fe)) = (self.retail.as_mut(), self.front.as_mut()) else { return };
-		fe.acc = (fe.acc + dt).min(0.04);
+		fe.acc = (fe.acc + dt).min(crate::retail::disc::field_dt2());
 		// The front end's level-load loop (retail.rs `in_load_loop`) takes no pace from the wall clock: fields run back to back for
 		// up to `TURBO_BUDGET` of this frame (the window stays alive), the same fields as at 50 Hz.
 		let t0 = std::time::Instant::now();
-		while fe.acc >= 0.02 || (r.turbo() && t0.elapsed() < TURBO_BUDGET) {
-			fe.acc = (fe.acc - 0.02).max(0.0);
+		while fe.acc >= crate::retail::disc::field_dt() || (r.turbo() && t0.elapsed() < TURBO_BUDGET) {
+			fe.acc = (fe.acc - crate::retail::disc::field_dt()).max(0.0);
 			// --shot (RAC_SHOT_TICK) counts the front end's fields as play ticks.
 			self.play_ticks += 1;
 			let keys = &self.keys;
 			r.tick_keys(|k| keys.contains(&k), false, false);
 			// The attract movie and the New Game intro (retail/fmv_bridge.rs): streamed from the disc, skipped like retail's (any pad press).
 			if let Some(q) = r.take_movie() {
-				let m = scene::Movie { lba: q.lba, bytes: q.bytes as u64, fps: 25.0 };
+				let m = scene::Movie { lba: q.lba, bytes: q.bytes as u64, fps: crate::retail::disc::movie_fps(q.lba) };
 				let lang = [0u32, 2, 3, 4, 5].iter().position(|&t| t == q.lang).unwrap_or(0) as u8;
 				eprintln!("retail: front end movie lba {} bytes {} lang {}", q.lba, q.bytes, q.lang);
 				if let Some(a) = &mut self.audio {

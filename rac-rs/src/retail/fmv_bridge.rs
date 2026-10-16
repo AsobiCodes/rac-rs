@@ -73,6 +73,11 @@ pub const PLAYERS: [Player; 21] = [
 	Player { level: BOOT, name: "boot", entry: 0x239ec8, end: 0x239f70, hash: 0x3c23_96fd_f89d_3d8a },
 ];
 
+/// The players of the disc that runs (`PLAYERS` PAL, retail/disc.rs `PLAYERS_USA`).
+pub fn players() -> &'static [Player] {
+	if super::disc::usa() { &super::disc::PLAYERS_USA } else { &PLAYERS }
+}
+
 /// Which presses end a movie early. Retail's player (boot FUN_00239f70, lines 77746-77760) reads these words each field:
 /// `0x15eed8` (-1 the boot logos, 2 the attract movie, 0 the story movies), `0x15eea0` / `0x15ee20` (zero in a normal
 /// run) and the level word `0x15ed84`; `0x13cae4` is the buttons newly pressed this field, `0x13cae0` the held ones.
@@ -174,7 +179,7 @@ static HOOKS: [ee_oracle::rec::Hand; PLAYERS.len()] = {
 /// mismatch means that level's movies would run the retail player, which spins without IPU emulation).
 pub fn check_level(m: &ee_oracle::Machine, level: u32) -> bool {
 	let ram = |p: &Player| ee_oracle::rec::hash(&m.cpu.mem, p.entry, p.end);
-	let mine = PLAYERS.iter().find(|p| p.level == level);
+	let mine = players().iter().find(|p| p.level == level);
 	let ok = mine.is_some_and(|p| ram(p) == p.hash);
 	match mine {
 		Some(p) => eprintln!("fmv_bridge: level {level} movie player hook {} ({} {:06x} ram {:016x} want {:016x})", if ok { "MATCH" } else { "NO MATCH" }, p.name, p.entry, ram(p), p.hash),
@@ -184,7 +189,11 @@ pub fn check_level(m: &ee_oracle::Machine, level: u32) -> bool {
 }
 
 pub fn register() {
-	ee_oracle::rec::register_hand(&HOOKS);
+	if super::disc::usa() {
+		ee_oracle::rec::register_hand(&super::disc::HOOKS_USA);
+	} else {
+		ee_oracle::rec::register_hand(&HOOKS);
+	}
 }
 
 /// A new game start (`Retail::load`): clears an `abort` left by the previous Retail's drop (and any stale request).

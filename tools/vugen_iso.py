@@ -77,8 +77,13 @@ class IsoDisc:
         return self.f.read(n)
 
 
+BOOT_NAMES = {'SCES_509.16': 0, 'SCUS_971.99': 0xc0}   # boot ELF -> shift of the orb tables in the Veldin overlay section
+ORB_SHIFT = 0
+
+
 def boot_elf(d):
-    """SCES_509.16 via a minimal ISO9660 walk (root directory record)."""
+    """SCES_509.16 (PAL) or SCUS_971.99 (USA) via a minimal ISO9660 walk (root directory record); sets ORB_SHIFT."""
+    global ORB_SHIFT
     pvd = d.bytes(16, ISO_SEC)
     assert pvd[1:6] == b'CD001', 'not an ISO9660 image'
     root_lba, root_len = u32(pvd, 156 + 2), u32(pvd, 156 + 10)
@@ -90,10 +95,12 @@ def boot_elf(d):
             o = (o // ISO_SEC + 1) * ISO_SEC
             continue
         name = dirdata[o + 33:o + 33 + dirdata[o + 32]].decode('latin1')
-        if name.upper().startswith('SCES_509.16'):
-            return d.bytes(u32(dirdata, o + 2), u32(dirdata, o + 10))
+        for bn, shift in BOOT_NAMES.items():
+            if name.upper().startswith(bn):
+                ORB_SHIFT = shift
+                return d.bytes(u32(dirdata, o + 2), u32(dirdata, o + 10))
         o += ln
-    raise FileNotFoundError('SCES_509.16 not found on the disc image')
+    raise FileNotFoundError('neither SCES_509.16 nor SCUS_971.99 on the disc image')
 
 
 def wad_decompress(data):
@@ -187,7 +194,7 @@ def orb_rs(d):
     ov = level_section(d, 0, 0)
     out = [ORB_HEAD]
     for name, ty, w, n, size, off, want, doc in ORB_TABLES:
-        b = ov[off:off + size]
+        b = ov[off + ORB_SHIFT:off + ORB_SHIFT + size]
         h = hashlib.sha256(b).hexdigest()
         if h != want:
             sys.exit('%s: orb table does not match the PAL v1.00 disc (sha256 %s)' % (name, h))

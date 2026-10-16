@@ -42,6 +42,8 @@ pub const FX_CLAMPED: [usize; 1] = [0x0b];
 /// Street-lamp glow draw (class 1511, update FUN_00307488 on Oltanis; Oltanis FUN_00307b00, Rilgar twin FUN_0031c918, queue A)
 /// [C: nebula-style decode of overlay.elf.c 174324-174449 and the Rilgar disassembly].
 const LAMP_FN: [(u32, u32); 2] = [(5, 0x31c918), (14, 0x307b00)];
+/// `LAMP_FN` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+const LAMP_FN_USA: [(u32, u32); 2] = [(5, 0x31cf58), (14, 0x308150)];
 /// ON (2026-10-12): the first port read the gp floats at gp + 0x40 and drew the glow on the ground, where retail shows none; with gp 0x166c00 (K1 = 4.0,
 /// K2 = -0.1) the halo sits on the globe and agrees with retail's GS picture (fg1/14_0692, shots q2c vs q2i).
 const LAMP_ENABLED: bool = true;
@@ -95,9 +97,9 @@ fn gp_floats(m: &Machine, level: u32, f: u32, insns: u32) -> Vec<u32> {
 
 /// Hook (`queue_b::fill`, queue A loop): draw `f(arg)` when it is a callback of this module.
 pub fn fill_a(m: &Machine, level: u32, f: u32, arg: u32, out: &mut Vec<WorldQuad>) {
-	if LAMP_ENABLED && LAMP_FN.contains(&(level, f)) {
+	if LAMP_ENABLED && (*crate::retail::disc::pick(&LAMP_FN, &LAMP_FN_USA)).contains(&(level, f)) {
 		lamp(m, level, f, arg, out);
-	} else if BEAM_FN.contains(&(level, f)) {
+	} else if (*crate::retail::disc::pick(&BEAM_FN, &BEAM_FN_USA)).contains(&(level, f)) {
 		beam(m, f, arg, out);
 	}
 }
@@ -105,6 +107,8 @@ pub fn fill_a(m: &Machine, level: u32, f: u32, arg: u32, out: &mut Vec<WorldQuad
 /// Searchlight beam draw (class 823): Rilgar FUN_0030bbb0, Umbris twin FUN_003041d8 (queue A) [C: overlay C 7_umbris 156263-156482, the
 /// tables read from RAM].
 const BEAM_FN: [(u32, u32); 2] = [(5, 0x30bbb0), (7, 0x3041d8)];
+/// `BEAM_FN` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+const BEAM_FN_USA: [(u32, u32); 2] = [(5, 0x30c220), (7, 0x3048b0)];
 
 /// The gp-relative `lw` addresses of the function in order of appearance (first `insns` words).
 fn gp_words(m: &Machine, f: u32, insns: u32) -> Vec<u32> {
@@ -210,5 +214,5 @@ fn lamp(m: &Machine, level: u32, f: u32, arg: u32, out: &mut Vec<WorldQuad>) {
 
 /// Effects layer claimed set (retail/efx_draw.rs): the callbacks `fill_a` draws.
 pub fn claims(level: u32, f: u32) -> bool {
-	(LAMP_ENABLED && LAMP_FN.contains(&(level, f))) || BEAM_FN.contains(&(level, f))
+	(LAMP_ENABLED && (*crate::retail::disc::pick(&LAMP_FN, &LAMP_FN_USA)).contains(&(level, f))) || (*crate::retail::disc::pick(&BEAM_FN, &BEAM_FN_USA)).contains(&(level, f))
 }

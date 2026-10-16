@@ -14,6 +14,7 @@
 use ee_oracle::Machine;
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
+use crate::retail::disc::va;
 
 /// Class id -> first ST pair (s, t) of every packet (LOD 0 then LOD 1 packet order) of the WAD class block.
 static BASE: Mutex<Option<HashMap<u32, Vec<Option<[u16; 2]>>>>> = Mutex::new(None);
@@ -129,7 +130,7 @@ pub fn class_uv(m: &Machine, level: u32) -> Vec<(u32, [f32; 2])> {
 		}
 		if let Some(d) = delta.filter(|d| *d != [0, 0]) {
 			if log {
-				eprintln!("asset_feed: class {class} ST delta ({}, {}) / 4096 at field {}", d[0], d[1], m.rd32(0x15f5ac));
+				eprintln!("asset_feed: class {class} ST delta ({}, {}) / 4096 at field {}", d[0], d[1], m.rd32(va(0x15f5ac)));
 			}
 			out.push((class, [d[0] as f32 / 4096.0, d[1] as f32 / 4096.0]));
 		}

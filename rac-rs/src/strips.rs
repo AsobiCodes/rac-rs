@@ -140,6 +140,7 @@ impl StripGroup {
 	/// FIX per pass). With `pulse_from` (class 1225) the pulse of every record is rewritten after the strips are
 	/// submitted. The 400-unit sphere reject is left to the GPU clip.
 	pub fn draw(&mut self, pulse_from: Option<u32>) -> Vec<crate::particles::WorldStrip> {
+		crate::viewer::gs_state::guard_path("strips");
 		use crate::particles::WorldStrip;
 		let mut out = Vec::new();
 		if !std::mem::take(&mut self.reg) {

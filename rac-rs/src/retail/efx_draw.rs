@@ -21,6 +21,7 @@
 use super::efx_own::{self, Own};
 use crate::particles::{WorldQuad, WorldStrip, FX_CLAMP};
 use ee_oracle::Machine;
+use crate::retail::disc::va;
 
 /// fx slot table (16-byte records, +0 = the slot's TEX0 once uploaded) at Novalis's address; per level + LEVEL_SHIFT.
 const SLOT_TABLE: u32 = 0x16d580;
@@ -53,6 +54,9 @@ pub struct Stats {
 	pub zw: u32,
 	/// Prims drawn through the FIX-blend strip pass (ALPHA 0x64 / 0x68).
 	pub fix_tris: u32,
+	/// Distinct (owner fn, what, word) of the prims the layer cannot draw as the GS does: "blend" = ALPHA word of a skipped prim (reason 4,
+	/// ABE off = 0), "mag" = TEX1 with MMAG nearest of a drawn prim (GS_AUDIT.md run 9).
+	pub odd: Vec<(u32, &'static str, u64)>,
 }
 
 /// A prim's TEST / ZBUF against the mirror's particle pipelines [C: GS manual TEST / ZBUF]: (drawable, writes Z).
@@ -134,6 +138,8 @@ struct Prim {
 	test: Option<u64>,
 	zbuf: Option<u64>,
 	tex1: Option<u64>,
+	/// FOGCOL (reg 0x3d, 24 bits) when the owner's stream wrote it (None = the GS keeps the earlier pass's value: the level fog colour).
+	fogcol: Option<u32>,
 }
 
 /// The GS register state a DIRECT stream sets, and the vertex queue.
@@ -151,6 +157,7 @@ struct Gs {
 	test: [Option<u64>; 2],
 	zbuf: [Option<u64>; 2],
 	tex1: [Option<u64>; 2],
+	fogcol: Option<u32>,
 	vq: [V; 3],
 	n: usize,
 	lines: u32,
@@ -160,7 +167,7 @@ struct Gs {
 
 impl Gs {
 	fn new() -> Gs {
-		Gs { prim: 0, prmode: 0, prmodecont: true, rgba: [0x80; 4], q: 1.0, st: [0.0; 2], uv: [0.0; 2], tex0: [0; 2], clamp: [0; 2], alpha: [0; 2], test: [None; 2], zbuf: [None; 2], tex1: [None; 2], vq: [V::default(); 3], n: 0, lines: 0, target: Vec::new() }
+		Gs { prim: 0, prmode: 0, prmodecont: true, rgba: [0x80; 4], q: 1.0, st: [0.0; 2], uv: [0.0; 2], tex0: [0; 2], clamp: [0; 2], alpha: [0; 2], test: [None; 2], zbuf: [None; 2], tex1: [None; 2], fogcol: None, vq: [V::default(); 3], n: 0, lines: 0, target: Vec::new() }
 	}
 
 	fn set_prim(&mut self, v: u64) {
@@ -189,6 +196,7 @@ impl Gs {
 			0x42 | 0x43 => self.alpha[(a - 0x42) as usize] = d,
 			0x47 | 0x48 => self.test[(a - 0x47) as usize] = Some(d),
 			0x14 | 0x15 => self.tex1[(a - 0x14) as usize] = Some(d),
+			0x3d => self.fogcol = Some(d as u32 & 0xff_ffff),
 			0x1a => self.prmodecont = d & 1 != 0,
 			0x1b => self.prmode = d,
 			0x18 | 0x19 | 0x40 | 0x41 | 0x4c | 0x4d | 0x4e | 0x4f => {
@@ -220,7 +228,7 @@ impl Gs {
 		let ctx = (attr & 0x200 != 0) as usize;
 		if kick {
 			match ty {
-				3..=6 => out.push(Prim { sprite: ty == 6, v: self.vq, attr, tex0: self.tex0[ctx], clamp: self.clamp[ctx], alpha: self.alpha[ctx], test: self.test[ctx], zbuf: self.zbuf[ctx], tex1: self.tex1[ctx] }),
+				3..=6 => out.push(Prim { sprite: ty == 6, v: self.vq, attr, tex0: self.tex0[ctx], clamp: self.clamp[ctx], alpha: self.alpha[ctx], test: self.test[ctx], zbuf: self.zbuf[ctx], tex1: self.tex1[ctx], fogcol: self.fogcol }),
 				_ => self.lines += 1,
 			}
 		}
@@ -343,11 +351,13 @@ impl Gs {
 /// the level's patch draw]: crate::water draws the patches from the level data, so the layer leaves them out (their VU1
 /// output was 18 qwords without a prim in every sweep state, efx6l-*.err, but a visible patch would be drawn twice).
 const WATER_DRIVERS: [(u32, u32); 6] = [(1, 0x2fc9f0), (5, 0x30d008), (7, 0x30c648), (11, 0x30e038), (12, 0x2bf078), (13, 0x309d88)];
+/// `WATER_DRIVERS` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+const WATER_DRIVERS_USA: [(u32, u32); 6] = [(1, 0x2fd0c0), (5, 0x30d678), (7, 0x30cd20), (11, 0x30e708), (12, 0x2bf748), (13, 0x30a460)];
 
 /// Whether an older one-off port already draws callback `f` on this level (the claimed set): every module that turns
 /// queue callbacks into mirror geometry answers for its own tables.
 pub fn claimed(m: &Machine, level: u32, f: u32) -> bool {
-	WATER_DRIVERS.contains(&(level, f)) || super::queue_b::claims(m, level, f) || super::queue_q1::claims(level, f) || super::queue_story::claims(level, f) || super::queue_fxa::claims(level, f) || super::claims(level, f)
+	(*crate::retail::disc::pick(&WATER_DRIVERS, &WATER_DRIVERS_USA)).contains(&(level, f)) || super::queue_b::claims(m, level, f) || super::queue_q1::claims(level, f) || super::queue_story::claims(level, f) || super::queue_fxa::claims(level, f) || super::claims(level, f)
 }
 
 /// The fx slot whose cached TEX0 is `tex0` (exact 64-bit match).
@@ -358,6 +368,60 @@ fn slot(slots: &[u64], tex0: u64, cache: &mut Vec<(u64, Option<usize>)>) -> Opti
 	let s = (0..SLOTS as usize).find(|&n| tex0 != 0 && slots.get(n) == Some(&tex0));
 	cache.push((tex0, s));
 	s
+}
+
+/// GS fog (PRIM FGE = 1) of an effect prim, carried in the high bits of `WorldQuad.tex` / `WorldStrip.tex` (the texture index
+/// and FX_CLAMP / FX_NOMIP use bits 0..21): bit 22 `FOG_ON` (F per vertex follows), bit 23 `FOG_OFF` (FIX strips with FGE 0: the shared
+/// strip shader would otherwise fog them by distance), bits 24..47 the fog bytes F of vertices 0..2 (quads only: a strip carries F in its
+/// vertex colour alpha, which its shader ignores), bits 48..63 the FOGCOL (reg 0x3d) as an index into an intern table (0xffff = the
+/// GS kept the level's fog colour). `viewer/gpu.rs` turns it into the vertex `light` = [F, FOGCOL word, 0, -5]; the shaders
+/// (`fog_class` l.w = -5 gives the linear-interpolated F, fs_part / fs_part_fix apply `c = (F * C + (255 - F) * FOGCOL) >> 8`).
+pub const FOG_ON: usize = 1 << 22;
+pub const FOG_OFF: usize = 1 << 23;
+/// Every bit of `tex` that is not the texture index or a texture-variant flag.
+pub const FOG_BITS: usize = !((1usize << 22) - 1);
+const FOG_COL_NONE: usize = 0xffff;
+
+static FOGCOLS: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+
+/// The `tex` word of an effect prim drawn with GS fog: `f` = the fog bytes of vertices 0..2 (a quad's fourth corner repeats the
+/// third), `fogcol` = the prim's FOGCOL if its owner wrote one.
+fn fog_tex(tex: usize, f: [u8; 3], fogcol: Option<u32>) -> usize {
+	let ci = fogcol.map_or(FOG_COL_NONE, |c| {
+		let mut t = FOGCOLS.lock().unwrap();
+		let i = t.iter().position(|&x| x == c).unwrap_or_else(|| {
+			t.push(c);
+			t.len() - 1
+		});
+		assert!(i < FOG_COL_NONE, "FOGCOL table full");
+		i
+	});
+	tex | FOG_ON | (f[0] as usize) << 24 | (f[1] as usize) << 32 | (f[2] as usize) << 40 | ci << 48
+}
+
+/// `tex` of an FGE 0 FIX strip: not fogged at all.
+fn fog_off(tex: usize) -> usize {
+	tex | FOG_OFF
+}
+
+/// The texture key (index + variant flags) of a `tex` word.
+pub fn plain_tex(tex: usize) -> usize {
+	tex & !FOG_BITS
+}
+
+/// The vertex `light` of corner `k` of a quad (or of a strip vertex whose F is `strip_f`) drawn with `tex`: [F, FOGCOL word
+/// (r | g << 8 | b << 16, -1 = the level fog colour), 0, -5] for GS fog, [0, 0, 0, -6] for an FGE 0 FIX strip (no fog), zeros otherwise.
+pub fn fog_light(tex: usize, k: usize, strip_f: f32) -> [f32; 4] {
+	if tex & FOG_OFF != 0 {
+		return [0.0, 0.0, 0.0, -6.0];
+	}
+	if tex & FOG_ON == 0 {
+		return [0.0; 4];
+	}
+	let ci = tex >> 48;
+	let col = if ci == FOG_COL_NONE { -1.0 } else { FOGCOLS.lock().unwrap().get(ci).map_or(-1.0, |&c| c as f32) };
+	let f = if strip_f >= 0.0 { strip_f } else { ((tex >> (24 + 8 * k.min(2))) & 0xff) as f32 };
+	[f, col, 0.0, -5.0]
 }
 
 fn colour(c: [u8; 4]) -> [f32; 4] {
@@ -393,7 +457,7 @@ pub fn capture(m: &Machine, level: u32, own: &[Own]) -> BuildIn {
 	let claimed: Vec<bool> = own.iter().map(|o| claimed(m, level, o.fnp)).collect();
 	let pkts = own.iter().zip(&claimed).map(|(o, &c)| (!c).then(|| efx_own::walk(&m.cpu, o))).collect();
 	let env = (0..10).map(|k| DRAW_ENV + 16 * k).map(|a| (m.rd32(a + 8) as u8, m.rd32(a) as u64 | (m.rd32(a + 4) as u64) << 32)).collect();
-	let tbl = SLOT_TABLE.wrapping_add_signed(*super::LEVEL_SHIFT.get(level as usize).unwrap_or(&0));
+	let tbl = va(SLOT_TABLE.wrapping_add_signed(*super::LEVEL_SHIFT.get(level as usize).unwrap_or(&0)));
 	let slots = (0..SLOTS).map(|n| tbl + 16 * n).map(|a| m.rd32(a) as u64 | (m.rd32(a + 4) as u64) << 32).collect();
 	BuildIn { level, own: own.to_vec(), claimed, pkts, env, slots }
 }
@@ -482,6 +546,9 @@ pub fn build_in(b: &BuildIn, vu: &super::efx_vu::VuOut, out: &mut Vec<WorldQuad>
 			}
 			let (dok, zw) = depth_ok(pr.test, pr.zbuf);
 			if !dok {
+				if crate::viewer::gs_state::enabled() {
+					crate::viewer::gs_state::note("efx", "prim.skipped_by_test", pr.test.unwrap_or(0) as u32 & 0x3ffff);
+				}
 				st.skip[9] += 1;
 				continue;
 			}
@@ -494,6 +561,19 @@ pub fn build_in(b: &BuildIn, vu: &super::efx_vu::VuOut, out: &mut Vec<WorldQuad>
 				st.skip[6] += 1;
 				continue;
 			}
+			if crate::viewer::gs_state::enabled() {
+				use crate::viewer::gs_state as gs;
+				let regs = gs::GsRegs { prim: Some(attr), tex0: Some(pr.tex0), tex1: pr.tex1.or(Some(0x20)), clamp: Some(if pr.clamp & 0xf == 5 { 0 } else { pr.clamp }), test: pr.test, alpha: Some(if pr.alpha == 0 { 0x44 } else { pr.alpha }), zbuf: pr.zbuf, fogcol: pr.fogcol.map(u64::from), ..Default::default() };
+				// A TEX1 / ALPHA the owner stream never writes is inherited from the main pass (census: TEX1 MMAG linear, ALPHA 0x44), not a state of its own.
+				gs::guard("efx", &gs::GsState::decode(&regs), &gs::efx_support());
+				// The vertex fog byte matters only with PRIM FGE (`fog_tex`); a prim with FGE 0 draws unfogged as the GS does.
+			}
+			if pr.tex1.is_some_and(|t| t >> 5 & 1 == 0) && attr & 0x10 != 0 {
+				let o = (o.fnp, "mag", pr.tex1.unwrap_or(0));
+				if !st.odd.contains(&o) {
+					st.odd.push(o);
+				}
+			}
 			// ALPHA low byte: 0x48 Cs*As + Cd, 0x44 Cs*As + Cd*(1-As); FIX blends (C = 2): 0x64 (Cs-Cd)*FIX + Cd, 0x68 Cs*FIX + Cd.
 			let (additive, fix) = match (attr & 0x40 != 0, pr.alpha & 0xff) {
 				(true, 0x48) => (true, None),
@@ -502,6 +582,10 @@ pub fn build_in(b: &BuildIn, vu: &super::efx_vu::VuOut, out: &mut Vec<WorldQuad>
 				(true, 0x68) => (true, Some(((((pr.alpha >> 32) & 0xff) as u8).min(0x80), true))),
 				_ => {
 					st.skip[4] += 1;
+					let o = (o.fnp, "blend", if attr & 0x40 != 0 { pr.alpha } else { 0 });
+					if !st.odd.contains(&o) {
+						st.odd.push(o);
+					}
 					continue;
 				}
 			};
@@ -514,6 +598,8 @@ pub fn build_in(b: &BuildIn, vu: &super::efx_vu::VuOut, out: &mut Vec<WorldQuad>
 			let (tw, th) = ((1u32 << ((pr.tex0 >> 26) & 15)) as f32, (1u32 << ((pr.tex0 >> 30) & 15)) as f32);
 			let uv = |v: &V| if fst { [v.u / tw, v.v / th] } else if v.q != 0.0 { [v.s / v.q, v.t / v.q] } else { [v.s, v.t] };
 			let flat = attr & 8 == 0;
+			// PRIM FGE: the GS fogs the texture-shaded colour per vertex F (`fog_tex`).
+			let fogged = attr & 0x20 != 0;
 			if let Some((fix, add)) = fix {
 				// FIX blends go to the strip pass (texture and vertex alpha ignored): consecutive prims of one state share a strip.
 				let tri: Option<[([f32; 3], [f32; 2], [f32; 4]); 3]> = if pr.sprite {
@@ -522,7 +608,13 @@ pub fn build_in(b: &BuildIn, vu: &super::efx_vu::VuOut, out: &mut Vec<WorldQuad>
 					let pos = pr.v.map(|v| view.world(v.x, v.y, v.z, v.q));
 					match pos {
 						[Some(p0), Some(p1), Some(p2)] => {
-							let c = if flat { [colour(pr.v[2].rgba); 3] } else { pr.v.map(|v| colour(v.rgba)) };
+							let mut c = if flat { [colour(pr.v[2].rgba); 3] } else { pr.v.map(|v| colour(v.rgba)) };
+							if fogged {
+								// The strip shader ignores vertex alpha: it carries the fog byte F.
+								for k in 0..3 {
+									c[k][3] = pr.v[k].f as f32;
+								}
+							}
 							Some([(p0, uv(&pr.v[0]), c[0]), (p1, uv(&pr.v[1]), c[1]), (p2, uv(&pr.v[2]), c[2])])
 						}
 						_ => {
@@ -535,7 +627,10 @@ pub fn build_in(b: &BuildIn, vu: &super::efx_vu::VuOut, out: &mut Vec<WorldQuad>
 					Some(t) => vec![t],
 					None => {
 						let (a, b) = (pr.v[0], pr.v[1]);
-						let c = colour(b.rgba);
+						let mut c = colour(b.rgba);
+						if fogged {
+							c[3] = b.f as f32;
+						}
 						let (ua, ub) = (uv(&a), uv(&b));
 						let corner = |x: f32, y: f32| view.world(x, y, b.z, b.q);
 						let [Some(p0), Some(p1), Some(p2), Some(p3)] = [corner(a.x, a.y), corner(b.x, a.y), corner(b.x, b.y), corner(a.x, b.y)] else {
@@ -546,7 +641,7 @@ pub fn build_in(b: &BuildIn, vu: &super::efx_vu::VuOut, out: &mut Vec<WorldQuad>
 						vec![[v0, v1, v3], [v1, v3, v2]]
 					}
 				};
-				let key = (tex, fix, add);
+				let key = (if fogged { fog_tex(tex, [0; 3], pr.fogcol) } else { fog_off(tex) }, fix, add);
 				if run.as_ref().is_some_and(|r| r.key != key) {
 					flush(&mut run, pools);
 				}
@@ -579,6 +674,8 @@ pub fn build_in(b: &BuildIn, vu: &super::efx_vu::VuOut, out: &mut Vec<WorldQuad>
 					st.skip[7] += 1;
 					continue;
 				};
+				// A sprite takes the second vertex's F for the whole rectangle (gs_raster `sprite`).
+				let tex = if fogged { fog_tex(tex, [b.f; 3], pr.fogcol) } else { tex };
 				out.push(WorldQuad { pos: [p0, p1, p2, p3], uv: [ua, [ub[0], ua[1]], ub, [ua[0], ub[1]]], colour: [c; 4], tex, additive });
 				st.tris += 2;
 			} else {
@@ -589,6 +686,7 @@ pub fn build_in(b: &BuildIn, vu: &super::efx_vu::VuOut, out: &mut Vec<WorldQuad>
 				};
 				let c = if flat { [colour(pr.v[2].rgba); 3] } else { pr.v.map(|v| colour(v.rgba)) };
 				let t = pr.v.map(|v| uv(&v));
+				let tex = if fogged { fog_tex(tex, [pr.v[0].f, pr.v[1].f, pr.v[2].f], pr.fogcol) } else { tex };
 				out.push(WorldQuad { pos: [p0, p1, p2, p2], uv: [t[0], t[1], t[2], t[2]], colour: [c[0], c[1], c[2], c[2]], tex, additive });
 				st.tris += 1;
 			}
@@ -609,5 +707,36 @@ struct Run {
 fn flush(run: &mut Option<Run>, pools: &mut Vec<WorldStrip>) {
 	if let Some(r) = run.take() {
 		pools.push(WorldStrip { pos: r.pos, uv: r.uv, colour: r.colour, tex: r.key.0, fix: r.key.1, add: r.key.2 });
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// The fog word round trip: F bytes of vertices 0..2, the interned FOGCOL and the texture index survive `fog_tex`; a strip's
+	/// own F wins over the packed one; `fog_off` and `plain_tex` behave as documented.
+	#[test]
+	fn fog_word_round_trip() {
+		let tex = 0x1234 | crate::particles::FX_CLAMP;
+		let w = fog_tex(tex, [10, 200, 255], Some(0x202020));
+		assert_eq!(plain_tex(w), tex);
+		let (l0, l1, l2, l3) = (fog_light(w, 0, -1.0), fog_light(w, 1, -1.0), fog_light(w, 2, -1.0), fog_light(w, 3, -1.0));
+		assert_eq!([l0[0], l1[0], l2[0], l3[0]], [10.0, 200.0, 255.0, 255.0]);
+		assert_eq!((l0[1], l0[3]), (0x202020 as f32, -5.0));
+		assert_eq!(fog_light(w, 0, 77.0)[0], 77.0);
+		let level = fog_tex(tex, [1, 2, 3], None);
+		assert_eq!(fog_light(level, 0, -1.0)[1], -1.0);
+		assert_eq!(fog_light(fog_off(tex), 0, -1.0), [0.0, 0.0, 0.0, -6.0]);
+		assert_eq!(fog_light(tex, 0, -1.0), [0.0; 4]);
+		assert_eq!(plain_tex(fog_off(tex)), tex);
+	}
+
+	/// ZTST GEQUAL passes, ALWAYS does not; ATE NEVER with AFAIL KEEP rejects the prim.
+	#[test]
+	fn depth_filter() {
+		assert_eq!(depth_ok(Some(0x5360b), None).0, true);
+		assert_eq!(depth_ok(Some(0x30000), None).0, false);
+		assert_eq!(depth_ok(None, None), (true, false));
 	}
 }

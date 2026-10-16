@@ -103,6 +103,8 @@ pub struct Table {
 
 impl Table {
     pub fn build(mem: &Mem, level: u32) -> Table {
+        // A rebuild follows every overlay load (FlushCache): the host learns which overlay is in RAM (`ver::on_rebuild`).
+        crate::ver::rebuilt(&mem.ram);
         let (lo, hi) = (0x10_0000u32, 0x40_0000u32);
         let loader = u16::from_le_bytes([mem.ram[LOADER as usize], mem.ram[LOADER as usize + 1]]);
         let mut t = Table {

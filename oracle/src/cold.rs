@@ -14,7 +14,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 pub const TRAMP: u32 = 0x8000_0300;
-/// One PAL field in EE instructions (294.912 MHz / 50) when nothing waits at the vblank poll.
+/// One PAL field in EE instructions (294.912 MHz / 50) when nothing waits at the vblank poll. The cold kernel uses
+/// `ver::period()` (the same in PAL mode, shorter for NTSC).
 pub const PERIOD: u64 = 5_900_000;
 /// Power-on register set applied by `boot` (bits of env COLD_PWR, see there).
 pub const PWR_DEFAULT: u32 = 0xf;
@@ -174,9 +175,16 @@ pub fn iso_find(f: &mut std::fs::File, want: &str) -> Option<(u32, u32)> {
 pub fn read_hooks(t: &str, k: &mut Kernel, hooked: &mut [bool]) {
     let h = |s: &str| u32::from_str_radix(s.trim_start_matches("0x"), 16).unwrap();
     for l in t.lines() {
-        let w: Vec<&str> = l.split_whitespace().collect();
+        let mut w: Vec<&str> = l.split_whitespace().collect();
         if w.is_empty() || w[0].starts_with('#') {
             continue;
+        }
+        // A rule for one disc only: "pal RULE.." / "usa RULE.." (addresses above 0x15ef00 differ between the discs).
+        if w[0] == "pal" || w[0] == "usa" {
+            if w[0] != crate::ver::disc().tag() {
+                continue;
+            }
+            w.remove(0);
         }
         let pc = h(w[1]);
         hooked[(pc >> 2) as usize & 0x7f_ffff] = true;
@@ -302,8 +310,9 @@ pub fn syscall(c: &mut Cpu, k: &mut Kernel, pc: u32) -> bool {
             if a3 != 0 {
                 c.mem.wr32(a3, 1);
                 c.mem.wr32(a3 + 4, a3 + 0x10);
-                for (i, b) in b"cdrom0:\\SCES_509.16;1\0".iter().enumerate() {
-                    c.mem.wr8(a3 + 0x10 + i as u32, *b);
+                let arg0 = format!("cdrom0:\\{};1\0", crate::ver::disc().boot_file());
+                for (i, b) in arg0.bytes().enumerate() {
+                    c.mem.wr8(a3 + 0x10 + i as u32, b);
                 }
             }
             c.s(28, a0 as u64);
@@ -439,7 +448,10 @@ pub const HOOKS: &str = include_str!("cold_hooks.txt");
 /// A cold-boot machine: the ELF from the ISO in zeroed RAM, Status as at an ELF entry, pad idle.
 pub fn boot(iso_path: &str, stubs_path: &str, extra_hooks: Option<&str>) -> Result<(Cpu, Kernel), String> {
     let mut iso = std::fs::File::open(iso_path).map_err(|e| format!("iso {iso_path}: {e}"))?;
-    let (lba, size) = iso_find(&mut iso, "SCES_509.16;1").ok_or("SCES_509.16 not in the ISO")?;
+    // The disc (PAL SCES_509.16 or USA SCUS_971.99) and the video mode the game will pick from SYSTEM.CNF.
+    crate::ver::from_iso(iso_path);
+    let boot = crate::ver::disc().boot_file();
+    let (lba, size) = iso_find(&mut iso, &format!("{boot};1")).ok_or_else(|| format!("neither SCES_509.16 nor SCUS_971.99 in the ISO {iso_path}"))?;
     let mut elf = vec![0u8; size as usize];
     iso.seek(SeekFrom::Start(lba as u64 * 2048)).map_err(|e| e.to_string())?;
     iso.read_exact(&mut elf).map_err(|e| e.to_string())?;
@@ -504,7 +516,7 @@ pub fn boot(iso_path: &str, stubs_path: &str, extra_hooks: Option<&str>) -> Resu
         }
     }
     k.hooked = hk;
-    k.next_vb = PERIOD;
+    k.next_vb = crate::ver::period();
     k.osd_word = osd_config_word();
     Ok((c, k))
 }

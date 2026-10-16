@@ -178,18 +178,19 @@ pub fn font_glyph_tables(disc: &mut Disc) -> R<Vec<Vec<Glyph>>> {
 			continue;
 		}
 		let nl = dir[at + 32] as usize;
-		if dir[at + 33..at + 33 + nl].starts_with(b"SCES_509.16") {
-			file = Some((u32_at(&dir, at + 2)? as u64, u32_at(&dir, at + 10)? as usize));
+		let name = &dir[at + 33..at + 33 + nl];
+		if name.starts_with(b"SCES_509.16") || name.starts_with(b"SCUS_971.99") {
+			file = Some((u32_at(&dir, at + 2)? as u64, u32_at(&dir, at + 10)? as usize, if name.starts_with(b"SCUS") { 0x80 } else { 0 }));
 			break;
 		}
 		at += len;
 	}
-	let (sector, size) = file.ok_or("boot executable not on the disc")?;
+	let (sector, size, shift) = file.ok_or("boot executable not on the disc")?;
 	let elf = disc.read_bytes(sector, size).map_err(|e| e.to_string())?;
 	let phoff = u32_at(&elf, 0x1c)? as usize;
 	let (phentsize, phnum) = (u16_at(&elf, 0x2a)? as usize, u16_at(&elf, 0x2c)? as usize);
 	let mut out = Vec::new();
-	for &va in &FONT_TABLES {
+	for va in FONT_TABLES.map(|a| a + shift) {
 		let mut table = None;
 		for p in 0..phnum {
 			let ph = span(&elf, phoff + p * phentsize, 32)?;

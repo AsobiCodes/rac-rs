@@ -58,9 +58,11 @@ pub struct Pipe {
 
 impl Pipe {
     /// `state`: a savestate directory (vu1Memory.bin / vu1MicroMem.bin start VU1 as the savestate left it).
+    /// An empty `state` (a cold boot without RAC_GSFULL_STATE) starts VU1 blank: the boot uploads its own programs (MPG).
     pub fn new(state: &str) -> Option<Pipe> {
-        let d = std::fs::read(format!("{state}/vu1Memory.bin")).ok()?;
-        let mi = std::fs::read(format!("{state}/vu1MicroMem.bin")).ok()?;
+        let blank = || Some(vec![0u8; 16 << 10]);
+        let d = if state.is_empty() { blank() } else { std::fs::read(format!("{state}/vu1Memory.bin")).ok() }?;
+        let mi = if state.is_empty() { blank() } else { std::fs::read(format!("{state}/vu1MicroMem.bin")).ok() }?;
         let w: Vec<u32> = mi.get(..64)?.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
         let out = Out { prog: super::vif::identify(&w), ..Default::default() };
         Some(Pipe { vif: Vif1::new(), vu: Vu1::new(&d, &mi), out })
@@ -256,7 +258,8 @@ impl Drop for Flag {
 /// Starts the GS-full threads for the savestate `state` (its GS.bin is the starting local memory). The sender takes one
 /// `FieldIn` per EE field; one with no jobs draws nothing and presents nothing.
 pub fn start(state: &str) -> Option<(SyncSender<FieldIn>, Arc<GsFull>)> {
-    let vram = Gs::load_vram(&format!("{state}/GS.bin"))?;
+    // An empty `state` (cold boot): blank local memory, as the console's GS after the BIOS.
+    let vram = if state.is_empty() { Some(vec![0u8; super::gs_mem::VRAM_SIZE]) } else { Gs::load_vram(&format!("{state}/GS.bin")) }?;
     let mut pipe = Pipe::new(state)?;
     let wide = super::wide::enabled();
     let shared = Arc::new(GsFull { wide, ..Default::default() });

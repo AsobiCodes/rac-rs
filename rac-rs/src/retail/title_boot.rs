@@ -21,6 +21,7 @@ use ee_oracle::Machine;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use crate::retail::disc::va;
 
 static ON: AtomicBool = AtomicBool::new(false);
 /// The boot runs: the memory card is held (see the module doc).
@@ -41,6 +42,10 @@ pub fn enabled() -> bool {
 
 /// The front end's mode word (boot data in frontbin: 0 title idle, 3 page menu, 4 text screen; the level overlays keep theirs at 0x15f5a4).
 pub const FRONT_MODE: u32 = 0x15f5e4;
+/// `FRONT_MODE` on the disc that runs (retail/disc.rs).
+pub fn front_mode() -> u32 {
+	super::disc::g(FRONT_MODE)
+}
 /// Level-request words of the level overlays (Eudora/Veldin 0x27f6d0, ingame_save_quit.md section 5): target level (-1 = front end), request flags.
 const REQ_LEVEL: u32 = 0x15f5a0;
 const REQ_FLAG: u32 = 0x15f5b8;
@@ -48,8 +53,8 @@ const REQ_FLAG: u32 = 0x15f5b8;
 /// The frontbin overlay is in RAM: its movie player (fmv_bridge `FRONT`) has the hash of the ELF's code. A level overlay or the
 /// boot image has other code there.
 pub fn front_end(m: &Machine) -> bool {
-	use super::fmv_bridge::{FRONT, PLAYERS};
-	PLAYERS.iter().find(|p| p.level == FRONT).is_some_and(|p| ee_oracle::rec::hash(&m.cpu.mem, p.entry, p.end) == p.hash)
+	use super::fmv_bridge::{players, FRONT};
+	players().iter().find(|p| p.level == FRONT).is_some_and(|p| ee_oracle::rec::hash(&m.cpu.mem, p.entry, p.end) == p.hash)
 }
 
 /// The front end runs interpreted (no recompiled code), and the oracle's hand table is only consulted from recompiled
@@ -59,8 +64,8 @@ pub fn front_end(m: &Machine) -> bool {
 /// the New Game intro play in the window, or are skipped at once without one (v0 = 0 either way, like a skipped movie).
 /// The stub applies only while RAM holds frontbin's player code (its first four words).
 pub fn hook_front_movies(m: &mut Machine) {
-	use super::fmv_bridge::{movie_call, FRONT, PLAYERS};
-	let Some(p) = PLAYERS.iter().find(|p| p.level == FRONT) else { return };
+	use super::fmv_bridge::{movie_call, players, FRONT};
+	let Some(p) = players().iter().find(|p| p.level == FRONT) else { return };
 	let sig = [0, 1, 2, 3].map(|k| m.rd32(p.entry + 4 * k));
 	m.cpu.add_host_stub(p.entry, "front end movie player (fmv_bridge)", sig, movie_call);
 }
@@ -68,16 +73,16 @@ pub fn hook_front_movies(m: &mut Machine) {
 /// Cold boot only: a level overlay's movie player (any of the 19 levels) is in RAM, i.e. the boot ELF's own front end has handed
 /// over to a level. (The boot ELF carries the first title itself; frontbin only loads after a Quit Game.)
 pub fn level_loaded(m: &Machine) -> bool {
-	use super::fmv_bridge::PLAYERS;
-	PLAYERS.iter().any(|p| p.level < 19 && ee_oracle::rec::hash(&m.cpu.mem, p.entry, p.end) == p.hash)
+	use super::fmv_bridge::players;
+	players().iter().any(|p| p.level < 19 && ee_oracle::rec::hash(&m.cpu.mem, p.entry, p.end) == p.hash)
 }
 
 /// Cold boot (`--retail-cold`): the BOOT player (the logo movies, boot ELF 0x239ec8) is replaced like the front end's one. The cold
 /// machine's hook rule `ret 239ec8 1` (cold_hooks.txt: movies skipped for the oracle-only drivers) is removed so the movie reaches
 /// the native bridge: the registered hand takes compiled callers, this host stub the interpreted ones.
 pub fn hook_boot_movies(m: &mut Machine) {
-	use super::fmv_bridge::{movie_call, BOOT, PLAYERS};
-	let Some(p) = PLAYERS.iter().find(|p| p.level == BOOT) else { return };
+	use super::fmv_bridge::{movie_call, players, BOOT};
+	let Some(p) = players().iter().find(|p| p.level == BOOT) else { return };
 	if let Some(k) = m.cold_kernel_mut() {
 		k.rules_ret.remove(&p.entry);
 	}
@@ -88,11 +93,15 @@ pub fn hook_boot_movies(m: &mut Machine) {
 /// The game asked for the front end (Quit Game: target level -1 and the load request flag): the picture of the front end
 /// has to be recorded from before its first draw, so the worker starts the GS-full pipe now.
 pub fn want_late_gs(m: &Machine) -> bool {
-	m.rd32(REQ_LEVEL) == u32::MAX && m.rd32(REQ_FLAG) != 0
+	m.rd32(super::disc::g(REQ_LEVEL)) == u32::MAX && m.rd32(super::disc::g(REQ_FLAG)) != 0
 }
 
 /// RAC_FRONT_GS=1: the front end's picture is the GS's own (debug fallback, -GsFull references); else the mirror draws it.
 pub fn gs_picture() -> bool {
+	// USA disc with RAC_USA_EXTRAS=0: the GS's own picture.
+	if super::disc::extras_off() {
+		return true;
+	}
 	std::env::var("RAC_FRONT_GS").is_ok_and(|v| v != "0" && !v.is_empty())
 }
 
@@ -200,7 +209,7 @@ impl Boot {
 					}
 					return 0;
 				};
-				if m.page == PAGE_QUIT {
+				if m.page == va(PAGE_QUIT) {
 					self.stage = Stage::Quitting;
 					self.deadline = Instant::now() + AFTER_YES;
 					eprintln!("title: Quit Game > Yes at boot field {}", self.fields);

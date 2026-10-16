@@ -19,6 +19,10 @@ pub const FRAME_COUNTER: u32 = 0x15f5ac;
 const GLINT_DRAW: [u32; 19] = [
 	0x1fe688, 0x220518, 0x20f640, 0x1f7f70, 0x1f1070, 0x22d340, 0x2162f0, 0x226440, 0x211118, 0x21dcd0, 0x1f1c70, 0x22ff70, 0x2214d8, 0x20a0f0, 0x211c28, 0x1f7d40, 0x1fce70, 0x1fb670, 0x2073f0,
 ];
+/// `GLINT_DRAW` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+const GLINT_DRAW_USA: [u32; 19] = [
+	0x1fead8, 0x2209e8, 0x20fb10, 0x1f8440, 0x1f1540, 0x22d790, 0x2167c0, 0x226910, 0x2115e8, 0x21e1a0, 0x1f2140, 0x230440, 0x2219a8, 0x20a5c0, 0x212078, 0x1f8210, 0x1fd340, 0x1fbb40, 0x2078c0,
+];
 /// Pool entries: 16 x 0x20 bytes (pos +0, life i16 +0x10, fade i16 +0x12, angle f32 +0x18, size f32 +0x1c) [C].
 const GLINTS: u32 = 16;
 
@@ -28,7 +32,7 @@ fn sext(v: u32) -> u32 {
 
 /// The glint pool base of `level`, decoded from the draw function in RAM (None when the code is not the expected twin).
 pub fn glint_pool(m: &Machine, level: u32) -> Option<u32> {
-	let f = *GLINT_DRAW.get(level as usize)?;
+	let f = *(*crate::retail::disc::pick(&GLINT_DRAW, &GLINT_DRAW_USA)).get(level as usize)?;
 	let lo = m.rd32(f + 0x70);
 	// addiu rt, rs, imm
 	if lo >> 26 != 9 {
@@ -62,7 +66,7 @@ pub fn sky_sprites(m: &Machine, level: u32) -> Vec<SkySprite> {
 	if level != 2 {
 		return Vec::new();
 	}
-	let hdr = m.rd32(0x16049c) & 0x01ff_ffff;
+	let hdr = m.rd32(crate::retail::disc::va(0x16049c)) & 0x01ff_ffff;
 	let (count, recs) = (m.rd16(hdr + 8) as i16, m.rd32(hdr + 0x1c) & 0x01ff_ffff);
 	if hdr == 0 || recs == 0 || !(0..=0x400).contains(&count) {
 		return Vec::new();
@@ -87,6 +91,12 @@ const OCEANS: [(u32, u32, u32, u32, &[(u32, u32)]); 3] = [
 	(5, 0x2ce1c0, 0x2cda28, 0x2cdac0, &[(0x211aa0, 0x315a00)]),
 	(7, 0x2cc6c8, 0x2cbf30, 0x2cbfc8, &[(0x1d3300, 0x2f7960), (0x208460, 0x30cd48)]),
 	(9, 0x2c1248, 0x2c0ac8, 0x2c0b48, &[(0x1fc640, 0x2ef078)]),
+];
+/// `OCEANS` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+const OCEANS_USA: [(u32, u32, u32, u32, &[(u32, u32)]); 3] = [
+	(5, 0x2ce830, 0x2ce098, 0x2ce130, &[(0x211b20, 0x316070)]),
+	(7, 0x2ccda0, 0x2cc608, 0x2cc6a0, &[(0x1d3400, 0x2f8038), (0x208560, 0x30d420)]),
+	(9, 0x2c1920, 0x2c11a0, 0x2c1220, &[(0x1fc740, 0x2ef750)]),
 ];
 
 /// Whether `cb` is in draw queue C this field (count 0x15f42c, callbacks at the queue-A callback array + 0x400: Rilgar 0x16e080,
@@ -177,8 +187,8 @@ fn ocean_texture(m: &Machine, va: u32, table: u32, n: u32) -> Option<Vec<[u8; 4]
 /// |c.xy| against cz * slope]. Only the -1 answer changes the picture, the GPU clips the rest.
 fn sphere_vis(m: &Machine, a: u32, far: f32) -> i32 {
 	let rv = |p: u32| [m.rdf(p), m.rdf(p + 4), m.rdf(p + 8), m.rdf(p + 12)];
-	let (c0, c1, c2, k) = (rv(0x16cdc0), rv(0x16cdd0), rv(0x16cde0), rv(0x16cdf0));
-	let (v20, v21, v22, v23) = (rv(0x16ce00), rv(0x16ce10), rv(0x16ce20), rv(0x16ce30));
+	let (c0, c1, c2, k) = (rv(crate::retail::disc::va(0x16cdc0)), rv(crate::retail::disc::va(0x16cdd0)), rv(crate::retail::disc::va(0x16cde0)), rv(crate::retail::disc::va(0x16cdf0)));
+	let (v20, v21, v22, v23) = (rv(crate::retail::disc::va(0x16ce00)), rv(crate::retail::disc::va(0x16ce10)), rv(crate::retail::disc::va(0x16ce20)), rv(crate::retail::disc::va(0x16ce30)));
 	let w = k[3];
 	let s = rv(a).map(|x| x * w);
 	let d = [s[0] - k[0], s[1] - k[1], s[2] - k[2]];
@@ -215,14 +225,14 @@ fn sphere_vis(m: &Machine, a: u32, far: f32) -> i32 {
 /// Empty on other levels or when the code is not the expected copy.
 fn lava_patches(m: &Machine, level: u32, desc: u32) -> (Vec<RamPatch>, [f32; 4]) {
 	let none = (Vec::new(), [0.0; 4]);
-	let gate = [(0x2ef108, 0x0c0b_04a8), (0x2ef0fc, 0x3c05_001f), (0x2c12a0, 0x27bd_ff40), (0x2c1630, 0x3c03_0075), (0x2c16d4, 0x3c01_3f00), (0x2c16a0, 0x3c01_4380)];
-	if level != 9 || desc != 0x1fc640 || gate.iter().any(|&(a, w)| m.rd32(a) != w) {
+	let gate = [(crate::retail::disc::va(0x2ef108), 0x0c0b_04a8), (crate::retail::disc::va(0x2ef0fc), 0x3c05_001f), (crate::retail::disc::va(0x2c12a0), 0x27bd_ff40), (crate::retail::disc::va(0x2c1630), 0x3c03_0075), (crate::retail::disc::va(0x2c16d4), 0x3c01_3f00), (crate::retail::disc::va(0x2c16a0), 0x3c01_4380)];
+	if level != 9 || desc != crate::retail::disc::va(0x1fc640) || gate.iter().any(|&(a, w)| m.rd32(a) != w) {
 		return none;
 	}
-	let elems = lui_addiu(m, 0x2ef0fc, 0x2ef104);
-	let count = m.rd32(0x2ef10c) & 0xffff;
-	let fill = (m.rd32(0x2c1630) & 0xffff) << 16 | (m.rd32(0x2c1640) & 0xffff);
-	let far = f32::from_bits((m.rd32(0x2c16a0) & 0xffff) << 16);
+	let elems = lui_addiu(m, crate::retail::disc::va(0x2ef0fc), crate::retail::disc::va(0x2ef104));
+	let count = m.rd32(crate::retail::disc::va(0x2ef10c)) & 0xffff;
+	let fill = (m.rd32(crate::retail::disc::va(0x2c1630)) & 0xffff) << 16 | (m.rd32(crate::retail::disc::va(0x2c1640)) & 0xffff);
+	let far = f32::from_bits((m.rd32(crate::retail::disc::va(0x2c16a0)) & 0xffff) << 16);
 	let colour = [fill & 255, fill >> 8 & 255, fill >> 16 & 255].map(|b| b as f32 / 128.0);
 	let patches = (0..count.min(0x40))
 		.filter_map(|i| {
@@ -244,7 +254,7 @@ fn lava_patches(m: &Machine, level: u32, desc: u32) -> (Vec<RamPatch>, [f32; 4])
 /// and fx records are plain overlay data; the FIX byte is the init flag). Empty on other levels or when the level's code is not
 /// the expected copy. `frames` = the level frame counter of this field.
 pub fn oceans(m: &Machine, level: u32, frames: u32) -> Vec<RamOcean> {
-	let Some(&(_, wrap, st_fn, setup, descs)) = OCEANS.iter().find(|o| o.0 == level) else { return Vec::new() };
+	let Some(&(_, wrap, st_fn, setup, descs)) = (*crate::retail::disc::pick(&OCEANS, &OCEANS_USA)).iter().find(|o| o.0 == level) else { return Vec::new() };
 	// Code gate: the three functions start with the expected twin words and the setup loads its fx table with `lui t4`.
 	if m.rd32(wrap) != 0x27bd_ffe0 || m.rd32(st_fn) != 0xa085_003f || m.rd32(setup) != 0x27bd_ff60 || m.rd32(setup + 0x200) != 0x3c0c_0017 {
 		return Vec::new();

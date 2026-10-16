@@ -727,7 +727,7 @@ impl Mem {
 
     /// Cold boot: the next forced vblank is one field of instructions after `now`.
     pub fn rearm_tick(&mut self, now: u64) {
-        self.tick = now + crate::cold::PERIOD;
+        self.tick = now + crate::ver::period();
         self.due = if self.vif1_pend.is_some() { self.dma_due.min(self.tick) } else { self.tick };
     }
 

@@ -6,6 +6,7 @@ pub mod isolvl;
 #[allow(dead_code)]
 mod wad;
 pub mod cold;
+pub mod ver;
 pub mod cpu;
 pub mod fpu;
 pub mod gate;
@@ -101,6 +102,8 @@ pub fn load_raw(dir: &str) -> Cpu {
         c.snd.spuv = b;
     }
     let iso = std::env::var("ORACLE_ISO").unwrap_or_else(|_| DEFAULT_ISO.into());
+    // The disc and its video mode (USA: NTSC timing; PAL: unchanged).
+    ver::from_iso(&iso);
     c.iso = std::fs::File::open(iso).ok();
     c
 }

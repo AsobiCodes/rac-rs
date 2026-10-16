@@ -7,9 +7,12 @@
 
 use crate::particles::{WorldQuad, FX_CLAMP};
 use ee_oracle::Machine;
+use crate::retail::disc::va;
 
 /// Class-252 spark glow: Batalia FUN_002d3a38 (queue B), binary twin Oltanis FUN_002da8b8 [C: overlay C 8_batalia 139867-139990].
 const SPARK_FN: [(u32, u32); 2] = [(8, 0x2d3a38), (14, 0x2da8b8)];
+/// `SPARK_FN` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+const SPARK_FN_USA: [(u32, u32); 2] = [(8, 0x2d4108), (14, 0x2daf08)];
 /// First instruction of the callback: `addiu sp, sp, -0x170`.
 const SPARK_HEAD: u32 = 0x27bd_fe90;
 /// The gp the callbacks run with (queue_q2::gp).
@@ -22,9 +25,9 @@ const SPARK_ENABLED: bool = false;
 
 /// Hook (`queue_b::fill`, queue B loop): draw `f(arg)` when it is a callback of this module.
 pub fn fill_b(m: &Machine, level: u32, f: u32, arg: u32, out: &mut Vec<WorldQuad>) {
-	if SPARK_ENABLED && SPARK_FN.contains(&(level, f)) {
+	if SPARK_ENABLED && (*crate::retail::disc::pick(&SPARK_FN, &SPARK_FN_USA)).contains(&(level, f)) {
 		spark(m, f, arg, out);
-	} else if level == BOLT_LEVEL && f == BOLT_FN {
+	} else if level == BOLT_LEVEL && f == va(BOLT_FN) {
 		bolt(m, out);
 	}
 }
@@ -158,15 +161,15 @@ fn curve(t: f32) -> f32 {
 /// (0,0) (0,1) (1,0) (1,1) over (previous-left, previous-right, current-left, current-right); the previous ring carries the previous
 /// segment's colour. Alpha = clamp(int(age / scale_ticks(0x161c30) * 255) - u8 0x161ca0, 0, 255).
 fn bolt(m: &Machine, out: &mut Vec<WorldQuad>) {
-	if m.rd32(BOLT_FN) != BOLT_HEAD {
+	if m.rd32(va(BOLT_FN)) != BOLT_HEAD {
 		return;
 	}
-	let (p0, p1, cam) = (rd4(m, 0x161c80), rd4(m, 0x161c90), rd4(m, 0x1674c0));
-	let k = m.rdf(GP - 0x7e98);
-	let scale = (m.rd32(0x161c30) as i32 as f32 * k + 0.5) as i32;
-	let sub = m.rd8(0x161ca0) as i32;
-	let (col_core, col_glow) = (m.rd32(0x161c38), m.rd32(0x161c3c));
-	let (w0, w1, kg) = (m.rdf(0x161c44), m.rdf(0x161c40), m.rdf(0x161c48));
+	let (p0, p1, cam) = (rd4(m, va(0x161c80)), rd4(m, va(0x161c90)), rd4(m, va(0x1674c0)));
+	let k = m.rdf(va(GP - 0x7e98));
+	let scale = (m.rd32(va(0x161c30)) as i32 as f32 * k + 0.5) as i32;
+	let sub = m.rd8(va(0x161ca0)) as i32;
+	let (col_core, col_glow) = (m.rd32(va(0x161c38)), m.rd32(va(0x161c3c)));
+	let (w0, w1, kg) = (m.rdf(va(0x161c44)), m.rdf(va(0x161c40)), m.rdf(va(0x161c48)));
 	if scale <= 0 || !(w0.is_finite() && w1.is_finite() && kg.is_finite()) {
 		return;
 	}
@@ -187,13 +190,13 @@ fn bolt(m: &Machine, out: &mut Vec<WorldQuad>) {
 		}
 	};
 	let world = |local: V4| mul_mat(local, &frame);
-	let point = |i: usize| -> V4 { if i == 39 { p0 } else { world(rd4(m, 0x1dfd00 + 16 * i as u32)) } };
+	let point = |i: usize| -> V4 { if i == 39 { p0 } else { world(rd4(m, va(0x1dfd00) + 16 * i as u32)) } };
 	let facing = |pt: V4| -> [V4; 4] {
 		let tc = norm4(sub4(cam, pt));
 		[frame[0], tc, cross4(tc, frame[0]), pt]
 	};
 	// Trunk. The first ring sits at table entry 1 (retail starts the walk there), width w0, colour of age[0].
-	let age = |i: usize| m.rd16(0x1dff80 + 2 * i as u32) as i16;
+	let age = |i: usize| m.rd16(va(0x1dff80) + 2 * i as u32) as i16;
 	let (mut w, mut prev) = (w0, cols(alpha(age(0))));
 	let pt = point(1);
 	let mt = facing(pt);
@@ -212,15 +215,15 @@ fn bolt(m: &Machine, out: &mut Vec<WorldQuad>) {
 	}
 	// Branches: ribbons in the bolt frame (rows d, r1, r2) from the world position of trunk point `idx`.
 	for b in 0..3u32 {
-		let br_age = |j: u32| m.rd16(0x1e02d0 + 0x20 * b + 2 * j) as i16;
-		let tab = 0x1dffd0 + 0x100 * b;
-		let idx = m.rd32(0x161cb8 + 4 * b) as i32;
+		let br_age = |j: u32| m.rd16(va(0x1e02d0) + 0x20 * b + 2 * j) as i16;
+		let tab = va(0x1dffd0) + 0x100 * b;
+		let idx = m.rd32(va(0x161cb8) + 4 * b) as i32;
 		if !(0..40).contains(&idx) {
 			continue;
 		}
 		let mut prev = cols(alpha(br_age(0)));
 		let mut w = (w0 + (w1 - w0) * curve(idx as f32 / 40.0)) * 0.75;
-		let mut s = rd4(m, 0x1dfd00 + 16 * idx as u32);
+		let mut s = rd4(m, va(0x1dfd00) + 16 * idx as u32);
 		let mut e = world(s);
 		s[0] += m.rdf(tab);
 		s[2] += m.rdf(tab + 8);
@@ -288,6 +291,19 @@ const WATER_FN: [WaterFn; 4] = [
 	WaterFn { f: 0x2f0270, hash: 0xa7dd_15b0, sets: &[(0x162200, Base::At(0x1dbd20), Base::At(0x1dc150))], words: [0x162234, 0x162238, 0x16223c, 0x162240, 0x162248, 0x16224c], scroll: 0x162250 },
 	WaterFn { f: 0x2f0630, hash: 0x7bc0_b2b0, sets: &[(0x162260, Base::At(0x1dcde0), Base::At(0x1dd000))], words: [0x162294, 0x162298, 0x16229c, 0x1622a0, 0x1622a8, 0x1622ac], scroll: 0x1622b0 },
 ];
+/// `WATER_FN` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+const WATER_FN_USA: [WaterFn; 4] = [
+	WaterFn {
+		f: 0x2f04d0,
+		hash: 0xb452_b8ea,
+		sets: &[(0x162210, Base::Slot(0x162230), Base::Slot(0x162238)), (0x162214, Base::Slot(0x162234), Base::Slot(0x16223c))],
+		words: [0x162248, 0x16224c, 0x162250, 0x162254, 0x16225c, 0x162260],
+		scroll: 0x162268,
+	},
+	WaterFn { f: 0x2f10c8, hash: 0x1a85_106f, sets: &[(0x162340, Base::At(0x1dd760), Base::At(0x1dd980))], words: [0x162374, 0x162378, 0x16237c, 0x162380, 0x162388, 0x16238c], scroll: 0x162390 },
+	WaterFn { f: 0x2f0948, hash: 0xa7dd_15b0, sets: &[(0x162280, Base::At(0x1dbe20), Base::At(0x1dc250))], words: [0x1622b4, 0x1622b8, 0x1622bc, 0x1622c0, 0x1622c8, 0x1622cc], scroll: 0x1622d0 },
+	WaterFn { f: 0x2f0d08, hash: 0x7bc0_b2b0, sets: &[(0x1622e0, Base::At(0x1dcee0), Base::At(0x1dd100))], words: [0x162314, 0x162318, 0x16231c, 0x162320, 0x162328, 0x16232c], scroll: 0x162330 },
+];
 
 /// FUN_001fce38: `(q - trunc q) * b` with `q = a / b` (VDIV, VFTOI0 / VITOF0).
 fn fmod_vu(a: f32, b: f32) -> f32 {
@@ -327,7 +343,7 @@ pub fn fleet_water(m: &Machine, level: u32, out: &mut Vec<WorldQuad>) {
 		return;
 	}
 	for (f, arg) in super::queue_b::entries(m, level, true) {
-		let Some(w) = WATER_FN.iter().find(|w| w.f == f) else { continue };
+		let Some(w) = (*crate::retail::disc::pick(&WATER_FN, &WATER_FN_USA)).iter().find(|w| w.f == f) else { continue };
 		if super::queue_q1::code_hash(m, f) == w.hash && arg != 0 {
 			water(m, w, arg, out);
 		}
@@ -347,7 +363,7 @@ fn water(m: &Machine, w: &WaterFn, moby: u32, out: &mut Vec<WorldQuad>) {
 	let colour = [r / 128.0, g / 128.0, b / 128.0, (alpha.0 & 0xff) as f32 / 128.0];
 	let pos0 = m.rdv3(moby + 0x10);
 	// frames * speed * dt, in that order (the callback's fVar19).
-	let t = (m.rd32(0x15f5ac) as i32 as f32) * speed.1 * m.rdf(0x15ed6c);
+	let t = (m.rd32(va(0x15f5ac)) as i32 as f32) * speed.1 * m.rdf(0x15ed6c);
 	let s: [f32; 4] = std::array::from_fn(|k| m.rdf(w.scroll + 4 * k as u32));
 	let base = |b: Base| match b {
 		Base::Slot(a) => phys(m.rd32(a)),
@@ -386,5 +402,5 @@ fn water(m: &Machine, w: &WaterFn, moby: u32, out: &mut Vec<WorldQuad>) {
 
 /// Effects layer claimed set (retail/efx_draw.rs): the callbacks `fill_b` / `fleet_water` draw.
 pub fn claims(level: u32, f: u32) -> bool {
-	(SPARK_ENABLED && SPARK_FN.contains(&(level, f))) || (level == BOLT_LEVEL && f == BOLT_FN) || (level == FLEET_LEVEL && WATER_FN.iter().any(|w| w.f == f))
+	(SPARK_ENABLED && (*crate::retail::disc::pick(&SPARK_FN, &SPARK_FN_USA)).contains(&(level, f))) || (level == BOLT_LEVEL && f == va(BOLT_FN)) || (level == FLEET_LEVEL && (*crate::retail::disc::pick(&WATER_FN, &WATER_FN_USA)).iter().any(|w| w.f == f))
 }

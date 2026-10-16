@@ -21,6 +21,7 @@ use ee_oracle::rec::{register_hand, Hand};
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
+use crate::retail::disc::va;
 
 /// RAC_MOVE_CLASSIC=1 keeps the classic (retail) movement. A later options row ("Controls: Classic / Modern") replaces the
 /// env read here; everything else asks `enabled()`.
@@ -90,6 +91,28 @@ static ROWS: [Row; 19] = [
 	Row { entry: 0x224410, press: 0x260000, set_state: 0x21e090 }, // 17 veldin_orbit
 	Row { entry: 0x22d498, press: 0x2685e8, set_state: 0x227938 }, // 18 veldin_finale
 ];
+/// `ROWS` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+static ROWS_USA: [Row; 19] = [
+	Row { entry: 0x228b78, press: 0x266d60, set_state: 0x2223f8 }, // 0 veldin
+	Row { entry: 0x241968, press: 0x27b940, set_state: 0x23cf98 }, // 1 novalis
+	Row { entry: 0x22f9c0, press: 0x2683d8, set_state: 0x22b728 }, // 2 aridia
+	Row { entry: 0x21b6a0, press: 0x254f18, set_state: 0x216648 }, // 3 kerwan
+	Row { entry: 0x21c158, press: 0x2595d0, set_state: 0x2159d8 }, // 4 eudora
+	Row { entry: 0x252ae8, press: 0x290cc0, set_state: 0x24cee8 }, // 5 rilgar
+	Row { entry: 0x23a478, press: 0x275b48, set_state: 0x2356a0 }, // 6 nebula
+	Row { entry: 0x2509e0, press: 0x28f058, set_state: 0x24a260 }, // 7 umbris
+	Row { entry: 0x236110, press: 0x270cd0, set_state: 0x230b38 }, // 8 batalia
+	Row { entry: 0x248858, press: 0x285720, set_state: 0x2420d8 }, // 9 gaspar
+	Row { entry: 0x21c1e0, press: 0x259b40, set_state: 0x215a60 }, // 10 orxon
+	Row { entry: 0x252a50, press: 0x28c130, set_state: 0x24db50 }, // 11 pokitaru
+	Row { entry: 0x2451f8, press: 0x27f438, set_state: 0x2400d0 }, // 12 hoven
+	Row { entry: 0x234660, press: 0x272768, set_state: 0x22dee0 }, // 13 oltanis_orbit
+	Row { entry: 0x234608, press: 0x26e6c8, set_state: 0x22ff58 }, // 14 oltanis
+	Row { entry: 0x21c078, press: 0x256348, set_state: 0x216c38 }, // 15 quartu
+	Row { entry: 0x224250, press: 0x2621a0, set_state: 0x21e398 }, // 16 kalebo
+	Row { entry: 0x2248b0, press: 0x2606f0, set_state: 0x21e530 }, // 17 veldin_orbit
+	Row { entry: 0x22d930, press: 0x268cd0, set_state: 0x227dd0 }, // 18 veldin_finale
+];
 
 // Hashes: rec::hash (FNV-1a over the words) of [entry, end) of each overlay.elf; every function is 39 instructions
 // (Eudora's equals the ee-hand `combo_input_fire` row 0x87731a4978079f20). A Hand here replaces the ee-hand of the same
@@ -120,7 +143,7 @@ static HANDS: [Hand; 19] = [
 /// while the PC options say Strafe Off or Camera Classic: they check `enabled()` per call, so the rows can switch them on later.
 pub fn register() {
 	if modcam::enabled() && !classic() {
-		register_hand(&HANDS);
+		register_hand(crate::retail::disc::hands(&HANDS));
 	}
 }
 
@@ -206,7 +229,7 @@ impl Drop for Guard {
 }
 
 fn jump_any(c: &mut Cpu) -> bool {
-	match ROWS.iter().find(|r| r.entry == c.pc) {
+	match (*crate::retail::disc::pick(&ROWS, &ROWS_USA)).iter().find(|r| r.entry == c.pc) {
 		Some(r) => jump(c, r),
 		None => false,
 	}
@@ -253,7 +276,7 @@ fn jump(c: &mut Cpu, r: &'static Row) -> bool {
 	if enabled() {
 		if let Some(aim) = modcam::aim_yaw() {
 			let state = c.mem.rd32(HERO_STATE);
-			if FLIP_STATES.contains(&state) && c.mem.rd8(BODY_FORM) == 0 && c.mem.rd32(GAME_MODE) == 0 {
+			if FLIP_STATES.contains(&state) && c.mem.rd8(BODY_FORM) == 0 && c.mem.rd32(va(GAME_MODE)) == 0 {
 				let window = c.g(4);
 				let (x, y) = (f32::from_bits(c.mem.rd32(STICK_X)), f32::from_bits(c.mem.rd32(STICK_Y)));
 				let wish = f32::from_bits(c.mem.rd32(HERO_WISH));
@@ -419,7 +442,7 @@ pub fn post_field(m: &ee_oracle::Machine) {
 	let moby = m.rd32(HERO_MOBY) & 0x01ff_ffff;
 	let drawn = if moby != 0 { m.rdf(moby + 0x48) } else { 0.0 };
 	let inst = raw[0].hypot(raw[1]);
-	let ok = aim.is_some() && m.rd8(BODY_FORM) == 0 && m.rd32(GAME_MODE) == 0;
+	let ok = aim.is_some() && m.rd8(BODY_FORM) == 0 && m.rd32(va(GAME_MODE)) == 0;
 	let min = if state == 0 { MIN_STEP } else { MIN_WALK };
 	let moving = ok && TWIST_STATES.contains(&state) && inst > min && inst < 2.0;
 	let mut mv = [0.0f32; 2];

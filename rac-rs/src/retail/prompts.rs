@@ -895,7 +895,7 @@ mod tests {
 	#[test]
 	fn glyph_hook_chains_to_the_swarm_hand() {
 		ee_game::register();
-		ee_oracle::rec::register_hand(&GLYPH_HANDS);
+		ee_oracle::rec::register_hand(crate::retail::disc::hands(&GLYPH_HANDS));
 		let ours = glyph_draw_hook as fn(&mut Cpu) -> bool as usize;
 		let mut n = 0;
 		for g in &GLYPH_HANDS {

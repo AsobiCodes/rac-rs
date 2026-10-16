@@ -38,10 +38,20 @@ const SUCK_TUBE: [u32; 19] = [
 	0x2dd290, 0x305a88, 0x2e7e88, 0x2d8550, 0x2df5a0, 0x312d50, 0x2ede78, 0x308d78, 0x2fef98, 0x2fe6c0, 0x2d1eb0, 0x3064b0, 0x2fd678, 0x300250, 0x2f97f8,
 	0x2e21c0, 0x2dbbf8, 0x2dfa58, 0x2e75a8,
 ];
+/// `SUCK_TUBE` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+const SUCK_TUBE_USA: [u32; 19] = [
+	0x2dd8e8, 0x306158, 0x2e8558, 0x2d8c20, 0x2dfc78, 0x3133c0, 0x2ee550, 0x309450, 0x2ff668, 0x2fed98, 0x2d2588, 0x306b80, 0x2fdd48, 0x300928, 0x2f9e48,
+	0x2e2890, 0x2dc2e8, 0x2e0130, 0x2e7c78,
+];
 /// Taunter ring draw (queue A; Eudora FUN_002a9910 = Novalis 0x2ccb00 taunter_rings_draw) [C].
 const TAUNTER: [u32; 19] = [
 	0x2b6f10, 0x2ccb00, 0x2b68a8, 0x2a8900, 0x2a9910, 0x2e2b80, 0x2c4098, 0x2dffa0, 0x2bfea0, 0x2d6350, 0x2a8750, 0x2dcc80, 0x2cec30, 0x2d0cb0, 0x2c5b38,
 	0x2b0188, 0x2b1788, 0x2b4bd0, 0x2b9700,
+];
+/// `TAUNTER` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+const TAUNTER_USA: [u32; 19] = [
+	0x2b7568, 0x2cd1d0, 0x2b6f78, 0x2a8fd0, 0x2a9fe8, 0x2e31f0, 0x2c4770, 0x2e0678, 0x2c0570, 0x2d6a28, 0x2a8e28, 0x2dd350, 0x2cf300, 0x2d1388, 0x2c6188,
+	0x2b0858, 0x2b1e78, 0x2b52a8, 0x2b9dd0,
 ];
 
 fn li(level: u32) -> usize {
@@ -68,14 +78,16 @@ pub(super) fn entries(m: &Machine, level: u32, b: bool) -> Vec<(u32, u32)> {
 /// The Gadgetron vendor glow draw callback (Novalis FUN_002ba2f0, queued on queue B by the class-11 update FUN_002baa58 via
 /// FUN_0021b098 in states 1 and 2; binary twins on all 19 levels, twins.py) [C]. Entries are (callback, vendor moby).
 pub const VENDOR_FN: [u32; 19] = [0x2a49e8, 0x2ba2f0, 0x2a48a8, 0x294e30, 0x296b70, 0x2ce8d8, 0x2b1958, 0x2cda78, 0x2ad450, 0x2c2b78, 0x295850, 0x2c8858, 0x2bc330, 0x2b0bc8, 0x2aea48, 0x2927b0, 0x29d7b8, 0x29cac0, 0x2a4410];
+/// `VENDOR_FN` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+pub const VENDOR_FN_USA: [u32; 19] = [0x2a5040, 0x2ba9c0, 0x2a4f78, 0x295500, 0x297248, 0x2cef48, 0x2b2030, 0x2ce150, 0x2adb20, 0x2c3250, 0x295f28, 0x2c8f28, 0x2bca00, 0x2b12a0, 0x2af098, 0x292e80, 0x29dea8, 0x29d198, 0x2a4ae0];
 
 /// The Veldin robot lightning draw callback (Veldin FUN_002e2498, queued on queue A by the class-1471 helper update
 /// FUN_002e1798 while an arc is live; binary twins Oltanis 0x3040a8 and Quartu 0x2e8f58, twins.py) [C]. Other levels have none.
 pub fn arc_fn(level: u32) -> Option<u32> {
 	match level {
-		0 => Some(0x2e2498),
-		14 => Some(0x3040a8),
-		15 => Some(0x2e8f58),
+		0 => Some(crate::retail::disc::va(0x2e2498)),
+		14 => Some(crate::retail::disc::va(0x3040a8)),
+		15 => Some(crate::retail::disc::va(0x2e8f58)),
 		_ => None,
 	}
 }
@@ -134,14 +146,14 @@ pub fn arc_live(m: &Machine, level: u32) -> Option<u32> {
 
 /// The vendor moby addresses of the vendor glow entries on queue B this field.
 pub fn vendor_mobys(m: &Machine, level: u32) -> Vec<u32> {
-	let Some(&f) = VENDOR_FN.get(li(level)) else { return Vec::new() };
+	let Some(&f) = (*crate::retail::disc::pick(&VENDOR_FN, &VENDOR_FN_USA)).get(li(level)) else { return Vec::new() };
 	entries(m, level, true).into_iter().filter(|e| e.0 == f).map(|e| e.1).collect()
 }
 
 /// The two scroll globals the vendor callback advances (+0.01 a call; beam V scroll and ring rise): the first two distinct
 /// gp-relative `lwc1` offsets of the callback (Novalis gp-0x58ec / gp-0x58e8, gp = 0x166c00; offsets differ per level) [C].
 pub fn vendor_scrolls(m: &Machine, level: u32) -> Option<(f32, f32)> {
-	let f = *VENDOR_FN.get(li(level))?;
+	let f = *(*crate::retail::disc::pick(&VENDOR_FN, &VENDOR_FN_USA)).get(li(level))?;
 	let mut offs: Vec<i32> = Vec::new();
 	for k in 0..0x200 {
 		let w = m.rd32(f + 4 * k);
@@ -216,7 +228,7 @@ fn suck_tube(m: &Machine, level: u32, f: u32, out: &mut Vec<WorldQuad>) {
 	else {
 		return;
 	};
-	let cam = m.rdv3(gp(level) + 0x2c0);
+	let cam = m.rdv3(crate::retail::disc::va(gp(level) + 0x2c0));
 	let scroll = m.rdf(sa);
 	// [I] step the post-draw u / v back to the values the draw started from (wrap -7.0 undone below 0).
 	let back = |x: f32, d: f32| if x - d < 0.0 { x - d + 7.0 } else { x - d };
@@ -473,7 +485,7 @@ fn tesla(m: &Machine, level: u32, f: u32, arg: u32, out: &mut Vec<WorldQuad>) {
 	if pvar == 0 {
 		return;
 	}
-	let cam = m.rdv3(gp(level) + 0x2c0);
+	let cam = m.rdv3(crate::retail::disc::va(gp(level) + 0x2c0));
 	let r = Rib { tex1: m.rd32(tex1) as usize, col1: m.rd32(col1), tex2: m.rd32(tex2) as usize, col2: m.rd32(col2), u: m.rdf(u), w1: m.rdf(w1) };
 	let n = m.rd16(pvar + 0x3e) as i16 as i32;
 	ribbon(m, cam, pts, n, m.rd32(a1), m.rd32(a2), m.rdf(w2a), m.rdf(exta), &r, out);
@@ -549,7 +561,7 @@ fn morph(m: &Machine, level: u32, f: u32, arg: u32, out: &mut Vec<WorldQuad>) {
 	else {
 		return;
 	};
-	let cam = m.rdv3(gp(level) + 0x2c0);
+	let cam = m.rdv3(crate::retail::disc::va(gp(level) + 0x2c0));
 	let mut r = Rib { tex1: m.rd32(tex1) as usize, col1: m.rd32(col1), tex2: m.rd32(tex2) as usize, col2: m.rd32(c2a), u: m.rdf(u), w1: m.rdf(w1) };
 	let (a1, a2, w2, ext) = (m.rd32(a1), m.rd32(a2), m.rdf(w2), m.rdf(ext));
 	ribbon(m, cam, pts1, 12, a1, a2, w2, ext, &r, out);
@@ -700,15 +712,16 @@ pub fn rope_quads(r: &SwingRope, jt: [f32; 3]) -> Vec<WorldQuad> {
 /// queue order. The Swingshot rope goes to `rope` with the `qa` length at its queue slot (the viewer adds the posed
 /// attach point and draws it there).
 pub fn fill(m: &Machine, level: u32, qa: &mut Vec<WorldQuad>, qb: &mut Vec<WorldQuad>, rope: &mut Option<(usize, SwingRope)>) {
+	crate::viewer::gs_state::guard_path("queue");
 	let Some(i) = Some(li(level)).filter(|&i| i < 19) else { return };
 	for (f, arg) in entries(m, level, false) {
 		if is_swing_rope(m, f) {
 			if let Some(r) = swing_rope(m, f, arg) {
 				*rope = Some((qa.len(), r));
 			}
-		} else if f == TAUNTER[i] {
+		} else if f == (*crate::retail::disc::pick(&TAUNTER, &TAUNTER_USA))[i] {
 			taunter(m, level, f, arg, qa);
-		} else if f == SUCK_TUBE[i] {
+		} else if f == (*crate::retail::disc::pick(&SUCK_TUBE, &SUCK_TUBE_USA))[i] {
 			suck_tube(m, level, f, qa);
 		} else if is_barrier(m, level, f) {
 			barrier(m, arg, qa);
@@ -720,7 +733,7 @@ pub fn fill(m: &Machine, level: u32, qa: &mut Vec<WorldQuad>, qb: &mut Vec<World
 		}
 	}
 	for (f, arg) in entries(m, level, true) {
-		if f == SUCK_TUBE[i] {
+		if f == (*crate::retail::disc::pick(&SUCK_TUBE, &SUCK_TUBE_USA))[i] {
 			suck_tube(m, level, f, qb);
 		} else if is_tesla(m, f) {
 			tesla(m, level, f, arg, qb);
@@ -776,7 +789,7 @@ fn walloper(m: &Machine, level: u32, f: u32, arg: u32, out: &mut Vec<WorldQuad>)
 	else {
 		return;
 	};
-	let cam = m.rdv3(gp(level) + 0x2c0);
+	let cam = m.rdv3(crate::retail::disc::va(gp(level) + 0x2c0));
 	let k = m.rdf(inten);
 	let r = Rib { tex1: m.rd32(tex1) as usize, col1: m.rd32(col1), tex2: m.rd32(tex2) as usize, col2: m.rd32(col2), u: 0.0, w1: m.rdf(w1) };
 	let ext = f32::from_bits(0x3e4c_cccd);
@@ -986,11 +999,11 @@ const BARRIER_AGE: u32 = 0x1621b4;
 const BARRIER_TEX: usize = 0x0e;
 
 fn is_barrier(m: &Machine, level: u32, f: u32) -> bool {
-	level == BARRIER_LEVEL && f == BARRIER_FN && jal_to(m, f + 0x1e4) == Some(BARRIER_RIB)
+	level == BARRIER_LEVEL && f == crate::retail::disc::va(BARRIER_FN) && jal_to(m, f + 0x1e4) == Some(crate::retail::disc::va(BARRIER_RIB))
 }
 
 fn is_barrier2(m: &Machine, level: u32, f: u32) -> bool {
-	level == BARRIER_LEVEL && f == BARRIER2_FN && jal_to(m, f + 0x1e4) == Some(BARRIER_RIB)
+	level == BARRIER_LEVEL && f == crate::retail::disc::va(BARRIER2_FN) && jal_to(m, f + 0x1e4) == Some(crate::retail::disc::va(BARRIER_RIB))
 }
 
 /// `v * M` for the row-vector matrix `m` (rows `m[0..3]`).
@@ -1002,7 +1015,7 @@ fn row_mul(v: [f32; 3], m: [[f32; 3]; 3]) -> [f32; 3] {
 /// of 30 points at `pts` (vec4, lane stride 0x1e0) [C]: per point the pair (p + z 0.05, p - z 0.05) transformed by
 /// `p.x M0 + p.y M1 + p.z M2 + t`, s = off + step (k + 1), t = 1 / 0, ONE colour per lane for every vertex = lerp(c1, c2, f)
 /// per channel (truncated) with f = 1 - age / B for age <= B else (age - B) / (A - B), age = i32 at `ages + 4 lane`;
-/// texture 0xe, ALPHA 0x42 (Cs As + Cd, additive) [C: nebula FUN_002166b8 disassembly scratch_bfx/dis/rib_2166b8.s].
+/// texture 0xe, ALPHA_1 data A0 B2 C0 D1 FIX 0x80 = word 0x48 = Cs As + Cd, additive [C: the 0x42 is the REGISTER address of FUN_002ad5c8(0x42, ..) in FUN_002f66f8, the data comes from gp-0x4eb0..-0x4ea4 (RAM of fg1/6_0166: 0, 2, 0, 1); corrected 2026-10-16: the audit read 0x42 as a subtractive blend].
 struct Lanes {
 	mats: Vec<([[f32; 3]; 3], [f32; 3])>,
 	pts: u32,
@@ -1044,19 +1057,19 @@ fn barrier(m: &Machine, arg: u32, out: &mut Vec<WorldQuad>) {
 	if arg == 0 || pv == 0 {
 		return;
 	}
-	let obj = euler_rows(m.rdv3(arg + 0x40)).map(|r| scale(r, m.rdf(BARRIER_SCALE)));
+	let obj = euler_rows(m.rdv3(arg + 0x40)).map(|r| scale(r, m.rdf(crate::retail::disc::va(BARRIER_SCALE))));
 	let pos = m.rdv3(arg + 0x10);
-	let mats = (0..4u32).map(|i| (euler_rows(m.rdv3(BARRIER_EULER + 0x10 * i)).map(|r| row_mul(r, obj)), add(pos, [0.0, 0.0, i as f32 * 1.7 + 0.6]))).collect();
+	let mats = (0..4u32).map(|i| (euler_rows(m.rdv3(crate::retail::disc::va(BARRIER_EULER) + 0x10 * i)).map(|r| row_mul(r, obj)), add(pos, [0.0, 0.0, i as f32 * 1.7 + 0.6]))).collect();
 	let l = Lanes {
 		mats,
 		pts: pv,
 		ages: pv + 0xf00,
-		age_a: m.rd32(BARRIER_AGE) as i32 as f32,
-		age_b: m.rd32(BARRIER_AGE + 4) as i32 as f32,
-		c1: m.rd32(BARRIER_C1),
-		c2: m.rd32(BARRIER_C2),
-		step: m.rdf(BARRIER_STEP),
-		off: m.rdf(BARRIER_OFF),
+		age_a: m.rd32(crate::retail::disc::va(BARRIER_AGE)) as i32 as f32,
+		age_b: m.rd32(crate::retail::disc::va(BARRIER_AGE) + 4) as i32 as f32,
+		c1: m.rd32(crate::retail::disc::va(BARRIER_C1)),
+		c2: m.rd32(crate::retail::disc::va(BARRIER_C2)),
+		step: m.rdf(crate::retail::disc::va(BARRIER_STEP)),
+		off: m.rdf(crate::retail::disc::va(BARRIER_OFF)),
 	};
 	lanes(m, &l, out);
 }
@@ -1070,22 +1083,22 @@ fn barrier2(m: &Machine, arg: u32, out: &mut Vec<WorldQuad>) {
 	if arg == 0 || pv == 0 {
 		return;
 	}
-	let obj = euler_rows(m.rdv3(arg + 0x40)).map(|r| scale(r, m.rdf(0x161d8c)));
+	let obj = euler_rows(m.rdv3(arg + 0x40)).map(|r| scale(r, m.rdf(crate::retail::disc::va(0x161d8c))));
 	let pos = m.rdv3(arg + 0x10);
-	let mats = (0..9u32).map(|i| (euler_rows(m.rdv3(0x1daf60 + 0x10 * i)).map(|r| row_mul(r, obj)), add(pos, row_mul(m.rdv3(0x1daed0 + 0x10 * i), obj)))).collect();
-	let (t, c) = (m.rdf(pv + 0x18), m.rd32(0x161d70));
+	let mats = (0..9u32).map(|i| (euler_rows(m.rdv3(crate::retail::disc::va(0x1daf60) + 0x10 * i)).map(|r| row_mul(r, obj)), add(pos, row_mul(m.rdv3(crate::retail::disc::va(0x1daed0) + 0x10 * i), obj)))).collect();
+	let (t, c) = (m.rdf(pv + 0x18), m.rd32(crate::retail::disc::va(0x161d70)));
 	let c0 = c & 0x00ff_ffff;
 	let ch = |sh: u32| (((c0 >> sh & 0xff) as f32 * (1.0 - t) + (c >> sh & 0xff) as f32 * t) as u32 & 0xff) << sh;
 	let l = Lanes {
 		mats,
-		pts: 0x1daff0,
-		ages: 0x161dc0,
-		age_a: m.rd32(0x161dd0) as i32 as f32,
-		age_b: m.rd32(0x161dd4) as i32 as f32,
+		pts: crate::retail::disc::va(0x1daff0),
+		ages: crate::retail::disc::va(0x161dc0),
+		age_a: m.rd32(crate::retail::disc::va(0x161dd0)) as i32 as f32,
+		age_b: m.rd32(crate::retail::disc::va(0x161dd4)) as i32 as f32,
 		c1: ch(0) | ch(8) | ch(16) | ch(24),
-		c2: m.rd32(0x161d74),
-		step: m.rdf(0x161d78),
-		off: m.rdf(0x161d7c),
+		c2: m.rd32(crate::retail::disc::va(0x161d74)),
+		step: m.rdf(crate::retail::disc::va(0x161d78)),
+		off: m.rdf(crate::retail::disc::va(0x161d7c)),
 	};
 	lanes(m, &l, out);
 }
@@ -1178,8 +1191,8 @@ const PASS_2D: u32 = 0x16a134;
 /// [C: dump/w13_60].
 pub fn screen_filter(m: &Machine, level: u32) -> Vec<ScreenRect> {
 	let g = gp(level);
-	let rec = m.rd32(g - 0x78f0) & 0x01ff_ffff;
-	if m.rd32(DRAW_FLAGS) & 0x40 == 0 || m.rd32(PASS_2D) == 0 || m.rd32(g - 0x78f4) == 0 || rec == 0 {
+	let rec = m.rd32(crate::retail::disc::va(g - 0x78f0)) & 0x01ff_ffff;
+	if m.rd32(DRAW_FLAGS) & 0x40 == 0 || m.rd32(crate::retail::disc::va(PASS_2D)) == 0 || m.rd32(crate::retail::disc::va(g - 0x78f4)) == 0 || rec == 0 {
 		return Vec::new();
 	}
 	let rows = m.rd16(0x1518d2) as i16 as i32;
@@ -1320,15 +1333,15 @@ pub fn claims(m: &Machine, level: u32, f: u32) -> bool {
 		return false;
 	}
 	is_swing_rope(m, f)
-		|| f == TAUNTER[i]
-		|| f == SUCK_TUBE[i]
+		|| f == (*crate::retail::disc::pick(&TAUNTER, &TAUNTER_USA))[i]
+		|| f == (*crate::retail::disc::pick(&SUCK_TUBE, &SUCK_TUBE_USA))[i]
 		|| is_barrier(m, level, f)
 		|| is_barrier2(m, level, f)
 		|| is_tesla(m, f)
 		|| is_morph(m, f)
 		|| is_walloper(m, f)
 		|| is_hero_fx(m, f)
-		|| VENDOR_FN[i] == f
+		|| (*crate::retail::disc::pick(&VENDOR_FN, &VENDOR_FN_USA))[i] == f
 		|| arc_fn(level) == Some(f)
 		|| super::queue_q2::claims(level, f)
 		|| super::queue_fxb::claims(level, f)

@@ -245,9 +245,12 @@ fn strip_triangles(s: &[i32], count: usize) -> R<Vec<([u32; 3], u8)>> {
 }
 
 /// Strips of one packet's index unpack (byte 2 the first texture-switch code, strip bytes from byte 4) with the texture slot
-/// each strip draws with. The AD unpack `ad` supplies the switch codes (byte 0xc of each qword k) and slots (qword 2 of each
-/// 0x40 block); `texture` carries the slot across packets (a packet without an AD unpack keeps the previous one).
-fn packet_strips(index: &[u8], ad: Option<&[u8]>, texture: &mut i32) -> R<Vec<(i32, Vec<i32>)>> {
+/// and CLAMP wrap each draws with. The AD unpack `ad` supplies the switch codes (byte 0xc of each qword k) and per 0x40 block the
+/// slot (+0x20) and the GS state source words [C: `moby_ad_patch_tex` FUN_00253c78 / FUN_00254238 OV:44598-44642, the class patcher
+/// reads them as u32]: +0x00 TEX1 K, +0x04 MMIN, +0x10 CLAMP WMS, +0x14 WMT (runtime CLAMP_1 = WMS | WMT << 2, TEX1 = MXL << 2 |
+/// MMIN << 6 | 0x20 MMAG linear | K << 32). A slot below zero (flat, chrome, glass) runs CLAMP_1 = 5. `texture` carries slot
+/// and wrap (bit 0 u clamped, bit 1 v clamped; the shrub key layout) across packets (a packet without an AD unpack keeps the previous one).
+fn packet_strips(index: &[u8], ad: Option<&[u8]>, texture: &mut (i32, u32)) -> R<Vec<(i32, u32, Vec<i32>)>> {
 	let mut secret = vec![index[2] as i8];
 	let mut textures = Vec::new();
 	if let Some(ad) = ad {
@@ -256,11 +259,25 @@ fn packet_strips(index: &[u8], ad: Option<&[u8]>, texture: &mut i32) -> R<Vec<(i
 		}
 		for k in 0..ad.len() / 0x40 {
 			secret.push(ad[k * 0x10 + 0xc] as i8);
-			textures.push(u32_at(ad, k * 0x40 + 0x20)? as i32);
+			let slot = u32_at(ad, k * 0x40 + 0x20)? as i32;
+			let (kk, mmin, wms, wmt) = (u32_at(ad, k * 0x40)? as u64, u32_at(ad, k * 0x40 + 4)? as u64, u32_at(ad, k * 0x40 + 0x10)?, u32_at(ad, k * 0x40 + 0x14)?);
+			if crate::viewer::gs_state::enabled() && slot >= 0 {
+				crate::viewer::gs_state::guard_world("moby", crate::viewer::gs_state::TEST_TFRAG, (kk & 0xfff) << 32 | mmin << 6 | 0x20, wms as u64 | (wmt as u64) << 2);
+				crate::viewer::gs_state::note("moby", "tex1.mip_k_unapplied", (mmin as u32) << 16 | (kk as u32 & 0xfff));
+			}
+			if slot < 0 {
+				// Flat, chrome and glass draws patch CLAMP_1 = 5 (both axes clamped); the flat texture is uniform, so its key keeps wrap 0.
+				textures.push((slot, if slot == -1 { 0 } else { 3 }));
+				continue;
+			}
+			if wms > 1 || wmt > 1 {
+				return Err("unsupported moby CLAMP region mode".into());
+			}
+			textures.push((slot, wms | wmt << 1));
 		}
 	}
 	let indices: Vec<i8> = index[4..].iter().map(|&b| b as i8).collect();
-	let mut strips: Vec<(i32, Vec<i32>)> = Vec::new();
+	let mut strips: Vec<(i32, u32, Vec<i32>)> = Vec::new();
 	let mut ad = 0;
 	for (j, &b) in indices.iter().enumerate() {
 		let mut b = b;
@@ -268,8 +285,8 @@ fn packet_strips(index: &[u8], ad: Option<&[u8]>, texture: &mut i32) -> R<Vec<(i
 			let s = *secret.get(ad).ok_or("index list outruns its texture switches")?;
 			if s == 0 {
 				if let Some(cur) = strips.last_mut() {
-					let keep = cur.1.len().saturating_sub(3);
-					cur.1.truncate(keep);
+					let keep = cur.2.len().saturating_sub(3);
+					cur.2.truncate(keep);
 				}
 				break;
 			}
@@ -280,10 +297,10 @@ fn packet_strips(index: &[u8], ad: Option<&[u8]>, texture: &mut i32) -> R<Vec<(i
 		// A flagged vertex (no GS kick) followed by another one starts a strip; a lone one just
 		// enters the vertex queue, so the strip continues with its natural parity.
 		if b <= 0 && indices.get(j + 1).map_or(false, |&next| next <= 0) {
-			strips.push((*texture, Vec::new()));
+			strips.push((texture.0, texture.1, Vec::new()));
 		}
 		let cur = strips.last_mut().ok_or("vertex before the first strip")?;
-		cur.1.push((b as i32 & 0x7f) - 1);
+		cur.2.push((b as i32 & 0x7f) - 1);
 	}
 	Ok(strips)
 }
@@ -291,7 +308,7 @@ fn packet_strips(index: &[u8], ad: Option<&[u8]>, texture: &mut i32) -> R<Vec<(i
 /// The metal packets of a class (moby_format.md 4.1): table entries `header[7] ..+ header[6]`; each VIF list is an index unpack
 /// plus an optional AD unpack (no ST unpack), each vertex table a qword header `{n, ..}` and n 16-byte vertices (s16 x, y, z;
 /// u8 azimuth, elevation; u8 joints 0..2, joint count 1..3, u8 weights / 256). `texture` continues from the LOD packets.
-fn metal_packets(block: &[u8], header: &[u8], packet_table: usize, scale: f32, texture: &mut i32) -> R<Vec<MetalPacket>> {
+fn metal_packets(block: &[u8], header: &[u8], packet_table: usize, scale: f32, texture: &mut (i32, u32)) -> R<Vec<MetalPacket>> {
 	let mut out = Vec::new();
 	for i in 0..header[6] as usize {
 		let wrap = |e: String| format!("metal packet {i}: {e}");
@@ -326,7 +343,7 @@ fn metal_packets(block: &[u8], header: &[u8], packet_table: usize, scale: f32, t
 				c => return Err(wrap(format!("metal vertex joint count {c}"))),
 			});
 		}
-		for (tex, s) in strips {
+		for (tex, _, s) in strips {
 			for (f, _) in strip_triangles(&s, n).map_err(wrap)? {
 				p.faces.push((tex, f));
 			}
@@ -403,7 +420,7 @@ fn decode_class(block: &[u8], remap: Option<&[u8]>, id: u32) -> R<MobyClass> {
 	let mut cache: HashMap<u16, CachedVertex> = HashMap::new();
 	// VU0 matrix cache: 64 slots, persistent across packets.
 	let mut slots: [Option<Skin>; 64] = [None; 64];
-	let mut texture = 0i32;
+	let mut texture = (0i32, 0u32);
 	let mut untextured = 0;
 	let mut flat: Vec<[u32; 3]> = Vec::new();
 	let mut colour_start = usize::MAX;
@@ -529,7 +546,7 @@ fn decode_class(block: &[u8], remap: Option<&[u8]>, id: u32) -> R<MobyClass> {
 		let base = mesh.positions.len() as u32;
 		let count = packet_vertices.len();
 		let strips = packet_strips(index, ad, &mut texture).map_err(wrap)?;
-		for (tex, s) in &strips {
+		for (tex, wr, s) in &strips {
 			// -1 is GS state without a texture (flat geometry); chrome and glass (-2, -3) live in metal packets.
 			if *tex == -1 {
 				let tris = strip_triangles(s, count).map_err(wrap)?;
@@ -549,9 +566,10 @@ fn decode_class(block: &[u8], remap: Option<&[u8]>, id: u32) -> R<MobyClass> {
 				Some(r) => r[*tex as usize] as u32,
 				None => GADGET_TEXTURE_BASE + *tex as u32,
 			};
+			let global = texture_key(TextureGroup::Moby, global) | wr << crate::shrubs::WRAP_SHIFT;
 			for (f, phase) in strip_triangles(s, count).map_err(wrap)? {
 				mesh.strip_phase.push(phase);
-				mesh.faces.push((texture_key(TextureGroup::Moby, global) | cull_bits(index[0]), f.map(|x| x + base)));
+				mesh.faces.push((global | cull_bits(index[0]), f.map(|x| x + base)));
 			}
 		}
 		for (v, t) in packet_vertices.iter().zip(out_uvs) {
@@ -595,8 +613,10 @@ pub fn glow_rgb(glow: u32) -> Option<[f32; 3]> {
 pub const CULL_BACK: u32 = 1 << 24;
 /// Face key bit for cull mode 0: front faces are dropped.
 pub const CULL_FRONT: u32 = 1 << 25;
-/// Mask that strips the cull bits from a face texture key.
+/// Mask that strips the cull bits from a face texture key (the CLAMP wrap bits 26..28 go too, `shrubs::WRAP_SHIFT`).
 pub const KEY_MASK: u32 = 0x00ff_ffff;
+/// Mask of the key a draw slot is looked up by: the texture plus its CLAMP wrap (a texture drawn with two wraps has two slots).
+pub const SLOT_MASK: u32 = KEY_MASK | 3 << crate::shrubs::WRAP_SHIFT;
 
 /// The face-key cull bits of a packet's cull mode byte (254 and every other value cull nothing).
 pub fn cull_bits(mode: u8) -> u32 {
@@ -808,6 +828,27 @@ mod tests {
 		assert_eq!((3071.0f32 + 0.0) * 16.0, 49136.0);
 	}
 
+	/// Every level's moby classes decode (no CLAMP region mode, which `packet_strips` refuses) and the faces' wrap bits are the
+	/// source words WMS | WMT << 1 of their AD block; prints the census (`--nocapture`).
+	#[test]
+	fn moby_clamp_wrap_census() {
+		let (mut disc, levels) = open();
+		let (mut faces, mut clamped, mut classes_n) = (0, [0usize; 4], 0);
+		for l in levels.iter().take(20) {
+			let Ok(level) = Level::load(&mut disc, l) else { continue };
+			let classes = moby_classes(&level).expect("moby classes decode");
+			for c in classes.values() {
+				classes_n += 1;
+				for f in &c.mesh.faces {
+					assert_eq!(f.0 & !(SLOT_MASK | CULL_BACK | CULL_FRONT), 0);
+					clamped[(f.0 >> crate::shrubs::WRAP_SHIFT & 3) as usize] += 1;
+					faces += 1;
+				}
+			}
+		}
+		eprintln!("moby wrap census: {classes_n} classes, {faces} faces, wrap 0/1/2/3 = {clamped:?}");
+	}
+
 	/// Packets with cull mode 2 give class 705 (fan) faces the back-cull bit; jets 660/688 are mode 254.
 	#[test]
 	fn cull_bits_reach_the_faces() {
@@ -822,7 +863,7 @@ mod tests {
 			}
 			for id in [660, 688] {
 				if let Some(c) = classes.get(&id) {
-					assert!(c.mesh.faces.iter().all(|f| f.0 & !KEY_MASK == 0));
+					assert!(c.mesh.faces.iter().all(|f| f.0 & (CULL_BACK | CULL_FRONT) == 0));
 					jets += 1;
 				}
 			}

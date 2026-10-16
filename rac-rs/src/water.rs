@@ -120,6 +120,10 @@ pub struct Patch {
 const IMAGE_BASE: usize = 0x15ef38;
 
 fn elf_at(img: &[u8], va: usize, len: usize) -> Option<&[u8]> {
+	// USA: the layout is Novalis's (level 1).
+	if crate::retail::disc::usa() {
+		return crate::retail::disc::ov_bytes(img, crate::retail::disc::va_level(1, va as u32) as usize, len);
+	}
 	img.get(va.checked_sub(IMAGE_BASE)?..)?.get(..len)
 }
 

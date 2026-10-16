@@ -167,7 +167,7 @@ pub(super) struct PropsGpu {
 	pub moby_pipelines: [wgpu::RenderPipeline; 2],
 	/// The moby passes with a packet cull mode (index 2 * (cull - 1) + pass).
 	pub moby_cull: [wgpu::RenderPipeline; 4],
-	layout: wgpu::BindGroupLayout,
+	pub(super) layout: wgpu::BindGroupLayout,
 	insts: wgpu::Buffer,
 	pose: wgpu::Buffer,
 	/// Capacities in records and pose entries.

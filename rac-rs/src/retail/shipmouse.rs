@@ -37,6 +37,7 @@
 //!   under the 0.27 floor.
 //! A stick (keyboard / pad) held past 8 bytes from centre wins over the mouse on its axis. No mouse motion = bytes untouched.
 use ee_oracle::Machine;
+use crate::retail::disc::va;
 
 const GAME_MODE: u32 = 0x15f5a4;
 const HERO_STATE: u32 = 0x1413d4;
@@ -91,7 +92,7 @@ pub enum Turret {
 /// the near moby 0x13f64c (class 0x4b1, state 5) whose pvar holds the velocities; without it the mouse leaves the sticks alone.
 /// `invert` = the game's Y option is "inverted".
 pub fn turret(m: &Machine, invert: bool) -> Option<Turret> {
-	if m.rd32(GAME_MODE) != 0 || m.rd32(HERO_STATE) != STATE_SHIP || in_ship_fight(m) {
+	if m.rd32(va(GAME_MODE)) != 0 || m.rd32(HERO_STATE) != STATE_SHIP || in_ship_fight(m) {
 		return None;
 	}
 	match m.rd32(LEVEL) {
@@ -118,7 +119,7 @@ pub fn turret(m: &Machine, invert: bool) -> Option<Turret> {
 
 /// A ship fight is on: gameplay (mode 0), hero state 0x32 holding a moby of a ship class.
 pub fn in_ship_fight(m: &Machine) -> bool {
-	if m.rd32(GAME_MODE) != 0 || m.rd32(HERO_STATE) != STATE_SHIP {
+	if m.rd32(va(GAME_MODE)) != 0 || m.rd32(HERO_STATE) != STATE_SHIP {
 		return false;
 	}
 	let h = m.rd32(HELD_MOBY) & 0x01ff_ffff;

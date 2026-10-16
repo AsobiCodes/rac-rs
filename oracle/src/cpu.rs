@@ -429,7 +429,8 @@ impl Cpu {
         self.mem.irq_dirty = true;
         // T1 counts BUSCLK/256 (the game's mode 0x82): one PAL field is 147456000 / 256 / 50 = 11520 counts, and the
         // 16-bit counter wraps. A game frame that spans vblanks reads that much more (the long-frame catch-up test).
-        self.mem.rcnt1 = (self.mem.rcnt1 + crate::mem::T1_FIELD) & 0xffff;
+        // NTSC (the USA disc): 9610 counts a field (`ver::t1_field`).
+        self.mem.rcnt1 = (self.mem.rcnt1 + crate::ver::t1_field()) & 0xffff;
     }
 
     fn stub(&mut self, pc: u32) -> bool {

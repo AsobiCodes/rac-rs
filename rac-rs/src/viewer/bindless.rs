@@ -38,6 +38,11 @@ pub(super) fn shader_source(src: &str) -> String {
 		"fn shrub_mesh_texel(i: VOut) -> vec4<f32> {\n\treturn textureSampleLevel(tex, samp, i.uv, gs_level(i));\n}",
 		"fn shrub_mesh_texel(i: VOut) -> vec4<f32> {\n\tlet t = i.ti & 0xffffu;\n\tlet w = (i.ti >> 16u) & 3u;\n\tlet lv = gs_level(i);\n\tif (w == 1u) { return textureSampleLevel(texs[t], samp_u, i.uv, lv); }\n\tif (w == 2u) { return textureSampleLevel(texs[t], samp_v, i.uv, lv); }\n\tif (w == 3u) { return textureSampleLevel(texs[t], samp_uv, i.uv, lv); }\n\treturn textureSampleLevel(texs[t], samp, i.uv, lv);\n}",
 	);
+	// Ties: the same wrap samplers for the material's CLAMP wrap (`ties::tie_wrap`, the low bits of the word above the slot).
+	s = s.replace(
+		"\tif (i.l.w < -2.5 && i.l.w > -3.5 && i.kmx.y >= 0.0) {\n\t\treturn textureSampleLevel(tex, samp, i.uv, gs_level(i));\n\t}\n\treturn textureSampleGrad(tex, samp, i.uv, dx, dy);\n}",
+		"\tlet t = i.ti & 0xffffu;\n\tlet w = (i.ti >> 16u) & 3u;\n\tif (i.l.w < -2.5 && i.l.w > -3.5 && i.kmx.y >= 0.0) {\n\t\tlet lv = gs_level(i);\n\t\tif (w == 1u) { return textureSampleLevel(texs[t], samp_u, i.uv, lv); }\n\t\tif (w == 2u) { return textureSampleLevel(texs[t], samp_v, i.uv, lv); }\n\t\tif (w == 3u) { return textureSampleLevel(texs[t], samp_uv, i.uv, lv); }\n\t\treturn textureSampleLevel(texs[t], samp, i.uv, lv);\n\t}\n\tif (w == 1u) { return textureSampleGrad(texs[t], samp_u, i.uv, dx, dy); }\n\tif (w == 2u) { return textureSampleGrad(texs[t], samp_v, i.uv, dx, dy); }\n\tif (w == 3u) { return textureSampleGrad(texs[t], samp_uv, i.uv, dx, dy); }\n\treturn textureSampleGrad(texs[t], samp, i.uv, dx, dy);\n}",
+	);
 	// The shrub material word sits above the texture slot here (`first_instance`); `vs_shrub` also passes the slot on.
 	s = s.replace("fn shrub_inst(inst: u32) -> u32 {\n\treturn inst;\n}", "fn shrub_inst(inst: u32) -> u32 {\n\treturn inst >> 16u;\n}");
 	s = s.replace("\tlet m = shrub_inst(inst);\n", "\to.ti = inst;\n\tlet m = shrub_inst(inst);\n");
@@ -46,10 +51,11 @@ pub(super) fn shader_source(src: &str) -> String {
 	s.replace("\to.kmx = tie_kmx(l, inst, o.kmx);\n", "\to.ti = inst;\n\to.kmx = tie_kmx(l, inst, o.kmx);\n")
 }
 
-/// The array layout and the pipelines the tie and shrub draws use: opaque (no cull, back, front) and the two faded shrub
-/// passes (`shrub_pipelines[0..2]`).
+/// The array layout and the pipelines the tie and shrub draws use: the two tie passes (`tie_pipelines`), opaque (no cull,
+/// back, front) and the two faded shrub passes (`shrub_pipelines[0..2]`).
 pub(super) struct Bindless {
 	pub layout: wgpu::BindGroupLayout,
+	pub tie: [[wgpu::RenderPipeline; 3]; 2],
 	pub pipeline: wgpu::RenderPipeline,
 	pub pipeline_cull: [wgpu::RenderPipeline; 2],
 	pub shrub_faded: [wgpu::RenderPipeline; 2],
@@ -122,6 +128,15 @@ impl Bindless {
 		}
 	}
 
+	/// Draws `runs` (`push_args`) with `set[cull mode]` (the tie passes).
+	pub(super) fn multi_draw_set(&self, pass: &mut wgpu::RenderPass, runs: &Runs, set: &[wgpu::RenderPipeline; 3]) {
+		let Some((buf, _)) = &self.indirect else { return };
+		for &(cull, off, n) in runs {
+			pass.set_pipeline(&set[cull as usize]);
+			pass.multi_draw_indexed_indirect(buf, off, n);
+		}
+	}
+
 	/// The scene's array bind group: slot k = the texture of `scene.bind_groups[k]` (`views`, logged by `Gpu::upload`; the
 	/// rest padded with slot 0). None when a slot's view is unknown or the scene has more than `TEX_CAP` slots.
 	pub(super) fn bind_group(&self, device: &wgpu::Device, binds: &[wgpu::BindGroup], views: &HashMap<wgpu::BindGroup, wgpu::TextureView>, sampler: &wgpu::Sampler, wrap: &[wgpu::Sampler; 3]) -> Option<wgpu::BindGroup> {
@@ -155,6 +170,7 @@ mod tests {
 		assert!(s.contains("o.ti = inst;") && s.contains("ti: u32 };"));
 		assert!(s.contains("samp_uv, i.uv") && s.contains("binding(4) var samp_uv"), "the shrub mesh texel is rewritten to the wrap samplers");
 		assert!(s.contains("\to.ti = inst;\n\to.kmx = tie_kmx(l, inst, o.kmx);"), "vs (ties) passes the slot on");
+		assert!(s.contains("textureSampleGrad(texs[t], samp_uv, i.uv, dx, dy)") && s.contains("textureSampleLevel(texs[t], samp_v, i.uv, lv)"), "the tie texel is rewritten to the wrap samplers");
 		assert!(s.contains("return inst >> 16u;") && s.contains("\to.ti = inst;\n\tlet m = shrub_inst(inst);"), "vs_shrub reads the material word above the slot");
 		naga::front::wgsl::parse_str(&s).expect("bindless wgsl parse");
 	}

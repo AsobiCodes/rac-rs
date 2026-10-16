@@ -9,6 +9,7 @@
 use super::draw_queue;
 use crate::particles::WorldStrip;
 use ee_oracle::Machine;
+use crate::retail::disc::va;
 
 /// Mask a moby / pvar pointer to a physical address.
 const fn phys(a: u32) -> u32 {
@@ -53,6 +54,8 @@ fn same_class(m: &Machine, level: u32, arg: u32) -> Vec<u32> {
 /// one additive camera-facing glow quad (the hero-glow primitive). scale = 1.0 when the level id 0x15ed84 is 0 or 0x12
 /// (Veldin), else 1.2. Veldin 2 (level 18, id 0x12) FUN_002ec310 is a binary twin (the red orbs of the finale, effects census E9).
 const ORB_FN: [(u32, u32); 4] = [(0, 0x2ded80), (2, 0x2ea408), (5, 0x319388), (18, 0x2ec310)];
+/// `ORB_FN` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+const ORB_FN_USA: [(u32, u32); 4] = [(0, 0x2df3d8), (2, 0x2eaad8), (5, 0x3199c8), (18, 0x2ec9e0)];
 
 /// Transport glow callbacks (Aridia FUN_002ebc38 class 1212 / FUN_002ec598 class 1213, binary twins Gaspar 0x305538 /
 /// 0x305e98 and Orxon 0x2eb280 for 1213) [C: overlay.elf.c 157091-157143, 157507-157559]: for each visible same-class
@@ -65,10 +68,20 @@ const TRANSPORT_FN: [(u32, u32, u32, u32, u32, u32); 5] = [
 	(9, 0x305e98, 6, 0xe0, 0x3f99, 0x3f11),
 	(10, 0x2eb280, 6, 0xe0, 0x3f99, 0x3f11),
 ];
+/// `TRANSPORT_FN` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+const TRANSPORT_FN_USA: [(u32, u32, u32, u32, u32, u32); 5] = [
+	(2, 0x2ec308, 3, 0xb0, 0x3f66, 0x3ee6),
+	(2, 0x2ecc68, 6, 0xe0, 0x3f99, 0x3f11),
+	(9, 0x305c10, 3, 0xb0, 0x3f66, 0x3ee6),
+	(9, 0x306570, 6, 0xe0, 0x3f99, 0x3f11),
+	(10, 0x2eb958, 6, 0xe0, 0x3f99, 0x3f11),
+];
 
 /// Novalis strip-surface callbacks: `FUN_002b8ff0(); FUN_002b9010(count, table)` (676 x8 at 0x1e2ec0, 678 x2 at 0x1e3280,
 /// 761 x4 at 0x1fbb80, 1225 x3 at 0x202c80) [C: overlay.elf.c 152240, 152250, 157743, 165192]. (callback, count, table).
 const STRIP_FN: [(u32, usize, u32); 4] = [(0x2f5a28, 8, 0x1e2ec0), (0x2f5a80, 2, 0x1e3280), (0x2fe458, 4, 0x1fbb80), (0x309528, 3, 0x202c80)];
+/// `STRIP_FN` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+const STRIP_FN_USA: [(u32, usize, u32); 4] = [(0x2f60f8, 8, 0x1e2fc0), (0x2f6150, 2, 0x1e3380), (0x2feb28, 4, 0x1fbc80), (0x309bf8, 3, 0x202d80)];
 /// Novalis strip drawer FUN_002b9010.
 const STRIP_DRAW: u32 = 0x2b9010;
 const NOVALIS: u32 = 1;
@@ -85,7 +98,7 @@ pub fn fill(m: &Machine, level: u32, glows: &mut Vec<([f32; 3], f32, f32, u32)>,
 	let mut done: Vec<u32> = Vec::new();
 	for (f, arg) in entries(m, level) {
 		// The glass patches take no argument and draw their fixed tables once per callback.
-		if let Some(&(_, _, hash, patches)) = GLASS_FN.iter().find(|g| g.0 == level && g.1 == f) {
+		if let Some(&(_, _, hash, patches)) = (*crate::retail::disc::pick(&GLASS_FN, &GLASS_FN_USA)).iter().find(|g| g.0 == level && g.1 == f) {
 			if !done.contains(&f) {
 				done.push(f);
 				if code_hash(m, f) == hash {
@@ -98,18 +111,18 @@ pub fn fill(m: &Machine, level: u32, glows: &mut Vec<([f32; 3], f32, f32, u32)>,
 		if arg == 0 || done.contains(&f) {
 			continue;
 		}
-		if ORB_FN.contains(&(level, f)) && has_lui(m, f, 0x3f00) {
+		if (*crate::retail::disc::pick(&ORB_FN, &ORB_FN_USA)).contains(&(level, f)) && has_lui(m, f, 0x3f00) {
 			done.push(f);
 			orbs(m, level, arg, glows);
-		} else if let Some(&(_, _, joints, off, size, bias)) = TRANSPORT_FN.iter().find(|t| t.0 == level && t.1 == f) {
+		} else if let Some(&(_, _, joints, off, size, bias)) = (*crate::retail::disc::pick(&TRANSPORT_FN, &TRANSPORT_FN_USA)).iter().find(|t| t.0 == level && t.1 == f) {
 			done.push(f);
 			if has_lui(m, f, size) && has_lui(m, f, bias) {
 				transports(m, level, arg, joints, off, glows);
 			}
 		} else if level == NOVALIS {
-			if let Some(&(_, count, table)) = STRIP_FN.iter().find(|t| t.0 == f) {
+			if let Some(&(_, count, table)) = (*crate::retail::disc::pick(&STRIP_FN, &STRIP_FN_USA)).iter().find(|t| t.0 == f) {
 				done.push(f);
-				if (0..16).any(|k| jal_to(m, f + 4 * k) == Some(STRIP_DRAW)) {
+				if (0..16).any(|k| jal_to(m, f + 4 * k) == Some(va(STRIP_DRAW))) {
 					surfaces(m, f, count, table, strips);
 				}
 			}
@@ -129,15 +142,19 @@ pub fn fill(m: &Machine, level: u32, glows: &mut Vec<([f32; 3], f32, f32, u32)>,
 /// strip twice: context 1 with the table uv, context 2 with the sphere-map uv. (function, FNV-1a of its first 0x100 bytes).
 const HOVEN: u32 = 12;
 const POOL_FN: [(u32, u32); 4] = [(0x2e6ae0, 0x012d_e745), (0x2bbb40, 0x85ef_dfcc), (0x266394, 0x5f5b_76c1), (0x222d20, 0xe462_ea3a)];
+/// `POOL_FN` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+const POOL_FN_USA: [(u32, u32); 4] = [(0x2e71b0, 0x012d_e745), (0x2bc210, 0x85ef_dfcc), (0x2667fc, 0x5f5b_76c1), (0x2231f0, 0xe462_ea3a)];
 /// (record table, records, fx texture of pass 1 / 2, FIX of pass 1 / 2, camera vec4 of FUN_00266394, cull far).
 const POOLS: (u32, u32, [usize; 2], [u8; 2], u32, f32) = (0x1f5380, 0x2f, [0x2c, 0x2d], [0x80, 0x40], 0x1671c0, 256.0);
+/// `POOLS` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+const POOLS_USA: (u32, u32, [usize; 2], [u8; 2], u32, f32) = (0x1f5480, 0x2f, [0x2c, 0x2d], [0x80, 0x40], 0x167240, 256.0);
 
 fn hoven_pools(m: &Machine, out: &mut Vec<WorldStrip>) {
-	let queued = (0..m.rd32(0x15f42c).min(0x40)).any(|i| m.rd32(0x16e080 + 4 * i) == POOL_FN[0].0);
-	if !queued || POOL_FN.iter().any(|&(f, h)| code_hash(m, f) != h) {
+	let queued = (0..m.rd32(0x15f42c).min(0x40)).any(|i| m.rd32(va(0x16e080) + 4 * i) == (*crate::retail::disc::pick(&POOL_FN, &POOL_FN_USA))[0].0);
+	if !queued || (*crate::retail::disc::pick(&POOL_FN, &POOL_FN_USA)).iter().any(|&(f, h)| code_hash(m, f) != h) {
 		return;
 	}
-	let (table, count, tex, fix, cam, far) = POOLS;
+	let (table, count, tex, fix, cam, far) = (*crate::retail::disc::pick(&POOLS, &POOLS_USA));
 	let cam = m.rdv3(cam);
 	for k in 0..count {
 		let r = table + 0x20 * k;
@@ -181,7 +198,7 @@ fn pool_uv(v: [f32; 3], n: [f32; 3], cam: [f32; 3]) -> [f32; 2] {
 /// 0 - (z + r) clear), far * k - (z - r) < 0, or a side test a.c z - (|c| - b.c r) < 0 (c = x, y; a = +0x40, b = +0x60).
 fn sphere_visible(m: &Machine, far: f32, s: [f32; 4]) -> i32 {
 	let q = |a: u32| [m.rdf(a), m.rdf(a + 4), m.rdf(a + 8), m.rdf(a + 0xc)];
-	let b = 0x16d0c0u32;
+	let b = va(0x16d0c0u32);
 	let (r0, r1, r2, c, a, w, h, g) = (q(b), q(b + 0x10), q(b + 0x20), q(b + 0x30), q(b + 0x40), q(b + 0x50), q(b + 0x60), q(b + 0x70));
 	let k = c[3];
 	let p = s.map(|x| x * k);
@@ -224,6 +241,19 @@ const GLASS_FN: [(u32, u32, u32, u32); 10] = [
 	(17, 0x2f5c18, 0xe5313eba, 2),
 	(17, 0x2f5f30, 0x4aaf107f, 1),
 ];
+/// `GLASS_FN` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+const GLASS_FN_USA: [(u32, u32, u32, u32); 10] = [
+	(16, 0x2e8d40, 0x9c28a011, 3),
+	(16, 0x2e9270, 0x7e953950, 1),
+	(16, 0x2e97a0, 0xea65985b, 2),
+	(16, 0x2e9fe8, 0x72a3ca4d, 3),
+	(17, 0x2f5690, 0xeb2f8f15, 2),
+	(17, 0x2f59a8, 0xd9485226, 1),
+	(17, 0x2f5cc0, 0xd857cb0f, 2),
+	(17, 0x2f5fd8, 0xbff301aa, 1),
+	(17, 0x2f62f0, 0xe5313eba, 2),
+	(17, 0x2f6608, 0x4aaf107f, 1),
+];
 
 /// FNV-1a over the first 0x100 bytes (0x40 words) of the function at `f`.
 pub(super) fn code_hash(m: &Machine, f: u32) -> u32 {
@@ -240,8 +270,8 @@ pub(super) fn code_hash(m: &Machine, f: u32) -> u32 {
 /// (Kalebo 0x167140, Fleet 0x167640), the scale 2.0 / 4.0 its `(x / 2L + 0.5) * scale`.
 fn glass_level(level: u32) -> Option<(usize, u8, f32, u32)> {
 	match level {
-		16 => Some((0x29, 0x40, 2.0, 0x167140)),
-		17 => Some((0x30, 0x20, 4.0, 0x167640)),
+		16 => Some((0x29, 0x40, 2.0, va(0x167140))),
+		17 => Some((0x30, 0x20, 4.0, va(0x167640))),
 		_ => None,
 	}
 }
@@ -361,10 +391,10 @@ fn record(m: &Machine, r: u32) -> Option<(crate::strips::StripRec, [f32; 4], u32
 /// the stored word is I(frame counter at the write), found against the snapshot's counter, and the draw's I is the one
 /// before it [I: one call per frame].
 fn surfaces(m: &Machine, f: u32, count: usize, table: u32, out: &mut Vec<WorldStrip>) {
-	let frames = m.rd32(0x15f5ac);
+	let frames = m.rd32(va(0x15f5ac));
 	for k in 0..count as u32 {
 		let Some((rec, scroll, phase, stored)) = record(m, table + 0x60 * k) else { continue };
-		let pulse = if f == 0x309528 {
+		let pulse = if f == va(0x309528) {
 			(0..3u32).find(|d| stored == pulse_1225(frames.wrapping_sub(*d))).map_or(stored, |d| pulse_1225(frames.wrapping_sub(d + 1)))
 		} else {
 			stored
@@ -384,6 +414,8 @@ fn surfaces(m: &Machine, f: u32, count: usize, table: u32, out: &mut Vec<WorldSt
 /// per-level tables. (level, wrapper, ST table, strip index, fx table). Kerwan keeps the WAD-built ocean (`ocean.rs`
 /// KERWAN): its fx table address is not decoded here.
 pub(super) const OCEAN_FN: [(u32, u32, u32, u32, u32); 2] = [(8, 0x2d9a00, 0x1cb610, 0x1cb500, 0x16d908), (14, 0x302d00, 0x1cb590, 0x1cb480, 0x16d888)];
+/// `OCEAN_FN` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+pub(super) const OCEAN_FN_USA: [(u32, u32, u32, u32, u32); 2] = [(8, 0x2da0d0, 0x1cb710, 0x1cb600, 0x16d988), (14, 0x303350, 0x1cb610, 0x1cb500, 0x16d888)];
 
 /// Cache of the last ocean built: (key, ocean). The key holds the descriptor words and the first fx record, which pin the
 /// level data in RAM (the tables are overlay data; the fx pool base 0x15f420 moves per level).
@@ -392,7 +424,7 @@ static OCEAN_CACHE: std::sync::Mutex<Option<(Vec<u32>, std::sync::Arc<crate::oce
 /// Hook (retail.rs `queue_fx`): the level's ocean while the wrapper is in queue A, built from the descriptor in RAM.
 /// None on levels without an entry in `OCEAN_FN` and when the wrapper or descriptor does not look as decoded.
 pub fn ocean(m: &Machine, level: u32) -> Option<std::sync::Arc<crate::ocean::Ocean>> {
-	let &(_, wrapper, st_table, strip_index, fx_table) = OCEAN_FN.iter().find(|o| o.0 == level)?;
+	let &(_, wrapper, st_table, strip_index, fx_table) = (*crate::retail::disc::pick(&OCEAN_FN, &OCEAN_FN_USA)).iter().find(|o| o.0 == level)?;
 	let (fns, _) = draw_queue(level)?;
 	if !(0..m.rd32(0x15f424).min(0x40)).any(|i| m.rd32(fns + 4 * i) == wrapper) {
 		return None;
@@ -445,5 +477,5 @@ pub fn ocean(m: &Machine, level: u32) -> Option<std::sync::Arc<crate::ocean::Oce
 
 /// Effects layer claimed set (retail/efx_draw.rs): the callbacks `fill` draws.
 pub fn claims(level: u32, f: u32) -> bool {
-	ORB_FN.contains(&(level, f)) || TRANSPORT_FN.iter().any(|t| t.0 == level && t.1 == f) || STRIP_FN.iter().any(|t| t.0 == f) || POOL_FN.iter().any(|t| t.0 == f) || GLASS_FN.iter().any(|g| g.0 == level && g.1 == f)
+	(*crate::retail::disc::pick(&ORB_FN, &ORB_FN_USA)).contains(&(level, f)) || (*crate::retail::disc::pick(&TRANSPORT_FN, &TRANSPORT_FN_USA)).iter().any(|t| t.0 == level && t.1 == f) || (*crate::retail::disc::pick(&STRIP_FN, &STRIP_FN_USA)).iter().any(|t| t.0 == f) || (*crate::retail::disc::pick(&POOL_FN, &POOL_FN_USA)).iter().any(|t| t.0 == f) || (*crate::retail::disc::pick(&GLASS_FN, &GLASS_FN_USA)).iter().any(|g| g.0 == level && g.1 == f)
 }

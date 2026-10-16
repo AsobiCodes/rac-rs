@@ -8,6 +8,7 @@
 //!   back button, the wheel steps up / down (left / right over values, L1 / R1 over the ring), and the button-hint lines
 //!   press their button. See <dev>/scratch_play/handoff/mouse_lean.md for the RAM layout [C].
 
+use crate::retail::disc::va;
 pub const UP: u16 = 0x1000;
 pub const RIGHT: u16 = 0x2000;
 pub const DOWN: u16 = 0x4000;
@@ -22,7 +23,9 @@ const MENU_BTNS: u16 = UP | RIGHT | DOWN | LEFT | CROSS | CIRCLE | TRIANGLE | 0x
 
 /// The overlay's pixel space.
 const SCREEN: (f32, f32) = (512.0, 448.0);
-/// Fields a pulse holds the button, and fields it then stays released (the menu's auto-repeat needs a fresh press).
+/// Fields a pulse holds the button, and fields it then stays released (the menu's auto-repeat needs a fresh press). A steering
+/// pulse ends after its first released field once the snap shows the selection moved (`State::step`): 3 fields a step
+/// instead of 5 when the game takes the press at once, the full 5 when it does not.
 const PRESS: u8 = 2;
 const RELEASE: u8 = 3;
 /// Presses spent steering to one goal before giving up.
@@ -36,6 +39,11 @@ pub const MODE: u32 = 3;
 const PAGE_PTR: [u32; 19] = [
 	0x1b9cf4, 0x1ba0f4, 0x1ba274, 0x1b9d74, 0x1b9df4, 0x1ba174, 0x1ba3f4, 0x1b9cf4, 0x1ba474, 0x1b9df4, 0x1ba0f4, 0x1ba674, 0x1ba0f4, 0x1b9f74,
 	0x1ba3f4, 0x1ba274, 0x1ba0f4, 0x1ba574, 0x1ba674,
+];
+/// `PAGE_PTR` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
+const PAGE_PTR_USA: [u32; 19] = [
+	0x1b9cf4, 0x1ba174, 0x1ba2f4, 0x1b9df4, 0x1b9e74, 0x1ba174, 0x1ba474, 0x1b9d74, 0x1ba4f4, 0x1b9e74, 0x1ba174, 0x1ba6f4, 0x1ba174, 0x1b9ff4,
+	0x1ba3f4, 0x1ba2f4, 0x1ba174, 0x1ba5f4, 0x1ba6f4,
 ];
 
 /// What one item is, as far as the mouse cares.
@@ -84,7 +92,8 @@ pub struct MenuSnap {
 }
 
 fn ram(a: u32) -> bool {
-	(0x10_0000..0x200_0000).contains(&(a & MASK)) && a & !MASK == 0
+	// Also the PC options region (pcext.rs: the Graphics page, its items and the Options list copy live there).
+	((0x10_0000..0x200_0000).contains(&(a & MASK)) || (super::pcext::BASE..super::pcext::BASE + 0x1_0000).contains(&a)) && a & !MASK == 0
 }
 
 /// Text ids of the hint lines and the pad button each one names (decomp/notes/ingame_pause_menu.md, hud.md).
@@ -102,7 +111,7 @@ pub fn read(rd: &dyn Fn(u32) -> u32, level: u32, mode: u32) -> Option<MenuSnap> 
 	if mode != MODE {
 		return None;
 	}
-	read_ptr(rd, *PAGE_PTR.get(level as usize)?)
+	read_ptr(rd, *(*crate::retail::disc::pick(&PAGE_PTR, &PAGE_PTR_USA)).get(level as usize)?)
 }
 
 /// The front end's (frontbin) page pointer: FUN_00218758 keeps the current page in 0x1d5b74 and its kind word in 0x1d5b70.
@@ -113,7 +122,7 @@ pub fn read_front(rd: &dyn Fn(u32) -> u32, mode: u32) -> Option<MenuSnap> {
 	if mode != MODE {
 		return None;
 	}
-	read_ptr(rd, FRONT_PAGE_PTR).map(|m| MenuSnap { front: true, ..m })
+	read_ptr(rd, va(FRONT_PAGE_PTR)).map(|m| MenuSnap { front: true, ..m })
 }
 
 /// The menu whose current-page pointer lives at `pp`.
@@ -183,6 +192,14 @@ fn classify(rd: &dyn Fn(u32) -> u32, rd16: &dyn Fn(u32) -> u32, id: u32, slot: u
 	if !ram(data) {
 		return Kind::Other;
 	}
+	let flags = rd(it + 0x30);
+	// A text item showing the current item's row (draw FUN_0028d648 on Novalis, flags 0x80: +0x34 = u32 text ids, +0x38 =
+	// their stride 4; a list's +0x38 is its Up neighbour item instead): the description panel beside the Help / Options
+	// lists. Never the selection: the page's current item only changes through page+0x80, which those lists (flags 0x1000,
+	// list update FUN_0028df18) never write, and Left / Right are not read there.
+	if flags & 0x80 != 0 && rd(it + 0x38) == 4 {
+		return Kind::Other;
+	}
 	// 12-byte records {text id, type, arg, text2, pulse} up to a zero text id.
 	let mut recs = Vec::new();
 	for k in 0..14 {
@@ -200,7 +217,6 @@ fn classify(rd: &dyn Fn(u32) -> u32, rd16: &dyn Fn(u32) -> u32, id: u32, slot: u
 	if rd(it) == 0 && recs.len() == 1 {
 		return hint_button(first as u16).map_or(Kind::Other, Kind::Hint);
 	}
-	let flags = rd(it + 0x30);
 	let n = recs.len() as f32;
 	let fh = if flags & 4 != 0 {
 		14.0
@@ -366,6 +382,12 @@ impl MenuSnap {
 		}
 	}
 
+	/// The selection as the steering sees it: the current item, its cursor and the ring's cursor (any change = a press landed).
+	fn sig(&self) -> (u32, u32) {
+		let ring = self.items.iter().find_map(|i| if let Kind::Ring { cursor } = i.kind { Some(cursor) } else { None }).unwrap_or(0);
+		(self.cur, self.item(self.cur).and_then(MenuSnap::cursor_of).unwrap_or(0) * 16 + ring)
+	}
+
 	/// The right-click button: the screen's back / No button of the per-screen table (`menu_keys::screen`), the same one
 	/// Esc presses.
 	fn back_button(&self) -> u16 {
@@ -397,6 +419,8 @@ pub struct State {
 	goal: Option<Goal>,
 	pulse: u16,
 	left: u8,
+	/// A steering pulse in flight: the page and the selection when it went out.
+	steer: Option<(u32, (u32, u32))>,
 }
 
 impl State {
@@ -422,6 +446,7 @@ impl State {
 	}
 
 	fn fire(&mut self, b: u16) -> u16 {
+		self.steer = None;
 		self.pulse = b;
 		self.left = PRESS + RELEASE;
 		self.advance()
@@ -442,15 +467,24 @@ impl State {
 			return 0;
 		};
 		if self.left > 0 {
-			return self.advance();
+			// A steering pulse whose press the game already took (the selection moved, or the page changed) ends after its first
+			// released field: the next step goes out at once instead of after the full release.
+			let landed = self.left < RELEASE && self.steer.is_some_and(|(page, sig)| page != m.id || sig != m.sig());
+			if !landed {
+				return self.advance();
+			}
+			self.left = 0;
+			self.steer = None;
+		}
+		// A page flying in or closing: wheel notches and clicks of this field are lost (the game ignores the pad then too, and a
+		// double click must not confirm a row of the page it opened); a hover waits for the page.
+		if m.busy() {
+			self.goal = None;
+			(self.click, self.back, self.wheel) = (false, false, 0);
+			return 0;
 		}
 		let (moved, click, back, wheel) = (std::mem::take(&mut self.moved), std::mem::take(&mut self.click), std::mem::take(&mut self.back), std::mem::take(&mut self.wheel));
 		if kbd & MENU_BTNS != 0 {
-			self.goal = None;
-			return 0;
-		}
-		// A page flying in or closing: the events of this field are lost, as are goals of the page that went.
-		if m.busy() {
 			self.goal = None;
 			return 0;
 		}
@@ -498,15 +532,16 @@ impl State {
 			self.goal = None;
 			return if g.confirm { self.fire(CROSS) } else { 0 };
 		}
-		let ring = m.items.iter().find_map(|i| if let Kind::Ring { cursor } = i.kind { Some(cursor) } else { None }).unwrap_or(0);
-		let sig = (m.cur, m.item(m.cur).and_then(MenuSnap::cursor_of).unwrap_or(0) * 16 + ring);
+		let sig = m.sig();
 		g.stuck = if g.presses > 0 && sig == g.sig { g.stuck + 1 } else { 0 };
 		g.sig = sig;
 		match m.toward(g.target) {
 			Some(b) if g.presses < MAX_PRESSES && g.stuck < 3 => {
 				g.presses += 1;
 				self.goal = Some(g);
-				self.fire(b)
+				let out = self.fire(b);
+				self.steer = Some((m.id, sig));
+				out
 			}
 			_ => {
 				self.goal = None;
@@ -618,13 +653,14 @@ mod tests {
 		run(&mut st, &mut m, 30, &mut presses, &mut crossed);
 		assert_eq!(m.cur, 0x10);
 		assert_eq!(presses.len(), 1);
-		// Hover the last one: Down x3 (the toy list wraps, the rect direction says Down), presses spaced 5 fields apart.
+		// Hover the last one: Down x3 (the toy list wraps, the rect direction says Down); this toy takes each press at once, so
+		// every step ends after one released field: presses 3 fields apart.
 		presses.clear();
 		st.cursor(200.0, 200.0);
 		run(&mut st, &mut m, 60, &mut presses, &mut crossed);
 		assert_eq!(m.cur, 0x40);
 		assert_eq!(presses.len(), 3);
-		assert!(presses.windows(2).all(|w| w[1] - w[0] >= 5), "{presses:?}");
+		assert!(presses.windows(2).all(|w| w[1] - w[0] == 3), "{presses:?}");
 		assert_eq!(crossed, 0);
 		// A click elsewhere does nothing; a click on an item selects it and presses Cross.
 		st.cursor(10.0, 10.0);
@@ -644,6 +680,54 @@ mod tests {
 		st.click();
 		assert_eq!(st.step(None, 0), 0);
 		assert!(!st.click);
+	}
+
+	/// The viewer's timing (retail.rs `tick_keys`): the snap a step sees is 2 fields old. A game that takes the press in the
+	/// field it arrives steps every 3 fields and never overshoots; a game that ignores presses keeps the full 5-field pulses.
+	#[test]
+	fn steering_follows_the_game_without_overshoot() {
+		for (takes, gap) in [(true, 3u32), (false, 5)] {
+			let mut m = root();
+			let mut st = State::default();
+			let mut seen: std::collections::VecDeque<MenuSnap> = [m.clone(), m.clone()].into();
+			let (mut prev, mut presses, mut crossed) = (0u16, Vec::new(), 0);
+			st.cursor(200.0, 200.0);
+			for f in 0..60u32 {
+				let b = st.step(Some(&seen[0]), 0);
+				if b & !prev != 0 {
+					presses.push(f);
+					if takes {
+						play(&mut m, b, &mut crossed);
+					}
+				}
+				prev = b;
+				seen.pop_front();
+				seen.push_back(m.clone());
+			}
+			if takes {
+				assert_eq!(m.cur, 0x40, "reached, no overshoot");
+				assert_eq!(presses.len(), 2, "{presses:?}");
+			} else {
+				assert!(presses.len() >= 3, "{presses:?}");
+			}
+			assert!(presses.windows(2).all(|w| w[1] - w[0] == gap), "takes {takes}: {presses:?}");
+		}
+	}
+
+	/// A hover made while a page flies in is kept for when it is idle; a click then is dropped.
+	#[test]
+	fn hover_waits_for_a_page_flying_in() {
+		let mut m = root();
+		m.state = 1;
+		let mut st = State::default();
+		st.cursor(200.0, 61.0);
+		st.click();
+		for _ in 0..5 {
+			assert_eq!(st.step(Some(&m), 0), 0);
+		}
+		m.state = 2;
+		assert_eq!(st.step(Some(&m), 0), UP, "the hover steers once the page is idle");
+		assert!(!st.goal.unwrap().confirm, "the click during the fly-in was dropped");
 	}
 
 	#[test]
@@ -684,6 +768,41 @@ mod tests {
 		// 2 fields per pulse; the first press plus three repeats that change nothing.
 		assert!((6..=10).contains(&pressed), "{pressed}");
 		assert!(st.goal.is_none());
+	}
+
+	/// The Help page (id 7) as Novalis lays it out: the description panel beside the list is a text item (flags 0x90, u32
+	/// text ids per row, stride 4), not a list of rows, so hovering it is no goal; the list (flags 0x1000) keeps its rows.
+	#[test]
+	fn help_description_panel_is_not_a_row() {
+		let mut w = std::collections::HashMap::<u32, u32>::new();
+		let (pp, page, desc, list) = (0x1ba0f4u32, 0x1b3d98u32, 0x1b3f40u32, 0x1b3f98u32);
+		w.insert(pp, page);
+		w.insert(pp - 4, 7);
+		w.insert(page + 0x3c, 7);
+		w.insert(page + 0x40, list);
+		w.insert(page + 0x48, desc);
+		w.insert(page + 0x50, list);
+		for (it, rect) in [(desc, [21, 134, 155, 148]), (list, [195, 91, 123, 235])] {
+			for (k, v) in rect.into_iter().enumerate() {
+				w.insert(it + 0x18 + 4 * k as u32, v);
+			}
+		}
+		// Description: Help Log / Controls / Moves / Weapons / Gadgets texts, then the zero id and the next item's code words.
+		for (k, t) in [0x4fd6, 0x4efd, 0x4efe, 0x4eff, 0x4f00, 0, 0x28_d0a0, 0x28_d648].into_iter().enumerate() {
+			w.insert(0x1b3f28 + 4 * k as u32, t);
+		}
+		w.extend([(desc, 0x28_d0a0), (desc + 0x30, 0x90), (desc + 0x34, 0x1b3f28), (desc + 0x38, 4)]);
+		// List: five type-3 records.
+		for (k, t) in [0x4fd5u32, 0x4ef1, 0x4ef2, 0x4ee2, 0x4ee3].into_iter().enumerate() {
+			w.insert(0x1b3ee0 + 12 * k as u32, t | 3 << 16);
+		}
+		w.extend([(list, 0x28_df18), (list + 0x30, 0x1000), (list + 0x34, 0x1b3ee0)]);
+		let rd = |a: u32| w.get(&a).copied().unwrap_or(0);
+		let m = read_ptr(&rd, pp).unwrap();
+		assert_eq!(m.item(desc).map(|i| &i.kind), Some(&Kind::Other));
+		assert!(matches!(&m.item(list).unwrap().kind, Kind::Label { rows, .. } if rows.len() == 5 && rows.iter().all(|r| r.1)));
+		assert_eq!(m.hit(98.0, 193.0), None);
+		assert_eq!(m.hit(256.0, 91.0 + 116.5), Some(Target::Sub { item: list, sub: 2 }));
 	}
 
 	/// The Eudora pause menu savestate: the root page and its six buttons read out of a real RAM image.

@@ -31,9 +31,15 @@ mod popups;
 mod gpu;
 mod gpuskin;
 mod bindless;
+pub(crate) mod gs_state;
 mod warpfx;
 mod clip;
 mod shadowvol;
+mod post;
+mod sunshadow;
+mod waterfx;
+mod mirror;
+mod partfx;
 mod app;
 mod handler;
 mod front_mirror;
@@ -104,6 +110,12 @@ struct Uniforms {
 	points: [[f32; 4]; 16],
 	/// The dynamic third light each moby id (colour alpha, 1-based) takes at its origin: (rgb, travel direction) pairs.
 	dynl: [[f32; 4]; 2 * MAX_DYN],
+	/// [PC] Dynamic shadows (sunshadow.rs): the cascades' light view-projections, (light travel direction, strength; 0 = off),
+	/// per cascade the receiver depth bias (x..z; w = map size), per cascade the world size of a map texel.
+	sun_vp: [[[f32; 4]; 4]; 3],
+	sun: [f32; 4],
+	sun_bias: [f32; 4],
+	sun_texel: [f32; 4],
 }
 
 /// Mobies lit by a dynamic light in one frame (the rest take none).
@@ -189,18 +201,24 @@ fn metal_byte(class_id: u32) -> u8 {
 const METAL_LIGHT: f32 = -4.0;
 
 const SHADER: &str = r#"
-struct U { view_proj: mat4x4<f32>, sky_view_proj: mat4x4<f32>, lights: array<array<vec4<f32>, 4>, 16>, ambient: array<vec4<f32>, 4>, fog_colour: vec4<f32>, fog: vec4<f32>, eye: vec4<f32>, points: array<vec4<f32>, 16>, dynl: array<vec4<f32>, 256> };
+struct U { view_proj: mat4x4<f32>, sky_view_proj: mat4x4<f32>, lights: array<array<vec4<f32>, 4>, 16>, ambient: array<vec4<f32>, 4>, fog_colour: vec4<f32>, fog: vec4<f32>, eye: vec4<f32>, points: array<vec4<f32>, 16>, dynl: array<vec4<f32>, 256>, sun_vp: array<mat4x4<f32>, 3>, sun: vec4<f32>, sun_bias: vec4<f32>, sun_texel: vec4<f32> };
 @group(0) @binding(0) var<uniform> u: U;
+@group(0) @binding(1) var sun_map: texture_depth_2d_array;
+@group(0) @binding(2) var sun_cmp: sampler_comparison;
 @group(1) @binding(0) var tex: texture_2d<f32>;
 @group(1) @binding(1) var samp: sampler;
 
-struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, @location(1) n: vec3<f32>, @location(2) c: vec4<f32>, @location(3) w: vec3<f32>, @location(4) @interpolate(flat) l: vec4<f32>, @location(5) @interpolate(linear) fogf: f32, @location(6) lit: vec3<f32>, @location(7) @interpolate(flat) kmx: vec2<f32> };
+struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, @location(1) n: vec3<f32>, @location(2) c: vec4<f32>, @location(3) w: vec3<f32>, @location(4) @interpolate(flat) l: vec4<f32>, @location(5) @interpolate(linear) fogf: f32, @location(6) lit: vec3<f32>, @location(9) amb: vec3<f32>, @location(7) @interpolate(flat) kmx: vec2<f32> };
 
 // GS fog coefficient per world class (gameplay::fog_coefficient; lighting_fog.md "Fog per class"). The vertex light
 // w tags the class: -1 tfrag (per vertex, view depth), -2 shrub (per instance, l.xyz = instance origin) / -3 tie
 // (per instance, l.xyz = sphere centre [P]); all three use the same slope/intercept (the d058..d06c line).
 // Anything else returns -1: the fragment falls back to the euclidean-distance fog.
 fn fog_class(l: vec4<f32>, w: f32) -> f32 {
+	// Effects layer (retail/efx_draw.rs `fog_light`): l.w = -5 carries the GS fog byte F in l.x, interpolated linearly in screen space as the GS does.
+	if (l.w < -4.5 && l.w > -5.5) {
+		return l.x;
+	}
 	let span = max(u.fog.y - u.fog.x, 0.001);
 	let slope = (u.fog.w - u.fog.z) / span;
 	let icpt = (u.fog.z * u.fog.y - u.fog.w * u.fog.x) / span;
@@ -221,15 +239,16 @@ fn fog_class(l: vec4<f32>, w: f32) -> f32 {
 	return o;
 }
 
-// Tie draws (vertex light w = -3): the first instance's material word (`shrub_inst`) carries the material's GS TEX1 K (bits 2..14,
-// raw signed 12 bits, 1/16 mip) and the top level of the texture's authored chain (bits 14..16), as for a shrub mesh. A zero
-// word (no authored chain) gives MXL -1: `world_texel` takes the plain sample. Every other draw keeps `vs_main`'s `kmx`.
+// Tie draws (vertex light w = -3): the first instance's material word (`shrub_inst`) carries the material's GS CLAMP wrap (bits
+// 0..2), TEX1 K (bits 2..14, raw signed 12 bits, 1/16 mip) and the top level of the texture's authored chain (bits 14..16), as for
+// a shrub mesh. A word without K and level (no authored chain) gives MXL -1: `world_texel` takes the plain sample. Every other
+// draw keeps `vs_main`'s `kmx`.
 fn tie_kmx(l: vec4<f32>, inst: u32, kmx: vec2<f32>) -> vec2<f32> {
 	if (l.w < -2.5 && l.w > -3.5) {
 		let w = shrub_inst(inst);
 		var k = i32((w >> 2u) & 0xfffu);
 		if (k >= 2048) { k = k - 4096; }
-		return vec2<f32>(f32(k) / 16.0, select(-1.0, f32((w >> 14u) & 3u), w != 0u));
+		return vec2<f32>(f32(k) / 16.0, select(-1.0, f32((w >> 14u) & 3u), (w & 0xfffcu) != 0u));
 	}
 	return kmx;
 }
@@ -309,6 +328,7 @@ fn vs_main(p: vec3<f32>, uv: vec2<f32>, n: vec3<f32>, c: vec4<f32>, l: vec4<f32>
 	// NOV-35b metal vertex (light w = -4): the colour bytes / 128 come in l.rgb (FUN_00210358 metal branch, CPU-built).
 	if (c.a >= 0.0 && l.w < -3.5) {
 		o.lit = l.rgb;
+		o.amb = l.rgb;
 		return o;
 	}
 	// Per-vertex lighting (VU0 prog0 + FUN_00210358): the light pair is blended, shaded once, summed with the dynamic
@@ -327,8 +347,70 @@ fn vs_main(p: vec3<f32>, uv: vec2<f32>, n: vec3<f32>, c: vec4<f32>, l: vec4<f32>
 			if (l.w > 0.5) { s += points_moby(l.xyz, nn); }
 		}
 		o.lit = min(amb + floor(128.0 * max(s, vec3<f32>(0.0))) / 128.0, vec3<f32>(255.0 / 128.0));
+		o.amb = min(amb, o.lit);
 	}
 	return o;
+}
+
+// [PC] Dynamic shadows (sunshadow.rs; u.sun.w = 0 when off, and nothing below runs).
+const SUN_NEAR_GAP: f32 = 4.0;
+const SUN_FAR_GAP: f32 = 12.0;
+
+// One map layer at map point uv, receiver depth z (cascade k for its depth scale): the blocked fraction (3x3 hardware PCF
+// taps), faded out for far blockers (roofs, canopies, tall cliffs): 2002's baked colours already paint what they shade, and a
+// covered area keeps its painted interior light. The gap is the distance along the light to the nearest blocker of the 3x3.
+fn sun_layer(uv: vec2<f32>, layer: i32, z: f32, k: i32) -> f32 {
+	let ts = 1.0 / u.sun_bias.w;
+	var lit = 0.0;
+	for (var y = -1; y <= 1; y++) {
+		for (var x = -1; x <= 1; x++) {
+			lit += textureSampleCompareLevel(sun_map, sun_cmp, uv + vec2<f32>(f32(x), f32(y)) * ts, layer, z);
+		}
+	}
+	let occ = 1.0 - lit / 9.0;
+	if (occ <= 0.0) { return 0.0; }
+	let dim = vec2<i32>(textureDimensions(sun_map));
+	let c = clamp(vec2<i32>(uv * vec2<f32>(dim)), vec2<i32>(1), dim - 2);
+	var dmin = 1.0;
+	for (var y = -1; y <= 1; y++) {
+		for (var x = -1; x <= 1; x++) {
+			dmin = min(dmin, textureLoad(sun_map, c + vec2<i32>(x, y), layer, 0));
+		}
+	}
+	let gap = max(z - dmin, 0.0) * u.sun_texel[k] / max(u.sun_bias[k], 1e-9);
+	return occ * (1.0 - smoothstep(SUN_NEAR_GAP, SUN_FAR_GAP, gap));
+}
+
+// The first cascade whose map holds p answers: every caster (layer k) or, where a far roof has faded those out, the moving
+// casters alone (layer k + 3: Ratchet under a roof still casts along the light that lights him). p moves 1.5 texels towards
+// the light first (no acne); the last cascade fades out at its rim.
+fn sun_occ(p: vec3<f32>) -> f32 {
+	for (var k = 0; k < 3; k++) {
+		let q = u.sun_vp[k] * vec4<f32>(p - u.sun.xyz * (u.sun_texel[k] * 1.5), 1.0);
+		let e = max(abs(q.x), abs(q.y));
+		if (e < 0.98 && q.z > 0.0 && q.z < 1.0) {
+			let uv = vec2<f32>(q.x * 0.5 + 0.5, 0.5 - q.y * 0.5);
+			let z = q.z - u.sun_bias[k];
+			var occ = max(sun_layer(uv, k, z, k), sun_layer(uv, k + 3, z, k));
+			if (k == 2) { occ *= 1.0 - smoothstep(0.8, 0.98, e); }
+			return occ;
+		}
+	}
+	return 0.0;
+}
+
+// Baked world colour under a dynamic shadow: 2002's vertex colours already hold the painted shadows, so the shadow takes
+// STRENGTH x how lit the colour is (a painted shadow takes none).
+fn sun_baked(shade: vec3<f32>, p: vec3<f32>) -> vec3<f32> {
+	if (u.sun.w <= 0.0) { return shade; }
+	let lum = dot(shade, vec3<f32>(0.2126, 0.7152, 0.0722));
+	return shade * (1.0 - sun_occ(p) * u.sun.w * smoothstep(0.3, 0.8, lum));
+}
+
+// Lit moby under a dynamic shadow: it keeps its ambient and loses its directional light.
+fn sun_lit(i: VOut) -> vec3<f32> {
+	if (u.sun.w <= 0.0) { return i.lit; }
+	return i.amb + (i.lit - i.amb) * (1.0 - sun_occ(i.w) * min(u.sun.w * 1.4, 1.0));
 }
 
 // One light slot: colour * max(q, q * wrap) for both of its directions (prog11).
@@ -413,10 +495,10 @@ fn world_texel(i: VOut) -> vec4<f32> {
 		let d = distance(i.w, u.eye.xyz);
 		var f = clamp(u.fog.z + (d - u.fog.x) * (u.fog.w - u.fog.z) / max(u.fog.y - u.fog.x, 0.001), min(u.fog.z, u.fog.w), 255.0) / 255.0;
 		if (i.fogf >= 0.0) { f = i.fogf / 255.0; }
-		let shade = min(i.c.rgb, vec3<f32>(255.0 / 128.0));
+		let shade = sun_baked(min(i.c.rgb, vec3<f32>(255.0 / 128.0)), i.w);
 		return vec4<f32>(mix(u.fog_colour.rgb, c.rgb * shade, f), 1.0);
 	}
-	let rgb = c.rgb * i.c.rgb * i.lit;
+	let rgb = c.rgb * i.c.rgb * sun_lit(i);
 	// GS fog: coefficient linear in distance, 255 = unfogged (FUN_001f7900).
 	let d = distance(i.w, u.eye.xyz);
 	let f = clamp(u.fog.z + (d - u.fog.x) * (u.fog.w - u.fog.z) / max(u.fog.y - u.fog.x, 0.001), min(u.fog.z, u.fog.w), 255.0) / 255.0;
@@ -429,7 +511,7 @@ fn shrub_rgba(i: VOut, c: vec4<f32>) -> vec4<f32> {
 	let d = distance(i.w, u.eye.xyz);
 	var f = clamp(u.fog.z + (d - u.fog.x) * (u.fog.w - u.fog.z) / max(u.fog.y - u.fog.x, 0.001), min(u.fog.z, u.fog.w), 255.0) / 255.0;
 	if (i.fogf >= 0.0) { f = i.fogf / 255.0; }
-	let shade = min(i.c.rgb, vec3<f32>(255.0 / 128.0));
+	let shade = sun_baked(min(i.c.rgb, vec3<f32>(255.0 / 128.0)), i.w);
 	let a = round((-2.0 - i.c.a) * 256.0);
 	let ta = floor(c.a * 128.0 + 0.5);
 	return vec4<f32>(mix(u.fog_colour.rgb, c.rgb * shade, f), floor(ta * a / 128.0) / 128.0);
@@ -456,7 +538,7 @@ fn tfrag_rgba(i: VOut) -> vec4<f32> {
 	let d = distance(i.w, u.eye.xyz);
 	var f = clamp(u.fog.z + (d - u.fog.x) * (u.fog.w - u.fog.z) / max(u.fog.y - u.fog.x, 0.001), min(u.fog.z, u.fog.w), 255.0) / 255.0;
 	if (i.fogf >= 0.0) { f = i.fogf / 255.0; }
-	let shade = min(i.c.rgb, vec3<f32>(255.0 / 128.0));
+	let shade = sun_baked(min(i.c.rgb, vec3<f32>(255.0 / 128.0)), i.w);
 	return vec4<f32>(mix(u.fog_colour.rgb, c.rgb * shade, f), min(floor(c.a * 128.0 + 0.5), 128.0) / 128.0);
 }
 
@@ -471,6 +553,34 @@ fn tfrag_rgba(i: VOut) -> vec4<f32> {
 	if (i.c.a < -2.0005) { discard; }
 	let r = tfrag_rgba(i);
 	if (r.a * 128.0 >= 96.0 || r.a <= 0.0) { discard; }
+	return r;
+}
+
+// Tie fragment: the baked world colour of `fs` with the tie texel (`world_texel`: TEX1 level, CLAMP wrap) and its alpha. TieProc's
+// draw packet (Pokitaru FUN_002b87c8, data 0x1c33b0) sets TEST_1 0x5340b (ATE GEQUAL AREF 0x40, AFAIL RGB_ONLY, ZTST GEQUAL) under
+// ALPHA_1 0x44 (Cs - Cd) * As + Cd, As = texel alpha (vertex alpha 0x80): every texel blends, from alpha 0x40 it also writes Z.
+// Drawn opaque, the fading feet of the Pokitaru shoal mounds were hard flat silhouettes (decomp/notes/fx_census_late.md).
+fn tie_rgba(i: VOut) -> vec4<f32> {
+	let c = world_texel(i);
+	let d = distance(i.w, u.eye.xyz);
+	var f = clamp(u.fog.z + (d - u.fog.x) * (u.fog.w - u.fog.z) / max(u.fog.y - u.fog.x, 0.001), min(u.fog.z, u.fog.w), 255.0) / 255.0;
+	if (i.fogf >= 0.0) { f = i.fogf / 255.0; }
+	// [PC] Lighting Enhanced: the sun shadow / AO term of the other baked paths (`sun_baked`; identity in Classic).
+	let shade = sun_baked(min(i.c.rgb, vec3<f32>(255.0 / 128.0)), i.w);
+	return vec4<f32>(mix(u.fog_colour.rgb, c.rgb * shade, f), min(floor(c.a * 128.0 + 0.5), 128.0) / 128.0);
+}
+
+@fragment fn fs_tie(i: VOut) -> @location(0) vec4<f32> {
+	if (i.c.a < -2.0005) { discard; }
+	let r = tie_rgba(i);
+	if (r.a * 128.0 < 64.0) { discard; }
+	return r;
+}
+
+@fragment fn fs_tie_lt64(i: VOut) -> @location(0) vec4<f32> {
+	if (i.c.a < -2.0005) { discard; }
+	let r = tie_rgba(i);
+	if (r.a * 128.0 >= 64.0 || r.a <= 0.0) { discard; }
 	return r;
 }
 
@@ -514,7 +624,7 @@ fn moby_alpha(i: VOut) -> f32 {
 
 fn moby_rgba(i: VOut) -> vec4<f32> {
 	let c = textureSample(tex, samp, i.uv);
-	var rgb = c.rgb * i.c.rgb * i.lit;
+	var rgb = c.rgb * i.c.rgb * sun_lit(i);
 	if (i.c.a < -1.5) {
 		// Tinted tail packet: constant unlit colour, same alpha as the lit packets.
 		rgb = c.rgb * min(i.c.rgb, vec3<f32>(255.0 / 128.0));
@@ -543,7 +653,97 @@ fn moby_rgba(i: VOut) -> vec4<f32> {
 
 // Particles: billboards and ribbons built on the CPU, texture times vertex colour.
 @fragment fn fs_part(i: VOut) -> @location(0) vec4<f32> {
-	return textureSample(tex, samp, i.uv) * i.c;
+	let c = textureSample(tex, samp, i.uv) * i.c;
+	return vec4<f32>(gs_fog(i, c.rgb), c.a);
+}
+
+// GS fog (PRIM FGE) of an effects-layer prim, l.w = -5 (`fog_class`): C = (F * C + (255 - F) * FOGCOL) >> 8 on the 8-bit colour, F
+// the vertex fog byte interpolated (truncated to an integer), FOGCOL in l.y (r | g << 8 | b << 16; -1 = the level fog colour).
+fn gs_fog(i: VOut, rgb: vec3<f32>) -> vec3<f32> {
+	if (i.l.w > -4.5 || i.l.w < -5.5) {
+		return rgb;
+	}
+	let f = floor(clamp(i.fogf, 0.0, 255.0));
+	let c8 = floor(min(rgb, vec3<f32>(1.0)) * 255.0 + 0.001);
+	var fc = floor(u.fog_colour.rgb * 255.0 + 0.5);
+	if (i.l.y >= 0.0) {
+		let pk = u32(i.l.y);
+		fc = vec3<f32>(f32(pk & 255u), f32((pk >> 8u) & 255u), f32((pk >> 16u) & 255u));
+	}
+	return floor((c8 * f + fc * (255.0 - f)) / 256.0) / 255.0;
+}
+
+// [PC] Particles Enhanced (partfx.rs; with Lighting Enhanced): the same particles in their own pass, fading out where they
+// meet the scene (soft.p = (near, far, fade distance, glow gain)); the additive ones also write their light into the glow
+// target the bloom adds (post.rs `fs_bright`); its alpha is their cover (the water pass keeps them). Classic draws `fs_part` only.
+struct SoftU { p: vec4<f32>, n: vec4<f32>, l: array<vec4<f32>, 16> };
+@group(2) @binding(0) var<uniform> soft: SoftU;
+@group(2) @binding(1) var soft_depth: texture_depth_multisampled_2d;
+struct SoftOut { @location(0) c: vec4<f32>, @location(1) glow: vec4<f32> };
+
+fn soft_fade(pos: vec4<f32>) -> f32 {
+	let n = soft.p.x;
+	let f = soft.p.y;
+	let zs = textureLoad(soft_depth, vec2<i32>(pos.xy), 0);
+	let ls = n * f / (f - zs * (f - n));
+	let lf = n * f / (f - pos.z * (f - n));
+	return clamp((ls - lf) / soft.p.z, 0.0, 1.0);
+}
+
+// [PC] The effect lights (partfx.rs `lights`, soft.n.x in use) at a smoke particle: no facing, reach falloff squared.
+fn fx_smoke(p: vec3<f32>) -> vec3<f32> {
+	var acc = vec3<f32>(0.0);
+	for (var k = 0u; k < u32(soft.n.x); k++) {
+		let a = soft.l[2u * k];
+		let d = distance(a.xyz, p);
+		if (d >= a.w) { continue; }
+		let f = 1.0 - d / a.w;
+		acc += soft.l[2u * k + 1u].rgb * f * f;
+	}
+	return acc;
+}
+
+@fragment fn fs_part_soft(i: VOut) -> SoftOut {
+	var c = textureSample(tex, samp, i.uv) * i.c;
+	c.a *= soft_fade(i.pos);
+	if (soft.n.x > 0.0) {
+		// Grey smoke glows in the light of the fire beside it; coloured (flame) texels keep their colour.
+		let mx = max(c.r, max(c.g, c.b));
+		let sat = (mx - min(c.r, min(c.g, c.b))) / max(mx, 1e-4);
+		c = vec4<f32>(c.rgb + (c.rgb + vec3<f32>(0.03)) * fx_smoke(i.w) * soft.n.y * (1.0 - sat), c.a);
+	}
+	var o: SoftOut;
+	o.c = c;
+	// Alpha: the particle's cover, so the water pass leaves particles over water as drawn (waterfx.rs `fs_water`).
+	o.glow = vec4<f32>(0.0, 0.0, 0.0, c.a);
+	return o;
+}
+
+@fragment fn fs_part_soft_add(i: VOut) -> SoftOut {
+	var c = textureSample(tex, samp, i.uv) * i.c;
+	c.a *= soft_fade(i.pos);
+	var o: SoftOut;
+	o.c = c;
+	o.glow = vec4<f32>(c.rgb * c.a * soft.p.w, max(c.r, max(c.g, c.b)) * c.a);
+	return o;
+}
+
+// [PC] Water Enhanced with Particles Classic: the pool once more, writing only its cover into the glow alpha (colour masked off),
+// so the water pass keeps the particles drawn over the water as they are (waterfx.rs `fs_water`).
+@fragment fn fs_part_cover(i: VOut) -> SoftOut {
+	let c = textureSample(tex, samp, i.uv) * i.c;
+	var o: SoftOut;
+	o.c = c;
+	o.glow = vec4<f32>(0.0, 0.0, 0.0, c.a);
+	return o;
+}
+
+@fragment fn fs_part_cover_add(i: VOut) -> SoftOut {
+	let c = textureSample(tex, samp, i.uv) * i.c;
+	var o: SoftOut;
+	o.c = c;
+	o.glow = vec4<f32>(0.0, 0.0, 0.0, max(c.r, max(c.g, c.b)) * c.a);
+	return o;
 }
 
 // KER-92: pool lines (mode 2): untextured Gouraud vertex colour, no fog.
@@ -555,6 +755,13 @@ fn moby_rgba(i: VOut) -> vec4<f32> {
 // (alpha 1), the colour is fogged like the world.
 @fragment fn fs_part_fix(i: VOut) -> @location(0) vec4<f32> {
 	let c = textureSample(tex, samp, i.uv) * i.c;
+	// Effects-layer strips: GS fog (l.w = -5) or none (l.w = -6, PRIM FGE 0), see `gs_fog`.
+	if (i.l.w < -4.5 && i.l.w > -5.5) {
+		return vec4<f32>(gs_fog(i, c.rgb), 1.0);
+	}
+	if (i.l.w < -5.5 && i.l.w > -6.5) {
+		return vec4<f32>(c.rgb, 1.0);
+	}
 	let d = distance(i.w, u.eye.xyz);
 	let f = clamp(u.fog.z + (d - u.fog.x) * (u.fog.w - u.fog.z) / max(u.fog.y - u.fog.x, 0.001), min(u.fog.z, u.fog.w), 255.0) / 255.0;
 	return vec4<f32>(mix(u.fog_colour.rgb, c.rgb, f), 1.0);
@@ -890,6 +1097,9 @@ struct Scene {
 	/// Texture key -> `bind_groups` index of every texture the scene uploaded: `Gpu::regrow_props` rebuilds the prop slots
 	/// with it (retail pool growth) without a new upload.
 	tex_slots: HashMap<u32, usize>,
+	/// [PC] Dynamic shadows: per texture slot, whether most of its texels blend (PS2 alpha below 0x60, `fs_moby_b`): see-through
+	/// effect shells (blast domes, glows) cast no sun shadow (sunshadow.rs).
+	clear_tex: Vec<bool>,
 	/// [PC] perf round 3: `bind_groups` as one texture array (bindless.rs; None = per-draw bind groups).
 	tex_array: Option<wgpu::BindGroup>,
 	clear: wgpu::Color,
@@ -933,6 +1143,8 @@ struct Gpu {
 	wrap_samplers: [wgpu::Sampler; 3],
 	tfrag_pipeline: wgpu::RenderPipeline,
 	tfrag_pipeline_lt: wgpu::RenderPipeline,
+	/// Tie draws (`fs_tie`, `fs_tie_lt64`): [pass][cull: none, back, front]; pass 0 texel alpha >= 0x40 (Z written), pass 1 below.
+	tie_pipelines: [[wgpu::RenderPipeline; 3]; 2],
 	sky_pipeline: wgpu::RenderPipeline,
 	/// ARI-4: the sky sprites (ALPHA_1 0x48 = Cs * As + Cd, MODULATE), at the far plane without depth writes.
 	sky_add_pipeline: wgpu::RenderPipeline,
@@ -1025,6 +1237,24 @@ struct Gpu {
 	shadow: shadowvol::ShadowPipes,
 	volume_buf: Option<wgpu::Buffer>,
 	volume_counts: (u32, u32),
+	/// [PC] Graphics -> Lighting Enhanced (post.rs): the post-processing targets and pipelines, and whether this frame may use them
+	/// (a retail level is on screen: not the front end, a movie or the GS-full reference picture; set by the handler).
+	post: post::Post,
+	/// [PC] Water Enhanced (waterfx.rs).
+	waterfx: waterfx::WaterFx,
+	/// [PC] Water Enhanced: the planar mirror's uniforms (mirror.rs).
+	mirror: mirror::Mirror,
+	/// [PC] Water Enhanced: the water bed's uniforms (mirror.rs `Gpu::draw_bed`).
+	bed: mirror::Mirror,
+	/// [PC] Particles Enhanced (partfx.rs).
+	partfx: partfx::PartFx,
+	modern_ok: bool,
+	/// [PC] Dynamic shadows (sunshadow.rs): the cascade maps, bound in the level's group 0 with their compare sampler.
+	sun: sunshadow::SunShadow,
+	/// Retail mode: a ship fight is on (`shipmouse::in_ship_fight`): space, no sun to cast from (handler.rs sets it).
+	ship_fight: bool,
+	/// The loaded level (handler.rs; [PC] Water Enhanced skips Gaspar's lava).
+	level: usize,
 	/// SCN-3: the lighting word the scene actors copied from the hero when the scene started (FUN_00244e58); None outside a scene.
 	scene_actor_light: Option<[f32; 4]>,
 	/// A V offset for the hero model's vertices `[start, end)` this frame (the Pyrocitor nozzle's texture scroll).
@@ -1157,6 +1387,8 @@ struct App {
 	/// Cursor grabbed and hidden for the Modern camera; window focus.
 	grabbed: bool,
 	focused: bool,
+	/// The Display mode the window was last switched to (handler.rs `display_change`; true = borderless fullscreen).
+	fullscreen: bool,
 	/// Hero position last frame, to reset the rig on respawn.
 	rig_hero: [f32; 3],
 	/// Enter play mode right after the first level loads (--play).
@@ -1640,6 +1872,7 @@ fn new_app(iso_path: &str, level: usize, shot: Option<String>, start: Option<[f3
 		zoom_acc: 0.0,
 		grabbed: false,
 		focused: true,
+		fullscreen: false,
 		rig_hero: [0.0; 3],
 		autoplay: play,
 		spawn: None,
@@ -1905,7 +2138,8 @@ fn depth_view(device: &wgpu::Device, w: u32, h: u32, format: wgpu::TextureFormat
 			sample_count: MSAA,
 			dimension: wgpu::TextureDimension::D2,
 			format,
-			usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+			// [PC] Sampled by the Enhanced image (post.rs): its occlusion reads the level's depth.
+			usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
 			view_formats: &[],
 		})
 		.create_view(&Default::default())

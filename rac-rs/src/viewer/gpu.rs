@@ -43,14 +43,24 @@ impl Gpu {
 			label: Some("level"),
 			source: wgpu::ShaderSource::Wgsl(SHADER.into()),
 		});
+		// [PC] Bindings 1 and 2: the dynamic-shadow cascades and their compare sampler (sunshadow.rs; read only while shadows run).
 		let ulayout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
 			label: Some("uniforms"),
-			entries: &[wgpu::BindGroupLayoutEntry {
-				binding: 0,
-				visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-				ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
-				count: None,
-			}],
+			entries: &[
+				wgpu::BindGroupLayoutEntry {
+					binding: 0,
+					visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+					ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+					count: None,
+				},
+				wgpu::BindGroupLayoutEntry {
+					binding: 1,
+					visibility: wgpu::ShaderStages::FRAGMENT,
+					ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Depth, view_dimension: wgpu::TextureViewDimension::D2Array, multisampled: false },
+					count: None,
+				},
+				wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison), count: None },
+			],
 		});
 		let tex_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
 			label: Some("texture"),
@@ -114,12 +124,12 @@ impl Gpu {
 		let make_cull = |vs: &str, fs: &str, blend: Option<wgpu::BlendState>, depth_write: bool, compare: wgpu::CompareFunction, cull: Option<wgpu::Face>| make_prim(vs, fs, blend, depth_write, compare, wgpu::PrimitiveState { cull_mode: cull, ..Default::default() });
 		let make = |vs: &str, fs: &str, blend: Option<wgpu::BlendState>, depth_write: bool, compare: wgpu::CompareFunction| make_cull(vs, fs, blend, depth_write, compare, None);
 		// KER-92: pool draw mode 2, GS PRIM line + IIP, ALPHA_1 0x44 (alpha-over), depth-tested as the particles, no writes.
-		let line_pipeline = make_prim("vs", "fs_line", Some(wgpu::BlendState::ALPHA_BLENDING), false, wgpu::CompareFunction::Less, wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::LineList, ..Default::default() });
-		let pipeline = make("vs", "fs", None, true, wgpu::CompareFunction::Less);
+		let line_pipeline = make_prim("vs", "fs_line", Some(wgpu::BlendState::ALPHA_BLENDING), false, super::gs_state::ztest(), wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::LineList, ..Default::default() });
+		let pipeline = make("vs", "fs", None, true, super::gs_state::ztest());
 		// Moby packets whose VU1 cull mode is 2 (back) or 0 (front) (NOV-5.9a).
 		let pipeline_cull = [
-			make_cull("vs", "fs", None, true, wgpu::CompareFunction::Less, Some(wgpu::Face::Back)),
-			make_cull("vs", "fs", None, true, wgpu::CompareFunction::Less, Some(wgpu::Face::Front)),
+			make_cull("vs", "fs", None, true, super::gs_state::ztest(), Some(wgpu::Face::Back)),
+			make_cull("vs", "fs", None, true, super::gs_state::ztest(), Some(wgpu::Face::Front)),
 		];
 		let moby_pipelines = [
 			make("vs", "fs_moby_a", Some(wgpu::BlendState::ALPHA_BLENDING), true, wgpu::CompareFunction::LessEqual),
@@ -146,9 +156,12 @@ impl Gpu {
 			make("vs", "fs_shrub_all", Some(wgpu::BlendState::ALPHA_BLENDING), false, wgpu::CompareFunction::LessEqual),
 		];
 		// Terrain fragments: explicit mip level from the per-draw K / top level (REN-TEX-RESIDENCY).
-		let tfrag_pipeline = make("vs_tfrag", "fs_tfrag", Some(wgpu::BlendState::ALPHA_BLENDING), true, wgpu::CompareFunction::Less);
+		let tfrag_pipeline = make("vs_tfrag", "fs_tfrag", Some(wgpu::BlendState::ALPHA_BLENDING), true, super::gs_state::ztest());
 		// Texels below alpha 0x60 (AFAIL RGB_ONLY): blended, no z write; drawn after the other batches.
-		let tfrag_pipeline_lt = make("vs_tfrag", "fs_tfrag_lt96", Some(wgpu::BlendState::ALPHA_BLENDING), false, wgpu::CompareFunction::Less);
+		let tfrag_pipeline_lt = make("vs_tfrag", "fs_tfrag_lt96", Some(wgpu::BlendState::ALPHA_BLENDING), false, super::gs_state::ztest());
+		// Ties (TieProc TEST_1 0x5340b, ALPHA_1 0x44): texels from alpha 0x40 blend and write Z, the rest blend without Z (drawn after
+		// the other batches, as `tfrag_pipeline_lt`); per pass no cull, back, front (the packet's VU1 cull mode, `Draw::cull`).
+		let tie_pipelines = [("fs_tie", true), ("fs_tie_lt64", false)].map(|(fs, z)| [None, Some(wgpu::Face::Back), Some(wgpu::Face::Front)].map(|c| make_cull("vs", fs, Some(wgpu::BlendState::ALPHA_BLENDING), z, super::gs_state::ztest(), c)));
 		let sky_pipeline = make("vs_sky", "fs_sky", Some(wgpu::BlendState::ALPHA_BLENDING), false, wgpu::CompareFunction::LessEqual);
 		let clear_pipeline = make("vs_hudz", "fs_hud", Some(wgpu::BlendState::ALPHA_BLENDING), true, wgpu::CompareFunction::Always);
 		// GS draw flags 0x48 (alpha) and 0x44 (additive) [I]: depth-tested, no depth writes.
@@ -178,10 +191,10 @@ impl Gpu {
 			make("vs_hud", "fs_hud_flat", Some(wgpu::BlendState { color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::ReverseSubtract }, alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Zero, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add } }), false, wgpu::CompareFunction::Always),
 		];
 		let part_pipelines = [
-			make("vs", "fs_part", Some(wgpu::BlendState::ALPHA_BLENDING), false, wgpu::CompareFunction::Less),
-			make("vs", "fs_part", Some(additive), false, wgpu::CompareFunction::Less),
+			make("vs", "fs_part", Some(wgpu::BlendState::ALPHA_BLENDING), false, super::gs_state::ztest()),
+			make("vs", "fs_part", Some(additive), false, super::gs_state::ztest()),
 			// Water (prog10 fogs per vertex like tfrag, lighting_fog.md): alpha blend with the scene fog.
-			make("vs", "fs_part_fog", Some(wgpu::BlendState::ALPHA_BLENDING), false, wgpu::CompareFunction::Less),
+			make("vs", "fs_part_fog", Some(wgpu::BlendState::ALPHA_BLENDING), false, super::gs_state::ztest()),
 		];
 		// BRIDGE-23: GS ALPHA A=Cs B=Cd C=FIX D=Cd, out = Cs * k + Cd * (1 - k) with k = the blend constant (FIX / 128).
 		let fix_blend = wgpu::BlendState {
@@ -206,19 +219,19 @@ impl Gpu {
 		// depth-tested without Z write (TEST_1 0x5370b: vertex alpha 0 fails the alpha test, RGB only); its own fog
 		// (fs_ocean_k), or the level fog while the Visibomb is live. Index = (fix < 0x80) * 2 + level fog.
 		let ocean_pipeline = [
-			make("vs", "fs_ocean", None, true, wgpu::CompareFunction::Less),
-			make("vs", "fs_part_fix", None, true, wgpu::CompareFunction::Less),
-			make("vs", "fs_ocean_k", Some(fix_blend), false, wgpu::CompareFunction::Less),
-			make("vs", "fs_part_fix", Some(fix_blend), false, wgpu::CompareFunction::Less),
+			make("vs", "fs_ocean", None, true, super::gs_state::ztest()),
+			make("vs", "fs_part_fix", None, true, super::gs_state::ztest()),
+			make("vs", "fs_ocean_k", Some(fix_blend), false, super::gs_state::ztest()),
+			make("vs", "fs_part_fix", Some(fix_blend), false, super::gs_state::ztest()),
 			// Retail-mode RAM oceans (`fs_ocean_f`): 4 = opaque (FIX 0x80), 5 = FIX-blended.
-			make("vs", "fs_ocean_f", None, true, wgpu::CompareFunction::Less),
-			make("vs", "fs_ocean_f", Some(fix_blend), false, wgpu::CompareFunction::Less),
+			make("vs", "fs_ocean_f", None, true, super::gs_state::ztest()),
+			make("vs", "fs_ocean_f", Some(fix_blend), false, super::gs_state::ztest()),
 		];
 		// Retail mode: the oceans of Rilgar, Umbris and Gaspar (own fog per vertex, `fs_ocean_g`): opaque with Z, or FIX-blended without Z.
 		// 2 / 3 = the Gaspar second lava pass (coplanar with the first: GS TEST ZTST GEQUAL = nearer or equal passes).
 		let ocean_g_pipeline = [
-			make("vs", "fs_ocean_g", None, true, wgpu::CompareFunction::Less),
-			make("vs", "fs_ocean_g", Some(fix_blend), false, wgpu::CompareFunction::Less),
+			make("vs", "fs_ocean_g", None, true, super::gs_state::ztest()),
+			make("vs", "fs_ocean_g", Some(fix_blend), false, super::gs_state::ztest()),
 			make("vs", "fs_ocean_g", None, true, wgpu::CompareFunction::LessEqual),
 			make("vs", "fs_ocean_g", Some(fix_blend), false, wgpu::CompareFunction::LessEqual),
 		];
@@ -250,7 +263,7 @@ impl Gpu {
 					depth_stencil: Some(wgpu::DepthStencilState {
 						format: depth_format,
 						depth_write_enabled: Some(depth_write),
-						depth_compare: Some(wgpu::CompareFunction::Less),
+						depth_compare: Some(compare),
 						stencil: Default::default(),
 						bias: Default::default(),
 					}),
@@ -261,8 +274,9 @@ impl Gpu {
 			};
 			// The same states as `pipeline`, `pipeline_cull` and `shrub_pipelines[0..2]`.
 			super::bindless::Bindless {
-				pipeline: make_bl("vs", "fs", None, true, None, wgpu::CompareFunction::Less),
-				pipeline_cull: [make_bl("vs", "fs", None, true, Some(wgpu::Face::Back), wgpu::CompareFunction::Less), make_bl("vs", "fs", None, true, Some(wgpu::Face::Front), wgpu::CompareFunction::Less)],
+				tie: [("fs_tie", true), ("fs_tie_lt64", false)].map(|(fs, z)| [None, Some(wgpu::Face::Back), Some(wgpu::Face::Front)].map(|c| make_bl("vs", fs, Some(wgpu::BlendState::ALPHA_BLENDING), z, c, super::gs_state::ztest()))),
+				pipeline: make_bl("vs", "fs", None, true, None, super::gs_state::ztest()),
+				pipeline_cull: [make_bl("vs", "fs", None, true, Some(wgpu::Face::Back), super::gs_state::ztest()), make_bl("vs", "fs", None, true, Some(wgpu::Face::Front), super::gs_state::ztest())],
 				shrub_faded: [
 					make_bl("vs_shrub", "fs_shrub_ge12", Some(wgpu::BlendState::ALPHA_BLENDING), true, None, wgpu::CompareFunction::LessEqual),
 					make_bl("vs_shrub", "fs_shrub_lt12", Some(wgpu::BlendState::ALPHA_BLENDING), false, None, wgpu::CompareFunction::LessEqual),
@@ -316,10 +330,10 @@ impl Gpu {
 					cache: None,
 				})
 			};
-			let opaque = make_props("fs", None, true, wgpu::CompareFunction::Less, None);
+			let opaque = make_props("fs", None, true, super::gs_state::ztest(), None);
 			let cull = [
-				make_props("fs", None, true, wgpu::CompareFunction::Less, Some(wgpu::Face::Back)),
-				make_props("fs", None, true, wgpu::CompareFunction::Less, Some(wgpu::Face::Front)),
+				make_props("fs", None, true, super::gs_state::ztest(), Some(wgpu::Face::Back)),
+				make_props("fs", None, true, super::gs_state::ztest(), Some(wgpu::Face::Front)),
 			];
 			let moby = [
 				make_props("fs_moby_a", Some(wgpu::BlendState::ALPHA_BLENDING), true, wgpu::CompareFunction::LessEqual, None),
@@ -333,18 +347,17 @@ impl Gpu {
 			});
 			super::gpuskin::PropsGpu::new(&device, skin_layout, opaque, cull, moby, [mc0, mc1, mc2, mc3])
 		});
+		let sun = super::sunshadow::SunShadow::new(&device, props_gpu.as_ref().map(|p| &p.layout), bindless.as_ref().filter(|b| b.indirect.is_some()).map(|b| &b.layout));
 		let ubuf = buffer(&device, "uniforms", bytemuck::bytes_of(&Uniforms::zeroed()), wgpu::BufferUsages::UNIFORM);
-		let ubind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-			label: Some("uniforms"),
-			layout: &ulayout,
-			entries: &[wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() }],
-		});
+		let ubind = device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("uniforms"), layout: &ulayout, entries: &sun.entries(&ubuf) });
+		let mirror = super::mirror::Mirror::new(&device, &ulayout, &sun);
+		let bed = super::mirror::Mirror::new(&device, &ulayout, &sun);
 		let pbuf = [0, 1, 2, 3, 4, 5, 6, 7].map(|_| buffer(&device, "preview uniforms", bytemuck::bytes_of(&Uniforms::zeroed()), wgpu::BufferUsages::UNIFORM));
 		let pbind = [0, 1, 2, 3, 4, 5, 6, 7].map(|i| {
 			device.create_bind_group(&wgpu::BindGroupDescriptor {
 				label: Some("preview uniforms"),
 				layout: &ulayout,
-				entries: &[wgpu::BindGroupEntry { binding: 0, resource: pbuf[i].as_entire_binding() }],
+				entries: &sun.entries(&pbuf[i]),
 			})
 		});
 		let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -406,7 +419,10 @@ impl Gpu {
 			}
 		};
 		let (item_panel, popup_panel, portrait_panel) = (new_panel(), new_panel(), new_panel());
-		let mut gpu = Gpu { window, surface, device, queue, config, pipeline, pipeline_cull, moby_pipelines, moby_cull, shrub_pipelines, clamp_sampler, wrap_samplers, tfrag_pipeline, tfrag_pipeline_lt, sky_pipeline, sky_add_pipeline, hud_pipeline, clear_pipeline, pbuf, pbind, preview: None, preview_gold: false, preview_pair: None, preview_worn: None, preview2: None, shop_models: Vec::new(), shop_panel_models: Vec::new(), item_panel, popup_panel, portrait_panel, portrait_shown: false, popup_bolt: None, icon_bolt: None, icon_bolt_sphere: None, popup_bolt_sphere: None, panel_posed: None, metal: MetalDraw::default(), props_gpu, bindless, hud_split: None, hud_textures: Vec::new(), nearest, hud: Vec::new(), retail_ov: None, ubuf, ubind, tex_layout, sampler, depth, msaa, scene: None, lighting: None, reserved_lights: None, fog_live: None, shrub_cap: shrubs::SHRUB_CAP, part_far: crate::water::PART_FAR, points: [[0.0; 4]; 16], table: [None; 8], moby_dyn: Vec::new(), hero_placed: (gameplay::SPAWN_AMBIENT, 0), hero_env: gameplay::placed_env(gameplay::SPAWN_AMBIENT, 0), scene_actor_light: None, marker_v: None, prop_v: None, class_uv: HashMap::new(), marker_ghosts: [None; 5], marker_bomb: None, marker_light: None, part_pipelines, strip_pipeline, pool_pipeline, pool_add_pipeline, part_tex: None, part_verts: BTreeMap::new(), line_pipeline, line_verts: Vec::new(), part_defs: Vec::new(), fx_meshes: HashMap::new(), fx_tex: HashMap::new(), fx_quads: Vec::new(), water_quads: Vec::new(), strip_draws: Vec::new(), pool_draws: Vec::new(), ocean_pipeline, ocean_tex: None, ocean_draws: Vec::new(), ocean_rgba: Vec::new(), ocean_frame: None, ocean_level_fog: false, ocean_fog: None, ocean_g_pipeline, ocean_ram: Vec::new(), warp_fx: None, movie, hero_tint_out: None, depth_format, shadow, volume_buf: None, volume_counts: (0, 0), marker_tilt: [0.0; 2] };
+		let post = super::post::Post::new(&device, config.format);
+		let waterfx = super::waterfx::WaterFx::new(&device, config.format, depth_format);
+		let partfx = super::partfx::PartFx::new(&device, &shader, &ulayout, &tex_layout, config.format, depth_format);
+		let mut gpu = Gpu { window, surface, device, queue, config, pipeline, pipeline_cull, moby_pipelines, moby_cull, shrub_pipelines, clamp_sampler, wrap_samplers, tfrag_pipeline, tfrag_pipeline_lt, tie_pipelines, sky_pipeline, sky_add_pipeline, hud_pipeline, clear_pipeline, pbuf, pbind, preview: None, preview_gold: false, preview_pair: None, preview_worn: None, preview2: None, shop_models: Vec::new(), shop_panel_models: Vec::new(), item_panel, popup_panel, portrait_panel, portrait_shown: false, popup_bolt: None, icon_bolt: None, icon_bolt_sphere: None, popup_bolt_sphere: None, panel_posed: None, metal: MetalDraw::default(), props_gpu, bindless, hud_split: None, hud_textures: Vec::new(), nearest, hud: Vec::new(), retail_ov: None, ubuf, ubind, tex_layout, sampler, depth, msaa, scene: None, lighting: None, reserved_lights: None, fog_live: None, shrub_cap: shrubs::SHRUB_CAP, part_far: crate::water::PART_FAR, points: [[0.0; 4]; 16], table: [None; 8], moby_dyn: Vec::new(), hero_placed: (gameplay::SPAWN_AMBIENT, 0), hero_env: gameplay::placed_env(gameplay::SPAWN_AMBIENT, 0), scene_actor_light: None, marker_v: None, prop_v: None, class_uv: HashMap::new(), marker_ghosts: [None; 5], marker_bomb: None, marker_light: None, part_pipelines, strip_pipeline, pool_pipeline, pool_add_pipeline, part_tex: None, part_verts: BTreeMap::new(), line_pipeline, line_verts: Vec::new(), part_defs: Vec::new(), fx_meshes: HashMap::new(), fx_tex: HashMap::new(), fx_quads: Vec::new(), water_quads: Vec::new(), strip_draws: Vec::new(), pool_draws: Vec::new(), ocean_pipeline, ocean_tex: None, ocean_draws: Vec::new(), ocean_rgba: Vec::new(), ocean_frame: None, ocean_level_fog: false, ocean_fog: None, ocean_g_pipeline, ocean_ram: Vec::new(), warp_fx: None, movie, hero_tint_out: None, depth_format, shadow, volume_buf: None, volume_counts: (0, 0), marker_tilt: [0.0; 2], post, waterfx, mirror, bed, partfx, level: usize::MAX, modern_ok: false, sun, ship_fight: false };
 		let font = gpu.upload(Some(&overlay::font_texture()), &gpu.nearest);
 		gpu.hud_textures.push(font);
 		// prog2 maps each sprite's full texture (decomp/notes/particles.md "Draw size"); this soft disc is only
@@ -528,7 +544,7 @@ impl Gpu {
 			let mut phases: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
 			let phased = m.strip_phase.len() == m.faces.len();
 			for (fi, &(tex, f)) in m.faces.iter().enumerate() {
-				let slot = slots[&(tex & crate::mobies::KEY_MASK)];
+				let slot = slots[&(tex & crate::mobies::SLOT_MASK)];
 				by_tex.entry(slot).or_default().extend(f);
 				phases.entry(slot).or_default().push(if phased { m.strip_phase[fi] } else { crate::mesh::NO_PHASE });
 			}
@@ -566,7 +582,7 @@ impl Gpu {
 			let mut phases: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
 			let phased = class.mesh.strip_phase.len() == class.mesh.faces.len();
 			for (fi, &(tex, f)) in class.mesh.faces.iter().enumerate() {
-				let slot = slots[&(tex & crate::mobies::KEY_MASK)];
+				let slot = slots[&(tex & crate::mobies::SLOT_MASK)];
 				by_tex.entry(slot).or_default().extend(f);
 				phases.entry(slot).or_default().push(if phased { class.mesh.strip_phase[fi] } else { crate::mesh::NO_PHASE });
 			}
@@ -796,7 +812,7 @@ impl Gpu {
 	pub(super) fn regrow_props(&mut self, props: &[u32], prop_meshes: &HashMap<u32, Mesh>) -> bool {
 		let Some(scene) = self.scene.as_ref() else { return false };
 		let empty = Mesh::new(String::new());
-		let known = slot_meshes(props, prop_meshes, &empty).iter().all(|m| m.faces.iter().all(|&(t, _)| scene.tex_slots.contains_key(&(t & crate::mobies::KEY_MASK))));
+		let known = slot_meshes(props, prop_meshes, &empty).iter().all(|m| m.faces.iter().all(|&(t, _)| scene.tex_slots.contains_key(&(t & crate::mobies::SLOT_MASK))));
 		let had_prompt = scene.prompt.is_some();
 		if !known || (!had_prompt && props.contains(&game::vendor::PROMPT_CLASS) && prop_meshes.get(&game::vendor::PROMPT_CLASS).is_some_and(|m| !m.positions.is_empty())) {
 			return false;
@@ -848,7 +864,7 @@ impl Gpu {
 		let empty = Mesh::new(String::new());
 		let meshes = slot_meshes(classes, prop_meshes, &empty);
 		let n = scene.props_ranges.len() + classes.len();
-		if at > scene.props_ranges.len() || scene.props_class.len() != scene.props_ranges.len() || order.len() != n || classes.contains(&game::vendor::PROMPT_CLASS) || !meshes.iter().all(|m| m.faces.iter().all(|&(t, _)| scene.tex_slots.contains_key(&(t & crate::mobies::KEY_MASK)))) {
+		if at > scene.props_ranges.len() || scene.props_class.len() != scene.props_ranges.len() || order.len() != n || classes.contains(&game::vendor::PROMPT_CLASS) || !meshes.iter().all(|m| m.faces.iter().all(|&(t, _)| scene.tex_slots.contains_key(&(t & crate::mobies::SLOT_MASK)))) {
 			return false;
 		}
 		let mut all_classes = scene.props_class.clone();
@@ -903,7 +919,7 @@ impl Gpu {
 		let mut draw_of: HashMap<u32, usize> = HashMap::with_capacity(count.len());
 		let (mut pos, mut start) = (Vec::with_capacity(count.len()), 0);
 		for (d, (&key, &c)) in count.iter().enumerate() {
-			draws.push(Draw { inst: 0, cull: ((key >> 24) & 3) as u8, texture: scene.tex_slots[&(key & crate::mobies::KEY_MASK)], start, count: c });
+			draws.push(Draw { inst: 0, cull: ((key >> 24) & 3) as u8, texture: scene.tex_slots[&(key & crate::mobies::SLOT_MASK)], start, count: c });
 			draw_of.insert(key, d);
 			pos.push(start);
 			start += c;
@@ -955,7 +971,7 @@ impl Gpu {
 			} else {
 				*faces = cf.clipped.iter().map(|&(g, rank, idx, phase)| {
 					let key = cf.groups[g].0;
-					super::clip::PropFace { slot: first[g].1 + rank * 3, idx: idx.map(|i| i + base), phase, tex: tex_slots.get(&(key & crate::mobies::KEY_MASK)).copied().unwrap_or(0), cull: ((key >> 24) & 3) as u8 }
+					super::clip::PropFace { slot: first[g].1 + rank * 3, idx: idx.map(|i| i + base), phase, tex: tex_slots.get(&(key & crate::mobies::SLOT_MASK)).copied().unwrap_or(0), cull: ((key >> 24) & 3) as u8 }
 				}).collect();
 			}
 		});
@@ -1477,6 +1493,9 @@ impl Gpu {
 			// a scrolled slot is rebuilt every frame.
 			let cuv = self.class_uv.get(&(p.class_id as u32)).copied().unwrap_or([0.0; 2]);
 			let (du, dv) = (cuv[0], cuv[1] + prop_v.filter(|&(i, _)| i == pi).map_or(0.0, |(_, d)| d));
+			if water_log() && cuv != [0.0; 2] {
+				eprintln!("water: uv-scroll class {} slot {pi} at {:?} scale {scale} uv {cuv:?}", p.class_id, [m[12], m[13], m[14]]);
+			}
 			srcs.push(SlotSrc::Prop(SlotJob { range: r.clone(), ps: &ps[..posed_n], ns: &ns[..posed_n], m, scale, light, alpha_code, prop_tint: p.tint, tint, alpha, dv, du }));
 		}
 		// Debris: every live piece is instanced into the per-frame debris batch (the moby pool bounds the count).
@@ -1687,6 +1706,7 @@ impl Gpu {
 		configure_surface(&self.surface, &self.device, &self.config);
 		self.depth = depth_view(&self.device, w, h, self.depth_format);
 		self.msaa = msaa_view(&self.device, self.config.format, w, h);
+		self.post.reset();
 	}
 
 	/// Camera, level lights and fog (decomp/notes/lighting_fog.md); a neutral rig without them. The fog is the
@@ -1728,6 +1748,10 @@ impl Gpu {
 			eye: [cam.pos[0], cam.pos[1], cam.pos[2], 1.0],
 			points: self.points,
 			dynl,
+			sun_vp: [[[0.0; 4]; 4]; 3],
+			sun: [0.0; 4],
+			sun_bias: [0.0; 4],
+			sun_texel: [0.0; 4],
 		}
 	}
 
@@ -1888,6 +1912,11 @@ impl Gpu {
 		let _s = super::profile::span("set_particles");
 		let f = [cam.pitch.cos() * cam.yaw.cos(), cam.pitch.cos() * cam.yaw.sin(), cam.pitch.sin()];
 		let (slots, pool_ribbons, pool_lines, line_slots) = fx.map_or((&[][..], &[][..], &[][..], &[][..]), |x| (&x.sprite_slots[..], &x.ribbons[..], &x.lines[..], &x.line_slots[..]));
+		// [PC] Water Enhanced contact rings (waterfx.rs `Rings`): the hero and the pool particles (a line by its lower end).
+		if let Some(x) = fx {
+			let parts = sprites.iter().filter(|sp| sp.pool.is_some()).map(|sp| sp.pos).chain(pool_lines.iter().map(|l| if l.a[2] < l.b[2] { l.a } else { l.b }));
+			self.waterfx.contacts(x.frames, x.hero, parts);
+		}
 		let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
 		let m = view_proj(cam, aspect, RETAIL_NEAR, RETAIL_FAR);
 		// KER-92: pool lines, kept when both points pass the clip test and the midpoint view depth is inside (near, far).
@@ -2191,8 +2220,46 @@ impl Gpu {
 		let scene = self.scene.as_ref()?;
 		let aspect = self.config.width as f32 / self.config.height as f32;
 		let eye = Camera { pos: [0.0; 3], yaw: cam.yaw, pitch: cam.pitch, tan_half: cam.tan_half, up: cam.up };
-		let u = self.uniforms(cam, &eye, aspect, (RETAIL_NEAR, RETAIL_FAR));
+		let mut u = self.uniforms(cam, &eye, aspect, (RETAIL_NEAR, RETAIL_FAR));
+		// [PC] Graphics -> Lighting Enhanced (post.rs): the level pass resolves into the post scene target, the post
+		// passes grade it and the HUD pass draws over the result. Dynamic shadows On adds the cascades (sunshadow.rs) from the
+		// hero's key light. Classic: the frame below is drawn exactly as before (the shadow uniforms stay zero).
+		let gfx = crate::retail::pcext::graphics();
+		let post_on = gfx.enhanced() && self.modern_ok;
+		let sun = match post_on && gfx.shadows && !scene.warp_shown && !self.ship_fight {
+			true => {
+				let rows = self.light_rows();
+				let (a, b, t, _) = self.hero_env;
+				let id = scene.world_verts.len() ^ (scene.radius.to_bits() as usize) << 20;
+				self.sun.frame(cam, aspect, &rows, (a, b, t), id)
+			}
+			false => None,
+		};
+		super::sunshadow::write_uniforms(&mut u, sun.as_ref());
 		self.queue.write_buffer(&self.ubuf, 0, bytemuck::bytes_of(&u));
+		// [PC] Graphics -> Water Enhanced (waterfx.rs): the level pass records its water draws for the water pass.
+		let water_on = post_on && gfx.water && !scene.warp_shown && !self.ship_fight && self.level != super::waterfx::LAVA_LEVEL;
+		let mut wrec: Vec<super::waterfx::WaterDraw> = Vec::new();
+		let strips_water = water_on && super::waterfx::strips_are_water(self.level);
+		let strip_flows = if strips_water { self.waterfx.strip_flows(&self.strip_draws) } else { Vec::new() };
+		// [PC] Graphics -> Particles Enhanced (partfx.rs): the level pass keeps its MSAA colour for the particle pass.
+		let part_on = post_on && gfx.particles && !scene.warp_shown;
+		// [PC] Graphics -> Sun rays On (post.rs `fs_rays`): from the sun the level's sky paints (`sky_sun`); off in ship fights.
+		let rays = match post_on && gfx.sun_rays && !scene.warp_shown && !self.ship_fight {
+			true => super::post::sky_sun(self.level).and_then(|to| super::post::sun_on_screen(&u.view_proj, cam.pos, to.map(|c| -c), 1.0)),
+			false => None,
+		};
+		let water_frame = water_on.then(|| {
+			let rows = self.light_rows();
+			let (a, b, t, _) = self.hero_env;
+			super::waterfx::WaterFrame {
+				vp: u.view_proj,
+				eye: cam.pos,
+				proj: [cam.tan_half * aspect, cam.tan_half, RETAIL_NEAR, RETAIL_FAR],
+				key: super::sunshadow::key_light(&rows, a, b, t).map(|(d, l)| (sun.as_ref().map_or(d, |f| f.dir), l)),
+				fog: [u.fog_colour[0], u.fog_colour[1], u.fog_colour[2]],
+			}
+		});
 		self.write_warp_uniforms(cam, aspect);
 		let warp_hud = self.warp_hud(self.config.width as f32, self.config.height as f32);
 		super::profile::lap(super::profile::Phase::Cull);
@@ -2207,6 +2274,13 @@ impl Gpu {
 		super::profile::lap(super::profile::Phase::Acquire);
 		let view = frame.texture.create_view(&Default::default());
 		let mut enc = self.device.create_command_encoder(&Default::default());
+		if post_on {
+			self.post.prepare(&self.device, self.config.width, self.config.height, &self.depth);
+		}
+		if let Some(f) = &sun {
+			let skin = self.props_gpu.as_ref().map(|p| (&p.bind, scene.props_sj.as_ref()));
+			self.sun.encode(&self.device, &self.queue, &mut enc, scene, f, skin);
+		}
 		self.draw_item_panel(&mut enc, cam, scene);
 		// Overlay quads to clip space, one draw per run of the same texture.
 		let (sw, sh) = (self.config.width as f32, self.config.height as f32);
@@ -2268,11 +2342,11 @@ impl Gpu {
 				label: Some("level"),
 				color_attachments: &[Some(wgpu::RenderPassColorAttachment {
 					view: &self.msaa,
-					resolve_target: Some(&view),
+					resolve_target: Some(self.post.scene().filter(|_| post_on).unwrap_or(&view)),
 					depth_slice: None,
 					ops: wgpu::Operations {
 						load: wgpu::LoadOp::Clear(self.warp_fx.as_ref().filter(|_| scene.warp_shown).map_or(scene.clear, |w| w.clear)),
-						store: wgpu::StoreOp::Discard,
+						store: if part_on || water_on { wgpu::StoreOp::Store } else { wgpu::StoreOp::Discard },
 					},
 				})],
 				depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
@@ -2332,35 +2406,42 @@ impl Gpu {
 			let array = self.bindless.as_ref().zip(scene.tex_array.as_ref());
 			// BRIDGE-64a: with volumes this frame the deferred-list slots leave the opaque props draws for the redraw after them.
 			// M3a shadows: in retail mode a frame whose only deferred caster is the hero still draws its volumes.
-			let volumes = self.volume_buf.as_ref().filter(|_| self.volume_counts != (0, 0) && (props.is_some() && !scene.props_late.is_empty() || self.shadow.marker_late && marker.is_some()));
+			// [PC] Dynamic shadows replace the retail shadow volumes (no double shadows).
+			let volumes = self.volume_buf.as_ref().filter(|_| sun.is_none() && self.volume_counts != (0, 0) && (props.is_some() && !scene.props_late.is_empty() || self.shadow.marker_late && marker.is_some()));
 			let marker_late = marker.filter(|_| volumes.is_some() && self.shadow.marker_late);
 			let (props_main, props_late) = match volumes {
 				Some(_) => super::shadowvol::split_late(&scene.props.draws, &scene.slot_runs, &scene.props_late),
 				None => (Vec::new(), Vec::new()),
 			};
-			for (bi, (pipeline, batch)) in [(&self.pipeline, Some(&scene.world).filter(|_| !warp)), (&self.pipeline, Some(&scene.ties).filter(|_| !warp)), (&self.tfrag_pipeline, Some(&scene.tfrags).filter(|_| !warp)), (&self.pipeline, marker.filter(|_| marker_late.is_none())), (&self.pipeline, props), (&self.pipeline, clipped), (&self.pipeline, debris), (&self.pipeline, warp_batch), (&self.tfrag_pipeline_lt, Some(&scene.tfrags).filter(|_| !warp))].into_iter().enumerate() {
+			// Retail frame order: the tfrag pass, then the tie pass (FUN_0021af28: tfrag_frame, then TieProc), so a blended tie texel
+			// mixes with the terrain behind it. The texels that write no Z (tfrag below alpha 0x60, tie below 0x40) come last.
+			// `tie`: Some(pass) for the two tie passes (`tie_pipelines`).
+			for (bi, (pipeline, batch, tie)) in [(&self.pipeline, Some(&scene.world).filter(|_| !warp), None), (&self.tfrag_pipeline, Some(&scene.tfrags).filter(|_| !warp), None), (&self.pipeline, Some(&scene.ties).filter(|_| !warp), Some(0)), (&self.pipeline, marker.filter(|_| marker_late.is_none()), None), (&self.pipeline, props, None), (&self.pipeline, clipped, None), (&self.pipeline, debris, None), (&self.pipeline, warp_batch, None), (&self.tfrag_pipeline_lt, Some(&scene.tfrags).filter(|_| !warp), None), (&self.pipeline, Some(&scene.ties).filter(|_| !warp), Some(1))].into_iter().enumerate() {
 				let Some(batch) = batch else { continue };
-				if dskip(["world", "ties", "tfrags", "marker", "props", "clipped", "debris", "warp", "tfrags"][bi]) {
+				if dskip(["world", "tfrags", "ties", "marker", "props", "clipped", "debris", "warp", "tfrags", "ties"][bi]) {
 					continue;
 				}
-				// [PC] perf round 3 (bindless.rs): the tie draws through the texture array (their instance word is 0).
-				if let Some((bl, tex_array)) = array.filter(|_| std::ptr::eq(batch, &scene.ties)) {
-					pass.set_bind_group(1, tex_array, &[]);
-					pass.set_pipeline(&bl.pipeline);
+				if let Some(tp) = tie {
 					pass.set_vertex_buffer(0, batch.vbuf.slice(..));
 					pass.set_index_buffer(batch.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-					if let Some((ties, _, _)) = &multi {
-						bl.multi_draw(&mut pass, ties, None);
+					// [PC] perf round 3 (bindless.rs): the tie draws through the texture array (first instance = slot | word << 16).
+					if let Some((bl, tex_array)) = array {
+						pass.set_bind_group(1, tex_array, &[]);
+						if let Some((ties, _, _)) = &multi {
+							bl.multi_draw_set(&mut pass, ties, &bl.tie[tp]);
+							continue;
+						}
+						for d in &batch.draws {
+							pass.set_pipeline(&bl.tie[tp][d.cull as usize]);
+							let inst = super::bindless::first_instance(d);
+							pass.draw_indexed(d.start..d.start + d.count, 0, inst..inst + 1);
+						}
 						continue;
 					}
 					for d in &batch.draws {
-						if d.cull != 0 {
-							pass.set_pipeline(&bl.pipeline_cull[d.cull as usize - 1]);
-						}
-						pass.draw_indexed(d.start..d.start + d.count, 0, d.texture as u32..d.texture as u32 + 1);
-						if d.cull != 0 {
-							pass.set_pipeline(&bl.pipeline);
-						}
+						pass.set_pipeline(&self.tie_pipelines[tp][d.cull as usize]);
+						pass.set_bind_group(1, &scene.bind_groups[d.texture], &[]);
+						pass.draw_indexed(d.start..d.start + d.count, 0, d.inst..d.inst + 1);
 					}
 					continue;
 				}
@@ -2403,7 +2484,10 @@ impl Gpu {
 			// (FUN_0021be68) after the tfrag and tie passes and before the shrub pass FUN_0029f438, the moby pass and queue A; the shrubs
 			// (ice floes) then blend over the pool (GSPIX at 12_0582, decomp/notes/fx_census_late.md).
 			if !warp && !dskip("pools") {
-				draw_strips(&self.device, &self.queue, &mut pass, &self.fx_tex, &self.pool_draws, &self.pool_pipeline, &self.pool_add_pipeline);
+				let pool_tex = super::waterfx::pool_water_tex(self.level);
+				// Pools retail draws opaque (FIX 128 lerp) keep their look: no clear shallows.
+				let pool_slots: Vec<u32> = self.pool_draws.iter().map(|s| if !s.add && s.fix >= 120 { super::waterfx::OPAQUE_SLOT } else { 0 }).collect();
+				draw_strips(&self.device, &self.queue, &mut pass, &self.fx_tex, &self.pool_draws, &self.pool_pipeline, &self.pool_add_pipeline, (water_on && !pool_tex.is_empty()).then_some((&mut wrec, &pool_slots[..], pool_tex)));
 			}
 			// REN-CULL-SHRUB: the shrub meshes after the sky (they are depth tested, and the faded / billboard fragments write no Z
 			// everywhere), then the billboards: pass 1 with the Z-writing split, pass 2 never writing Z.
@@ -2601,6 +2685,9 @@ impl Gpu {
 					pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
 					pass.set_bind_group(1, bind, &[]);
 					pass.draw_indexed(0..idx.len() as u32, 0, 0..1);
+					if water_on {
+						wrec.push(super::waterfx::WaterDraw::new(vb, ib, idx.len() as u32, verts.iter().map(|v| v.pos)).kind("level ocean"));
+					}
 				}
 			}
 			// Retail mode: the Rilgar, Umbris and Gaspar oceans, one draw per batch (own texture, FIX blend without Z when FIX < 0x80).
@@ -2621,6 +2708,9 @@ impl Gpu {
 						pass.set_vertex_buffer(0, vb.slice(..));
 						pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
 						pass.draw_indexed(0..b.idx.len() as u32, 0, 0..1);
+						if water_on {
+							wrec.push(super::waterfx::WaterDraw::new(vb, ib, b.idx.len() as u32, b.verts.iter().map(|v| v.pos)).kind("RAM ocean"));
+						}
 					}
 					if !b.pidx.is_empty() {
 						let pvb = buffer(&self.device, "ocean ram patch vertices", bytemuck::cast_slice(&b.pverts), wgpu::BufferUsages::VERTEX);
@@ -2631,6 +2721,9 @@ impl Gpu {
 						pass.set_vertex_buffer(0, pvb.slice(..));
 						pass.set_index_buffer(pib.slice(..), wgpu::IndexFormat::Uint32);
 						pass.draw_indexed(0..b.pidx.len() as u32, 0, 0..1);
+						if water_on {
+							wrec.push(super::waterfx::WaterDraw::new(pvb, pib, b.pidx.len() as u32, b.pverts.iter().map(|v| v.pos)).kind("RAM ocean"));
+						}
 					}
 				}
 			}
@@ -2643,17 +2736,25 @@ impl Gpu {
 				let quads: &[_] = if warp { warp_fx.filter(|_| !fogged).map_or(&[], |w| &w.quads) } else { quads };
 				let mut verts = Vec::with_capacity(quads.len() * 4);
 				let mut runs: Vec<(usize, bool, u32, u32)> = Vec::new();
+				// [PC] Water Enhanced: a sea drawn as effect quads (Pokitaru) goes to the water pass too.
+				let sea_tex = if water_on && !fogged && !warp { super::waterfx::sea_fx_tex(self.level) } else { &[] };
+				let mut sea: Vec<Vertex> = Vec::new();
 				for q in quads {
-					if !table.contains_key(&q.tex) {
+					// The effects layer's GS fog rides in the high bits of `tex` (retail/efx_draw.rs `fog_tex`).
+					let tex = crate::retail::efx_draw::plain_tex(q.tex);
+					if !table.contains_key(&tex) {
 						continue;
+					}
+					if sea_tex.contains(&tex) {
+						sea.extend((0..4).map(|k| Vertex { pos: q.pos[k], uv: q.uv[k], normal: [0.0; 3], colour: q.colour[k], light: [0.0; 4] }));
 					}
 					let base = verts.len() as u32 / 4 * 6;
 					for k in 0..4 {
-						verts.push(Vertex { pos: q.pos[k], uv: q.uv[k], normal: [0.0; 3], colour: q.colour[k], light: [0.0; 4] });
+						verts.push(Vertex { pos: q.pos[k], uv: q.uv[k], normal: [0.0; 3], colour: q.colour[k], light: crate::retail::efx_draw::fog_light(q.tex, k, -1.0) });
 					}
 					match runs.last_mut() {
-						Some(r) if r.0 == q.tex && r.1 == q.additive => r.3 += 6,
-						_ => runs.push((q.tex, q.additive, base, 6)),
+						Some(r) if r.0 == tex && r.1 == q.additive => r.3 += 6,
+						_ => runs.push((tex, q.additive, base, 6)),
 					}
 				}
 				if !verts.is_empty() {
@@ -2669,11 +2770,24 @@ impl Gpu {
 						pass.set_bind_group(1, &table[&tex], &[]);
 						pass.draw_indexed(start..start + count, 0, 0..1);
 					}
+					// The fogged run is the water quads (Novalis class 751, Drek fleet water).
+					if fogged && water_on {
+						wrec.push(super::waterfx::WaterDraw::new(vb, ib, idx.len() as u32, verts.iter().map(|v| v.pos)).kind("fogged quads"));
+					}
+				}
+				if !sea.is_empty() {
+					let idx: Vec<u32> = (0..sea.len() as u32 / 4).flat_map(|q| [q * 4, q * 4 + 1, q * 4 + 2, q * 4, q * 4 + 2, q * 4 + 3]).collect();
+					let vb = buffer(&self.device, "sea quad vertices", bytemuck::cast_slice(&sea), wgpu::BufferUsages::VERTEX);
+					self.queue.write_buffer(&vb, 0, bytemuck::cast_slice(&sea));
+					let ib = buffer(&self.device, "sea quad indices", bytemuck::cast_slice(&idx), wgpu::BufferUsages::INDEX);
+					self.queue.write_buffer(&ib, 0, bytemuck::cast_slice(&idx));
+					wrec.push(super::waterfx::WaterDraw::new(vb, ib, idx.len() as u32, sea.iter().map(|v| v.pos)).kind("sea fx quads"));
 				}
 			}
 			// BRIDGE-23: FIX-blend world strips (NOV-15.1b), triangles (i, i+1, i+2), one draw per strip.
 			if !warp && !dskip("strips") {
-				draw_strips(&self.device, &self.queue, &mut pass, &self.fx_tex, &self.strip_draws, &self.strip_pipeline, &self.strip_pipeline);
+				// [PC] Water Enhanced: on Novalis these strips are the river and its pools (waterfx.rs `strips_are_water`).
+				draw_strips(&self.device, &self.queue, &mut pass, &self.fx_tex, &self.strip_draws, &self.strip_pipeline, &self.strip_pipeline, strips_water.then_some((&mut wrec, &strip_flows[..], &[][..])));
 			}
 			// NOV-13.3: the vendor shop's item models, world mobies seen by the world camera (decomp/notes/vendor.md
 			// "NOV-13.3"). Their meshes are the model-space preview batches, so the view-projection takes the model
@@ -2717,11 +2831,26 @@ impl Gpu {
 					}
 				}
 			}
+			// [PC] Particles Enhanced (partfx.rs): the pool (and the pool lines after it) in their own pass over the level's depth.
+			// [PC] Particles Enhanced: the additive pool particles' light (partfx.rs `lights`; runs > 0 = the retail pool, so the
+			// fixed glows and the ribbons at run 0 stay out) on the smoke and, in post, the scene.
+			let fx_lights = match part_on && !warp && super::partfx::FX_ON {
+				true => super::partfx::lights(self.part_verts.iter().filter(|((run, additive, key), _)| *run > 0 && *additive && *key != LINE_KEY).map(|((_, _, key), v)| (*key, &v[..])), &self.partfx.tints, cam.pos),
+				false => super::partfx::FxLights::default(),
+			};
+			if let (true, Some(resolve), Some(glow)) = (part_on, self.post.scene(), self.post.glow()) {
+				drop(pass);
+				let generation = self.post.water_inputs().map_or(0, |w| w.3);
+				pass = self.partfx.begin(&self.device, &self.queue, &mut enc, &self.msaa, &self.depth, resolve, glow, generation, &fx_lights);
+				pass.set_bind_group(0, &self.ubind, &[]);
+			}
 			// One vertex / index buffer for every run (the retail pool order makes many small runs), one draw per run;
 			// retail pool lines (`LINE_KEY` runs) come from their own vertex buffer, drawn in walk order.
 			let mut all: Vec<Vertex> = Vec::new();
 			let mut lall: Vec<Vertex> = Vec::new();
 			let mut runs: Vec<(bool, bool, u32, u32, u32)> = Vec::new();
+			// [PC] Water Enhanced with Particles Classic: the particles' cover pass ran (partfx.rs `cover`).
+			let mut covered = false;
 			for ((_, additive, key), verts) in self.part_verts.iter().filter(|_| !warp) {
 				if verts.is_empty() {
 					continue;
@@ -2752,31 +2881,90 @@ impl Gpu {
 					vb
 				});
 				let any_tex = self.part_tex.as_ref().or_else(|| self.fx_tex.values().next());
-				for (line, additive, key, first, count) in runs {
+				for &(line, additive, key, first, count) in &runs {
 					if line {
 						let (Some(vb), Some(tex)) = (lvb.as_ref(), any_tex) else { continue };
-						pass.set_pipeline(&self.line_pipeline);
+						pass.set_pipeline(if part_on { &self.partfx.line } else { &self.line_pipeline });
 						pass.set_bind_group(1, tex, &[]);
 						pass.set_vertex_buffer(0, vb.slice(..));
 						pass.draw(first..first + count, 0..1);
 						continue;
 					}
 					let (Some((vb, ib)), Some(tex)) = (tris.as_ref(), self.fx_tex.get(&(key as usize)).or(self.part_tex.as_ref())) else { continue };
-					pass.set_pipeline(&self.part_pipelines[additive as usize]);
+					pass.set_pipeline(if part_on { &self.partfx.soft[additive as usize] } else { &self.part_pipelines[additive as usize] });
 					pass.set_bind_group(1, tex, &[]);
 					pass.set_vertex_buffer(0, vb.slice(..));
 					pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
 					pass.draw_indexed(first..first + count, 0, 0..1);
+				}
+				if let (true, false, Some((vb, ib)), Some(resolve), Some(glow)) = (water_on, part_on, tris.as_ref(), self.post.scene(), self.post.glow()) {
+					drop(pass);
+					let generation = self.post.water_inputs().map_or(0, |w| w.3);
+					pass = self.partfx.begin(&self.device, &self.queue, &mut enc, &self.msaa, &self.depth, resolve, glow, generation, &super::partfx::FxLights::default());
+					pass.set_bind_group(0, &self.ubind, &[]);
+					pass.set_vertex_buffer(0, vb.slice(..));
+					pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+					for &(_, additive, key, first, count) in runs.iter().filter(|r| !r.0) {
+						let Some(tex) = self.fx_tex.get(&(key as usize)).or(self.part_tex.as_ref()) else { continue };
+						pass.set_pipeline(&self.partfx.cover[additive as usize]);
+						pass.set_bind_group(1, tex, &[]);
+						pass.draw_indexed(first..first + count, 0, 0..1);
+					}
+					covered = true;
 				}
 			}
 			// KER-92: the pool lines (untextured; any texture bind group satisfies the layout).
 			if let (false, Some(tex)) = (warp || self.line_verts.is_empty(), self.part_tex.as_ref().or_else(|| self.fx_tex.values().next())) {
 				let vb = buffer(&self.device, "particle lines", bytemuck::cast_slice(&self.line_verts), wgpu::BufferUsages::VERTEX);
 				self.queue.write_buffer(&vb, 0, bytemuck::cast_slice(&self.line_verts));
-				pass.set_pipeline(&self.line_pipeline);
+				pass.set_pipeline(if part_on || covered { &self.partfx.line } else { &self.line_pipeline });
 				pass.set_bind_group(1, tex, &[]);
 				pass.set_vertex_buffer(0, vb.slice(..));
 				pass.draw(0..self.line_verts.len() as u32, 0..1);
+			}
+			// [PC] Enhanced image (post.rs): the level pass ends here; the post passes grade the picture into the MSAA target, and the
+			// HUD pass loads it and draws everything below (HUD, retail overlay, prompt model, item previews) as the level pass would.
+			if post_on {
+				drop(pass);
+				if water_log() {
+					eprintln!("water: level {} draws {} ({:?}) mirror {:?}", self.level, wrec.len(), wrec.iter().map(|w| (w.kind, w.n, w.plane.map(|b| b[0]), w.flow)).collect::<Vec<_>>(), super::mirror::pick(&wrec, cam.pos));
+				}
+				let water = match (&water_frame, self.post.water_inputs()) {
+					(Some(f), Some(inputs)) if !wrec.is_empty() => {
+						// [PC] The planar mirror (mirror.rs) of the nearest flat water plane below the eye.
+						let mirror_h = super::mirror::pick(&wrec, cam.pos);
+						self.waterfx.positions(&self.device, &self.queue, &mut enc, &self.depth, inputs, f, &wrec, mirror_h, part_on || covered);
+						if let (Some(h), Some(target)) = (mirror_h, self.waterfx.mirror_target()) {
+							self.draw_mirror(&mut enc, scene, &u, h, target, multi.as_ref().map(|m| &m.0));
+						}
+						// [PC] What lies under the water (mirror.rs `draw_bed`), for the clear shallows.
+						if let Some(target) = self.waterfx.bed_target() {
+							self.draw_bed(&mut enc, scene, &u, target, multi.as_ref().map(|m| &m.0));
+						}
+						true
+					}
+					_ => false,
+				};
+				let waterfx = &self.waterfx;
+				self.post.encode(&self.queue, &mut enc, cam, aspect, gfx.ao, part_on, &fx_lights, rays, |enc, scene| {
+					if water {
+						waterfx.shade(enc, scene);
+					}
+				});
+				self.post.composite(&mut enc, &self.msaa);
+				pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+					label: Some("hud"),
+					color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &self.msaa, resolve_target: Some(&view), depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Discard } })],
+					depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+						view: &self.depth,
+						depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
+						stencil_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(super::shadowvol::STENCIL_CLEAR), store: wgpu::StoreOp::Discard }),
+					}),
+					timestamp_writes: None,
+					occlusion_query_set: None,
+					multiview_mask: None,
+				});
+				pass.set_bind_group(0, &self.ubind, &[]);
 			}
 			// BRIDGE-36 (c5): the HUD groups before the split, then the prompt model (world depth, world uniforms), then the rest.
 			let draw_hud = |pass: &mut wgpu::RenderPass<'_>, groups: &[(Draw, bool)]| {
@@ -2963,13 +3151,30 @@ impl Gpu {
 /// drawn iff `key - near > 0` and `key - far < 0` with far = min(line far, the pool clamp `part_far`), and both points lie
 /// inside the view frustum (`m` = view-projection, depth 0..1).
 /// BRIDGE-23: FIX-blend strips, triangles (i, i+1, i+2), one draw per strip; the blend constant is FIX / 128.
-fn draw_strips(device: &wgpu::Device, queue: &wgpu::Queue, pass: &mut wgpu::RenderPass<'_>, fx_tex: &HashMap<usize, wgpu::BindGroup>, strips: &[particles::WorldStrip], pipeline: &wgpu::RenderPipeline, add_pipeline: &wgpu::RenderPipeline) {
-	for s in strips {
-		let Some(bind) = fx_tex.get(&s.tex) else { continue };
+/// [PC] Dynamic shadows (sunshadow.rs): the texture slots whose texels mostly blend (PS2 alpha below 0x60; the texture holds
+/// alpha x 2): a mesh drawn with them is a see-through shell and casts no sun shadow.
+fn clear_slots(slots: &HashMap<u32, usize>, n: usize, textures: &HashMap<u32, Texture>) -> Vec<bool> {
+	let mut clear = vec![false; n];
+	for (&key, &slot) in slots {
+		if let Some(t) = textures.get(&(key & crate::mobies::KEY_MASK)).filter(|t| !t.rgba.is_empty()) {
+			clear[slot] = t.rgba.iter().filter(|c| c[3] < 0xc0).count() * 5 >= t.rgba.len() * 3;
+		}
+	}
+	clear
+}
+
+/// `rec`: [PC] Water Enhanced records each strip's buffers (waterfx.rs), with its flow slot from the list (by strip index; 0 past it);
+/// only the strips with one of the listed fx textures, if any are listed.
+#[allow(clippy::too_many_arguments)]
+fn draw_strips(device: &wgpu::Device, queue: &wgpu::Queue, pass: &mut wgpu::RenderPass<'_>, fx_tex: &HashMap<usize, wgpu::BindGroup>, strips: &[particles::WorldStrip], pipeline: &wgpu::RenderPipeline, add_pipeline: &wgpu::RenderPipeline, mut rec: Option<(&mut Vec<super::waterfx::WaterDraw>, &[u32], &[usize])>) {
+	for (i, s) in strips.iter().enumerate() {
+		let Some(bind) = fx_tex.get(&crate::retail::efx_draw::plain_tex(s.tex)) else { continue };
 		if s.pos.len() < 3 {
 			continue;
 		}
-		let verts: Vec<Vertex> = (0..s.pos.len()).map(|j| Vertex { pos: s.pos[j], uv: s.uv[j], normal: [0.0; 3], colour: s.colour[j], light: [0.0; 4] }).collect();
+		// An effects-layer strip with GS fog carries the fog byte F in its vertex alpha (retail/efx_draw.rs `fog_tex`).
+		let fogged = s.tex & crate::retail::efx_draw::FOG_ON != 0;
+		let verts: Vec<Vertex> = (0..s.pos.len()).map(|j| Vertex { pos: s.pos[j], uv: s.uv[j], normal: [0.0; 3], colour: if fogged { [s.colour[j][0], s.colour[j][1], s.colour[j][2], 1.0] } else { s.colour[j] }, light: crate::retail::efx_draw::fog_light(s.tex, 0, if fogged { s.colour[j][3] } else { -1.0 }) }).collect();
 		let idx: Vec<u32> = (0..s.pos.len() as u32 - 2).flat_map(|t| [t, t + 1, t + 2]).collect();
 		let vb = buffer(device, "fx strip vertices", bytemuck::cast_slice(&verts), wgpu::BufferUsages::VERTEX);
 		queue.write_buffer(&vb, 0, bytemuck::cast_slice(&verts));
@@ -2982,7 +3187,21 @@ fn draw_strips(device: &wgpu::Device, queue: &wgpu::Queue, pass: &mut wgpu::Rend
 		pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
 		pass.set_bind_group(1, bind, &[]);
 		pass.draw_indexed(0..idx.len() as u32, 0, 0..1);
+		if let Some((r, flows, _)) = rec.as_mut().filter(|(_, _, only)| only.is_empty() || only.contains(&crate::retail::efx_draw::plain_tex(s.tex))) {
+			if water_log() {
+				eprintln!("water strip {i}: tex {} add {} fix {} verts {} z {:.2}", s.tex, s.add, s.fix, s.pos.len(), s.pos.iter().map(|p| p[2]).sum::<f32>() / s.pos.len() as f32);
+			}
+			let mut d = super::waterfx::WaterDraw::new(vb, ib, idx.len() as u32, s.pos.iter().copied()).kind("strip");
+			d.flow = flows.get(i).copied().unwrap_or(0);
+			r.push(d);
+		}
 	}
+}
+
+/// [probe] RAC_WATER_LOG=1: the water draws the water pass gets, per frame.
+fn water_log() -> bool {
+	static S: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+	*S.get_or_init(|| std::env::var("RAC_WATER_LOG").is_ok())
 }
 
 /// [probe] RAC_DRAWSKIP=a,b,.. leaves those main-pass draw groups out (fx lane run 16): world ties tfrags marker props clipped
@@ -4079,12 +4298,15 @@ impl SceneCtx {
 		let mut draws = Vec::new();
 		for (tex, idx) in runs {
 			let cull = ((tex >> 24) & 3) as u8;
+			// Key bits 26..28 are the CLAMP wrap of the draw (`mobies::SLOT_MASK`): the slot's sampler clamps u, v or both.
+			let wrap = (tex >> crate::shrubs::WRAP_SHIFT) & 3;
 			let tex = tex & crate::mobies::KEY_MASK;
-			let texture = match slots.get(&tex) {
+			let slot_key = tex | wrap << crate::shrubs::WRAP_SHIFT;
+			let texture = match slots.get(&slot_key) {
 				Some(&i) => i,
 				None => {
-					bind.push(self.upload_texture(textures.get(&tex)));
-					slots.insert(tex, bind.len() - 1);
+					bind.push(if wrap != 0 { self.upload(textures.get(&tex), &self.wrap_samplers[wrap as usize - 1]) } else { self.upload_texture(textures.get(&tex)) });
+					slots.insert(slot_key, bind.len() - 1);
 					bind.len() - 1
 				}
 			};
@@ -4174,8 +4396,8 @@ impl SceneCtx {
 					None => match shrub_k {
 						Some(k) => {
 							let chain = shrub_chains.get((key & 0xff) as usize).and_then(|c| c.as_ref());
-							// A tie (key group 2) without an authored chain keeps the plain sample (word 0, `tie_kmx`).
-							let word = if chain.is_none() && (key >> 16) == 2 { 0 } else { wrap | k << 2 | (chain.map_or(0, |c| c.len() as u32 - 1)) << 14 };
+							// A tie (key group 2) without an authored chain keeps the plain sample (word = the wrap alone, `tie_kmx`).
+							let word = if chain.is_none() && (key >> 16) == 2 { wrap } else { wrap | k << 2 | (chain.map_or(0, |c| c.len() as u32 - 1)) << 14 };
 							(key, word, chain)
 						}
 						None => (key, wrap, None),
@@ -4332,7 +4554,9 @@ impl SceneCtx {
 				t.insert(sky::UNTEXTURED, Texture { w: 1, h: 1, rgba: vec![[255; 4]] });
 				let c = s.colour.map(|x| x as f64 / 255.0); // the target is gamma-space Unorm: raw GS bytes
 				clear = wgpu::Color { r: c[0], g: c[1], b: c[2], a: 1.0 };
-				let refs: Vec<&Mesh> = s.meshes.iter().collect();
+				// Retail draws the sky shells with CLAMP_1 = 5 (both axes clamped; fx_census_late.md GS census): wrap 3 in the face key.
+				let clamped: Vec<Mesh> = s.meshes.iter().map(|m| Mesh { faces: m.faces.iter().map(|&(k, f)| (if k == sky::UNTEXTURED { k } else { k | 3 << shrubs::WRAP_SHIFT }, f)).collect(), ..m.clone() }).collect();
+				let refs: Vec<&Mesh> = clamped.iter().collect();
 				let (batch, _, _, verts) = self.batch(&refs, Some(&s.colours), true, &t, &mut bind, &mut slots);
 				// The shells' vertices follow each other in shell order (an ordered batch).
 				let mut start = 0;
@@ -4455,6 +4679,6 @@ impl SceneCtx {
 		let views = self.tex_log.borrow_mut().take();
 		crate::loadlog::say(|| "gpu: previews done".into());
 		let tex_array = self.bindless_layout.as_ref().zip(views.as_ref()).and_then(|(l, v)| super::bindless::array_group(l, &self.device, &bind, v, &self.sampler, &self.wrap_samplers));
-		Some(Scene { previews, previews_gold, preview_models, world, world_verts, lit, ties, tie_draws, tie_ranges, tie_cull: tie_set.iter().map(|t| t.cull).collect(), occ_tick: occ.clone(), occ, tfrags, tfrag_set, tfrag_draws, tfrag_ranges, tfrag_vranges, tfrag_verts, tfrag_cols, tfrag_b, tie_verts, tie_base, tie_morph, tie_vranges, tie_fat, tie_q: vec![[0.0; 3]; tie_set.len()], tie_qdep, tie_full: vec![[false; 3]; tie_set.len()], tie_slots, tie_tri, tie_tris, tie_cols, tie_stale, tie_first, shrubs: shrub_batch, shrub_ranges, shrub_cull: shrub_set.iter().map(|s| s.cull).collect(), shrub_order: shrub_order(shrub_set), shrub_bb: shrub_set.iter().map(|s| s.bb).collect(), shrub_verts, shrub_first, shrub_a: vec![0; shrub_set.len()], shrub_opaque: Vec::new(), shrub_faded: Vec::new(), shrub_bb_quads: Vec::new(), shrub_bb_tex: HashMap::new(), sky, sky_shells, sky_sprites, marker, marker_verts: Vec::new(), marker_model, marker_tint: hero_tint.map(|(c, s, _)| (c, s)), marker_hero_len: hero_tint.map_or(0, |t| t.2), marker_shown: false, marker_alpha: false, props_verts: if self.gpu_posing { Vec::new() } else { props_model.clone() }, props_hidden: vec![false; ranges.len()], props_key: vec![None; ranges.len()], props, props_model, props_sj, props_rad, props_inst: Vec::new(), props_pose: Vec::new(), props_ranges: ranges, props_shown: false, props_alpha: false, props_drawn: Vec::new(), props_vis: Vec::new(), slot_runs, props_order: (0..props_class.len()).collect(), props_class, props_late: Vec::new(), prop_faces, class_faces, clip_masked: Vec::new(), clip_batch, clip_cap, clip_view: None, clip_queue: Vec::new(), marker_faces, marker_masked: Vec::new(), debris_model: HashMap::new(), debris: None, debris_cap: (0, 0), warp_model: HashMap::new(), warp_batch: None, warp_shown: false, prompt, prompt_slot, portrait, portrait_model, bind_groups: bind, tex_slots: slots, tex_array, clear, centre, radius })
+		Some(Scene { previews, previews_gold, preview_models, world, world_verts, lit, ties, tie_draws, tie_ranges, tie_cull: tie_set.iter().map(|t| t.cull).collect(), occ_tick: occ.clone(), occ, tfrags, tfrag_set, tfrag_draws, tfrag_ranges, tfrag_vranges, tfrag_verts, tfrag_cols, tfrag_b, tie_verts, tie_base, tie_morph, tie_vranges, tie_fat, tie_q: vec![[0.0; 3]; tie_set.len()], tie_qdep, tie_full: vec![[false; 3]; tie_set.len()], tie_slots, tie_tri, tie_tris, tie_cols, tie_stale, tie_first, shrubs: shrub_batch, shrub_ranges, shrub_cull: shrub_set.iter().map(|s| s.cull).collect(), shrub_order: shrub_order(shrub_set), shrub_bb: shrub_set.iter().map(|s| s.bb).collect(), shrub_verts, shrub_first, shrub_a: vec![0; shrub_set.len()], shrub_opaque: Vec::new(), shrub_faded: Vec::new(), shrub_bb_quads: Vec::new(), shrub_bb_tex: HashMap::new(), sky, sky_shells, sky_sprites, marker, marker_verts: Vec::new(), marker_model, marker_tint: hero_tint.map(|(c, s, _)| (c, s)), marker_hero_len: hero_tint.map_or(0, |t| t.2), marker_shown: false, marker_alpha: false, props_verts: if self.gpu_posing { Vec::new() } else { props_model.clone() }, props_hidden: vec![false; ranges.len()], props_key: vec![None; ranges.len()], props, props_model, props_sj, props_rad, props_inst: Vec::new(), props_pose: Vec::new(), props_ranges: ranges, props_shown: false, props_alpha: false, props_drawn: Vec::new(), props_vis: Vec::new(), slot_runs, props_order: (0..props_class.len()).collect(), props_class, props_late: Vec::new(), prop_faces, class_faces, clip_masked: Vec::new(), clip_batch, clip_cap, clip_view: None, clip_queue: Vec::new(), marker_faces, marker_masked: Vec::new(), debris_model: HashMap::new(), debris: None, debris_cap: (0, 0), warp_model: HashMap::new(), warp_batch: None, warp_shown: false, prompt, prompt_slot, portrait, portrait_model, clear_tex: clear_slots(&slots, bind.len(), textures), bind_groups: bind, tex_slots: slots, tex_array, clear, centre, radius })
 	}
 }

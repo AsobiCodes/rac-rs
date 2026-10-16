@@ -62,6 +62,7 @@ fn texture(w: usize, h: usize, pixels: &[u8], palette: &[u8]) -> R<Texture> {
 }
 
 pub fn sky_block(data: &[u8]) -> R<Sky> {
+	crate::viewer::gs_state::guard_path("sky");
 	let shell_count = i16_at(data, 6)?;
 	let texture_count = i16_at(data, 0xc)?;
 	if !(0..=8).contains(&shell_count) || !(0..=256).contains(&texture_count) {

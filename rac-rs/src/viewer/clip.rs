@@ -128,7 +128,7 @@ pub(super) fn replay_faces(meshes: &[&Mesh], slots: &HashMap<u32, usize>) -> Vec
 				let slot = next[&key];
 				*next.get_mut(&key).unwrap() += 3;
 				if phased && m.strip_phase[i] != crate::mesh::NO_PHASE {
-					let tex = slots.get(&(key & crate::mobies::KEY_MASK)).copied().unwrap_or(0);
+					let tex = slots.get(&(key & crate::mobies::SLOT_MASK)).copied().unwrap_or(0);
 					out.push(PropFace { slot, idx: f.map(|x| x + base), phase: m.strip_phase[i], tex, cull: ((key >> 24) & 3) as u8 });
 				}
 			}

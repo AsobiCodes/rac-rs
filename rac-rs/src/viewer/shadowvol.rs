@@ -45,6 +45,7 @@ pub(super) struct ShadowPipes {
 
 impl ShadowPipes {
 	pub(super) fn new(device: &wgpu::Device, ulayout: &wgpu::BindGroupLayout, colour: wgpu::TextureFormat, depth: wgpu::TextureFormat) -> ShadowPipes {
+		crate::viewer::gs_state::guard_path("shadowvol");
 		let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("shadow volumes"), source: wgpu::ShaderSource::Wgsl(SHADOW_SHADER.into()) });
 		let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("shadow volumes"), bind_group_layouts: &[Some(ulayout)], immediate_size: 0 });
 		let make = |volume: bool, op: wgpu::StencilOperation, compare: wgpu::CompareFunction| {
