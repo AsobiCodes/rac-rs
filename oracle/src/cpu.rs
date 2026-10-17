@@ -871,7 +871,10 @@ impl Cpu {
 
     /// Macro-mode upper op: same arithmetic and flags as micro mode (vu.rs
     /// vu_upper), committed at once. MAC/status/clip flags are what CFC2
-    /// reads (e.g. the collision range checks in seg_collide 0x1efbf0).
+    /// reads (e.g. the collision range checks in seg_collide 0x1efbf0). [PC] (speed) Inlined into the recompiled
+    /// code's `vu_special1` / `vu_special2` calls, where `op` is a constant: the decode in `vu_upper` folds away
+    /// (CLIP / ITOF / FTOI / ABS / OPMULA ran the whole decoder per op, ~6% of the EE thread on Blarg).
+    #[inline(always)]
     fn vu_macro_upper(&mut self, op: u32, pc: u32) {
         let u = match self.vu_upper(op, self.vi[18]) {
             Ok(u) => u,

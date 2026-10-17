@@ -48,7 +48,9 @@ fn lane(l: usize) -> u32 {
 }
 
 impl Cpu {
-    /// Compute an upper instruction against the current state, no writes.
+    /// Compute an upper instruction against the current state, no writes. Inlined: in recompiled code `op` is a
+    /// constant and the decode folds away.
+    #[inline(always)]
     pub fn vu_upper(&self, op: u32, clip_prev: u32) -> Result<Up, String> {
         self.vu_upper_g::<false>(op, clip_prev)
     }

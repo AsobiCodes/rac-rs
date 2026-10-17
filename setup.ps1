@@ -11,7 +11,7 @@
 #   (b) checks that the disc image is Ratchet & Clank PAL / Europe v1.00 (SCES-50916) or USA v1.00 (SCUS-97199) (size and SHA-1)
 #   (c) generates the game code from the disc image with tools\recgen_iso.py (boot code + 19 levels) into .\oracle\rec and .\oracle\game
 #   (c2) generates the VU microcode translations (graphics code) from the disc image with tools\vugen_iso.py into
-#        .\oracle\src\vu0_prog0.rs and .\rac-rs\src\gsfull\vu1_prog*.rs + vu1aot_gen.rs
+#        .\oracle\src\vu0_prog0.rs, vu0_prog1.rs, vu0_prog9hi.rs and .\rac-rs\src\gsfull\vu1_prog*.rs + vu1aot_gen.rs
 #   (d) builds the game with cargo (release) into .\build
 #   (e) writes generated\play.cfg (the disc image path) and Play.cmd, which starts the game from your disc image (cold boot: logos, title screen, New Game, no savestate),
 #       and a desktop shortcut to the game exe (the exe, started with no arguments, reads generated\play.cfg)
@@ -229,7 +229,7 @@ function Test-ProtectedPath([string]$rel) {
     # What an update never touches: the toolchain, the build, the generated code, the player's saves, the disc image.
     $r = $rel.Replace('\', '/').TrimStart('/').ToLowerInvariant()
     foreach ($p in @('toolchain/', 'build/', 'generated/', 'player/', 'oracle/rec/', 'oracle/game/', 'test_shots/')) { if ($r.StartsWith($p)) { return $true } }
-    if ($r -in @('play.cmd', 'oracle/src/vu0_prog0.rs', 'rac-rs/src/gsfull/vu1aot_gen.rs', 'rac-rs/src/particles/orb_tables.rs')) { return $true }
+    if ($r -in @('play.cmd', 'oracle/src/vu0_prog0.rs', 'oracle/src/vu0_prog1.rs', 'oracle/src/vu0_prog9hi.rs', 'rac-rs/src/gsfull/vu1aot_gen.rs', 'rac-rs/src/particles/orb_tables.rs')) { return $true }
     if ($r -match '^rac-rs/src/gsfull/vu1_prog\d+\.rs$') { return $true }
     return $r.EndsWith('.iso')
 }
@@ -1596,6 +1596,7 @@ if ($Regenerate -or $have -ne $want) {
 # ---------------------------------------------------------------- (c2) VU microcode translations
 # The VU0/VU1 microprograms (graphics/maths code of the game) are cut out of YOUR disc image and translated to Rust here;
 # none of that is shipped. Output (written in place, the files the sources already include): oracle\src\vu0_prog0.rs,
+# vu0_prog1.rs, vu0_prog9hi.rs,
 # rac-rs\src\gsfull\vu1_prog*.rs and vu1aot_gen.rs.
 Step '(c2) generating the VU microcode translations from the disc image'
 New-Item -ItemType Directory -Force -Path $gen | Out-Null
@@ -1605,7 +1606,7 @@ $VuCompatible = @('5b49455da24a986799cd727bb9a4563a70609ab5759df4c060f5df0b00bec
 $vuWant = "$vuBase gen=$(Get-FilesHash (Get-VuGenFiles))"
 $vuHave = ''
 if (Test-Path -LiteralPath $vuStamp) { $vuHave = (Get-Content -LiteralPath $vuStamp -Raw).Trim() }
-if (-not (Test-Path -LiteralPath (Join-Path $orc 'src\vu0_prog0.rs')) -or -not (Test-Path -LiteralPath (Join-Path $root 'rac-rs\src\gsfull\vu1aot_gen.rs')) -or -not (Test-Path -LiteralPath (Join-Path $root 'rac-rs\src\particles\orb_tables.rs'))) { $vuHave = '' }
+if (-not (Test-Path -LiteralPath (Join-Path $orc 'src\vu0_prog0.rs')) -or -not (Test-Path -LiteralPath (Join-Path $orc 'src\vu0_prog1.rs')) -or -not (Test-Path -LiteralPath (Join-Path $orc 'src\vu0_prog9hi.rs')) -or -not (Test-Path -LiteralPath (Join-Path $root 'rac-rs\src\gsfull\vu1aot_gen.rs')) -or -not (Test-Path -LiteralPath (Join-Path $root 'rac-rs\src\particles\orb_tables.rs'))) { $vuHave = '' }
 if ($vuHave -and $vuHave -ne $vuWant) {
     $oldGen = ''
     if ($vuHave -eq $vuBase) { $oldGen = $VuCompatible[0] } elseif ($vuHave.StartsWith($vuBase + ' gen=')) { $oldGen = $vuHave.Substring($vuBase.Length + 5) }
@@ -1629,14 +1630,15 @@ if ($NoBuild) { Write-Host 'Generation done (-NoBuild).' -ForegroundColor Green;
 
 # ---------------------------------------------------------------- (d) build
 Step '(d) building the game (release; this takes a long time and a lot of memory on the first run)'
-# The generated crates (oracle\rec\*, oracle\game) are 97% of the compile work: they build at opt-level 1 in one codegen unit
-# (about 2x less work than the default opt-level 3; same behaviour, gameplay speed measured equal). Everything else (the
+# The generated crates (oracle\rec\*, oracle\game) are 97% of the compile work: they build at opt-level 3 in one codegen unit
+# (full optimisation, same behaviour; the game thread runs faster on the heavy planets, and with one codegen unit the build
+# takes about as long as opt-level 1: 9m55s vs 9m21s on a 24-thread PC). Everything else (the
 # emulator core, hands, renderer, wgpu) keeps the default release profile. Passed to cargo as a config file so that
 # rac-rs\Cargo.toml stays unchanged.
 $prof = Join-Path $root 'generated\build_profile.toml'
-$pl = @('# written by setup.ps1 (step d): build profile of the generated crates', '[profile.release.package.ee-game]', 'opt-level = 1', 'codegen-units = 1')
+$pl = @('# written by setup.ps1 (step d): build profile of the generated crates', '[profile.release.package.ee-game]', 'opt-level = 3', 'codegen-units = 1')
 foreach ($d in (Get-ChildItem -LiteralPath (Join-Path $orc 'rec') -Directory | Sort-Object Name)) {
-    $pl += @('', "[profile.release.package.rec-$($d.Name.Replace('_', '-'))]", 'opt-level = 1', 'codegen-units = 1')
+    $pl += @('', "[profile.release.package.rec-$($d.Name.Replace('_', '-'))]", 'opt-level = 3', 'codegen-units = 1')
 }
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $prof) | Out-Null
 Set-Content -LiteralPath $prof -Value $pl -Encoding ASCII

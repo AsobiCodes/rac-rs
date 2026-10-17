@@ -3054,8 +3054,9 @@ match (m.hero_preview(), &self.hero_anim, self.menu_clip_base) {
 					if let Some(s) = &mut self.shot {
 						s.1 = if wait { s.1.max(6) } else { s.1.saturating_sub(1) };
 					}
-					g.window.request_redraw();
 					profile::frame_end(self.smooth.ticks);
+					self.pace.wait(&g.window, g.config.present_mode != wgpu::PresentMode::Fifo);
+					g.window.request_redraw();
 				}
 			}
 			_ => {}

@@ -8,6 +8,8 @@
 /oracle/rec/
 /oracle/game/
 /oracle/src/vu0_prog0.rs
+/oracle/src/vu0_prog1.rs
+/oracle/src/vu0_prog9hi.rs
 /rac-rs/src/gsfull/vu1_prog*.rs
 /rac-rs/src/gsfull/vu1aot_gen.rs
 /rac-rs/src/particles/orb_tables.rs

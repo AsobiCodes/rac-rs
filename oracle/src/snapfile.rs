@@ -8,7 +8,7 @@ use std::collections::HashMap;
 /// hashes them; reading them here ties the hash to the compilation of this crate (a build that races an edit of the
 /// sources cannot pair old code with a new hash). Not part of it: gs.rs (only used by the GS capture, off in fndiff),
 /// rec/ (the recompiled table is never built there), gate.rs, main.rs.
-pub const SRC: [&str; 24] = [
+pub const SRC: [&str; 25] = [
     include_str!("cpu.rs"),
     include_str!("fpu.rs"),
     include_str!("hle.rs"),
@@ -20,6 +20,7 @@ pub const SRC: [&str; 24] = [
     include_str!("mc.rs"),
     include_str!("vu0aot.rs"),
     include_str!("vu0_prog0.rs"),
+    include_str!("vu0_prog1.rs"),
     include_str!("snd989/driver.rs"),
     include_str!("snd989/handler.rs"),
     include_str!("snd989/voices.rs"),

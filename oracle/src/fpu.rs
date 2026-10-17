@@ -5,7 +5,7 @@
 //! environment is never changed outside the instruction.
 
 use std::arch::asm;
-use std::arch::x86_64::__m128;
+use std::arch::x86_64::*;
 
 /// Exceptions masked, DAZ, FTZ, round toward zero.
 pub const CSR_CHOP: u32 = 0x1f80 | 0x0040 | 0x8000 | 0x6000;
@@ -314,14 +314,88 @@ pub fn vin(v: [u32; 4]) -> [f32; 4] {
 pub fn vout(v: [f32; 4]) -> [u32; 4] {
     [fout(v[0]), fout(v[1]), fout(v[2]), fout(v[3])]
 }
+// [PC] (speed) `vadd` / `vsub` / `vmul` without MXCSR switching: the same results as
+// `vout(addps(vin(a), vin(b), CSR_CHOP))` etc. (round toward zero, DAZ, FTZ, exponent-255 operands as +-FLT_MAX,
+// overflow to +-FLT_MAX), computed under the host's round-to-nearest MXCSR (also right under a live `ChopGuard`).
+// The sum is rounded to nearest and stepped one ulp toward zero when its exact error (Fast2Sum) has the opposite
+// sign; the product is exact in f64 and stepped the same way after rounding to f32. The two ldmxcsr per op (each
+// stalls the pipeline) were most of the cost of a recompiled COP2 macro op (17.4 -> 8.5 ns per op; checked bit
+// for bit against the asm ops on random lanes with exponent edges, scratch_fps/mxb).
+#[inline(always)]
+unsafe fn sel(m: __m128i, a: __m128i, b: __m128i) -> __m128i {
+    _mm_or_si128(_mm_and_si128(m, a), _mm_andnot_si128(m, b))
+}
+
+/// Operand as the ops read it: exponent 255 -> +-FLT_MAX (`fin`), exponent 0 -> +-0 (DAZ).
+#[inline(always)]
+unsafe fn vprep(v: [u32; 4]) -> __m128i {
+    let v = _mm_loadu_si128(v.as_ptr() as *const __m128i);
+    let e = _mm_and_si128(v, _mm_set1_epi32(0x7f80_0000));
+    let s = _mm_and_si128(v, _mm_set1_epi32(0x8000_0000u32 as i32));
+    let v = sel(_mm_cmpeq_epi32(e, _mm_set1_epi32(0x7f80_0000)), _mm_or_si128(s, _mm_set1_epi32(MAX as i32)), v);
+    sel(_mm_cmpeq_epi32(e, _mm_setzero_si128()), s, v)
+}
+
+#[inline(always)]
+unsafe fn vstore(v: __m128i) -> [u32; 4] {
+    let mut o = [0u32; 4];
+    _mm_storeu_si128(o.as_mut_ptr() as *mut __m128i, v);
+    o
+}
+
+/// Sum of prepared lanes (finite, normal or zero).
+#[inline(always)]
+unsafe fn vadd_prepped(a: __m128i, b: __m128i) -> [u32; 4] {
+    let mag = _mm_set1_epi32(0x7fff_ffff);
+    // Fast2Sum needs |x| >= |y| (finite magnitudes compare as integers).
+    let big = _mm_cmpgt_epi32(_mm_and_si128(b, mag), _mm_and_si128(a, mag));
+    let x = _mm_castsi128_ps(sel(big, b, a));
+    let y = _mm_castsi128_ps(sel(big, a, b));
+    let s = _mm_add_ps(x, y);
+    let err = _mm_sub_ps(y, _mm_sub_ps(s, x));
+    let si = _mm_castps_si128(s);
+    let ei = _mm_castps_si128(err);
+    // |s| above the exact sum (error non-zero, opposite sign): one step toward zero.
+    let nz = _mm_andnot_si128(_mm_cmpeq_epi32(_mm_and_si128(ei, mag), _mm_setzero_si128()), _mm_set1_epi32(-1));
+    let opp = _mm_srai_epi32(_mm_xor_si128(si, ei), 31);
+    let r = _mm_add_epi32(si, _mm_and_si128(nz, opp));
+    let e = _mm_and_si128(r, _mm_set1_epi32(0x7f80_0000));
+    let sign = _mm_and_si128(r, _mm_set1_epi32(0x8000_0000u32 as i32));
+    // Overflow (inf): +-FLT_MAX; a denormal result: +-0.
+    let r = sel(_mm_cmpeq_epi32(e, _mm_set1_epi32(0x7f80_0000)), _mm_or_si128(sign, _mm_set1_epi32(MAX as i32)), r);
+    vstore(sel(_mm_cmpeq_epi32(e, _mm_setzero_si128()), sign, r))
+}
+
+#[inline]
 pub fn vadd(a: [u32; 4], b: [u32; 4]) -> [u32; 4] {
-    vout(addps(vin(a), vin(b), CSR_CHOP))
+    unsafe { vadd_prepped(vprep(a), vprep(b)) }
 }
+#[inline]
 pub fn vsub(a: [u32; 4], b: [u32; 4]) -> [u32; 4] {
-    vout(subps(vin(a), vin(b), CSR_CHOP))
+    unsafe { vadd_prepped(vprep(a), _mm_xor_si128(vprep(b), _mm_set1_epi32(0x8000_0000u32 as i32))) }
 }
+#[inline]
 pub fn vmul(a: [u32; 4], b: [u32; 4]) -> [u32; 4] {
-    vout(mulps(vin(a), vin(b), CSR_CHOP))
+    unsafe {
+        let (a, b) = (_mm_castsi128_ps(vprep(a)), _mm_castsi128_ps(vprep(b)));
+        // Exact in f64: 24 x 24 significand bits fit in 53, the exponents in its range.
+        let plo = _mm_mul_pd(_mm_cvtps_pd(a), _mm_cvtps_pd(b));
+        let phi = _mm_mul_pd(_mm_cvtps_pd(_mm_movehl_ps(a, a)), _mm_cvtps_pd(_mm_movehl_ps(b, b)));
+        let r = _mm_movelh_ps(_mm_cvtpd_ps(plo), _mm_cvtpd_ps(phi));
+        let abs = _mm_castsi128_pd(_mm_set1_epi64x(0x7fff_ffff_ffff_ffff));
+        let (aplo, aphi) = (_mm_and_pd(plo, abs), _mm_and_pd(phi, abs));
+        // |rounded| above |exact| (also inf on overflow): one step toward zero (inf - 1 ulp = FLT_MAX).
+        let ul = _mm_castpd_ps(_mm_cmpgt_pd(_mm_and_pd(_mm_cvtps_pd(r), abs), aplo));
+        let uh = _mm_castpd_ps(_mm_cmpgt_pd(_mm_and_pd(_mm_cvtps_pd(_mm_movehl_ps(r, r)), abs), aphi));
+        let up = _mm_castps_si128(_mm_shuffle_ps(ul, uh, 0b10_00_10_00));
+        // An exact product below the smallest normal: +-0 (FTZ).
+        let tmin = _mm_set1_pd(f32::MIN_POSITIVE as f64);
+        let tl = _mm_castpd_ps(_mm_cmplt_pd(aplo, tmin));
+        let th = _mm_castpd_ps(_mm_cmplt_pd(aphi, tmin));
+        let tiny = _mm_castps_si128(_mm_shuffle_ps(tl, th, 0b10_00_10_00));
+        let ri = _mm_add_epi32(_mm_castps_si128(r), up);
+        vstore(sel(tiny, _mm_and_si128(_mm_castps_si128(r), _mm_set1_epi32(0x8000_0000u32 as i32)), ri))
+    }
 }
 /// The same with FAST = true: no MXCSR switching, a `ChopGuard` must be alive.
 #[inline(always)]

@@ -47,6 +47,7 @@ mod front_mirror;
 mod heroanim;
 mod smooth;
 mod profile;
+mod pace;
 
 /// Particle texture number n is uploaded into `fx_tex` under key PART_TEX + n; effect types reach it
 /// through `Gpu::part_defs` (level particle def table, decomp/notes/particles.md).
@@ -1425,6 +1426,8 @@ struct App {
 	keys: HashSet<KeyCode>,
 	looking: bool,
 	last: Instant,
+	/// [PC] Frame cap of the uncapped present modes (viewer/pace.rs).
+	pace: pace::Pace,
 	/// (png path, frames to wait) for a one-frame capture.
 	shot: Option<(String, u32)>,
 	/// Camera override (x, y, z, yaw deg, pitch deg) applied after the level loads.
@@ -1923,6 +1926,7 @@ fn new_app(iso_path: &str, level: usize, shot: Option<String>, start: Option<[f3
 		keys: HashSet::new(),
 		looking: false,
 		last: Instant::now(),
+		pace: pace::Pace::new(),
 		// RAC_SHOT_FRAMES waits longer before the capture (to get past the opening in play mode).
 		shot: shot.map(|p| (p, std::env::var("RAC_SHOT_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(5))),
 		start,

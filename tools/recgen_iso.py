@@ -367,6 +367,26 @@ for line in open(A.stubs):
 
 # Words anywhere in the image pointing into code: jump-table targets (and harmless extras) become block labels.
 ptrs = {w for w in W if 0x100000 <= w < 0x400000 and not w & 3}
+# [PC] (speed) Also code addresses a function builds itself (lui + addiu / ori into the same register within the next
+# 8 words) that point inside that function: a continuation stored for a later `jr` (Kerwan tie_proc 0x282218 keeps
+# 0x282b30 / 0x283310 in scratchpad and jumps there). Without a label there the jump left the compiled code and the
+# rest of the call ran in the interpreter (~25% of the EE thread on Kerwan). Extra labels only split blocks.
+for _lo, _hi in fns:
+    for _a in range(_lo, _hi, 4):
+        _w = W[_a >> 2] if (_a >> 2) < len(W) else 0
+        if _w >> 26 != 15:
+            continue
+        _r, _h = (_w >> 16) & 31, (_w & 0xffff) << 16
+        for _b in range(_a + 4, min(_a + 36, _hi), 4):
+            _o = W[_b >> 2]
+            if _o >> 26 in (9, 13) and (_o >> 21) & 31 == _r:
+                _v = (_h + ((_o & 0xffff) - 0x10000 if (_o >> 26 == 9 and _o & 0x8000) else (_o & 0xffff))) & 0xffffffff
+                if _o >> 26 == 13:
+                    _v = _h | (_o & 0xffff)
+                if _lo < _v < _hi and not _v & 3:
+                    ptrs.add(_v)
+                break
+
 
 
 def sx16(v):

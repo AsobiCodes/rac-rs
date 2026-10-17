@@ -38,7 +38,8 @@ pub struct Mem {
     /// Debug: scratchpad byte range (lo, hi) whose writes (CPU and SPR DMA) are logged into `watch_log` (last 64).
     pub watch: Option<(usize, usize)>,
     pub watch_log: std::collections::VecDeque<String>,
-    /// Debug: log CPU writes into VU0 data memory too (env COLD_WATCH_VU0D); `vu0d_cpu_writes` counts them.
+    /// Debug: log CPU writes into VU0 data memory too (env COLD_WATCH_VU0D); `vu0d_cpu_writes` counts them (all of
+    /// them while the log is on; otherwise recompiled code stores there directly, see rec/mod.rs `fbuf`).
     pub watch_vu: bool,
     pub vu0d_cpu_writes: u64,
     pub gs_field: u32,

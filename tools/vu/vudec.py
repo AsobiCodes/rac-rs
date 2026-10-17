@@ -119,8 +119,11 @@ class Lo:
         self.div = False
         self.name = 'nop'
         self.wvf = None      # (reg, mask) written (ready +4)
-        self.branch = None   # None | ('b',) | ('cond', opc)
+        self.branch = None   # None | ('b',) | ('cond', opc) | ('jr',)  (BAL is ('b',), its link register in `link`)
         self.op = 0
+        self.wvi = None      # VI register written (None: none)
+        self.link = None     # BAL: the VI register that gets the return address
+        self.flagread = False  # FMEQ / FMAND / FMOR: reads the MAC flag register
 
 
 def sx11(op):
@@ -151,9 +154,22 @@ def decode_lower(lo, pc):
     elif opc in (0x08, 0x09):
         L.name = 'iaddiu' if opc == 8 else 'isubiu'
         L.im = ((lo >> 10) & 0x7800) | (lo & 0x7ff)
+        L.wvi = it
+    elif opc in (0x18, 0x1a, 0x1b):
+        L.name = {0x18: 'fmeq', 0x1a: 'fmand', 0x1b: 'fmor'}[opc]
+        L.flagread = True
+        L.wvi = it
     elif opc == 0x20:
         L.name = 'b'
         L.branch = ('b',)
+    elif opc == 0x21:
+        L.name = 'bal'
+        L.branch = ('b',)
+        L.link = it
+        L.wvi = it
+    elif opc == 0x24:
+        L.name = 'jr'
+        L.branch = ('jr',)
     elif opc in (0x28, 0x29, 0x2c, 0x2d, 0x2e, 0x2f):
         L.name = {0x28: 'ibeq', 0x29: 'ibne', 0x2c: 'ibltz', 0x2d: 'ibgtz', 0x2e: 'iblez', 0x2f: 'ibgez'}[opc]
         L.branch = ('cond', opc)
@@ -161,14 +177,19 @@ def decode_lower(lo, pc):
         f = lo & 0x3f
         if f == 0x34:
             L.name = 'iand'
+            L.wvi = id_
         elif f == 0x35:
             L.name = 'ior'
+            L.wvi = id_
         elif f == 0x30:
             L.name = 'iadd'
+            L.wvi = id_
         elif f == 0x31:
             L.name = 'isub'
+            L.wvi = id_
         elif f == 0x32:
             L.name = 'iaddi'
+            L.wvi = it
         elif f in (0x3c, 0x3d, 0x3e, 0x3f):
             x = (lo & 3) | ((lo >> 4) & 0x7c)
             fsf = (lo >> 21) & 3
@@ -177,6 +198,15 @@ def decode_lower(lo, pc):
             if x == 0x30:
                 L.name = 'move'
                 L.reads = [(is_, dest)]
+                L.wvf = (it, dest)
+            elif x == 0x31:
+                # MR32: lane l of ft = lane l+1 of fs (the read mask is the dest lanes rotated, as in lower_info)
+                L.name = 'mr32'
+                m = 0
+                for l in range(4):
+                    if dest & lane(l):
+                        m |= lane((l + 1) & 3)
+                L.reads = [(is_, m)]
                 L.wvf = (it, dest)
             elif x == 0x38 or x == 0x3a:
                 L.name = 'div' if x == 0x38 else 'rsqrt'
@@ -188,6 +218,7 @@ def decode_lower(lo, pc):
             elif x == 0x3c:
                 L.name = 'mtir'
                 L.reads = [(is_, lane(fsf))]
+                L.wvi = it
             else:
                 raise NotImplementedError('lower special %x at %04x' % (x, pc))
         else:

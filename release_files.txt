@@ -625,6 +625,7 @@ rac-rs/src/viewer/hud.rs
 rac-rs/src/viewer/hudart.rs
 rac-rs/src/viewer/icefx.rs
 rac-rs/src/viewer/mirror.rs
+rac-rs/src/viewer/pace.rs
 rac-rs/src/viewer/partfx.rs
 rac-rs/src/viewer/popups.rs
 rac-rs/src/viewer/post.rs

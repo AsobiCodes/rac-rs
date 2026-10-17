@@ -546,6 +546,13 @@ impl Mem {
             return if i + n <= 0x4000 { Some(&mut self.spr[i..i + n]) } else { None };
         }
         let p = if (0x8000_0000..0xc000_0000).contains(&a) { a & 0x1fff_ffff } else { a };
+        // [PC] (speed) VU0 data memory (0x1100_4000 and its mirrors to 0x1100_7fff, `map`'s Loc::Vu(1)) is plain bytes
+        // too: the EE's direct stores into it (Blarg's skinning, skinned_vertex_stream) took the hardware path per
+        // word and ~10% of the EE thread. Not while COLD_WATCH_VU0D logs every write there (`Mem::wr`).
+        if p >> 14 == 0x1100_4000 >> 14 && !self.watch_vu {
+            let i = (p & 0xfff) as usize;
+            return if i + n <= 0x1000 { self.vu0d.get_mut(i..i + n) } else { None };
+        }
         let hi = p >> 28;
         if (hi == 0 || hi == 2 || hi == 3) && p & 0x0e00_0000 == 0 {
             let i = (p & 0x01ff_ffff) as usize;

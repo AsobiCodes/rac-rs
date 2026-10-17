@@ -21,6 +21,8 @@ pub mod rec;
 pub mod vif;
 mod vu;
 mod vu0_prog0;
+mod vu0_prog1;
+mod vu0_prog9hi;
 pub mod vu0aot;
 
 use cpu::Cpu;

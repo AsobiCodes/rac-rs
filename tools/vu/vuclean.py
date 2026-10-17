@@ -65,6 +65,12 @@ def transfer(p, st):
             nvf[L.it] &= ~L.dest & 15
         elif L.name == 'move' and L.it != 0:
             nvf[L.it] = (nvf[L.it] & ~L.dest & 15) | (vf[L.is_] & L.dest)
+        elif L.name == 'mr32' and L.it != 0:
+            rot = 0
+            for l in range(4):
+                if vf[L.is_] & lane((l + 1) & 3):
+                    rot |= lane(l)
+            nvf[L.it] = (nvf[L.it] & ~L.dest & 15) | (rot & L.dest)
     u = p.up
     if u.kind != 'nop' and u.dst != NONE and u.dst != 0 and u.mask:
         res = result_clean(u, st)

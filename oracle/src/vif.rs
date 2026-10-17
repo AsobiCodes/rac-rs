@@ -125,13 +125,19 @@ impl Mem {
                 }
                 0x4a => {
                     let n = if num == 0 { 256 } else { num } as usize;
+                    // [PC] (speed) The game uploads the same code again and again (Blarg: the prog9 piece at 0xc80
+                    // before its runs); only a write that changes a byte drops the native code's verdict.
+                    let mut changed = false;
                     for k in 0..n * 2 {
                         let a = (((imm as usize) * 8 + k * 4) & 0xfff) as usize;
-                        let v = w.get(i + k).copied().unwrap_or(0);
-                        self.vu0m[a..a + 4].copy_from_slice(&v.to_le_bytes());
+                        let v = w.get(i + k).copied().unwrap_or(0).to_le_bytes();
+                        changed |= self.vu0m[a..a + 4] != v;
+                        self.vu0m[a..a + 4].copy_from_slice(&v);
                     }
                     self.vif0.mpg_uploads += 1;
-                    self.vu0m_changed();
+                    if changed {
+                        self.vu0m_changed();
+                    }
                     i += n * 2;
                 }
                 0x60..=0x7f => i += self.vif0_unpack(cmd, imm, num, &w[i..]),
