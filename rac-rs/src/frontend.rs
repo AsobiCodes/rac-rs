@@ -43,6 +43,11 @@ impl Text {
 	pub fn get(&self, id: u32) -> &str {
 		self.0.get(&id).map_or("", String::as_str)
 	}
+
+	/// Adds or replaces a string (the PC options' own texts, retail/pcext.rs).
+	pub fn insert(&mut self, id: u32, s: String) {
+		self.0.insert(id, s);
+	}
 }
 
 /// Fx texture record `k` of a level's index table 0x58 (16 B: palette, pixels, w, h), PSMT8.
@@ -227,6 +232,8 @@ pub enum Page {
 	Options,
 	Language,
 	Video,
+	/// [PC] Graphics Options on the title (retail/pcext.rs `title_options`): the pause menu's Graphics rows.
+	Graphics,
 	/// Sound Options: shared by the title and the pause menu (same item set).
 	Sound,
 	/// The pause root (Start in play) and its pages.
@@ -520,6 +527,8 @@ pub struct Menu {
 	pub ram_alpha: Option<(f32, f32)>,
 	/// Retail mode: the Press Start caption index (captions run EN, FR, DE, ES, IT; `lang` is the Language page's row order).
 	pub press_lang: usize,
+	/// Retail mode: the text ids of the Options rows as the game lists them (viewer/front_mirror.rs); empty = the PAL rows.
+	pub front_rows: Vec<u32>,
 }
 
 /// Where a page's panels, header and rows go (PAL 512x448): the rest rects of the class-0x472 slot
@@ -567,6 +576,8 @@ fn layout(page: Page, n: usize, in_game: bool) -> Layout {
 		Page::Options => l(&[[193.0, 23.0, 127.0, 47.0], [193.0, 119.0, 127.0, 176.0], TITLE_BACK], Rows::Column([193.0, 119.0, 127.0, 176.0])),
 		Page::Language => l(&[[175.0, 23.0, 163.0, 47.0], [181.0, 119.0, 151.0, 176.0], TITLE_BACK], Rows::Column([181.0, 119.0, 151.0, 176.0])),
 		Page::Video => l(&[[155.0, 23.0, 203.0, 47.0], [58.0, 170.0, 396.0, 62.0], TITLE_BACK], Rows::Column([58.0, 170.0, 396.0, 62.0])),
+		// Video's header and back panels, the Sound page's value panel (pcext.rs `title_options` copies its slot-3 sequence).
+		Page::Graphics => l(&[[155.0, 23.0, 203.0, 47.0], [47.0, 125.0, 419.0, 164.0], TITLE_BACK], Rows::Column([47.0, 125.0, 419.0, 164.0])),
 		Page::Sound if in_game => l(&[OPTION_TITLE, [53.0, 127.0, 406.0, 164.0], GAME_BACK], Rows::Column([53.0, 127.0, 406.0, 164.0])),
 		Page::Sound => l(&[[155.0, 23.0, 203.0, 47.0], [47.0, 125.0, 419.0, 164.0], [191.0, 346.0, 131.0, 78.0]], Rows::Column([47.0, 125.0, 419.0, 164.0])),
 		Page::NewGame | Page::LoadGame => {
@@ -628,6 +639,7 @@ fn slot_seqs(page: Page, in_game: bool) -> Option<([u8; 14], bool)> {
 		Page::Options => (park(&[0, 1, 0xbe, 0xbf, 0xc0]), false),
 		Page::Language => (park(&[0, 1, 0xc1, 0xc2, 0xc3]), false),
 		Page::Video => (park(&[0, 1, 0xca, 0xcb, 0xc3]), false),
+		Page::Graphics => (park(&[0, 1, 0xca, 0xd2, 0xc3]), false),
 		Page::Sound if in_game => (park(&[0x76, 0xd4, 0xd5, 0xd6, 0xd7]), false),
 		Page::Sound => (park(&[0, 1, 0xca, 0xd2, 0xd7]), false),
 		Page::LoadGame => (park(&[0xc4, 0xc5, 0xc6, 0xc7, 0xc8]), false),
@@ -777,6 +789,7 @@ impl Menu {
 			hold_t: 0.0,
 			ram_alpha: None,
 			press_lang: 0,
+			front_rows: Vec::new(),
 		}
 	}
 
@@ -966,9 +979,13 @@ impl Menu {
 			}
 			Page::LoadGame | Page::LoadSaved => self.slot_rows(text, false),
 			Page::SaveGame => self.slot_rows(text, true),
+			// Retail mode: the rows the game lists (USA: no Video row; the PC Graphics row, retail/pcext.rs).
+			Page::Options if !self.front_rows.is_empty() => self.front_rows.iter().map(|&id| t(id)).collect(),
+			Page::Options if crate::retail::disc::usa() => vec![t(LANGUAGE), t(SOUND)],
 			Page::Options => vec![t(LANGUAGE), t(VIDEO), t(SOUND)],
 			Page::Language => (0..5).map(|i| t(LANGUAGES + i)).collect(),
 			Page::Video => vec![(format!("{}  {}", text.get(VIDEO_MODE), text.get(if s.hz60 { HZ60 } else { HZ50 })), true)],
+			Page::Graphics => crate::retail::pcext::title_rows().into_iter().map(|(label, value)| (format!("{}  {}", text.get(label), text.get(value)), true)).collect(),
 			Page::Sound => {
 				let mut v: Vec<(String, bool)> = SOUND_ROWS.iter().map(|&id| t(id)).collect();
 				v[2].0 = format!("{}  {}", v[2].0, text.get(if s.stereo { STEREO } else { MONO }));
@@ -1040,7 +1057,7 @@ impl Menu {
 
 	/// True on pages of the pause menu (Start closes them; Triangle at the root closes).
 	pub fn in_game(&self) -> bool {
-		!matches!(self.page, Page::Title | Page::Root | Page::NewGame | Page::LoadGame | Page::Options | Page::Language | Page::Video) && (self.page != Page::Sound || self.stack.first().is_some_and(|s| s.0 == Page::Pause))
+		!matches!(self.page, Page::Title | Page::Root | Page::NewGame | Page::LoadGame | Page::Options | Page::Language | Page::Video | Page::Graphics) && (self.page != Page::Sound || self.stack.first().is_some_and(|s| s.0 == Page::Pause))
 	}
 
 	pub fn press(&mut self, key: Key, text: &Text) -> (Option<Cue>, Option<Action>) {
@@ -1368,6 +1385,7 @@ impl Menu {
 			Page::Options => OPTIONS,
 			Page::Language => LANGUAGE,
 			Page::Video => VIDEO_OPTIONS,
+			Page::Graphics => crate::retail::pcext::ID_GRAPHICS_HDR,
 			Page::Sound => SOUND_OPTIONS,
 			Page::Weapons => WEAPONS,
 			Page::Gadgets => GADGETS,

@@ -21,6 +21,10 @@ const P_SOUND: u32 = 0x1d4838;
 fn page_of(m: Option<&MenuSnap>) -> Option<frontend::Page> {
 	use frontend::Page::*;
 	let Some(m) = m else { return Some(Title) };
+	// The PC Graphics page lives in reserved RAM (retail/pcext.rs `title_options`), the same address on both discs.
+	if m.page == crate::retail::pcext::TGPAGE {
+		return Some(Graphics);
+	}
 	Some(match crate::retail::disc::unva(m.page) {
 		P_ROOT => Root,
 		P_NEW => NewGame,
@@ -142,7 +146,7 @@ impl App {
 				crate::retail::snd::field(a, ev);
 			}
 			if let (Some(e), Some(g)) = (r.take_stop(), &self.gpu) {
-				g.window.set_title(&format!("rac-rs: RETAIL STOPPED: {e}"));
+				g.window.set_title(&format!("{}: RETAIL STOPPED: {e}", crate::app_name()));
 			}
 		}
 		if let Some(p) = &mut self.movie {
@@ -218,9 +222,24 @@ impl App {
 			}
 			fe.menu.lang = lang;
 		}
+		// The PC options' texts (the Graphics row and page) join the language's strings.
+		if fe.text.get(crate::retail::pcext::ID_GRAPHICS).is_empty() {
+			for (id, s) in crate::retail::pcext::texts(lang) {
+				fe.text.insert(id, s);
+			}
+		}
 		let slots: [Option<save::Summary>; save::SLOTS] = std::array::from_fn(|i| fr.slots.get(i).copied().flatten().map(|(level, bolts, play_frames, date)| save::Summary { level: level as usize, bolts, play_frames, date }));
 		match snap.as_ref().map(|m| (page_of(Some(m)), m)) {
-			Some((Some(page), m)) => fe.menu.follow(page, sel_of(m, page, fr.slot_cur), slots),
+			Some((Some(page), m)) => {
+				// The Options rows as the game lists them (its list item, slot 3): PAL Language, Video, Sound; USA Language, Sound;
+				// then Graphics (retail/pcext.rs). Kept while the item is not on screen.
+				if page == frontend::Page::Options {
+					if let Some(it) = m.items.iter().find(|i| i.slot == 3 && !i.texts.is_empty()) {
+						fe.menu.front_rows = it.texts.iter().map(|&t| t as u32).collect();
+					}
+				}
+				fe.menu.follow(page, sel_of(m, page, fr.slot_cur), slots)
+			}
 			Some((None, _)) => {}
 			None => fe.menu.follow(frontend::Page::Title, 0, slots),
 		}

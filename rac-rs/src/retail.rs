@@ -2939,6 +2939,9 @@ impl Retail {
 						modcam::pre_field(&mut m, &fin2);
 						strafe::pre_field(&mut m, &fin2);
 						aim::pre_field(&mut m, &fin2);
+					} else if front {
+						// The title's Options -> Graphics rows (pcext.rs `front_field`).
+						pcext::front_field(&mut m);
 					}
 					// Dev debug keys (retail/debugkeys.rs): inert unless RAC_DEBUG_KEYS=1; their writes happen here, between two fields.
 					debugkeys::pre_field(&mut m, field, !front && !booting);
@@ -3004,6 +3007,8 @@ impl Retail {
 						if !cold_front {
 							title_boot::hook_front_movies(&mut m);
 						}
+						// The title's Options -> Graphics row (pcext.rs `hook_front`).
+						pcext::hook_front(&mut m);
 						(pooled, transit, front_n, front_ns) = (u32::MAX, true, 0, 0);
 						eprintln!("retail: front end running at field {field} (late GS pipe {late_gs})");
 					} else if front && !in_front {

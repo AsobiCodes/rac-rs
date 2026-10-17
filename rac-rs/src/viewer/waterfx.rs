@@ -17,7 +17,9 @@
 //!   (shallow water from the depth under it, or the edge where geometry cuts the surface); contact rings (`Rings`: ripples
 //!   and a froth crest spreading from where the hero or a falling particle meets still water); a soft mask edge.
 //!   A camera below the surface leaves the pixel retail, so underwater views stay as they were.
-//! Gaspar's RAM ocean is lava: no water pass there (`LAVA_LEVEL`).
+//! Gaspar's RAM ocean is lava (`LAVA_LEVEL`): it takes `LAVA_SLOT`, and `fs_water` gives it the lava look (`lava`) instead.
+//! Aridia's mud (its ocean) and Orxon's toxic sludge (level terrain, `terrain_liquid`) take `MUD_SLOT` / `SLUDGE_SLOT`: the
+//! mud and sludge looks.
 
 use super::*;
 
@@ -38,6 +40,37 @@ struct WU { vp: mat4x4<f32>, eye: vec4<f32>, sun: vec4<f32>, proj: vec4<f32>, si
 
 // Clear shallows: absorption per world unit of path through the water (`fs_water`).
 const ABSORB: f32 = 0.12;
+// Cold water (`fs_water`, w.flows[COLD_SLOT].w = the look 1..3): the swell's world scale (under 1 = longer waves), pace and
+// slope, and the pixel size its finest waves fade at as if far off (no fine chop); the least reflectance and how dark a
+// reflection may turn the water (the dark cave above must not dim the teal); how far the swell moves the water's own
+// picture; light on the swell and the shimmer; the ice colour (linear light) and its rim.
+const COLD_SCALE: f32 = 0.55;
+const COLD_PACE: f32 = 0.5;
+const COLD_SWELL: f32 = 2.2;
+const COLD_CALM: f32 = 0.12;
+const COLD_SHEEN: f32 = 0.3;
+const COLD_FLOOR: f32 = 0.85;
+const COLD_PUSH: f32 = 1.8;
+const COLD_SHADE: f32 = 1.0;
+const COLD_SHIMMER: f32 = 0.6;
+const COLD_ICE: vec3<f32> = vec3<f32>(0.55, 0.75, 0.80);
+const COLD_RIM: f32 = 1.4;
+
+// Far water (user 2026-10-16: "the water surfaces flicker when u move the camera, especially those more far away"): past
+// FAR_FROM world units the ripples fade sooner (as if a pixel were 1 + FAR_RIPPLE times wider), the pixel footprint follows a
+// grazing view further (FAR_GRAZE, was 0.2 everywhere), and the mirror / screen-space reflection is bent less by the ripples
+// (FAR_BEND) and read over a wider disc (FAR_BLUR), all reaching full strength at FAR_TO. Nearer water keeps its look exactly.
+// [C: flick.py on play/compare Hoven / Pokitaru / Novalis windows, 2026-10-16: with the ripples off the far flicker fell most,
+// the planar mirror and the footprint clamp next.]
+const FAR_FROM: f32 = 25.0;
+// A river of effect quads (`WaterFx::quad_flows`, flows w = -3) flows in two phases FLOW_CYCLE seconds long, each restarting
+// while the other one shows, so neighbouring quads of different flow drift apart by at most one cycle's travel.
+const FLOW_CYCLE: f32 = 1.6;
+const FAR_TO: f32 = 50.0;
+const FAR_GRAZE: f32 = 0.02;
+const FAR_RIPPLE: f32 = 1.5;
+const FAR_BEND: f32 = 0.6;
+const FAR_BLUR: f32 = 2.0;
 
 // w.proj = (tan_half * aspect, tan_half, near, far).
 fn linear_depth(d: f32) -> f32 {
@@ -297,6 +330,388 @@ fn env(r: vec3<f32>, base: vec3<f32>) -> vec3<f32> {
 	return mix(base * 1.1, w.fog.rgb * cap, 0.45) * (0.8 + 0.4 * h * h);
 }
 
+// Lava (Gaspar's RAM ocean, `LAVA_SLOT`: w.flows[..].w = -2; user 2026-10-16: "it doesnt really match the quality on hoven"):
+// retail's own animated lava picture, moved a little by a heat shimmer, under a molten skin with slow swells (lit by the key
+// light, glossy: a Fresnel reflection of what stands around), dark crust plates drifting with the flow in broad fields and
+// breaking up into small floes at their edges, with glowing cracks between them, bubbles that swell and pop on the open
+// lava, and a white-hot rim with a glow where the lava meets rock. All in world space and time; every fine part fades to its
+// mean before it gets finer than a few pixels (far lava keeps a calm glow instead of flickering).
+const LAVA_HOT: vec3<f32> = vec3<f32>(1.0, 0.42, 0.07);
+const LAVA_WHITE: vec3<f32> = vec3<f32>(1.0, 0.82, 0.42);
+const LAVA_CRUST: vec3<f32> = vec3<f32>(0.02, 0.008, 0.005);
+// Crust plates per world unit; the crust fields' share (higher = less crust); the flow (world units a second).
+const LAVA_PLATE: f32 = 0.32;
+const LAVA_COVER: f32 = 0.62;
+const LAVA_FLOW: vec2<f32> = vec2<f32>(0.06, 0.035);
+// The swell's slope, the molten skin's reflectance, the shore rim, the bubbles, the heat shimmer (world units).
+const LAVA_SWELL: f32 = 0.4;
+const LAVA_GLOSS: f32 = 0.5;
+const LAVA_RIM: f32 = 1.0;
+// How far from the rock the rim reaches (world units); the lava depth over the rock where the rim and the glow around it
+// fade out; deeper (or nothing under the lava) counts as LAVA_DEEP.
+const LAVA_SHORE: f32 = 0.2;
+const LAVA_RIM_DEPTH: f32 = 0.18;
+const LAVA_HALO_DEPTH: f32 = 0.7;
+const LAVA_DEEP: f32 = 4.0;
+// How bright the lava glows along a plate's edge, and how far (cell units) that glow reaches into the open lava.
+const LAVA_CRACK: f32 = 0.8;
+const LAVA_EDGE: f32 = 0.07;
+const LAVA_BUBBLE: f32 = 1.0;
+const LAVA_SHIMMER: f32 = 0.16;
+
+// Integer lattice hash (Gaspar's large world coordinates break a fract(sin) hash under the GPU's fast maths).
+fn lhash_u(i: vec2<i32>) -> u32 {
+	var n = bitcast<u32>(i.x) * 1597334677u ^ bitcast<u32>(i.y) * 3812015801u;
+	n = (n ^ (n >> 16u)) * 2246822519u;
+	n = (n ^ (n >> 13u)) * 3266489917u;
+	return n ^ (n >> 16u);
+}
+fn lhash(i: vec2<i32>) -> f32 {
+	return f32(lhash_u(i) >> 8u) / 16777215.0;
+}
+fn lhash2(i: vec2<i32>) -> vec2<f32> {
+	let n = lhash_u(i);
+	return vec2<f32>(f32(n & 0xffffu), f32(n >> 16u)) / 65535.0;
+}
+// Value noise 0..1 with its slope: (value, d/dx, d/dy).
+fn lnoise_d(p: vec2<f32>) -> vec3<f32> {
+	let fl = floor(p);
+	let i = vec2<i32>(fl);
+	let f = p - fl;
+	let u = f * f * (3.0 - 2.0 * f);
+	let du = 6.0 * f * (1.0 - f);
+	let a = lhash(i);
+	let b = lhash(i + vec2<i32>(1, 0));
+	let c = lhash(i + vec2<i32>(0, 1));
+	let d = lhash(i + vec2<i32>(1, 1));
+	let k = a - b - c + d;
+	return vec3<f32>(a + (b - a) * u.x + (c - a) * u.y + k * u.x * u.y, du.x * ((b - a) + k * u.y), du.y * ((c - a) + k * u.x));
+}
+fn lnoise(p: vec2<f32>) -> f32 {
+	return lnoise_d(p).x;
+}
+
+// The molten skin's slope: three octaves of flowing noise (swells about 6, 2.6 and 1.1 units long), each fading out before
+// it gets finer than a few pixels (`fp` = world size of a pixel).
+fn lava_slope(p: vec2<f32>, t: f32, fp: f32) -> vec2<f32> {
+	var g = vec2<f32>(0.0);
+	var f = 0.17;
+	var a = 1.0;
+	for (var k = 0; k < 3; k++) {
+		let n = lnoise_d((p - LAVA_FLOW * t * (1.0 + 0.4 * f32(k))) * f + vec2<f32>(f32(k) * 17.3, f32(k) * 5.9));
+		g += n.yz * f * a * (1.0 - smoothstep(0.12, 0.35, fp * f));
+		f *= 2.3;
+		a *= 0.5;
+	}
+	return g * LAVA_SWELL;
+}
+
+// Crust plates: a jittered cell set (cell units). x = the gap to the crack (second nearest minus nearest), y = the plate's
+// own value.
+fn lava_plates(q: vec2<f32>, t: f32) -> vec2<f32> {
+	let fl = floor(q);
+	let i = vec2<i32>(fl);
+	let f = q - fl;
+	var d1 = 9.0;
+	var d2 = 9.0;
+	var id = 0.0;
+	for (var y = -1; y <= 1; y++) {
+		for (var x = -1; x <= 1; x++) {
+			let o = vec2<i32>(x, y);
+			let h = lhash2(i + o);
+			let pt = vec2<f32>(o) + 0.5 + 0.36 * sin(vec2<f32>(t * 0.06, t * 0.045) + 6.2831 * h);
+			let d = length(pt - f);
+			if (d < d1) {
+				d2 = d1;
+				d1 = d;
+				id = h.x;
+			} else if (d < d2) {
+				d2 = d;
+			}
+		}
+	}
+	return vec2<f32>(d2 - d1, id);
+}
+
+// A bubble on the open lava (cells about 2.9 units; four in ten bubble, each on its own beat): x = the dome (0..1) while it
+// swells, y = the ring of its pop.
+fn lava_bubble(p: vec2<f32>, t: f32) -> vec2<f32> {
+	let q = p * 0.35;
+	let fl = floor(q);
+	let i = vec2<i32>(fl);
+	let h = lhash2(i + vec2<i32>(311, 97));
+	if (h.x > 0.4) { return vec2<f32>(0.0); }
+	let ph = fract(t / (2.5 + 10.0 * h.x) + h.y);
+	let d = length(q - fl - (0.3 + 0.4 * lhash2(i + vec2<i32>(91, 37))));
+	if (ph < 0.3) {
+		let r = 0.2 * smoothstep(0.0, 1.0, ph / 0.3);
+		return vec2<f32>(1.0 - smoothstep(r * 0.6, r + 0.01, d), 0.0);
+	}
+	if (ph < 0.42) {
+		let k = (ph - 0.3) / 0.12;
+		return vec2<f32>(0.0, (1.0 - smoothstep(0.0, 0.04 + 0.04 * k, abs(d - 0.2 - 0.22 * k))) * (1.0 - k));
+	}
+	return vec2<f32>(0.0);
+}
+
+// The lava's colour (linear light) at water pixel `c` (world point `p`).
+fn lava(c: vec2<i32>, p: vec3<f32>, view: vec3<f32>, dist: f32, fp: f32, jit: f32, uv0: vec2<f32>) -> vec3<f32> {
+	let t = w.eye.w;
+	let sun_on = clamp(w.sun.w / 2.2, 0.0, 1.0);
+	// The key light, else light from high up behind the view (crust and swells stay shaped at night or in shade).
+	let hd = normalize(vec2<f32>(view.x, view.y) + vec2<f32>(1e-4, 0.0));
+	let l = select(normalize(vec3<f32>(hd * 0.5, 0.86)), w.sun.xyz, w.sun.w > 0.0);
+	let s = lava_slope(p.xy, t, fp);
+	let n = normalize(vec3<f32>(-s, 1.0));
+
+	// Heat shimmer: the picture under the skin moves a little with the swell and a slow flowing wobble (only from lava).
+	let wob = vec2<f32>(lnoise(p.xy * 0.35 + vec2<f32>(t * 0.25, 0.0)), lnoise(p.xy * 0.35 + vec2<f32>(7.1, 2.3 - t * 0.22))) - 0.5;
+	var uv = project(p + vec3<f32>(wob * 2.0 * LAVA_SHIMMER + s * 0.3, 0.0)).xy;
+	if (wpos_at(vec2<i32>(uv * w.size.xy)).a < 0.5) { uv = uv0; }
+	let base = to_linear(textureSampleLevel(scene, lsamp, uv, 0.0).rgb);
+
+	// Molten: retail's colour, a slow heat pulse rolling across it, the swells lit (brighter facing the light, its mean kept).
+	let pulse = 0.5 + 0.5 * sin(t * 0.8 + dot(p.xy, vec2<f32>(0.07, 0.05)) + lnoise(p.xy * 0.04) * 6.2832);
+	var molten = base * (1.05 + 0.3 * pulse) * max(1.0 + 1.2 * (dot(n, l) - l.z), 0.3);
+
+	// Crust: broad fields drifting with the flow; inside one, plates with thin cracks; at its edge they shrink into floes.
+	let cq = (p.xy - LAVA_FLOW * t) * 0.022;
+	let zone = smoothstep(LAVA_COVER - 0.1, LAVA_COVER + 0.12, lnoise(cq) * 0.65 + lnoise(cq * 2.7 + vec2<f32>(4.1, 8.3)) * 0.35);
+	let warp = vec2<f32>(lnoise(p.xy * 0.045 + vec2<f32>(1.7, 0.0)), lnoise(p.xy * 0.045 + vec2<f32>(0.0, 6.4))) - 0.5;
+	let pl = lava_plates((p.xy - LAVA_FLOW * t) * LAVA_PLATE + warp * 2.0, t);
+	let cw = mix(0.55, 0.06, zone) + pl.y * 0.05;
+	let aa = fp * LAVA_PLATE * 1.5;
+	let far = smoothstep(0.08, 0.35, aa);
+	let on = smoothstep(0.0, 0.25, zone);
+	let plate = mix(smoothstep(cw, cw + max(aa, 0.04), pl.x), clamp(1.0 - cw * 1.7, 0.0, 1.0), far) * on;
+	// The glow along a plate's edge: in a thin crack all of it, in the open lava a band fading out from the floe.
+	let crack = mix(exp(-max(cw - pl.x, 0.0) / (LAVA_EDGE + aa)), 0.25, far) * on * (1.0 - plate);
+	// Rough crust: lit by the light, a dull red where it borders a crack, a faint glow through it.
+	let rough = lnoise_d(p.xy * 1.6).yz * 1.6 * 0.35 * (1.0 - smoothstep(0.1, 0.35, fp * 1.6));
+	let nc = normalize(vec3<f32>(-s * 0.5 - rough, 1.0));
+	let ember = lnoise(p.xy * 0.9 + vec2<f32>(t * 0.05, 0.0)) * (1.0 - smoothstep(0.1, 0.4, fp * 0.9));
+	var crust = LAVA_CRUST * (0.5 + 1.0 * max(dot(nc, l), 0.0) * (0.4 + 0.6 * sun_on)) + base * (0.015 + 0.14 * ember * ember * ember);
+	let hem = 1.0 - smoothstep(cw, cw + 0.06 + aa, pl.x);
+	crust = mix(crust, base * 0.2, hem * hem * (1.0 - far));
+
+	// Gloss: the reflection of what stands around (screen space, else the far air) on the molten skin, little on the crust.
+	let ndv = clamp(dot(n, view), 0.0, 1.0);
+	let fres = 0.04 + 0.96 * pow(1.0 - ndv, 5.0);
+	var r = reflect(-view, n);
+	r = normalize(vec3<f32>(r.xy, max(r.z, 0.04)));
+	let hit = reflect_ray(p + vec3<f32>(0.0, 0.0, 0.02), r, jit);
+	var refl = env(r, w.fog.rgb);
+	if (hit.w > 0.0) {
+		refl = mix(refl, soft_scene(hit.xy, (0.003 + 0.014 * hit.z / (hit.z + dist)) * (1.0 + FAR_BLUR * smoothstep(FAR_FROM, FAR_TO, dist)), jit), hit.w);
+	}
+	molten += refl * fres * LAVA_GLOSS;
+	crust += refl * fres * 0.1;
+	// The key light's sheen on the swells (broad, warm, softening with distance).
+	let hv = normalize(l + view);
+	let e = 60.0 / (1.0 + fp * 20.0);
+	molten += vec3<f32>(1.0, 0.85, 0.6) * pow(max(dot(n, hv), 0.0), e) * (e + 8.0) * 0.004 * (0.3 + 0.7 * sun_on);
+
+	var col = mix(molten, crust, plate);
+	col += (LAVA_HOT + LAVA_WHITE * crack * crack * crack * 0.6) * crack * LAVA_CRACK;
+
+	// Bubbles on the open lava: a darker skin swelling, a bright rim, then a hot ring as it pops.
+	let bub = lava_bubble(p.xy, t) * (1.0 - smoothstep(0.04, 0.15, fp)) * (1.0 - plate) * LAVA_BUBBLE;
+	col = mix(col, col * 0.5 + LAVA_CRUST, bub.x * 0.7);
+	col += LAVA_WHITE * bub.x * (1.0 - bub.x) * 1.6 + LAVA_HOT * bub.y * 0.6;
+
+	// Where the lava meets rock: a white-hot rim where geometry cuts the surface nearby, and a broader glow where the lava runs
+	// shallow over the rock under it. The rim's taps sit at fixed world offsets around the point on the lava plane (twelve
+	// directions, two radii up to LAVA_SHORE, at least 1.5 pixels out), each weighted by how near the depth there is to the
+	// tap's own, so they stay on the same ground while the camera moves. The glow reads the bed (the level drawn without the
+	// lava, mirror.rs `draw_bed`) bilinearly, so it follows the rock smoothly. Before, eight taps at fixed pixel offsets made
+	// both: they stair-stepped and crawled at every shore while the camera crept [C: flick.py on fg1/9_0362 fields 60-84,
+	// 2026-10-16: lava flicker 6.5 with them, 4.1 now, 3.8 with no rim at all; the rest is the bobbing lava rocks, whose rim
+	// moves with them].
+	var h1 = 0.0;
+	let rs0 = max(LAVA_SHORE, fp * 3.0);
+	for (var k = 0; k < 12; k++) {
+		let a = f32(k) * 0.523599 + 0.2618;
+		let d = vec2<f32>(cos(a), sin(a));
+		for (var j = 0; j < 2; j++) {
+			let sq = project(vec3<f32>(p.xy + d * rs0 * (0.5 + 0.5 * f32(j)), p.z));
+			let q = vec2<i32>(sq.xy * w.size.xy);
+			if (on_screen(sq) && wpos_at(q).a < 0.5) {
+				let zq = scene_z((vec2<f32>(q) + 0.5) * w.size.zw);
+				let tol = 0.06 * sq.z + 0.25;
+				h1 += (1.0 - smoothstep(0.5 * tol, tol, abs(zq - sq.z))) * (1.0 - 0.4 * f32(j));
+			}
+		}
+	}
+	let zw = project(p).z;
+	let bd = vec2<i32>(textureDimensions(bed_depth));
+	let bf = uv0 * vec2<f32>(bd) - 0.5;
+	let b0 = vec2<i32>(floor(bf));
+	let bw = bf - floor(bf);
+	var dep = 0.0;
+	for (var k = 0; k < 4; k++) {
+		let o = vec2<i32>(k & 1, k >> 1);
+		let zb = linear_depth(textureLoad(bed_depth, clamp(b0 + o, vec2<i32>(0), bd - vec2<i32>(1)), 0));
+		let dk = select(LAVA_DEEP, clamp(p.z - (w.eye.z + (p.z - w.eye.z) * zb / zw), 0.0, LAVA_DEEP), zb > zw && zb < w.proj.w * 0.98);
+		dep += dk * select(1.0 - bw.x, bw.x, o.x == 1) * select(1.0 - bw.y, bw.y, o.y == 1);
+	}
+	let flick = 0.7 + 0.3 * lnoise(p.xy * 1.2 + vec2<f32>(t * 0.7, -t * 0.5));
+	let rim = max(smoothstep(0.0, 2.5, h1), 1.0 - smoothstep(0.0, LAVA_RIM_DEPTH, dep)) * LAVA_RIM;
+	let halo = max(rim * 0.6, 1.0 - smoothstep(0.0, LAVA_HALO_DEPTH, dep)) * LAVA_RIM;
+	col = mix(col, max(molten, LAVA_HOT), halo * 0.35);
+	col += (LAVA_HOT * 0.4 + LAVA_WHITE * 0.25 * flick * flick) * rim * flick;
+	return col;
+}
+
+// Mud (Aridia's ocean, `MUD_SLOT`: w.flows[..].w = -4; the brown quicksand the hero sinks in): retail's own picture under a
+// slow churn (it oozes a little with broad low swells, lit by the key light), darker wet patches drifting across it, a dim
+// soft sheen of the air at a grazing view (no mirror: mud reflects nothing sharp), and slow bubbles that swell and pop.
+const MUD_SWELL: f32 = 0.35;
+const MUD_OOZE: f32 = 0.1;
+const MUD_FLOW: vec2<f32> = vec2<f32>(0.018, 0.011);
+const MUD_SHEEN: f32 = 0.3;
+const MUD_BUBBLE: f32 = 0.8;
+
+// Slow churn slope: two octaves of drifting noise (swells about 7 and 3 units), each fading out before it gets finer than a
+// few pixels.
+fn mud_slope(p: vec2<f32>, t: f32, fp: f32) -> vec2<f32> {
+	var g = vec2<f32>(0.0);
+	var f = 0.14;
+	var a = 1.0;
+	for (var k = 0; k < 2; k++) {
+		let n = lnoise_d((p - MUD_FLOW * t * (1.0 - 1.6 * f32(k))) * f + vec2<f32>(f32(k) * 13.1, f32(k) * 3.7 + t * 0.01));
+		g += n.yz * f * a * (1.0 - smoothstep(0.12, 0.35, fp * f));
+		f *= 2.3;
+		a *= 0.55;
+	}
+	return g * MUD_SWELL;
+}
+
+fn mud(c: vec2<i32>, p: vec3<f32>, view: vec3<f32>, dist: f32, fp: f32, uv0: vec2<f32>) -> vec3<f32> {
+	let t = w.eye.w;
+	let sun_on = clamp(w.sun.w / 2.2, 0.0, 1.0);
+	let hd = normalize(vec2<f32>(view.x, view.y) + vec2<f32>(1e-4, 0.0));
+	let l = select(normalize(vec3<f32>(hd * 0.5, 0.86)), w.sun.xyz, w.sun.w > 0.0);
+	let s = mud_slope(p.xy, t, fp);
+	let n = normalize(vec3<f32>(-s, 1.0));
+	// The ooze: the picture moves a little with a slow wobble and the swell (only from mud).
+	let wob = vec2<f32>(lnoise(p.xy * 0.2 + vec2<f32>(t * 0.04, 0.0)), lnoise(p.xy * 0.2 + vec2<f32>(5.3, 1.1 - t * 0.035))) - 0.5;
+	var uv = project(p + vec3<f32>(wob * 2.0 * MUD_OOZE + s * 0.2, 0.0)).xy;
+	if (wpos_at(vec2<i32>(uv * w.size.xy)).a < 0.5) { uv = uv0; }
+	let base = to_linear(textureSampleLevel(scene, lsamp, uv, 0.0).rgb);
+	// Lit swells (the mean kept) and darker wet patches.
+	let wet = smoothstep(0.45, 0.75, lnoise((p.xy - MUD_FLOW * t * 2.0) * 0.08 + vec2<f32>(2.1, 7.7)));
+	var col = base * max(1.0 + 0.9 * (dot(n, l) - l.z), 0.5) * (1.0 - 0.18 * wet);
+	// The sheen: the air (env) blurred, only at a grazing view, stronger on the wet patches; a broad dull highlight.
+	let ndv = clamp(dot(n, view), 0.0, 1.0);
+	let fres = 0.02 + 0.98 * pow(1.0 - ndv, 5.0);
+	var r = reflect(-view, n);
+	r = normalize(vec3<f32>(r.xy, max(r.z, 0.04)));
+	col += env(r, base) * fres * MUD_SHEEN * (0.5 + 0.5 * wet);
+	let hv = normalize(l + view);
+	let e = 18.0 / (1.0 + fp * 10.0);
+	col += vec3<f32>(1.0, 0.9, 0.75) * pow(max(dot(n, hv), 0.0), e) * (e + 8.0) * 0.0015 * (0.3 + 0.7 * sun_on) * (0.4 + 0.6 * wet);
+	// Bubbles: a dome swelling (lit on top, its rim darker), then a dark ring as it pops; slower than lava's.
+	let bub = lava_bubble(p.xy + vec2<f32>(57.0, 23.0), t * 0.45) * (1.0 - smoothstep(0.04, 0.15, fp)) * MUD_BUBBLE;
+	col = mix(col, col * 1.25 + base * 0.1, bub.x * (1.0 - bub.x) * 2.0);
+	col *= 1.0 - 0.35 * bub.y - 0.15 * bub.x * bub.x;
+	return col;
+}
+
+// Toxic sludge (Orxon's green sea, level terrain texture 12, `SLUDGE_SLOT`: w.flows[..].w = -5): retail's own picture, thick:
+// slow heavy swells under a glossy skin (a soft reflection of what stands around that darkens the bright goo where rock
+// mirrors in it, broad highlights of the light), a glow rolling through it in broad veins (the goo away from one goes duller),
+// and domes that swell slowly, glint and pop into a ring. Retail draws it still; all the motion here is slow.
+const SLUDGE_SWELL: f32 = 0.9;
+const SLUDGE_FLOW: vec2<f32> = vec2<f32>(0.03, -0.02);
+const SLUDGE_GLOW: f32 = 0.35;
+const SLUDGE_GLOSS: f32 = 0.55;
+const SLUDGE_BUBBLE: f32 = 1.0;
+
+// A sludge dome (cells 3 units; seven in ten swell, each on its own beat of 5-12 s): x, y = its slope, z = the ring left by
+// its pop (0..1). The dome grows to 0.9 units across over most of its beat, then pops.
+fn sludge_bubble(p: vec2<f32>, t: f32) -> vec3<f32> {
+	let q = p / 3.0;
+	let fl = floor(q);
+	let i = vec2<i32>(fl);
+	let h = lhash2(i + vec2<i32>(733, 151));
+	if (h.x > 0.7) { return vec3<f32>(0.0); }
+	let ph = fract(t / (5.0 + 10.0 * h.x) + h.y);
+	let o = (q - fl - (0.3 + 0.4 * lhash2(i + vec2<i32>(29, 613)))) * 3.0;
+	let d = length(o);
+	if (ph < 0.8) {
+		let r = 0.45 * smoothstep(0.0, 0.8, ph);
+		if (d >= r) { return vec3<f32>(0.0); }
+		// A cap of a sphere of radius r: slope o / sqrt(r^2 - d^2), clipped at its foot.
+		let s = o / max(sqrt(r * r - d * d), r * 0.25) * smoothstep(0.0, 0.1, ph);
+		return vec3<f32>(s * 0.6, 0.0);
+	}
+	let k = (ph - 0.8) / 0.2;
+	return vec3<f32>(0.0, 0.0, (1.0 - smoothstep(0.0, 0.08 + 0.1 * k, abs(d - 0.45 - 0.6 * k))) * (1.0 - k));
+}
+
+fn sludge(c: vec2<i32>, p: vec3<f32>, view: vec3<f32>, dist: f32, fp: f32, jit: f32, uv0: vec2<f32>) -> vec3<f32> {
+	let t = w.eye.w;
+	let sun_on = clamp(w.sun.w / 2.2, 0.0, 1.0);
+	let hd = normalize(vec2<f32>(view.x, view.y) + vec2<f32>(1e-4, 0.0));
+	let l = select(normalize(vec3<f32>(hd * 0.5, 0.86)), w.sun.xyz, w.sun.w > 0.0);
+	var g = vec2<f32>(0.0);
+	var f = 0.15;
+	var a = 1.0;
+	for (var k = 0; k < 3; k++) {
+		let nd = lnoise_d((p.xy - SLUDGE_FLOW * t * (1.0 + 0.5 * f32(k))) * f + vec2<f32>(f32(k) * 9.7, t * 0.02 + f32(k) * 4.3));
+		g += (nd.yz - 0.0) * f * a * (1.0 - smoothstep(0.12, 0.35, fp * f));
+		f *= 2.2;
+		a *= 0.55;
+	}
+	// The domes, fading out before they get finer than a few pixels.
+	let bf = 1.0 - smoothstep(0.08, 0.25, fp);
+	let bub = sludge_bubble(p.xy, t) * bf * SLUDGE_BUBBLE;
+	let s = g * SLUDGE_SWELL + bub.xy;
+	let n = normalize(vec3<f32>(-s, 1.0));
+	// The picture under the skin moves a little with the swell.
+	var uv = project(p + vec3<f32>(s * 0.25, 0.0)).xy;
+	if (wpos_at(vec2<i32>(uv * w.size.xy)).a < 0.5) { uv = uv0; }
+	let base = to_linear(textureSampleLevel(scene, lsamp, uv, 0.0).rgb);
+	// The glow: broad veins drifting slowly through it with a slow pulse; away from them the goo is duller. The swells lit
+	// (darker troughs: retail's sludge is near white in places, so the light can only shape it by taking away).
+	let vq = (p.xy - SLUDGE_FLOW * t * 1.5) * 0.07;
+	let vein = 1.0 - abs(lnoise(vq + vec2<f32>(lnoise(vq * 0.5 + vec2<f32>(t * 0.01, 3.0)) * 2.0, 0.0)) * 2.0 - 1.0);
+	let glow = smoothstep(0.35, 1.0, vein) * (0.85 + 0.15 * sin(t * 0.6 + dot(p.xy, vec2<f32>(0.05, 0.08))));
+	let shade = clamp(1.0 + 1.6 * (dot(n, l) - l.z), 0.3, 1.15);
+	var col = base * shade * mix(0.62, 1.0, glow) + base * glow * SLUDGE_GLOW * 0.3;
+	// Gloss: a soft reflection of what stands around (else the air), mixed in: rock mirrored in the goo darkens it.
+	let ndv = clamp(dot(n, view), 0.0, 1.0);
+	let fres = 0.05 + 0.95 * pow(1.0 - ndv, 5.0);
+	var r = reflect(-view, n);
+	r = normalize(vec3<f32>(r.xy, max(r.z, 0.04)));
+	let hit = reflect_ray(p + vec3<f32>(0.0, 0.0, 0.02), r, jit);
+	var refl = env(r, base * 0.6);
+	if (hit.w > 0.0) {
+		refl = mix(refl, soft_scene(hit.xy, (0.006 + 0.016 * hit.z / (hit.z + dist)) * (1.0 + FAR_BLUR * smoothstep(FAR_FROM, FAR_TO, dist)), jit), hit.w);
+	}
+	col = mix(col, refl, clamp(fres * SLUDGE_GLOSS * 2.0, 0.0, 0.6));
+	// Broad highlights of the light on the swells and domes (a light from high behind the view when there is no key light).
+	let hv = normalize(l + view);
+	let e = 30.0 / (1.0 + fp * 12.0);
+	col += vec3<f32>(0.85, 1.0, 0.7) * pow(max(dot(n, hv), 0.0), e) * (e + 8.0) * 0.01 * (0.4 + 0.6 * sun_on);
+	// A pop leaves a dark ring spreading, bright at its crest.
+	col = mix(col, col * 0.45, bub.z * 0.7) + base * bub.z * bub.z * 0.5;
+	return col;
+}
+
+// Back to the frame: a pixel with little water around blends towards the retail picture, and particles over the water (a
+// blast, smoke, splashes) stay as drawn.
+fn finish(c: vec2<i32>, orig: vec3<f32>, shaded: vec3<f32>) -> vec4<f32> {
+	var around = 0.0;
+	let ring = array<vec2<i32>, 8>(vec2<i32>(-1, -1), vec2<i32>(0, -1), vec2<i32>(1, -1), vec2<i32>(-1, 0), vec2<i32>(1, 0), vec2<i32>(-1, 1), vec2<i32>(0, 1), vec2<i32>(1, 1));
+	for (var k = 0; k < 8; k++) {
+		if (wpos_at(c + ring[k]).a > 0.5) { around += 1.0; }
+	}
+	var col = mix(orig, shaded, smoothstep(2.0, 7.0, around));
+	col = mix(col, orig, clamp(textureLoad(glow, c, 0).a * w.mirror.z * 1.5, 0.0, 1.0));
+	return vec4<f32>(pow(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(1.0 / 2.2)), 1.0);
+}
+
 // w.eye = (eye, seconds); w.sun = (to the key light, glint strength); w.look = (ripples, refraction in world units, minimum
 // reflectance, foam); w.fog = (fog colour in linear light, reflection strength).
 @fragment fn fs_water(v: VO) -> @location(0) vec4<f32> {
@@ -310,34 +725,76 @@ fn env(r: vec3<f32>, base: vec3<f32>) -> vec3<f32> {
 	let te = eye - p;
 	let dist = max(length(te), 1e-3);
 	let view = te / dist;
-	let time = w.eye.w;
+	// Frozen sheets (Hoven's ice floor, `frozen_pool`, w.flows[..].w = -1): the same look held still (no ripple, caustic or
+	// sparkle motion, no contact rings); retail's own texture motion stays in the picture.
+	let fw = w.flows[min(u32(wp.a - 0.5), 63u)].w;
+	let frozen = fw < -0.5 && fw > -1.5;
+	let time = select(w.eye.w, 0.0, frozen);
 	let jit = dither(v.pos.xy);
 	let uv0 = (vec2<f32>(c) + 0.5) * w.size.zw;
 	let orig = to_linear(textureSampleLevel(scene, lsamp, uv0, 0.0).rgb);
 	// World size of one pixel here (wider on a grazing view of the surface).
-	let fp = dist * 2.0 * w.proj.y * w.size.w / max(view.z, 0.2);
+	let ds = smoothstep(FAR_FROM, FAR_TO, dist);
+	let fp = dist * 2.0 * w.proj.y * w.size.w / max(view.z, mix(0.2, FAR_GRAZE, ds));
+	if (fw < -1.5 && fw > -2.5) {
+		return finish(c, orig, lava(c, p, view, dist, fp, jit, uv0));
+	}
+	if (fw < -3.5 && fw > -4.5) {
+		return finish(c, orig, mud(c, p, view, dist, fp, uv0));
+	}
+	if (fw < -4.5 && fw > -5.5) {
+		return finish(c, orig, sludge(c, p, view, dist, fp, jit, uv0));
+	}
+	let phased = fw < -2.5;
 	// Flowing water (a river's scrolling texture, `WaterFx::strip_flows`): the ripples and caustics drift downstream with it.
-	// w.flows[slot] = (flow x, flow y, clear (0 = water retail draws opaque: no clear shallows), 0).
+	// w.flows[slot] = (flow x, flow y, clear (0 = water retail draws opaque: no clear shallows), cold look (0 = none)).
 	let fl = w.flows[min(u32(wp.a - 0.5), 63u)];
 	let flow = fl.xy;
-	let q = p.xy - flow * time;
-	let rg = rings_at(p, fp);
-	let rs = ripple(q, time, fp) * w.look.x + rg.xy;
+	// Cold water (Hoven's abyss, `COLD_SLOT`): long slow heavy swells that move its own picture further, a higher reflectance
+	// floor (what stands in it mirrors); look 2+ lights the swell with a cool light and adds a moonlit shimmer, look 3 an icy
+	// rim where the water meets the ground nearby.
+	let cold = fl.w;
+	// The caustics of a phased river stay in place (they would jump with the phases).
+	let ft = select(flow * time, vec2<f32>(0.0), phased);
+	let q = p.xy - ft;
+	let rg = select(rings_at(p, fp), vec3<f32>(0.0), frozen);
+	let iced = cold > 0.0;
+	let sc = select(1.0, COLD_SCALE, iced);
+	let rfp = max(fp * sc * (1.0 + FAR_RIPPLE * ds), select(0.0, COLD_CALM, iced));
+	var rw = ripple(q * sc, time * select(1.0, COLD_PACE, iced), rfp);
+	if (phased) {
+		let t0 = fract(time / FLOW_CYCLE);
+		let t1 = fract(t0 + 0.5);
+		let w0 = 1.0 - abs(1.0 - 2.0 * t0);
+		rw = mix(ripple(p.xy - flow * (t1 * FLOW_CYCLE) + vec2<f32>(3.7, 1.9), time, rfp), ripple(p.xy - flow * (t0 * FLOW_CYCLE), time, rfp), w0);
+		// Two half-weight patterns cancel a little: back to one pattern's strength.
+		rw *= 1.0 / sqrt(w0 * w0 + (1.0 - w0) * (1.0 - w0));
+	}
+	let rs = rw * (w.look.x * select(1.0, COLD_SWELL, iced)) + rg.xy;
 	let g = geo_normal(c, p, dist);
 	let n = normalize(g + vec3<f32>(-rs.x, -rs.y, 0.0));
 	let ndv = clamp(dot(n, view), 0.0, 1.0);
-	let fresnel = max(0.02 + 0.98 * pow(1.0 - ndv, 5.0), w.look.z);
+	let fresnel = max(0.02 + 0.98 * pow(1.0 - ndv, 5.0), select(w.look.z, COLD_SHEEN, cold > 0.0));
 	let sun_on = clamp(w.sun.w / 2.2, 0.0, 1.0);
 
-	// What lies under the surface: the level's depth behind the water pixel (blended water) gives the bed and its depth.
+	// What lies under the surface: the level's depth behind the water pixel (blended water) gives the bed and its depth. Water
+	// retail draws (near) opaque (fl.z = 0: Hoven's abyss and floor sheets at FIX 0x7f, the FIX 0x80 pools) has no bed: the
+	// depth behind Hoven's abyss comes and goes from one frame to the next, and the whole sheet blinked between two looks
+	// [C: play/compare/Hoven.racpad fields 1711-1713, 2026-10-16]. The same holds far off for all blended water (the level's
+	// depth behind distant water blinks between bed and none), so the bed path fades out from FAR_FROM to FAR_TO (`bk`: 1 =
+	// the bed path, 0 = the opaque one), and far water looks as water retail draws opaque [C: flick.py on camera pans of
+	// fullgame1 0331 (Batalia sea), fg1/5_0216 and 5_0246 (Rilgar), 2026-10-16: with the bed path off past 40 units the far
+	// flicker fell from 8.0 / 7.3 / 8.1 to 3.2 / 1.0 / 1.5 (Classic 1.9 / 0.5 / 0.2); with the clear shallows off it stayed].
 	let zw = project(p).z;
 	let zs = scene_z(uv0);
-	let blended = zs > zw + 0.05 && zs < w.proj.w * 0.98;
+	let blended = fl.z > 0.5 && ds < 1.0 && zs > zw + 0.05 && zs < w.proj.w * 0.98;
+	let bk = select(0.0, 1.0 - ds, blended);
 	let bed = eye + (p - eye) * (zs / zw);
-	let thick = select(0.0, clamp(p.z - bed.z, 0.0, 40.0), blended);
+	let depth = select(0.0, clamp(p.z - bed.z, 0.0, 40.0), blended);
+	let thick = depth * bk;
 
 	// Refraction: the picture under the surface, shifted by the ripple slope (more through deeper water); only from water.
-	let push = w.look.y * (0.5 + min(thick, 4.0) * 0.25);
+	let push = w.look.y * (0.5 + min(thick, 4.0) * 0.25) * select(1.0, COLD_PUSH, cold > 0.0);
 	var uv = project(p + vec3<f32>(rs * push, 0.0)).xy;
 	if (wpos_at(vec2<i32>(uv * w.size.xy)).a < 0.5) {
 		uv = mix(uv0, uv, 0.4);
@@ -347,10 +804,18 @@ fn env(r: vec3<f32>, base: vec3<f32>) -> vec3<f32> {
 
 	// Caustics: moving light lines on the bed (on the surface itself where the water hides its bed), brightening the colour
 	// already there so the water keeps its tint; strongest in sunlight and shallow water.
-	let cp = select(q + rs * 0.6, bed.xy - flow * time + rs * (0.6 + thick * 0.3), blended);
-	let cfp = select(fp, fp * zs / zw, blended);
-	let cstr = (0.25 + 0.75 * sun_on) * select(0.18, 0.8 * exp(-thick * 0.22), blended);
-	base += base * (caustic(cp, time, cfp) - 0.3) * cstr;
+	let cb = bed.xy - ft + rs * (0.6 + thick * 0.3);
+	var cl: f32;
+	if (bk >= 1.0) {
+		cl = caustic(cb, time, fp * zs / zw);
+	} else {
+		cl = caustic(q + rs * 0.6, time, fp);
+		if (bk > 0.0) {
+			cl = mix(cl, caustic(cb, time, fp * zs / zw), bk);
+		}
+	}
+	let cstr = (0.25 + 0.75 * sun_on) * select(mix(0.18, 0.8 * exp(-thick * 0.22), bk), 0.8 * exp(-thick * 0.22), bk >= 1.0);
+	base += base * (cl - 0.3) * cstr;
 	// Depth tint: deeper water turns towards a darker, richer version of its own colour.
 	let lb = luma(base);
 	let deep = max(vec3<f32>(lb) + (base - vec3<f32>(lb)) * 1.4, vec3<f32>(0.0)) * 0.7;
@@ -373,7 +838,7 @@ fn env(r: vec3<f32>, base: vec3<f32>) -> vec3<f32> {
 		let hue = base / max(max(base.r, max(base.g, base.b)), 1e-3);
 		var shallow = to_linear(textureSampleLevel(bed_tex, lsamp, buv, 0.0).rgb) * mix(vec3<f32>(1.0), hue, 0.6);
 		let bt = clamp(p.z - bp.z, 0.0, 40.0);
-		shallow += shallow * (caustic(bp.xy - flow * time + rs * (0.6 + bt * 0.3), time, fp * zb / zw) - 0.3) * (0.25 + 0.75 * sun_on) * 0.9 * exp(-bt * 0.2);
+		shallow += shallow * (caustic(bp.xy - ft + rs * (0.6 + bt * 0.3), time, fp * zb / zw) - 0.3) * (0.25 + 0.75 * sun_on) * 0.9 * exp(-bt * 0.2);
 		base = mix(base, shallow, exp(-path * ABSORB) * w.mirror.w * fl.z);
 	}
 
@@ -388,16 +853,16 @@ fn env(r: vec3<f32>, base: vec3<f32>) -> vec3<f32> {
 	// How sure the reflection is (a mirror image or a screen-space hit): sure reflections may mirror more at grazing views.
 	var sure = hit.w;
 	if (hit.w > 0.0) {
-		let bend = project(p + vec3<f32>(-rs * 0.5 * min(hit.z, 4.0), 0.0)).xy - project(p).xy;
-		let rad = 0.002 + 0.014 * hit.z / (hit.z + dist);
+		let bend = project(p + vec3<f32>(-rs * 0.5 * min(hit.z, 4.0) * (1.0 - FAR_BEND * ds), 0.0)).xy - project(p).xy;
+		let rad = (0.002 + 0.014 * hit.z / (hit.z + dist)) * (1.0 + FAR_BLUR * ds);
 		let huv = clamp(hit.xy + bend, vec2<f32>(0.0), vec2<f32>(1.0));
 		refl = mix(refl, soft_scene(huv, rad, jit), hit.w);
 	}
 	// Flat water on the mirrored plane (mirror.rs; w.mirror = (height, on)): the true mirror image at this pixel, bent by the
 	// ripples and softened by the pixel's footprint, in place of the screen-space reflection.
 	if (w.mirror.y > 0.5 && abs(p.z - w.mirror.x) < 0.4 && g.z > 0.96) {
-		let muv = uv0 + project(p + vec3<f32>(-rs * 0.25, 0.0)).xy - project(p).xy;
-		let mr = (0.5 + min(fp * 4.0, 2.0)) * w.size.zw * 2.0;
+		let muv = uv0 + project(p + vec3<f32>(-rs * 0.25 * (1.0 - FAR_BEND * ds), 0.0)).xy - project(p).xy;
+		let mr = (0.5 + min(fp * 4.0, 2.0)) * w.size.zw * 2.0 * (1.0 + FAR_BLUR * ds);
 		let a = jit * 6.2832;
 		let o = vec2<f32>(cos(a), sin(a));
 		var m = vec3<f32>(0.0);
@@ -407,6 +872,9 @@ fn env(r: vec3<f32>, base: vec3<f32>) -> vec3<f32> {
 		}
 		refl = m * 0.25;
 		sure = 1.0;
+	}
+	if (cold > 0.0) {
+		refl = max(refl, base * COLD_FLOOR);
 	}
 	var col = mix(base, refl, clamp(fresnel * w.fog.w, 0.0, mix(0.65, 0.75, sure)));
 	// Keep the water's own hue (a reflection of grey walls or fog must not grey a teal pool); less so for a sure reflection.
@@ -422,14 +890,25 @@ fn env(r: vec3<f32>, base: vec3<f32>) -> vec3<f32> {
 	let e = 900.0 / (1.0 + fp * 60.0);
 	let twinkle = 0.25 + 0.75 * smoothstep(0.7, 0.95, vnoise(q * 5.0 + vec2<f32>(time * 1.3, -time * 0.9)));
 	col += vec3<f32>(1.0, 0.97, 0.9) * pow(max(dot(sn, hv), 0.0), e) * (e + 8.0) * 0.0004 * twinkle * w.sun.w;
+	if (cold >= 2.0) {
+		// Cold water: a cool light from beyond the water, 25 degrees up along the view's heading (no light of the level reaches
+		// the cave). The swell brightens where it faces it and darkens where it turns away (its mean stays the water's colour),
+		// and a soft moonlit shimmer runs along the waves.
+		let hd = normalize(vec2<f32>(-view.x, -view.y) + vec2<f32>(1e-4, 0.0));
+		let lc = vec3<f32>(hd * 0.906, 0.423);
+		col *= max(1.0 + COLD_SHADE * (dot(n, lc) - dot(g, lc)), 0.0);
+		let ec = 60.0 / (1.0 + fp * 20.0);
+		col += vec3<f32>(0.7, 0.9, 1.0) * pow(max(dot(n, normalize(lc + view)), 0.0), ec) * (ec + 8.0) * 0.0004 * (0.5 + 0.5 * twinkle) * COLD_SHIMMER;
+	}
 
 	// Foam where the water meets the ground.
 	var foam = 0.0;
-	if (blended) {
+	if (bk > 0.0) {
 		// Blended water over the ground: shallow near the shore (the water's own depth there, so a pool wall seen at a grazing
 		// angle keeps a thin line instead of a broad band).
-		foam = 1.0 - smoothstep(0.0, 0.3, thick);
-	} else {
+		foam = 1.0 - smoothstep(0.0, 0.3, depth);
+	}
+	if (bk < 1.0) {
 		// The water wrote its own depth: geometry cutting the surface at the same depth marks the shore.
 		let px = clamp(0.18 / (zw * 2.0 * w.proj.y * w.size.w), 1.5, 9.0);
 		var hits = 0.0;
@@ -441,25 +920,22 @@ fn env(r: vec3<f32>, base: vec3<f32>) -> vec3<f32> {
 				if (abs(zq - zw) < 0.06 * zw + 0.25) { hits += 1.0; }
 			}
 		}
-		foam = clamp(hits / 3.0, 0.0, 1.0);
+		foam = mix(clamp(hits / 3.0, 0.0, 1.0), foam, bk);
 	}
 	let breakup = vnoise(p.xy * 2.7 + vec2<f32>(time * 0.35, time * -0.2)) * 0.6 + vnoise(p.xy * 6.1 - vec2<f32>(time * 0.5, 0.0)) * 0.4;
 	// Soft and in the water's own colour: a lighter froth, not a white rim.
 	foam = smoothstep(0.45, 0.95, foam * (0.3 + 1.1 * breakup)) * w.look.w * 0.55;
-	col = mix(col, min(base * 1.5 + vec3<f32>(0.05), vec3<f32>(0.7)), foam);
+	if (cold >= 3.0) {
+		// Cold water: ice forming where it meets the ground nearby (far off the shore test spreads over the cliffs), pale.
+		col = mix(col, mix(base, COLD_ICE, 0.6), clamp(foam * COLD_RIM * (1.0 - smoothstep(0.04, 0.1, fp)), 0.0, 1.0));
+	} else {
+		col = mix(col, min(base * 1.5 + vec3<f32>(0.05), vec3<f32>(0.7)), foam);
+	}
 	// The rings' froth crest: whiter than the shore foam while young, broken up the same way.
 	col = mix(col, min(base * 1.8 + vec3<f32>(0.12), vec3<f32>(0.85)), clamp(rg.z * (0.3 + 0.9 * breakup), 0.0, 0.8));
 
-	// Soft mask edge: a pixel with little water around blends back towards the retail picture.
-	var around = 0.0;
-	let ring = array<vec2<i32>, 8>(vec2<i32>(-1, -1), vec2<i32>(0, -1), vec2<i32>(1, -1), vec2<i32>(-1, 0), vec2<i32>(1, 0), vec2<i32>(-1, 1), vec2<i32>(0, 1), vec2<i32>(1, 1));
-	for (var k = 0; k < 8; k++) {
-		if (wpos_at(c + ring[k]).a > 0.5) { around += 1.0; }
-	}
-	col = mix(orig, col, smoothstep(2.0, 7.0, around));
-	// Particles over the water (a blast, smoke, splashes) stay as drawn: the shade goes back to the picture under their cover.
-	col = mix(col, orig, clamp(textureLoad(glow, c, 0).a * w.mirror.z * 1.5, 0.0, 1.0));
-	return vec4<f32>(pow(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(1.0 / 2.2)), 1.0);
+	// Soft mask edge and particle cover (`finish`).
+	return finish(c, orig, col);
 }
 "#;
 
@@ -491,28 +967,93 @@ const GLINT: f32 = 2.2;
 /// How clear the water is over its bed (0 = the retail colour throughout).
 const CLEAR: f32 = 1.0;
 
-/// Gaspar (its "ocean" is lava).
+/// Gaspar (its "ocean" is lava): its RAM ocean takes `LAVA_SLOT` (`WaterDraw::liquid`), the lava look of `fs_water`.
 pub(super) const LAVA_LEVEL: usize = 9;
+
+/// The liquids that are no water, by level: the slot (`fs_water`'s look) their ocean draws take (`WaterDraw::liquid`). Gaspar's
+/// RAM ocean is lava; Aridia's ocean (its "level ocean", the brown plane at z 24.75 [C: RAC_WATER_LOG at fg1/2_0091 / 2_0138,
+/// 2026-10-16: its only water draw]) is the mud the hero sinks in (decomp/notes/water.md ARI-50: Aridia has no water faces).
+fn liquid_slot(level: usize) -> Option<u32> {
+	match level {
+		LAVA_LEVEL => Some(LAVA_SLOT),
+		2 => Some(MUD_SLOT),
+		_ => None,
+	}
+}
+
+/// A liquid drawn as level terrain, by level: its terrain texture index (tfrag face key) and slot. Orxon's green toxic sea is
+/// terrain texture 12 (flat faces, z 27-62; it goes when that texture is left out, and retail draws it still: Classic fields
+/// 60 / 80 / 100 at fullgame1 0520 differ in no sludge pixel) [C: the terrain textures logged and left out one at a time, 2026-10-16].
+pub(super) fn terrain_liquid(level: usize) -> Option<(u32, u32)> {
+	match level {
+		10 => Some((12, SLUDGE_SLOT)),
+		_ => None,
+	}
+}
 
 /// The fx textures (level fx table index, `WorldQuad.tex`) of a sea drawn as effect quads: Pokitaru's sea is queue-A
 /// callback 0x30a238 output (decomp/notes/ocean.md); at fg1/11_0449 it is fx texture 22 (15 fans out to the horizon) under
 /// the additive layers 40 and 41 (flat at z 223.16 around the beach) [C: RAC_WATER_LOG bounds and RAC_DRAWSKIP=quads, 2026-10-15].
-/// The queue-C pool strips (`Gpu.pool_draws`) that are water, by fx texture: Hoven's abyss water (0x30b798: tex 0x2c and its
-/// FIX 64 second layer 0x2d). Its tex 47 / 48 strips are the snow, Orxon's tex 41 (FIX 32) and Batalia's tex 59 (additive,
-/// FIX 0) are no water surfaces.
+/// The queue-C pool strips (`Gpu.pool_draws`) that are water, by fx texture: Hoven's door pools (FUN_002e6ae0: tex 0x2c at FIX
+/// 0x80, its second layer 0x2d at FIX 0x40) and its abyss water (tex 0x2c, 0x2f and 0x30; `cold_pool` gives 0x2f / 0x30 the cold look). Orxon's tex 41 (FIX
+/// 32) and Batalia's tex 59 (additive, FIX 0) are no water surfaces.
+/// (corrected 2026-10-16: was "tex 47 / 48 strips are the snow"; at fg1/12_0554 they are drawn but hidden under the ground,
+/// in the abyss they are its teal wave plane [C: RAC_DRAWSKIP=pools on play/compare/Hoven.racpad field 1950].)
 pub(super) fn pool_water_tex(level: usize) -> &'static [usize] {
 	match level {
-		12 => &[44, 45],
+		12 => &[44, 45, 47, 48],
 		_ => &[],
 	}
 }
 
+/// Hoven's abyss water, the queue-C callback FUN_0030b798 (overlay.elf.c 165949-166004): tex 0x2c strips while the camera is
+/// inside its cuboid and the wave plane tex 0x2f, both at FIX 0x7f (ALPHA 0x7f00000064), then tex 0x30 additive (Cs * FIX +
+/// Cd). The two wave-plane layers get the cold look (`COLD_SLOT`). The tex 0x2c sheet is the flooded floor around the doors
+/// (fg1/12_0582, plane z 45) and keeps the door pools' look, as the door pools themselves (tex 0x2c FIX 0x80, 0x2d FIX 0x40).
+pub(super) fn cold_pool(level: usize, tex: usize, add: bool, fix: u8) -> bool {
+	level == 12 && (!add && fix == 127 && tex == 47 || add && tex == 48)
+}
+
+/// [PC] Hoven's frozen floor (user 2026-10-16 at fg1/12_0582: "the ice here should be more static, currently it moves like
+/// water"): the door puddles (FUN_002e6ae0 / FUN_002bbb40: tex 0x2c FIX 0x80, then tex 0x2d FIX 0x40) and the tex 0x2c FIX 0x7f
+/// sheet around the doors (plane z 45) keep their Enhanced look held still: `FROZEN_SLOT` for the opaque layers,
+/// `FROZEN_CLEAR_SLOT` for the FIX 0x40 one. Retail blends the puddle texture over time itself (Classic fields 60 / 100
+/// differ there), which stays. The abyss (`cold_pool`, tex 0x2f / 0x30) stays liquid.
+pub(super) fn frozen_pool(level: usize, tex: usize, add: bool, fix: u8) -> Option<u32> {
+	match (level, add, tex, fix) {
+		(12, false, 44, 127..=128) => Some(FROZEN_SLOT),
+		(12, false, 45, 64) => Some(FROZEN_CLEAR_SLOT),
+		_ => None,
+	}
+}
+
+/// Quartu's tank water (the flooded round tank room, decomp/notes/draw_coverage.md 6h: queue B callbacks 0x2ea5c0 / 0x2ed510 /
+/// 0x2ed8f0, a wobbling grid drawn twice at ALPHA 0x44) is fx texture 45 (646 quads, z 39.40-39.60 at fullgame2 0058)
+/// [C: RAC_WATER_LOG fx quad bounds, 2026-10-16].
 pub(super) fn sea_fx_tex(level: usize) -> &'static [usize] {
 	match level {
 		11 => &[22, 40, 41],
+		15 => &[45],
 		_ => &[],
 	}
 }
+
+/// A river drawn as effect quads, by level: its fx texture. Batalia's jungle river is fx texture 58 (non-additive quads from
+/// the waterfall down to the sea, z 14-31, sloped) under the additive layers 60 and 61 [C: RAC_WATER_LOG bounds at fullgame1
+/// 0345 / 0348, 2026-10-16]; retail scrolls its uv the same step every tick on every quad (`WaterFx::quad_flows`).
+pub(super) fn river_fx_tex(level: usize) -> Option<usize> {
+	match level {
+		8 => Some(58),
+		_ => None,
+	}
+}
+
+/// River quad flows (`WaterFx::quad_flows`): directions and speed steps (world units per second) the quads share slots by.
+/// How clear a river of effect quads is over its bed (flows z; under 0.5: no bed path): retail paints its light pattern
+/// on the surface, which stays.
+const RIVER_CLEAR: f32 = 0.25;
+const RIVER_DIRS: f32 = 12.0;
+const RIVER_SPEED_STEP: f32 = 0.5;
 
 const WPOS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
 
@@ -522,6 +1063,8 @@ pub(super) struct WaterDraw {
 	pub vb: wgpu::Buffer,
 	pub ib: wgpu::Buffer,
 	pub n: u32,
+	/// The first index (`range`: a slice of a shared batch).
+	pub first: u32,
 	/// Its flat plane, if any (`mirror::plane_of`).
 	pub plane: super::mirror::Plane,
 	/// Its slot in this frame's flow table (`WaterFx::strip_flows`), 0 = still water.
@@ -532,11 +1075,32 @@ pub(super) struct WaterDraw {
 
 impl WaterDraw {
 	pub(super) fn new(vb: wgpu::Buffer, ib: wgpu::Buffer, n: u32, pos: impl Iterator<Item = [f32; 3]> + Clone) -> WaterDraw {
-		WaterDraw { vb, ib, n, plane: super::mirror::plane_of(pos), flow: 0, kind: "" }
+		WaterDraw { vb, ib, n, first: 0, plane: super::mirror::plane_of(pos), flow: 0, kind: "" }
+	}
+
+	/// Indices `first..first + n` of a shared batch (`terrain_liquid`): its slot, no mirror plane.
+	pub(super) fn range(vb: wgpu::Buffer, ib: wgpu::Buffer, first: u32, n: u32, slot: u32) -> WaterDraw {
+		WaterDraw { vb, ib, n, first, plane: None, flow: slot, kind: "" }
 	}
 
 	pub(super) fn kind(mut self, kind: &'static str) -> WaterDraw {
 		self.kind = kind;
+		self
+	}
+
+	/// A flowing river group (`WaterFx::quad_flows`): its flow slot, and no mirror plane (the river slopes).
+	pub(super) fn flowing(mut self, slot: u32) -> WaterDraw {
+		self.flow = slot;
+		self.plane = None;
+		self
+	}
+
+	/// An ocean that is no water (`liquid_slot`: Gaspar's lava, Aridia's mud): its slot, and no mirror plane.
+	pub(super) fn liquid(mut self, level: usize) -> WaterDraw {
+		if let Some(slot) = liquid_slot(level) {
+			self.flow = slot;
+			self.plane = None;
+		}
 		self
 	}
 }
@@ -640,6 +1204,23 @@ impl Rings {
 const FLOWS: usize = 64;
 /// The flow slot of still water that retail draws opaque (Hoven's FIX 128 pools): ripples and reflections, no clear shallows.
 pub(super) const OPAQUE_SLOT: u32 = FLOWS as u32 - 1;
+/// The flow slot of Hoven's abyss water (`cold_pool`): opaque like `OPAQUE_SLOT`, with the cold look `COLD_LOOK`.
+pub(super) const COLD_SLOT: u32 = FLOWS as u32 - 2;
+/// The flow slots of Hoven's frozen floor (`frozen_pool`), held still (flows w = -1): opaque like `OPAQUE_SLOT`, and clear
+/// like slot 0.
+pub(super) const FROZEN_SLOT: u32 = FLOWS as u32 - 3;
+pub(super) const FROZEN_CLEAR_SLOT: u32 = FLOWS as u32 - 4;
+/// The flow slot of Gaspar's lava (`WaterDraw::liquid`, flows w = -2): `fs_water`'s lava look.
+pub(super) const LAVA_SLOT: u32 = FLOWS as u32 - 5;
+/// The flow slots of Aridia's mud (`liquid_slot`, flows w = -4) and Orxon's toxic sludge (`terrain_liquid`, flows w = -5):
+/// `fs_water`'s mud and sludge looks.
+pub(super) const MUD_SLOT: u32 = FLOWS as u32 - 6;
+pub(super) const SLUDGE_SLOT: u32 = FLOWS as u32 - 7;
+/// The lowest reserved slot: flowing water takes the slots below it.
+const LAST_FLOW: u32 = SLUDGE_SLOT;
+/// [PC] The cold look of Hoven's abyss (`fs_water`): 1 = long slow swells and a higher reflectance floor (what stands in the
+/// water mirrors), 2 = also a cool light on the swell and a moonlit shimmer, 3 = also an icy rim where it meets the ground.
+const COLD_LOOK: f32 = 2.0;
 
 /// Levels whose world strips (`Gpu::strip_draws`) are water: Novalis, whose strip classes 676 / 678 / 761 / 1225 are its
 /// river, waterfall pool and cascade pools (retail/queue_q1.rs `STRIP_FN`; decomp/notes/water.md NOV-23.1).
@@ -686,6 +1267,11 @@ pub(super) struct WaterFx {
 	t: Option<Targets>,
 	drift: Vec<Drift>,
 	flows: Vec<[f32; 2]>,
+	/// The river quads' uv last frame by the bits of their first corner, and the smoothed uv step per tick (`quad_flows`).
+	river_uv: std::collections::HashMap<[u32; 3], [f32; 2]>,
+	river_step: [f32; 2],
+	/// This frame's flows are river quads (`quad_flows`): they flow in two phases (flows w = -3).
+	phased: bool,
 	rings: Rings,
 }
 
@@ -772,6 +1358,9 @@ impl WaterFx {
 			t: None,
 			drift: Vec::new(),
 			flows: vec![[0.0; 2]],
+			river_uv: std::collections::HashMap::new(),
+			river_step: [0.0; 2],
+			phased: false,
 			rings: Rings::default(),
 		}
 	}
@@ -849,7 +1438,7 @@ impl WaterFx {
 			look: [RIPPLES, REFRACTION, SHEEN, FOAM],
 			fog: [fog[0], fog[1], fog[2], REFLECTION],
 			mirror: [mirror.unwrap_or(0.0), mirror.is_some() as u32 as f32, parts as u32 as f32, CLEAR],
-			flows: std::array::from_fn(|k| if k == OPAQUE_SLOT as usize { [0.0; 4] } else { self.flows.get(k).map_or([0.0, 0.0, 1.0, 0.0], |f| [f[0], f[1], 1.0, 0.0]) }),
+			flows: std::array::from_fn(|k| if k == OPAQUE_SLOT as usize { [0.0; 4] } else if k == COLD_SLOT as usize { [0.0, 0.0, 0.0, COLD_LOOK] } else if k == FROZEN_SLOT as usize { [0.0, 0.0, 0.0, -1.0] } else if k == FROZEN_CLEAR_SLOT as usize { [0.0, 0.0, 1.0, -1.0] } else if k == LAVA_SLOT as usize { [0.0, 0.0, 0.0, -2.0] } else if k == MUD_SLOT as usize { [0.0, 0.0, 0.0, -4.0] } else if k == SLUDGE_SLOT as usize { [0.0, 0.0, 0.0, -5.0] } else { self.flows.get(k).map_or([0.0, 0.0, 1.0, 0.0], |f| if self.phased && k > 0 { [f[0], f[1], RIVER_CLEAR, -3.0] } else { [f[0], f[1], 1.0, 0.0] }) }),
 			rn: [rn as f32, 0.0, 0.0, 0.0],
 			rings,
 		};
@@ -867,7 +1456,7 @@ impl WaterFx {
 		for d in draws {
 			pass.set_vertex_buffer(0, d.vb.slice(..));
 			pass.set_index_buffer(d.ib.slice(..), wgpu::IndexFormat::Uint32);
-			pass.draw_indexed(0..d.n, 0, d.flow..d.flow + 1);
+			pass.draw_indexed(d.first..d.first + d.n, 0, d.flow..d.flow + 1);
 		}
 	}
 
@@ -884,6 +1473,7 @@ impl WaterFx {
 	pub(super) fn strip_flows(&mut self, strips: &[crate::particles::WorldStrip]) -> Vec<u32> {
 		self.drift.resize(strips.len(), Drift::default());
 		self.flows.truncate(1);
+		self.phased = false;
 		let mut slots = Vec::with_capacity(strips.len());
 		for (s, d) in strips.iter().zip(self.drift.iter_mut()) {
 			let n = s.uv.len().max(1) as f32;
@@ -901,7 +1491,7 @@ impl WaterFx {
 				let l = (v[0] * v[0] + v[1] * v[1]).sqrt();
 				if l > 6.0 { [v[0] * 6.0 / l, v[1] * 6.0 / l] } else { v }
 			});
-			match flow.filter(|v| v[0].abs() + v[1].abs() > 1e-3 && self.flows.len() < OPAQUE_SLOT as usize) {
+			match flow.filter(|v| v[0].abs() + v[1].abs() > 1e-3 && self.flows.len() < LAST_FLOW as usize) {
 				Some(v) => {
 					slots.push(self.flows.len() as u32);
 					self.flows.push(v);
@@ -910,6 +1500,78 @@ impl WaterFx {
 			}
 		}
 		slots
+	}
+
+	/// Before the level pass, on a level with a river of effect quads (`river_fx_tex`): the river quads grouped by flow slot
+	/// (slot, indices into `quads`). The texture scrolls the same uv step per tick on every quad, so the step is the median uv
+	/// change of the quads drawn at the same place last frame (no change: between two ticks; a change past 0.3 is the wrap),
+	/// smoothed as `strip_flows` does. Each quad's flow is then that step through its own uv-to-world map, rounded to
+	/// `RIVER_DIRS` directions and `RIVER_SPEED_STEP` speeds so the quads share a few slots. Steep quads (the waterfall, normal
+	/// z under 0.5) are left out and keep their retail look.
+	pub(super) fn quad_flows(&mut self, quads: &[([[f32; 3]; 4], [[f32; 2]; 4])]) -> Vec<(u32, Vec<usize>)> {
+		self.flows.truncate(1);
+		self.phased = true;
+		let key = |p: [f32; 3]| [p[0].to_bits(), p[1].to_bits(), p[2].to_bits()];
+		let (mut du, mut dv) = (Vec::new(), Vec::new());
+		for (pos, uv) in quads {
+			if let Some(o) = self.river_uv.get(&key(pos[0])) {
+				let d = [uv[0][0] - o[0], uv[0][1] - o[1]];
+				if d[0].abs() < 0.3 && d[1].abs() < 0.3 {
+					du.push(d[0]);
+					dv.push(d[1]);
+				}
+			}
+		}
+		if !du.is_empty() {
+			du.sort_by(f32::total_cmp);
+			dv.sort_by(f32::total_cmp);
+			let step = [du[du.len() / 2], dv[dv.len() / 2]];
+			if step[0].abs().max(step[1].abs()) > 1e-6 {
+				let d = self.river_step;
+				self.river_step = if d == [0.0; 2] { step } else { [d[0] * 0.8 + step[0] * 0.2, d[1] * 0.8 + step[1] * 0.2] };
+			}
+		}
+		self.river_uv.clear();
+		self.river_uv.extend(quads.iter().map(|(pos, uv)| (key(pos[0]), uv[0])));
+		let st = self.river_step;
+		let mut keys: std::collections::BTreeMap<(i32, i32), u32> = std::collections::BTreeMap::new();
+		let mut groups: Vec<(u32, Vec<usize>)> = Vec::new();
+		for (i, (pos, uv)) in quads.iter().enumerate() {
+			let (a, b) = ([pos[1][0] - pos[0][0], pos[1][1] - pos[0][1], pos[1][2] - pos[0][2]], [pos[3][0] - pos[0][0], pos[3][1] - pos[0][1], pos[3][2] - pos[0][2]]);
+			let n = [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+			let nl = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+			if nl < 1e-9 || n[2].abs() < 0.5 * nl {
+				continue;
+			}
+			let flow = uv_map(&pos[..], &uv[..]).map(|inv| {
+				let v = [-(inv[0][0] * st[0] + inv[0][1] * st[1]) * 50.0, -(inv[1][0] * st[0] + inv[1][1] * st[1]) * 50.0];
+				let l = (v[0] * v[0] + v[1] * v[1]).sqrt();
+				if l > 6.0 { [v[0] * 6.0 / l, v[1] * 6.0 / l] } else { v }
+			});
+			let slot = match flow.map(|v| (v[1].atan2(v[0]), (v[0] * v[0] + v[1] * v[1]).sqrt())).filter(|f| f.1 >= RIVER_SPEED_STEP * 0.5) {
+				Some((ang, sp)) => {
+					let k = ((ang / std::f32::consts::TAU * RIVER_DIRS).round() as i32).rem_euclid(RIVER_DIRS as i32);
+					let q = (sp / RIVER_SPEED_STEP).round() as i32;
+					match keys.get(&(k, q)) {
+						Some(&s) => s,
+						None if self.flows.len() < LAST_FLOW as usize => {
+							let (ang, sp) = (k as f32 * std::f32::consts::TAU / RIVER_DIRS, q as f32 * RIVER_SPEED_STEP);
+							let s = self.flows.len() as u32;
+							self.flows.push([ang.cos() * sp, ang.sin() * sp]);
+							keys.insert((k, q), s);
+							s
+						}
+						None => 0,
+					}
+				}
+				None => 0,
+			};
+			match groups.iter_mut().find(|g| g.0 == slot) {
+				Some(g) => g.1.push(i),
+				None => groups.push((slot, vec![i])),
+			}
+		}
+		groups
 	}
 
 	/// The planar mirror's targets (MSAA colour, resolve, MSAA depth) for `Gpu::draw_mirror`; after `positions`.

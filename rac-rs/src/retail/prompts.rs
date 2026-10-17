@@ -21,7 +21,7 @@
 //! "Space" plus the label would be wider than retail's legend box (see `substitute`).
 //!
 //! The gamepad (XInput): A = Cross, B = Circle, X = Square, Y = Triangle, LB = L1, RB = R1, LT = L2, RT = R2, Back = Select,
-//! Start = Start, d-pad, both sticks analog with radial deadzones, L3 / R3. A PlayStation controller (pspad.rs: DualShock 4,
+//! Start = Start, d-pad, both sticks analog with radial deadzones and a DualShock 2's square range (`stick`), L3 / R3. A PlayStation controller (pspad.rs: DualShock 4,
 //! DualSense, read over HID) arrives as an XInput report with its buttons in their PS2 places and goes the same way. The pads
 //! are merged with the keyboard (OR of buttons, the larger deflection of each stick axis) and work without any switch; only
 //! the keyboard prompts follow `RAC_PC_EXT`.
@@ -679,6 +679,9 @@ const DZ_RIGHT: f32 = 8689.0;
 const TRIGGER: u8 = 30;
 
 /// One stick: radial deadzone, then the rest of the throw scaled to the full 1..=255 range; y up in XInput = low byte on the PS2.
+/// The round throw goes onto the square, as a DualShock 2 reports it: at every angle the larger axis carries the throw, so a
+/// full diagonal is full on both axes. Retail reads each axis on its own (dead zone 47/127, full at 124/127) and runs only at
+/// a stick strength >= 0.82 (decomp/notes/hero_movement.md); on the circle a full diagonal gave 0.76 and Ratchet walked.
 fn stick(x: i16, y: i16, dz: f32) -> (u8, u8) {
 	let (x, y) = (x as f32, y as f32);
 	let mag = (x * x + y * y).sqrt();
@@ -686,7 +689,9 @@ fn stick(x: i16, y: i16, dz: f32) -> (u8, u8) {
 		return (0x80, 0x80);
 	}
 	let s = ((mag - dz) / (32767.0 - dz)).min(1.0);
-	let (nx, ny) = (x / mag * s, y / mag * s);
+	let (ux, uy) = (x / mag, y / mag);
+	let k = s / ux.abs().max(uy.abs());
+	let (nx, ny) = (ux * k, uy * k);
 	((0x80 as f32 + nx * 127.0).round().clamp(1.0, 255.0) as u8, (0x80 as f32 - ny * 127.0).round().clamp(1.0, 255.0) as u8)
 }
 
@@ -1049,10 +1054,35 @@ mod tests {
 		assert!(a > 0x80 && a < 0x84, "{a}");
 		let half = st(7849 + (32767 - 7849) / 2, 0, 0, 0)[2];
 		assert!((half as i32 - (0x80 + 63)).abs() <= 1, "{half}");
-		// Diagonals keep their direction and never exceed the circle.
-		let d = st(23170, 23170, 0, 0);
+		// Diagonals keep their direction and reach the square's corner, as on a DualShock 2: a full push up-right is full right
+		// and full up (retail then runs; on the circle each axis was 90/127 and Ratchet walked).
+		assert_eq!(st(23170, 23170, 0, 0), [0x80, 0x80, 0xff, 1], "full diagonal = corner");
+		let d = st(20000, 20000, 0, 0);
 		assert!(d[2] > 0x80 && d[3] < 0x80 && (d[2] as i32 - 0x80) == (0x80 - d[3] as i32), "{d:?}");
-		assert!((d[2] as i32 - 0x80) <= 127);
+		// The larger axis carries the throw at every angle: a full push at 30 degrees is full right and tan(30) up.
+		let e = st(28377, 16384, 0, 0);
+		assert_eq!(e[2], 0xff, "{e:?}");
+		assert!((0x80 - e[3] as i32 - 73).abs() <= 1, "{e:?}");
+		// Half a throw on the diagonal is half on each axis (not 0.35 as on the circle).
+		let h = (7849.0 + (32767.0 - 7849.0) / 2.0) / std::f32::consts::SQRT_2;
+		let g = st(h as i16, h as i16, 0, 0);
+		assert!((g[2] as i32 - (0x80 + 63)).abs() <= 1, "{g:?}");
+	}
+
+	/// Retail's own per-axis reading (decomp/notes/hero_crouch_ledge.md: d = |byte - 0x7f|, zero up to 0x2f, else (d - 0x30) / 0x4c
+	/// up to 1) of a full gamepad push at any angle gives a stick strength of at least 0.82, the run threshold.
+	#[test]
+	fn a_full_push_runs_at_every_angle() {
+		let axis = |b: u8| {
+			let d = (b as i32 - 0x7f).abs();
+			if d <= 0x2f { 0.0 } else { ((d - 0x30) as f32 / 0x4c as f32).min(1.0) }
+		};
+		for deg in 0..360 {
+			let a = (deg as f32).to_radians();
+			let s = map_xinput(&XRaw { lx: (a.cos() * 32767.0) as i16, ly: (a.sin() * 32767.0) as i16, ..Default::default() }).sticks;
+			let m = axis(s[2]).hypot(axis(s[3])).min(1.0);
+			assert!(m >= 0.82, "{deg} degrees: strength {m}");
+		}
 	}
 
 	#[test]

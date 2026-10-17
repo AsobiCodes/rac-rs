@@ -60,6 +60,11 @@ mod wad;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+/// The window title main.rs gives the viewer (the acceptance runs have no install root).
+pub fn app_name() -> &'static str {
+	"rac-rs"
+}
+
 // The recorded-pad feed shared with the oracle runners (movetest / fndiff): pad.raw + pad.pokes of a play window.
 #[path = "../../oracle/pcsx2rec/playfeed.rs"]
 mod playfeed;

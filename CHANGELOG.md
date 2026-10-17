@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.2.1
+
+- Every liquid in the game now has an Enhanced look (Lighting and Water set to Enhanced):
+  - Aridia's mud is now thick brown mud that oozes slowly and bubbles. Before, it shone like a mirror.
+  - Orxon's toxic sludge now swells slowly, with a glossy skin, glowing veins and bubbles that swell and pop.
+  - Gaspar's lava now has drifting dark crust with glowing cracks, bubbles, a heat shimmer, and a white-hot glow where it meets rock.
+  - Batalia's jungle river now flows, with ripples and reflections.
+  - The water in Hoven's abyss and in the flooded tank room on Quartu now get the Enhanced water look.
+- Hoven's frozen floor by the doors now stays still like ice instead of rippling like water.
+- Hoven's ice (floes, crystals and icicles) now has a cold shine with sparkles (with Lighting Enhanced).
+- Distant water no longer flickers when the camera moves, on every planet.
+- With Water set to Classic, every liquid still looks like the PS2.
+- The Graphics settings are now also on the title screen: Options > Graphics. They are the same settings as Pause > Options > Graphics, and a change made in one place shows in the other.
+- The game window's title now shows the game's version (for example "rac-rs v0.2.1").
+- Lighting Classic: objects (crates, machines, platforms, enemies, Ratchet) now use the same texture detail as the PS2, so they look as soft as on the PS2 from a distance. Lighting Enhanced keeps the sharper textures.
+- Controllers: running with the left stick no longer slows Ratchet down at diagonal angles. A full push now runs in every direction, like on the PS2.
+- USA disc: the title screen's Options page showed a Video row that the USA game does not have, so the highlight sat on the wrong row. It now shows Language, Sound and Graphics, and the highlight follows your choice.
+
 ## v0.2.0
 
 - This update rebuilds the whole game once, so it takes longer than usual: about 10 minutes, up to 20 on slower PCs. Your saves and settings are kept.

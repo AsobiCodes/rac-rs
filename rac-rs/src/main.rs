@@ -111,6 +111,19 @@ fn install_root() -> Result<std::path::PathBuf, String> {
 		.ok_or_else(|| "Run Setup.cmd first: the game has not been set up yet (generated/play.cfg not found).".to_string())
 }
 
+/// [PC] The window title: "rac-rs v0.2.1" from the install root's `generated/built_version.txt` (setup.ps1 writes it after building
+/// this exe, so an update whose files arrived but whose build has not finished still shows the old version), else its VERSION file
+/// (the release the player downloaded), else "rac-rs" (dev and test runs outside an install).
+pub fn app_name() -> &'static str {
+	static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+	NAME.get_or_init(|| {
+		let read = |r: &std::path::Path, f: &str| std::fs::read_to_string(r.join(f)).ok().filter(|v| !v.trim().is_empty());
+		let ver = install_root().ok().and_then(|r| read(&r, "generated/built_version.txt").or_else(|| read(&r, "VERSION"))).unwrap_or_default();
+		let ver = ver.trim_start_matches('\u{feff}').trim();
+		if ver.is_empty() || ver.len() > 24 || !ver.chars().all(|c| c.is_ascii_alphanumeric() || ".-+".contains(c)) { "rac-rs".into() } else { format!("rac-rs v{ver}") }
+	})
+}
+
 /// Public Windows build only: before the game starts, ask `setup.ps1 -Launch` (a hidden PowerShell) whether an update is waiting.
 /// Returns true when the update window took over (PowerShell exit code 10): the game must not start, this exe must exit so that the
 /// update can replace it. Every other outcome (no setup.ps1, offline, up to date, "Not now", spawn failure, a hang) returns false = start the game.

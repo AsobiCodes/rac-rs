@@ -8,7 +8,7 @@ impl ApplicationHandler for App {
 		if self.gpu.is_some() {
 			return;
 		}
-		let mut attrs = Window::default_attributes().with_title("rac-rs").with_inner_size(winit::dpi::LogicalSize::new(1280, 720)).with_visible(!self.headless);
+		let mut attrs = Window::default_attributes().with_title(crate::app_name()).with_inner_size(winit::dpi::LogicalSize::new(1280, 720)).with_visible(!self.headless);
 		// Window and taskbar icon: the logo, 64x64 raw RGBA embedded in the exe (assets/icon/rac-rs-64.rgba).
 		if let Ok(icon) = winit::window::Icon::from_rgba(include_bytes!("../../assets/icon/rac-rs-64.rgba").to_vec(), 64, 64) {
 			attrs = attrs.with_window_icon(Some(icon));
@@ -515,7 +515,7 @@ impl ApplicationHandler for App {
 							travel::mirror_warp::field(r, self.gpu.as_mut(), &self.iso_path);
 							// The interpreter stopped (a crash or a spin): say so in the title bar, the frozen frame shows nothing.
 							if let (Some(e), Some(g)) = (r.take_stop(), &self.gpu) {
-								g.window.set_title(&format!("rac-rs: RETAIL STOPPED: {e}"));
+								g.window.set_title(&format!("{}: RETAIL STOPPED: {e}", crate::app_name()));
 							}
 							// The first mirror is the savestate's own values, not a change the HUD should pop up for.
 							if self.play_ticks == 0 {
@@ -1597,7 +1597,7 @@ impl ApplicationHandler for App {
 					// PC-FPS-1: blended poses join `fx_posed`, blended placements go to `smooth::PROP_XF`.
 					self.smooth.props(&game.props, posed, &mut fx_posed);
 					profile::lap(profile::Phase::Props);
-					let title = format!("rac-rs - {} - bolts {} - health {}/4{}", toc::LEVEL_NAMES[self.level], game.bolts, game.health.max(0), crate::retail::debugkeys::title_suffix());
+					let title = format!("{} - {} - bolts {} - health {}/4{}", crate::app_name(), toc::LEVEL_NAMES[self.level], game.bolts, game.health.max(0), crate::retail::debugkeys::title_suffix());
 					self.shown_bolts = if (game.bolts as f32) < self.shown_bolts { game.bolts as f32 } else { (self.shown_bolts + dt * 60.0f32.max((game.bolts as f32 - self.shown_bolts) * 4.0)).min(game.bolts as f32) };
 					// NOV-30f nano request latch (compares against the previous frame's health before `hud_seen` updates).
 					hud::nano_request(&mut self.nano_live, &mut self.nano_hud, game.shop.is_some(), game.health, self.hud_seen.1);

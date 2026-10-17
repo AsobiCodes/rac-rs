@@ -29,6 +29,9 @@
 //!   Classic / Enhanced, Ambient occlusion and Dynamic shadows On / Off, Display mode Windowed / Fullscreen, Water and Particles
 //!   Classic / Enhanced, Sun rays Off / On (`graphics`, viewer/post.rs); a new
 //!   player sees the retail picture (Original). The picture of the row is help_ss 5 (the lit planet), from the same ToC.
+//! - Title screen: Options -> Graphics (`title_options`, a hand on the front end's Options list set-up) shows the same rows on
+//!   a copy of the Video Options page; `front_field` applies and remembers them, the mirror draws them (viewer/front_mirror.rs,
+//!   frontend.rs `Page::Graphics`). The Options rows themselves are retail's of the disc's region (USA: no Video row).
 //!
 //! `RAC_PC_EXT=0` registers nothing and writes nothing (today's bit-exact path); the oracle's gates never link this file.
 use super::pcopts::{self, Lang, PcOptions};
@@ -82,6 +85,30 @@ pub const GPAGE: u32 = BASE + 0x900;
 const GHDR: u32 = BASE + 0xa00;
 pub const GVAL: u32 = BASE + 0xa60;
 const GTAB: u32 = BASE + 0xaa0;
+/// The title's Graphics page (`title_options`): the Options list records (up to 4 + the zero record, 12 bytes each), the page
+/// (a copy of Video Options; 0x100 bytes, zero after its 0x88), its header item, its value item and that item's rows (7 + the
+/// zero record, 20 bytes each: the front end's value item reads 5-word rows), ending at BASE + 0xe80.
+const TRECS: u32 = BASE + 0xc00;
+pub const TGPAGE: u32 = BASE + 0xc40;
+const TGHDR: u32 = BASE + 0xd40;
+pub const TGVAL: u32 = BASE + 0xda0;
+const TGTAB: u32 = BASE + 0xde0;
+/// The Graphics rows of both pages: label, row byte, the value texts for 0 and 1.
+#[rustfmt::skip]
+const ROWS: [[u32; 4]; 7] = [
+	[ID_LIGHTING, LIGHT, ID_LIGHT_CLASSIC, ID_ENHANCED],
+	[ID_AO, AO, ID_OFF, ID_ON],
+	[ID_SHADOWS, SHADOWS, ID_OFF, ID_ON],
+	[ID_DISPLAY, DISPLAY, ID_WINDOWED, ID_FULLSCREEN],
+	[ID_WATER, WATER, ID_CLASSIC, ID_ENHANCED_F],
+	[ID_PARTICLES, PARTICLES, ID_PART_CLASSIC, ID_PART_ENHANCED],
+	[ID_SUNRAYS, SUNRAYS, ID_OFF, ID_ON],
+];
+/// Front end texts (frontbin): the Options rows Video and Sound, the Video Options header and its one row.
+const FRONT_VIDEO: u32 = 0x4f21;
+const FRONT_SOUND: u32 = 0x4f22;
+const FRONT_VIDEO_HDR: u32 = 0x4f3a;
+const FRONT_VIDEO_ROW: u32 = 0x4f3b;
 /// The Graphics row of the Options list: before Quit Game (the 7th retail row).
 const GRAPHICS_ROW: usize = 6;
 /// The retail Options rows (text ids, list item records at +0x34): HelpDesk, Save, Load, Sound, Camera, Subtitles, Quit Game.
@@ -392,24 +419,41 @@ pub fn pre_field(m: &mut ee_oracle::Machine, fin: &FieldIn) -> FieldIn {
 	out
 }
 
+/// Worker, before each field of the front end: once the title's Options page has set the region up (`title_options`), the
+/// Graphics rows changed there are applied and remembered as in a level. Until then it writes nothing (a cold boot that
+/// never opens Options keeps today's RAM).
+pub fn front_field(m: &mut ee_oracle::Machine) {
+	if !enabled() || m.rd32(BASE) != MAGIC {
+		return;
+	}
+	if let Ok(mut s) = ST.lock() {
+		sync(&mut m.cpu.mem, u32::MAX, false, &mut s);
+	}
+}
+
+/// Fresh RAM (start, savestate load, cold boot): the options file's values go in.
+fn setup(mem: &mut Mem, s: &mut St) {
+	if mem.rd32(BASE) == MAGIC {
+		return;
+	}
+	mem.wr32(BASE, MAGIC);
+	let (c, t, b) = (s.opts.camera_modern() as u8, s.opts.strafe_on() as u8, s.opts.buyall_on() as u8);
+	mem.wr8(CAM, c);
+	mem.wr8(STRAFE, t);
+	mem.wr8(BUYALL, b);
+	s.last = Some((c, t, b));
+	apply(s, c, t, b, false);
+	let g = s.opts.graphics_rows();
+	for (a, v) in GROWS.iter().zip(g) {
+		mem.wr8(*a, v);
+	}
+	s.glast = Some(g);
+	apply_graphics(s, g, false);
+}
+
 /// `pre_field` on the memory: true when the F7 press was consumed.
 fn sync(mem: &mut Mem, level: u32, toggle: bool, s: &mut St) -> bool {
-	if mem.rd32(BASE) != MAGIC {
-		// Fresh RAM (start, savestate load, cold boot): the options file's values go in.
-		mem.wr32(BASE, MAGIC);
-		let (c, t, b) = (s.opts.camera_modern() as u8, s.opts.strafe_on() as u8, s.opts.buyall_on() as u8);
-		mem.wr8(CAM, c);
-		mem.wr8(STRAFE, t);
-		mem.wr8(BUYALL, b);
-		s.last = Some((c, t, b));
-		apply(s, c, t, b, false);
-		let g = s.opts.graphics_rows();
-		for (a, v) in GROWS.iter().zip(g) {
-			mem.wr8(*a, v);
-		}
-		s.glast = Some(g);
-		apply_graphics(s, g, false);
-	}
+	setup(mem, s);
 	if toggle {
 		let c = mem.rd8(CAM);
 		mem.wr8(CAM, (c == 0) as u8);
@@ -585,17 +629,8 @@ fn patch_graphics(mem: &mut Mem, level: u32) -> bool {
 	mem.wr32(GVAL + 0x34, GTAB);
 	mem.wr32(GVAL + 0x38, 0);
 	mem.wr32(GVAL + 0x3c, 0);
-	#[rustfmt::skip]
-	let tab = [
-		ID_LIGHTING, LIGHT, ID_LIGHT_CLASSIC, ID_ENHANCED, 0, 0,
-		ID_AO, AO, ID_OFF, ID_ON, 0, 0,
-		ID_SHADOWS, SHADOWS, ID_OFF, ID_ON, 0, 0,
-		ID_DISPLAY, DISPLAY, ID_WINDOWED, ID_FULLSCREEN, 0, 0,
-		ID_WATER, WATER, ID_CLASSIC, ID_ENHANCED_F, 0, 0,
-		ID_PARTICLES, PARTICLES, ID_PART_CLASSIC, ID_PART_ENHANCED, 0, 0,
-		ID_SUNRAYS, SUNRAYS, ID_OFF, ID_ON, 0, 0,
-		0, 0, 0, 0, 0, 0,
-	];
+	// 6-word rows {label, byte, value 0, value 1, 0, 0} and the zero record.
+	let tab: Vec<u32> = ROWS.iter().flat_map(|r| [r[0], r[1], r[2], r[3], 0, 0]).chain([0; 6]).collect();
 	for (i, w) in tab.iter().enumerate() {
 		mem.wr32(GTAB + 4 * i as u32, *w);
 	}
@@ -603,6 +638,145 @@ fn patch_graphics(mem: &mut Mem, level: u32) -> bool {
 	mem.wr32(pic + 0x30, OPT_PICS);
 	mem.wr32(list + 0x34, OPT_RECS);
 	true
+}
+
+fn copy_words(mem: &mut Mem, from: u32, to: u32, len: u32) {
+	for o in (0..len).step_by(4) {
+		let w = mem.rd32(from + o);
+		mem.wr32(to + o, w);
+	}
+}
+
+/// The front end's Options list set-up (11 instructions, boot ELF 0x219ca8 on the PAL title, also in frontbin and on the USA
+/// disc): `item+0x34` = the PAL rows Language, Video, Sound, or the NTSC rows Language, Sound, by the region word 0x15ee90.
+/// The words that hold addresses (the region word, the two lists) are masked.
+const TITLE_CODE: [(u32, u32); 11] = [
+	(0x3c02_0000, 0xffff_0000), // lui v0, hi(region)
+	(0x8c42_0000, 0xffff_0000), // lw v0, lo(region)(v0)
+	(0x5040_0004, !0),          // beql v0, zero, +4
+	(0x3c02_0000, 0xffff_0000), // lui v0, hi(lists)
+	(0x3c02_0000, 0xffff_0000), // lui v0, hi(lists)
+	(0x1000_0002, !0),          // b +2
+	(0x2442_0000, 0xffff_0000), // addiu v0, v0, lo(PAL list)
+	(0x2442_0000, 0xffff_0000), // addiu v0, v0, lo(NTSC list)
+	(0xac82_0034, !0),          // sw v0, 0x34(a0)
+	(0x03e0_0008, !0),          // jr ra
+	(0x0000_102d, !0),          // move v0, zero
+];
+
+/// The front end runs interpreted (no recompiled code: title_boot.rs `hook_front_movies`), so the Options hook is an oracle host
+/// stub on every copy of `TITLE_CODE` in the code range, applied only while RAM still holds that function. Called when the
+/// front end starts (cold boot title in the boot ELF, frontbin after Quit Game).
+pub fn hook_front(m: &mut ee_oracle::Machine) {
+	if !enabled() {
+		return;
+	}
+	let ram = &m.cpu.mem.ram;
+	let rd = |a: usize| u32::from_le_bytes(ram[a..a + 4].try_into().unwrap());
+	let found: Vec<u32> = (0x10_0000..0x40_0000 - 4 * TITLE_CODE.len()).step_by(4).filter(|&a| TITLE_CODE.iter().enumerate().all(|(k, &(v, mask))| rd(a + 4 * k) & mask == v)).map(|a| a as u32).collect();
+	for a in found {
+		let sig = [0, 1, 2, 3].map(|k| m.rd32(a + 4 * k));
+		m.cpu.add_host_stub(a, "title Options list (pcext)", sig, title_options);
+		eprintln!("retail: PC options: title Options hook at {a:#x}");
+	}
+}
+
+/// The title's Options page (host stub on its list set-up, `hook_front`): the retail rows of the disc's region and a Graphics row
+/// that opens a copy of the Video Options page reading the Graphics rows (`ROWS`: the bytes of the pause menu's Graphics
+/// page), all in reserved RAM. The region is set up first (`setup`), so the rows show the remembered values. The instruction
+/// count advances as retail's would (9 instructions with the PAL rows, 8 with the NTSC ones).
+fn title_options(c: &mut Cpu) -> bool {
+	let item = c.g(4) as u32;
+	let Ok(mut s) = ST.lock() else { return false };
+	let Some(n) = build_title(&mut c.mem, c.pc, item, &mut s) else { return false };
+	c.s(2, 0);
+	c.icount += n;
+	c.mem.now = c.icount;
+	true
+}
+
+/// `title_options` on the memory; Some(the instructions retail runs). Every address comes from the function's own code at `pc`
+/// (the region word, both row lists) and the Video page the PAL list names, checked against the retail texts, so the same body
+/// runs on both discs. None when a check fails: the retail function then runs (no Graphics row). The page's slots, items and
+/// row table are rebuilt on every entry to Options, the list records only when the rows changed (their third word is the
+/// menu's own).
+fn build_title(mem: &mut Mem, pc: u32, item: u32, s: &mut St) -> Option<u64> {
+	let ok = |a: u32| (0x10_0000..0x200_0000).contains(&a);
+	let imm = |w: u32| w as u16 as i16 as i32 as u32;
+	// lui v0,hi; lw v0,lo(v0) (the region word); ...; lui v0,hi; ...; addiu v0,v0,pal; addiu v0,v0,ntsc.
+	let (w0, w1, w3, w6, w7) = (mem.rd32(pc), mem.rd32(pc + 4), mem.rd32(pc + 0xc), mem.rd32(pc + 0x18), mem.rd32(pc + 0x1c));
+	let region = ((w0 & 0xffff) << 16).wrapping_add(imm(w1));
+	let (pal, ntsc) = (((w3 & 0xffff) << 16).wrapping_add(imm(w6)), ((w3 & 0xffff) << 16).wrapping_add(imm(w7)));
+	if !ok(item) || !ok(region) || !ok(pal) || !ok(ntsc) {
+		return None;
+	}
+	let rows = |mem: &mut Mem, a: u32| -> Vec<[u32; 3]> { (0..5).map(|i| [mem.rd32(a + 12 * i), mem.rd32(a + 12 * i + 4), mem.rd32(a + 12 * i + 8)]).take_while(|r| r[0] != 0).collect() };
+	let page = |rs: &[[u32; 3]], id: u32| rs.iter().find(|r| r[0] == id | 3 << 16).map(|r| r[1]).filter(|&p| ok(p));
+	let is_pal = mem.rd32(region) != 0;
+	let shown = if is_pal { pal } else { ntsc };
+	let mut recs = rows(mem, shown);
+	let (Some(video), Some(sound)) = (page(&rows(mem, pal), FRONT_VIDEO), page(&recs, FRONT_SOUND)) else { return None };
+	if recs.len() > 3 || recs.iter().any(|r| r[0] >> 16 != 3) || mem.rd32(video + 0x38) != mem.rd32(sound + 0x38) {
+		return None;
+	}
+	let items: Vec<u32> = (0..14).map(|k| mem.rd32(video + 0x44 + 4 * k)).filter(|&a| ok(a)).collect();
+	let hdr = items.iter().copied().find(|&it| mem.rd32(it + 0x34) == FRONT_VIDEO_HDR);
+	let val = items.iter().copied().find(|&it| {
+		let t = mem.rd32(it + 0x34);
+		ok(t) && mem.rd32(t) == FRONT_VIDEO_ROW
+	});
+	let (Some(hdr), Some(val)) = (hdr, val) else { return None };
+	setup(mem, s);
+	recs.push([ID_GRAPHICS | 3 << 16, TGPAGE, 0]);
+	let same = recs.iter().enumerate().all(|(i, r)| mem.rd32(TRECS + 12 * i as u32) == r[0] && mem.rd32(TRECS + 12 * i as u32 + 4) == r[1]) && mem.rd32(TRECS + 12 * recs.len() as u32) == 0;
+	if !same {
+		for (i, r) in recs.iter().chain([&[0u32; 3]]).enumerate() {
+			for (k, w) in r.iter().enumerate() {
+				mem.wr32(TRECS + 12 * i as u32 + 4 * k as u32, *w);
+			}
+		}
+	}
+	// The page: Video Options' own (slot sequences, parent = Options, id, items) with our header and value items. The value
+	// panel (slot 3) plays the Sound page's slot-3 sequence: its rect (47,125,419,164) holds the 7 rows, Video's holds one.
+	copy_words(mem, video, TGPAGE, 0x88);
+	for o in (0x88..0x100).step_by(4) {
+		mem.wr32(TGPAGE + o, 0);
+	}
+	let seq = mem.rd32(sound + 0xc);
+	mem.wr32(TGPAGE + 0xc, seq);
+	for o in (0x40..0x80).step_by(4) {
+		match mem.rd32(TGPAGE + o) {
+			a if a == hdr => mem.wr32(TGPAGE + o, TGHDR),
+			a if a == val => mem.wr32(TGPAGE + o, TGVAL),
+			_ => {}
+		}
+	}
+	copy_words(mem, hdr, TGHDR, 0x58);
+	mem.wr32(TGHDR + 0x34, ID_GRAPHICS_HDR);
+	copy_words(mem, val, TGVAL, 0x40);
+	mem.wr32(TGVAL + 0x34, TGTAB);
+	mem.wr32(TGVAL + 0x38, 0);
+	mem.wr32(TGVAL + 0x3c, 0);
+	// 5-word rows {label, byte, value 0, value 1, flags 0 (Cross flips the byte; Video's 1 = the keep-mode prompt)}, the zero record.
+	let tab: Vec<u32> = ROWS.iter().flat_map(|r| [r[0], r[1], r[2], r[3], 0]).chain([0; 5]).collect();
+	for (i, w) in tab.iter().enumerate() {
+		mem.wr32(TGTAB + 4 * i as u32, *w);
+	}
+	mem.wr32(item + 0x34, TRECS);
+	Some(if is_pal { 9 } else { 8 })
+}
+
+/// The title's Graphics page as the mirror draws it (viewer/front_mirror.rs): each row's label and value text ids, for the
+/// values last applied.
+pub fn title_rows() -> Vec<(u32, u32)> {
+	let g = GFX.load(Ordering::Relaxed);
+	let on = [g & 0xff != 0, g >> 8 & 1 != 0, g >> 9 & 1 != 0, FULLSCREEN.load(Ordering::Relaxed), g >> 10 & 1 != 0, g >> 11 & 1 != 0, g >> 12 & 1 != 0];
+	ROWS.iter().zip(on).map(|(r, v)| (r[0], if v { r[3] } else { r[2] })).collect()
+}
+
+/// The new texts in `lang` (0 En .. 4 It) as the mirror's strings (font bytes as chars, like the disc's texts).
+pub fn texts(lang: usize) -> impl Iterator<Item = (u32, String)> {
+	NEW_IDS.iter().enumerate().map(move |(k, &id)| (id, TEXTS[k][lang.min(4)].iter().map(|&b| b as char).collect()))
 }
 
 /// The text lookup hand: the three new ids get their string for the game's language; every other id goes to `prompts::lookup`
@@ -905,6 +1079,100 @@ mod tests {
 		sync(mem, 4, false, &mut s);
 		assert_eq!(mem.rd8(DISPLAY), 1, "fresh RAM takes the remembered display mode");
 		assert!(fullscreen());
+		let _ = std::fs::remove_dir_all(&dirp);
+		GFX.store(pack_gfx([0, 1, 1, 0, 1, 1, 1]), Ordering::Relaxed);
+		FULLSCREEN.store(false, Ordering::Relaxed);
+	}
+
+	/// The title's Options list set-up as the PAL boot ELF holds it (0x219ca8, region word 0x15ee90, lists 0x1d4790 / 0x1d47c0) with
+	/// its Options, Video and Sound pages: the hook pattern matches it, PAL gains Graphics after Language, Video, Sound and USA after
+	/// Language, Sound; the Graphics page is Video Options' with our items and Sound's value panel; the menu's word survives a
+	/// re-entry; a page that is not the retail one leaves retail's list.
+	#[test]
+	fn title_graphics_page() {
+		let _turn = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+		let (pc, region, opt, video, sound, hdr, val, vtab) = (0x219ca8, 0x15ee90, 0x1d4708, 0x1d4a38, 0x1d4838, 0x1d4ac0, 0x1d4b40, 0x1d4b18);
+		let fresh = |pal: bool| -> Mem {
+			let mut m = Mem::new();
+			let code = [0x3c02_0016, 0x8c42_ee90, 0x5040_0004, 0x3c02_001d, 0x3c02_001d, 0x1000_0002, 0x2442_4790, 0x2442_47c0, 0xac82_0034, 0x03e0_0008, 0x0000_102d];
+			for (k, w) in code.iter().enumerate() {
+				m.wr32(pc + 4 * k as u32, *w);
+			}
+			m.wr32(region, pal as u32);
+			for (list, recs) in [(0x1d4790, &[(0x4f2b, 0x1d48c0), (FRONT_VIDEO, video), (FRONT_SOUND, sound)][..]), (0x1d47c0, &[(0x4f2b, 0x1d48c0), (FRONT_SOUND, sound)][..])] {
+				for (i, &(id, page)) in recs.iter().enumerate() {
+					m.wr32(list + 12 * i as u32, id | 3 << 16);
+					m.wr32(list + 12 * i as u32 + 4, page);
+				}
+			}
+			for (k, s) in [0, 1, 0xca, 0xcb, 0xc3].iter().enumerate() {
+				m.wr32(video + 4 * k as u32, *s);
+			}
+			m.wr32(sound + 0xc, 0xd2);
+			for (page, id) in [(video, 0x31), (sound, 0x32)] {
+				m.wr32(page + 0x38, opt);
+				m.wr32(page + 0x3c, id);
+			}
+			m.wr32(video + 0x40, val);
+			for (k, it) in [hdr, 0x1d4a00, 0x1d4a10, val].iter().enumerate() {
+				m.wr32(video + 0x44 + 4 * k as u32, *it);
+			}
+			m.wr32(hdr + 0x34, FRONT_VIDEO_HDR);
+			m.wr32(val, 0x1234);
+			m.wr32(val + 0x34, vtab);
+			m.wr32(val + 0x38, 1);
+			m.wr32(vtab, FRONT_VIDEO_ROW);
+			m
+		};
+		let code_at = |m: &mut Mem| TITLE_CODE.iter().enumerate().all(|(k, &(v, mask))| m.rd32(pc + 4 * k as u32) & mask == v);
+		let ids = |m: &mut Mem| -> Vec<u32> { (0..5).map(|i| m.rd32(TRECS + 12 * i)).collect() };
+		let dirp = scratch("title");
+		let mut s = St { opts: PcOptions::default(), path: Some(dirp.join("pc_options.txt")), last: None, glast: None, lang_seen: None, warned: false };
+		let item = 0x1d47e8;
+
+		let mut m = fresh(true);
+		assert!(code_at(&mut m));
+		assert_eq!(build_title(&mut m, pc, item, &mut s), Some(9));
+		assert_eq!((m.rd32(item + 0x34), m.rd32(BASE)), (TRECS, MAGIC));
+		assert_eq!(ids(&mut m), [0x34f2b, 0x34f21, 0x34f22, ID_GRAPHICS | 3 << 16, 0]);
+		assert_eq!((m.rd32(TRECS + 4), m.rd32(TRECS + 16), m.rd32(TRECS + 28), m.rd32(TRECS + 40)), (0x1d48c0, video, sound, TGPAGE));
+		// The page: Video's sequences with Sound's value panel, parent Options, id, current item and items ours.
+		let seqs: Vec<u32> = (0..6).map(|k| m.rd32(TGPAGE + 4 * k)).collect();
+		assert_eq!(seqs, [0, 1, 0xca, 0xd2, 0xc3, 0]);
+		assert_eq!((m.rd32(TGPAGE + 0x38), m.rd32(TGPAGE + 0x3c), m.rd32(TGPAGE + 0x40)), (opt, 0x31, TGVAL));
+		let items: Vec<u32> = (0..5).map(|k| m.rd32(TGPAGE + 0x44 + 4 * k)).collect();
+		assert_eq!(items, [TGHDR, 0x1d4a00, 0x1d4a10, TGVAL, 0]);
+		assert_eq!((m.rd32(TGHDR + 0x34), m.rd32(TGVAL), m.rd32(TGVAL + 0x34), m.rd32(TGVAL + 0x38)), (ID_GRAPHICS_HDR, 0x1234, TGTAB, 0));
+		let row = |m: &mut Mem, i: u32| -> Vec<u32> { (0..5).map(|k| m.rd32(TGTAB + 20 * i + 4 * k)).collect() };
+		assert_eq!(row(&mut m, 0), [ID_LIGHTING, LIGHT, ID_LIGHT_CLASSIC, ID_ENHANCED, 0]);
+		for (i, r) in ROWS.iter().enumerate() {
+			assert_eq!(row(&mut m, i as u32), [r[0], r[1], r[2], r[3], 0]);
+		}
+		assert_eq!(row(&mut m, 7), [0; 5]);
+		// Re-entry: the list's runtime word stays, the page is rebuilt (the cursor back on the first row).
+		m.wr32(TRECS + 8, 0x77);
+		m.wr32(TGVAL + 0x38, 3);
+		assert_eq!(build_title(&mut m, pc, item, &mut s), Some(9));
+		assert_eq!((m.rd32(TRECS + 8), m.rd32(TGVAL + 0x38)), (0x77, 0));
+
+		// USA (region word 0): Language, Sound, Graphics.
+		let mut m = fresh(false);
+		assert_eq!(build_title(&mut m, pc, item, &mut s), Some(8));
+		assert_eq!(ids(&mut m), [0x34f2b, 0x34f22, ID_GRAPHICS | 3 << 16, 0, 0]);
+		assert_eq!(m.rd32(TGPAGE + 0xc), 0xd2);
+
+		// Not the retail Video page (header text), a fourth row, or a row that is not a page: retail's list stays.
+		for bad in 0..3 {
+			let mut m = fresh(true);
+			match bad {
+				0 => m.wr32(hdr + 0x34, 0x4f3b),
+				1 => m.wr32(0x1d4790 + 36, 0x34f2c),
+				_ => m.wr32(0x1d4790, 0x14f2b),
+			}
+			m.wr32(item + 0x34, 0x1d4790);
+			assert_eq!(build_title(&mut m, pc, item, &mut s), None, "case {bad}");
+			assert_eq!((m.rd32(item + 0x34), m.rd32(TRECS)), (0x1d4790, 0), "case {bad}");
+		}
 		let _ = std::fs::remove_dir_all(&dirp);
 		GFX.store(pack_gfx([0, 1, 1, 0, 1, 1, 1]), Ordering::Relaxed);
 		FULLSCREEN.store(false, Ordering::Relaxed);

@@ -1198,6 +1198,23 @@ impl Gpu {
 		scene.shrub_bb_quads.extend(pass2);
 	}
 
+	/// [PC] icefx.rs, first thing in `draw`: once per level the ice marks on the tie and shrub vertices of the level's ice textures.
+	pub(super) fn tag_ice(&mut self) {
+		let level = self.level;
+		let Some(scene) = &mut self.scene else { return };
+		if scene.ice_level == level {
+			return;
+		}
+		scene.ice_level = level;
+		let (tk, sk) = super::icefx::ice_keys(level);
+		if super::icefx::retag(&mut scene.tie_verts, &scene.tie_vkey, tk, -3.0) {
+			self.queue.write_buffer(&scene.ties.vbuf, 0, bytemuck::cast_slice(&scene.tie_verts));
+		}
+		if super::icefx::retag(&mut scene.shrub_verts, &scene.shrub_vkey, sk, -2.0) {
+			self.queue.write_buffer(&scene.shrubs.vbuf, 0, bytemuck::cast_slice(&scene.shrub_verts));
+		}
+	}
+
 	/// REN-CULL-SHRUB-BBTEX: the billboard texture chain of each shrub class (key = class id), uploaded level by level with the
 	/// clamping sampler; the mip count - 1 goes to the shader as the top level.
 	pub(super) fn set_shrub_bb_textures(&mut self, chains: &HashMap<u32, Vec<Texture>>) {
@@ -1745,7 +1762,7 @@ impl Gpu {
 			ambient,
 			fog_colour,
 			fog,
-			eye: [cam.pos[0], cam.pos[1], cam.pos[2], 1.0],
+			eye: [cam.pos[0], cam.pos[1], cam.pos[2], super::icefx::flag(self.level)],
 			points: self.points,
 			dynl,
 			sun_vp: [[[0.0; 4]; 4]; 3],
@@ -2214,6 +2231,7 @@ impl Gpu {
 	}
 
 	pub(super) fn draw(&mut self, cam: &Camera, capture: bool) -> Option<crate::render::Image> {
+		self.tag_ice();
 		self.cull_shrubs(cam);
 		self.cull_ties();
 		self.cull_tfrags();
@@ -2226,6 +2244,9 @@ impl Gpu {
 		// hero's key light. Classic: the frame below is drawn exactly as before (the shadow uniforms stay zero).
 		let gfx = crate::retail::pcext::graphics();
 		let post_on = gfx.enhanced() && self.modern_ok;
+		// Moby draws: the material's TEX1 word (`moby_word`), so a moby texel takes the level the PS2 picks, only for the Classic
+		// picture; Lighting Enhanced keeps the sharper plain sample (user, 2026-10-16).
+		let moby_inst = move |d: &Draw| d.inst | if post_on { 0 } else { scene.slot_words.get(d.texture).copied().unwrap_or(0) };
 		let sun = match post_on && gfx.shadows && !scene.warp_shown && !self.ship_fight {
 			true => {
 				let rows = self.light_rows();
@@ -2238,10 +2259,16 @@ impl Gpu {
 		super::sunshadow::write_uniforms(&mut u, sun.as_ref());
 		self.queue.write_buffer(&self.ubuf, 0, bytemuck::bytes_of(&u));
 		// [PC] Graphics -> Water Enhanced (waterfx.rs): the level pass records its water draws for the water pass.
-		let water_on = post_on && gfx.water && !scene.warp_shown && !self.ship_fight && self.level != super::waterfx::LAVA_LEVEL;
+		let water_on = post_on && gfx.water && !scene.warp_shown && !self.ship_fight;
 		let mut wrec: Vec<super::waterfx::WaterDraw> = Vec::new();
 		let strips_water = water_on && super::waterfx::strips_are_water(self.level);
 		let strip_flows = if strips_water { self.waterfx.strip_flows(&self.strip_draws) } else { Vec::new() };
+		// [PC] Water Enhanced: a river drawn as effect quads (Batalia) goes to the water pass, grouped by its flow downstream.
+		let river: Vec<usize> = match super::waterfx::river_fx_tex(self.level).filter(|t| water_on && self.fx_tex.contains_key(t)) {
+			Some(t) => (0..self.fx_quads.len()).filter(|&i| !self.fx_quads[i].additive && crate::retail::efx_draw::plain_tex(self.fx_quads[i].tex) == t).collect(),
+			None => Vec::new(),
+		};
+		let river_groups = if river.is_empty() { Vec::new() } else { self.waterfx.quad_flows(&river.iter().map(|&i| (self.fx_quads[i].pos, self.fx_quads[i].uv)).collect::<Vec<_>>()) };
 		// [PC] Graphics -> Particles Enhanced (partfx.rs): the level pass keeps its MSAA colour for the particle pass.
 		let part_on = post_on && gfx.particles && !scene.warp_shown;
 		// [PC] Graphics -> Sun rays On (post.rs `fs_rays`): from the sun the level's sky paints (`sky_sun`); off in ship fights.
@@ -2458,12 +2485,16 @@ impl Gpu {
 				pass.set_vertex_buffer(0, batch.vbuf.slice(..));
 				pass.set_index_buffer(batch.ibuf.slice(..), wgpu::IndexFormat::Uint32);
 				let draws: &[Draw] = if volumes.is_some() && std::ptr::eq(batch, &scene.props) { &props_main } else { &batch.draws };
+				// The moby batches (marker, props, clipped props, debris) carry the material's TEX1 K word as the first instance
+				// (`moby_word`); the world and tfrag batches keep theirs (the tfrag pass reads its own word from it).
+				let moby_pass = matches!(bi, 3 | 4 | 5 | 6);
 				for d in draws {
 					if d.cull != 0 {
 						pass.set_pipeline(&cull[d.cull as usize - 1]);
 					}
 					pass.set_bind_group(1, &scene.bind_groups[d.texture], &[]);
-					pass.draw_indexed(d.start..d.start + d.count, 0, d.inst..d.inst + 1);
+					let inst = if moby_pass { moby_inst(d) } else { d.inst };
+					pass.draw_indexed(d.start..d.start + d.count, 0, inst..inst + 1);
 					if d.cull != 0 {
 						pass.set_pipeline(pipeline);
 					}
@@ -2485,8 +2516,9 @@ impl Gpu {
 			// (ice floes) then blend over the pool (GSPIX at 12_0582, decomp/notes/fx_census_late.md).
 			if !warp && !dskip("pools") {
 				let pool_tex = super::waterfx::pool_water_tex(self.level);
-				// Pools retail draws opaque (FIX 128 lerp) keep their look: no clear shallows.
-				let pool_slots: Vec<u32> = self.pool_draws.iter().map(|s| if !s.add && s.fix >= 120 { super::waterfx::OPAQUE_SLOT } else { 0 }).collect();
+				// Pools retail draws opaque (FIX 128 lerp) keep their look: no clear shallows. The abyss water gets the cold look, the ice
+				// floor (door puddles and the sheet around them) is held still.
+				let pool_slots: Vec<u32> = self.pool_draws.iter().map(|s| if super::waterfx::cold_pool(self.level, crate::retail::efx_draw::plain_tex(s.tex), s.add, s.fix) { super::waterfx::COLD_SLOT } else if let Some(k) = super::waterfx::frozen_pool(self.level, crate::retail::efx_draw::plain_tex(s.tex), s.add, s.fix) { k } else if !s.add && s.fix >= 120 { super::waterfx::OPAQUE_SLOT } else { 0 }).collect();
 				draw_strips(&self.device, &self.queue, &mut pass, &self.fx_tex, &self.pool_draws, &self.pool_pipeline, &self.pool_add_pipeline, (water_on && !pool_tex.is_empty()).then_some((&mut wrec, &pool_slots[..], pool_tex)));
 			}
 			// REN-CULL-SHRUB: the shrub meshes after the sky (they are depth tested, and the faded / billboard fragments write no Z
@@ -2594,7 +2626,8 @@ impl Gpu {
 				for d in &batch.draws {
 					pass.set_pipeline(if d.cull != 0 { &self.pipeline_cull[d.cull as usize - 1] } else { &self.pipeline });
 					pass.set_bind_group(1, &scene.bind_groups[d.texture], &[]);
-					pass.draw_indexed(d.start..d.start + d.count, 0, d.inst..d.inst + 1);
+					let inst = moby_inst(d);
+					pass.draw_indexed(d.start..d.start + d.count, 0, inst..inst + 1);
 				}
 			}
 			if let (Some(_), Some(batch)) = (volumes.filter(|_| !dskip("plate")), props) {
@@ -2612,7 +2645,8 @@ impl Gpu {
 				for d in &props_late {
 					pass.set_pipeline(if d.cull != 0 { &cull[d.cull as usize - 1] } else { pipeline });
 					pass.set_bind_group(1, &scene.bind_groups[d.texture], &[]);
-					pass.draw_indexed(d.start..d.start + d.count, 0, d.inst..d.inst + 1);
+					let inst = moby_inst(d);
+					pass.draw_indexed(d.start..d.start + d.count, 0, inst..inst + 1);
 				}
 			}
 			// Retail draws every moby texel through one ABE pass: texels below alpha 0x80 blend here (MOBY-GS).
@@ -2636,7 +2670,8 @@ impl Gpu {
 								pass.set_pipeline(&culled[2 * (d.cull as usize - 1) + k]);
 							}
 							pass.set_bind_group(1, &scene.bind_groups[d.texture], &[]);
-							pass.draw_indexed(d.start..d.start + d.count, 0, 0..1);
+							let inst = moby_inst(d);
+							pass.draw_indexed(d.start..d.start + d.count, 0, inst..inst + 1);
 							if d.cull != 0 {
 								pass.set_pipeline(pipeline);
 							}
@@ -2686,7 +2721,18 @@ impl Gpu {
 					pass.set_bind_group(1, bind, &[]);
 					pass.draw_indexed(0..idx.len() as u32, 0, 0..1);
 					if water_on {
-						wrec.push(super::waterfx::WaterDraw::new(vb, ib, idx.len() as u32, verts.iter().map(|v| v.pos)).kind("level ocean"));
+						wrec.push(super::waterfx::WaterDraw::new(vb, ib, idx.len() as u32, verts.iter().map(|v| v.pos)).kind("level ocean").liquid(self.level));
+					}
+				}
+			}
+			// [PC] Water Enhanced: a liquid drawn as level terrain (`waterfx::terrain_liquid`: Orxon's sludge) goes to the water pass
+			// too: this frame's drawn terrain faces of its texture.
+			if water_on && !warp {
+				if let Some((tex, slot)) = super::waterfx::terrain_liquid(self.level) {
+					let wrap = 3 << crate::shrubs::WRAP_SHIFT;
+					let slots: Vec<usize> = scene.tex_slots.iter().filter(|(k, _)| **k & !wrap == tex).map(|(_, &s)| s).collect();
+					for d in scene.tfrags.draws.iter().filter(|d| d.count > 0 && slots.contains(&d.texture)) {
+						wrec.push(super::waterfx::WaterDraw::range(scene.tfrags.vbuf.clone(), scene.tfrags.ibuf.clone(), d.start, d.count, slot).kind("terrain liquid"));
 					}
 				}
 			}
@@ -2709,7 +2755,7 @@ impl Gpu {
 						pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
 						pass.draw_indexed(0..b.idx.len() as u32, 0, 0..1);
 						if water_on {
-							wrec.push(super::waterfx::WaterDraw::new(vb, ib, b.idx.len() as u32, b.verts.iter().map(|v| v.pos)).kind("RAM ocean"));
+							wrec.push(super::waterfx::WaterDraw::new(vb, ib, b.idx.len() as u32, b.verts.iter().map(|v| v.pos)).kind("RAM ocean").liquid(self.level));
 						}
 					}
 					if !b.pidx.is_empty() {
@@ -2722,7 +2768,7 @@ impl Gpu {
 						pass.set_index_buffer(pib.slice(..), wgpu::IndexFormat::Uint32);
 						pass.draw_indexed(0..b.pidx.len() as u32, 0, 0..1);
 						if water_on {
-							wrec.push(super::waterfx::WaterDraw::new(pvb, pib, b.pidx.len() as u32, b.pverts.iter().map(|v| v.pos)).kind("RAM ocean"));
+							wrec.push(super::waterfx::WaterDraw::new(pvb, pib, b.pidx.len() as u32, b.pverts.iter().map(|v| v.pos)).kind("RAM ocean").liquid(self.level));
 						}
 					}
 				}
@@ -2782,6 +2828,18 @@ impl Gpu {
 					let ib = buffer(&self.device, "sea quad indices", bytemuck::cast_slice(&idx), wgpu::BufferUsages::INDEX);
 					self.queue.write_buffer(&ib, 0, bytemuck::cast_slice(&idx));
 					wrec.push(super::waterfx::WaterDraw::new(vb, ib, idx.len() as u32, sea.iter().map(|v| v.pos)).kind("sea fx quads"));
+				}
+				for (slot, group) in river_groups.iter().filter(|_| !fogged && !warp) {
+					{
+						let q = |i: usize| &self.fx_quads[river[i]];
+						let v: Vec<Vertex> = group.iter().flat_map(|&i| (0..4).map(move |k| (i, k))).map(|(i, k)| Vertex { pos: q(i).pos[k], uv: q(i).uv[k], normal: [0.0; 3], colour: q(i).colour[k], light: [0.0; 4] }).collect();
+						let idx: Vec<u32> = (0..v.len() as u32 / 4).flat_map(|q| [q * 4, q * 4 + 1, q * 4 + 2, q * 4, q * 4 + 2, q * 4 + 3]).collect();
+						let vb = buffer(&self.device, "river quad vertices", bytemuck::cast_slice(&v), wgpu::BufferUsages::VERTEX);
+						self.queue.write_buffer(&vb, 0, bytemuck::cast_slice(&v));
+						let ib = buffer(&self.device, "river quad indices", bytemuck::cast_slice(&idx), wgpu::BufferUsages::INDEX);
+						self.queue.write_buffer(&ib, 0, bytemuck::cast_slice(&idx));
+						wrec.push(super::waterfx::WaterDraw::new(vb, ib, idx.len() as u32, v.iter().map(|v| v.pos)).kind("river fx quads").flowing(*slot));
+					}
 				}
 			}
 			// BRIDGE-23: FIX-blend world strips (NOV-15.1b), triangles (i, i+1, i+2), one draw per strip.
@@ -2937,7 +2995,7 @@ impl Gpu {
 						if let (Some(h), Some(target)) = (mirror_h, self.waterfx.mirror_target()) {
 							self.draw_mirror(&mut enc, scene, &u, h, target, multi.as_ref().map(|m| &m.0));
 						}
-						// [PC] What lies under the water (mirror.rs `draw_bed`), for the clear shallows.
+						// [PC] What lies under the water (mirror.rs `draw_bed`), for the clear shallows and the lava's shore glow.
 						if let Some(target) = self.waterfx.bed_target() {
 							self.draw_bed(&mut enc, scene, &u, target, multi.as_ref().map(|m| &m.0));
 						}
@@ -4193,6 +4251,36 @@ pub(super) struct SceneCtx {
 	pub(super) paced: bool,
 }
 
+/// The authored mip chains of the level's moby textures by texture key, registered by the level loader next to `all_textures`
+/// (`Level::mip_chains`; the same 16-byte table entry layout as terrain, ties and shrubs).
+static MOBY_CHAINS: std::sync::Mutex<Option<std::sync::Arc<HashMap<u32, Vec<Texture>>>>> = std::sync::Mutex::new(None);
+
+pub(super) fn register_moby_chains(chains: HashMap<u32, Vec<Texture>>) {
+	*MOBY_CHAINS.lock().unwrap() = Some(std::sync::Arc::new(chains));
+}
+
+/// The authored chain of a moby draw slot (key with a TEX1 K code), only when its level 0 is exactly the texture the draw uses
+/// (the warp actors' texture keys 0..2 are other textures than the level's).
+fn moby_chain(slot_key: u32, t: Option<&Texture>) -> Option<std::sync::Arc<Vec<Texture>>> {
+	let t = t?;
+	if crate::mobies::key_k(slot_key).is_none() || (slot_key & crate::mobies::KEY_MASK) >> 16 != 1 {
+		return None;
+	}
+	let all = MOBY_CHAINS.lock().unwrap().clone()?;
+	let chain = all.get(&(slot_key & crate::mobies::KEY_MASK))?;
+	chain.first().filter(|c| c.w == t.w && c.h == t.h && c.rgba == t.rgba)?;
+	Some(std::sync::Arc::new(chain.iter().map(|m| Texture { w: m.w, h: m.h, rgba: m.rgba.clone() }).collect()))
+}
+
+/// The first-instance word of a moby draw slot (`vs` / `vs_props` `moby_kmx`): TEX1 K (bits 2..14) and the top level of the
+/// authored chain (bits 14..16); 0 when the material has no K or its texture no authored chain (plain sample).
+fn moby_word(slot_key: u32, t: Option<&Texture>) -> u32 {
+	match (crate::mobies::key_k(slot_key), moby_chain(slot_key, t)) {
+		(Some(k), Some(chain)) => (k & 0xfff) << 2 | (chain.len() as u32 - 1) << 14,
+		_ => 0,
+	}
+}
+
 impl SceneCtx {
 	/// `queue.write_buffer`, but on the level-prefetch thread (`paced`) in 4 MB pieces with a 1 ms pause after each:
 	/// wgpu copies a write into its staging memory while holding the queue's pending-writes lock, so one 100 MB
@@ -4300,12 +4388,20 @@ impl SceneCtx {
 			let cull = ((tex >> 24) & 3) as u8;
 			// Key bits 26..28 are the CLAMP wrap of the draw (`mobies::SLOT_MASK`): the slot's sampler clamps u, v or both.
 			let wrap = (tex >> crate::shrubs::WRAP_SHIFT) & 3;
+			let moby = (tex & crate::mobies::KEY_MASK) >> 16 == 1;
+			let kcode = if moby { tex >> crate::mobies::K_CODE_SHIFT } else { 0 };
+			let slot_key = tex & (crate::mobies::KEY_MASK | 3 << crate::shrubs::WRAP_SHIFT) | kcode << crate::mobies::K_CODE_SHIFT;
 			let tex = tex & crate::mobies::KEY_MASK;
-			let slot_key = tex | wrap << crate::shrubs::WRAP_SHIFT;
 			let texture = match slots.get(&slot_key) {
 				Some(&i) => i,
 				None => {
-					bind.push(if wrap != 0 { self.upload(textures.get(&tex), &self.wrap_samplers[wrap as usize - 1]) } else { self.upload_texture(textures.get(&tex)) });
+					// A moby material with a TEX1 K reads the authored mip chain of its texture at the level the GS picks (`moby_word`).
+					let sampler = if wrap != 0 { &self.wrap_samplers[wrap as usize - 1] } else { &self.sampler };
+					bind.push(match moby_chain(slot_key, textures.get(&tex)).filter(|_| kcode != 0) {
+						Some(chain) => self.upload_chain(&chain, sampler),
+						None if wrap != 0 => self.upload(textures.get(&tex), sampler),
+						None => self.upload_texture(textures.get(&tex)),
+					});
 					slots.insert(slot_key, bind.len() - 1);
 					bind.len() - 1
 				}
@@ -4521,6 +4617,7 @@ impl SceneCtx {
 		let shrub_refs: Vec<&Mesh> = shrub_set.iter().map(|s| &s.mesh).collect();
 		let (shrub_batch, slo, shi, shrub_verts, shrub_ranges) = self.batch_instances(&shrub_refs, textures, &mut bind, &mut slots, None, shrub_chains);
 		crate::loadlog::say(|| "gpu: shrub batch".into());
+		let shrub_vkey = super::icefx::vertex_keys(shrub_refs.iter().copied().zip(shrub_ranges.iter().map(|r| r.1.start)), shrub_verts.len());
 		for j in 0..3 {
 			lo[j] = lo[j].min(slo[j]);
 			hi[j] = hi[j].max(shi[j]);
@@ -4532,6 +4629,7 @@ impl SceneCtx {
 		let tie_base: Vec<[f32; 3]> = tie_verts.iter().map(|v| v.pos).collect();
 		// The LOD 1 / 2 meshes carry no `Lit`, so they take LOD 0's fog class tag and instance centre here.
 		let mut tie_verts = tie_verts;
+		let tie_vkey = super::icefx::vertex_keys(tie_refs.iter().copied().zip(tie_vr.iter().map(|r| r.1.start)), tie_verts.len());
 		for r in &tie_vranges {
 			if let Some(l) = tie_verts.get(r[0].start).map(|v| v.light) {
 				for lod in 1..3 {
@@ -4679,6 +4777,11 @@ impl SceneCtx {
 		let views = self.tex_log.borrow_mut().take();
 		crate::loadlog::say(|| "gpu: previews done".into());
 		let tex_array = self.bindless_layout.as_ref().zip(views.as_ref()).and_then(|(l, v)| super::bindless::array_group(l, &self.device, &bind, v, &self.sampler, &self.wrap_samplers));
-		Some(Scene { previews, previews_gold, preview_models, world, world_verts, lit, ties, tie_draws, tie_ranges, tie_cull: tie_set.iter().map(|t| t.cull).collect(), occ_tick: occ.clone(), occ, tfrags, tfrag_set, tfrag_draws, tfrag_ranges, tfrag_vranges, tfrag_verts, tfrag_cols, tfrag_b, tie_verts, tie_base, tie_morph, tie_vranges, tie_fat, tie_q: vec![[0.0; 3]; tie_set.len()], tie_qdep, tie_full: vec![[false; 3]; tie_set.len()], tie_slots, tie_tri, tie_tris, tie_cols, tie_stale, tie_first, shrubs: shrub_batch, shrub_ranges, shrub_cull: shrub_set.iter().map(|s| s.cull).collect(), shrub_order: shrub_order(shrub_set), shrub_bb: shrub_set.iter().map(|s| s.bb).collect(), shrub_verts, shrub_first, shrub_a: vec![0; shrub_set.len()], shrub_opaque: Vec::new(), shrub_faded: Vec::new(), shrub_bb_quads: Vec::new(), shrub_bb_tex: HashMap::new(), sky, sky_shells, sky_sprites, marker, marker_verts: Vec::new(), marker_model, marker_tint: hero_tint.map(|(c, s, _)| (c, s)), marker_hero_len: hero_tint.map_or(0, |t| t.2), marker_shown: false, marker_alpha: false, props_verts: if self.gpu_posing { Vec::new() } else { props_model.clone() }, props_hidden: vec![false; ranges.len()], props_key: vec![None; ranges.len()], props, props_model, props_sj, props_rad, props_inst: Vec::new(), props_pose: Vec::new(), props_ranges: ranges, props_shown: false, props_alpha: false, props_drawn: Vec::new(), props_vis: Vec::new(), slot_runs, props_order: (0..props_class.len()).collect(), props_class, props_late: Vec::new(), prop_faces, class_faces, clip_masked: Vec::new(), clip_batch, clip_cap, clip_view: None, clip_queue: Vec::new(), marker_faces, marker_masked: Vec::new(), debris_model: HashMap::new(), debris: None, debris_cap: (0, 0), warp_model: HashMap::new(), warp_batch: None, warp_shown: false, prompt, prompt_slot, portrait, portrait_model, clear_tex: clear_slots(&slots, bind.len(), textures), bind_groups: bind, tex_slots: slots, tex_array, clear, centre, radius })
+		// The first-instance words of the moby draws, by `bind_groups` index (`moby_word`).
+		let mut slot_words = vec![0u32; bind.len()];
+		for (&key, &i) in &slots {
+			slot_words[i] = moby_word(key, textures.get(&(key & crate::mobies::KEY_MASK)));
+		}
+		Some(Scene { previews, previews_gold, preview_models, world, world_verts, lit, ties, tie_draws, tie_ranges, tie_cull: tie_set.iter().map(|t| t.cull).collect(), occ_tick: occ.clone(), occ, tfrags, tfrag_set, tfrag_draws, tfrag_ranges, tfrag_vranges, tfrag_verts, tfrag_cols, tfrag_b, tie_verts, tie_base, tie_morph, tie_vranges, tie_fat, tie_q: vec![[0.0; 3]; tie_set.len()], tie_qdep, tie_full: vec![[false; 3]; tie_set.len()], tie_slots, tie_tri, tie_tris, tie_cols, tie_stale, tie_first, shrubs: shrub_batch, shrub_ranges, shrub_cull: shrub_set.iter().map(|s| s.cull).collect(), shrub_order: shrub_order(shrub_set), shrub_bb: shrub_set.iter().map(|s| s.bb).collect(), shrub_verts, shrub_first, tie_vkey, shrub_vkey, ice_level: usize::MAX, shrub_a: vec![0; shrub_set.len()], shrub_opaque: Vec::new(), shrub_faded: Vec::new(), shrub_bb_quads: Vec::new(), shrub_bb_tex: HashMap::new(), sky, sky_shells, sky_sprites, marker, marker_verts: Vec::new(), marker_model, marker_tint: hero_tint.map(|(c, s, _)| (c, s)), marker_hero_len: hero_tint.map_or(0, |t| t.2), marker_shown: false, marker_alpha: false, props_verts: if self.gpu_posing { Vec::new() } else { props_model.clone() }, props_hidden: vec![false; ranges.len()], props_key: vec![None; ranges.len()], props, props_model, props_sj, props_rad, props_inst: Vec::new(), props_pose: Vec::new(), props_ranges: ranges, props_shown: false, props_alpha: false, props_drawn: Vec::new(), props_vis: Vec::new(), slot_runs, props_order: (0..props_class.len()).collect(), props_class, props_late: Vec::new(), prop_faces, class_faces, clip_masked: Vec::new(), clip_batch, clip_cap, clip_view: None, clip_queue: Vec::new(), marker_faces, marker_masked: Vec::new(), debris_model: HashMap::new(), debris: None, debris_cap: (0, 0), warp_model: HashMap::new(), warp_batch: None, warp_shown: false, prompt, prompt_slot, portrait, portrait_model, clear_tex: clear_slots(&slots, bind.len(), textures), bind_groups: bind, tex_slots: slots, slot_words, tex_array, clear, centre, radius })
 	}
 }

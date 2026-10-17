@@ -263,7 +263,6 @@ fn packet_strips(index: &[u8], ad: Option<&[u8]>, texture: &mut (i32, u32)) -> R
 			let (kk, mmin, wms, wmt) = (u32_at(ad, k * 0x40)? as u64, u32_at(ad, k * 0x40 + 4)? as u64, u32_at(ad, k * 0x40 + 0x10)?, u32_at(ad, k * 0x40 + 0x14)?);
 			if crate::viewer::gs_state::enabled() && slot >= 0 {
 				crate::viewer::gs_state::guard_world("moby", crate::viewer::gs_state::TEST_TFRAG, (kk & 0xfff) << 32 | mmin << 6 | 0x20, wms as u64 | (wmt as u64) << 2);
-				crate::viewer::gs_state::note("moby", "tex1.mip_k_unapplied", (mmin as u32) << 16 | (kk as u32 & 0xfff));
 			}
 			if slot < 0 {
 				// Flat, chrome and glass draws patch CLAMP_1 = 5 (both axes clamped); the flat texture is uniform, so its key keeps wrap 0.
@@ -273,7 +272,10 @@ fn packet_strips(index: &[u8], ad: Option<&[u8]>, texture: &mut (i32, u32)) -> R
 			if wms > 1 || wmt > 1 {
 				return Err("unsupported moby CLAMP region mode".into());
 			}
-			textures.push((slot, wms | wmt << 1));
+			// TEX1 K rides in the key above the wrap (bits 28..32 as an index into `MIP_KS`); only the LINEAR_MIPMAP_NEAREST
+			// materials (MMIN 4, every moby block on the disc) have one.
+			let kcode = if mmin == 4 { intern_k(kk as u32 & 0xfff) } else { 0 };
+			textures.push((slot, wms | wmt << 1 | kcode << 2));
 		}
 	}
 	let indices: Vec<i8> = index[4..].iter().map(|&b| b as i8).collect();
@@ -616,7 +618,48 @@ pub const CULL_FRONT: u32 = 1 << 25;
 /// Mask that strips the cull bits from a face texture key (the CLAMP wrap bits 26..28 go too, `shrubs::WRAP_SHIFT`).
 pub const KEY_MASK: u32 = 0x00ff_ffff;
 /// Mask of the key a draw slot is looked up by: the texture plus its CLAMP wrap (a texture drawn with two wraps has two slots).
-pub const SLOT_MASK: u32 = KEY_MASK | 3 << crate::shrubs::WRAP_SHIFT;
+pub const SLOT_MASK: u32 = KEY_MASK | 3 << crate::shrubs::WRAP_SHIFT | 0xf << K_CODE_SHIFT;
+/// Moby face keys carry the material's GS TEX1 K as a code in bits 28..32 (0 = none): an index + 1 into the table of the distinct K values
+/// of the loaded level (`with_ks`, raw signed 12 bits, 1/16 mip; at most 15 per level). A texture drawn with
+/// two K values has two draw slots. `reset_k_table` starts a level's table; the codes of the previous level are void after it.
+pub const K_CODE_SHIFT: u32 = 28;
+#[cfg(not(test))]
+static MIP_KS: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+#[cfg(test)]
+thread_local!(static MIP_KS: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) });
+
+#[cfg(not(test))]
+fn with_ks<T>(f: impl FnOnce(&mut Vec<u32>) -> T) -> T {
+	f(&mut MIP_KS.lock().unwrap())
+}
+/// Tests run on their own threads: each gets its own table, so parallel tests never mix their K codes.
+#[cfg(test)]
+fn with_ks<T>(f: impl FnOnce(&mut Vec<u32>) -> T) -> T {
+	MIP_KS.with(|t| f(&mut t.borrow_mut()))
+}
+
+/// Empties the K table: call before `moby_classes` of a level that replaces the shown one.
+pub fn reset_k_table() {
+	with_ks(|t| t.clear());
+}
+
+/// The key code of a raw 12-bit TEX1 K (interned; 0 when the table of 15 is full, which draws that material with the plain sample).
+fn intern_k(k: u32) -> u32 {
+	with_ks(|t| match t.iter().position(|&x| x == k) {
+		Some(i) => i as u32 + 1,
+		None if t.len() < 15 => {
+			t.push(k);
+			t.len() as u32
+		}
+		None => 0,
+	})
+}
+
+/// The raw 12-bit TEX1 K of a moby face key (None when the key has no code).
+pub fn key_k(key: u32) -> Option<u32> {
+	let code = (key >> K_CODE_SHIFT) as usize;
+	(code != 0).then(|| with_ks(|t| t.get(code - 1).copied())).flatten()
+}
 
 /// The face-key cull bits of a packet's cull mode byte (254 and every other value cull nothing).
 pub fn cull_bits(mode: u8) -> u32 {
@@ -847,6 +890,41 @@ mod tests {
 			}
 		}
 		eprintln!("moby wrap census: {classes_n} classes, {faces} faces, wrap 0/1/2/3 = {clamped:?}");
+	}
+
+	/// Every moby material on the disc has a TEX1 K (MMIN 4): each textured face key carries a K code, the distinct K values fit the
+	/// table of 15, and a texture drawn with two K values just gets two draw slots. Prints the census (`--nocapture`).
+	#[test]
+	fn moby_k_census() {
+		let (mut disc, levels) = open();
+		let (mut faces, mut without, mut most) = (0usize, 0usize, 0usize);
+		let (mut two_k, mut all_ks) = (0usize, std::collections::BTreeSet::new());
+		for l in levels.iter().take(20) {
+			let Ok(level) = Level::load(&mut disc, l) else { continue };
+			reset_k_table();
+			let classes = moby_classes(&level).expect("moby classes decode");
+			let mut per_tex: HashMap<u32, std::collections::BTreeSet<u32>> = HashMap::new();
+			for c in classes.values() {
+				for f in &c.mesh.faces {
+					if f.0 & KEY_MASK == texture_key(TextureGroup::Moby, FLAT_SLOT) || (f.0 & KEY_MASK) >> 16 != 1 {
+						continue;
+					}
+					faces += 1;
+					match key_k(f.0) {
+						Some(k) => {
+							per_tex.entry(f.0 & KEY_MASK).or_default().insert(k);
+							all_ks.insert(k);
+						}
+						None => without += 1,
+					}
+				}
+			}
+			two_k += per_tex.values().filter(|v| v.len() > 1).count();
+			most = most.max(with_ks(|t| t.len()));
+		}
+		let ks: Vec<f32> = all_ks.iter().map(|&k| (if k >= 2048 { k as i32 - 4096 } else { k as i32 }) as f32 / 16.0).collect();
+		eprintln!("moby K census: {faces} textured faces, {without} without K, {two_k} textures with two K values, most K per level {most}, {} distinct K overall {ks:?}", ks.len());
+		assert!(without == 0 && most <= 15);
 	}
 
 	/// Packets with cull mode 2 give class 705 (fan) faces the back-cull bit; jets 660/688 are mode 254.

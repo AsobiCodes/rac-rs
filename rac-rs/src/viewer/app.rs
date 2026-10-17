@@ -1145,6 +1145,7 @@ crate::loadlog::say(|| "host: terrain/shrub mips done".into());
 			let mut colliders = HashMap::new();
 			// NOV-35b: the classes with metal (env-mapped) packets, drawn by the per-frame metal batch (BRIDGE-45).
 			let mut metal_classes = HashMap::new();
+			mobies::reset_k_table();
 			match mobies::moby_classes(&l).and_then(|c| Ok((gameplay::moby_instances(&l)?, c))) {
 				Ok((all, mut classes)) => {
 					colliders = classes.iter().filter_map(|(&id, c)| c.collision.clone().map(|k| (id, k))).collect();
@@ -1780,6 +1781,13 @@ crate::loadlog::say(|| "host: ship bundle done".into());
 				None
 			});
 			let mut textures = l.all_textures()?;
+			// The moby materials read the authored mip chain of their texture at the level the GS picks (gpu.rs `moby_word`).
+			if !front {
+				match l.mip_chains(crate::level::TextureGroup::Moby) {
+					Ok(chains) => super::gpu::register_moby_chains(chains.into_iter().enumerate().filter_map(|(i, c)| Some((crate::level::texture_key(crate::level::TextureGroup::Moby, i as u32), c?))).collect()),
+					Err(e) => eprintln!("moby mip chains: {e}"),
+				}
+			}
 			// NOV-33.1: untextured moby faces draw with the retail 8 x 8 grey texel 0x80808080.
 			textures.insert(crate::level::texture_key(crate::level::TextureGroup::Moby, crate::mobies::FLAT_SLOT), Texture { w: 8, h: 8, rgba: vec![[128, 128, 128, 255]; 64] });
 crate::loadlog::say(|| "host: (rest) before metal textures".into());
@@ -2174,7 +2182,7 @@ crate::loadlog::say(|| "host: t world/game dropped".into());
 					Some([x, y, z, yaw, pitch]) => Camera { pos: [x, y, z], yaw: yaw.to_radians(), pitch: pitch.to_radians(), tan_half: TAN_HALF_FOV, up: [0.0, 0.0, 1.0] },
 					None => Camera { pos: [s.centre[0] - s.radius * 0.6, s.centre[1] - s.radius * 0.6, s.centre[2] + s.radius * 0.5], yaw: 45f32.to_radians(), pitch: -30f32.to_radians(), tan_half: TAN_HALF_FOV, up: [0.0, 0.0, 1.0] },
 				};
-				gpu.window.set_title(&format!("rac-rs - {} ({})", toc::LEVEL_NAMES[self.level], self.level));
+				gpu.window.set_title(&format!("{} - {} ({})", crate::app_name(), toc::LEVEL_NAMES[self.level], self.level));
 crate::loadlog::say(|| "host: t title".into());
 				if !front {
 					let lang = self.settings.lang as usize;
@@ -2190,8 +2198,8 @@ crate::loadlog::say(|| "host: t ui_text".into());
 				// [PC] The parsed level data the scene and game were built from is freed off the main thread (40+ ms at a switch).
 				drop_later((meshes, tie_set, shrub_set, textures, prop_meshes, previews, terrain_chains, bb_tex, fx_textures, art_textures, sky));
 				if front {
-					gpu.window.set_title("rac-rs");
-					self.title = "rac-rs".into();
+					gpu.window.set_title(crate::app_name());
+					self.title = crate::app_name().into();
 					let text = iso::Disc::open(std::path::Path::new(&self.iso_path))
 						.map_err(|e| e.to_string())
 						.and_then(|mut d| frontend::Text::load(&mut d, TEXT_SLOT[lang]))

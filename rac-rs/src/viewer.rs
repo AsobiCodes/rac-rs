@@ -38,6 +38,7 @@ mod shadowvol;
 mod post;
 mod sunshadow;
 mod waterfx;
+mod icefx;
 mod mirror;
 mod partfx;
 mod app;
@@ -236,7 +237,18 @@ fn fog_class(l: vec4<f32>, w: f32) -> f32 {
 @vertex fn vs(@location(0) p: vec3<f32>, @location(1) uv: vec2<f32>, @location(2) n: vec3<f32>, @location(3) c: vec4<f32>, @location(4) l: vec4<f32>, @builtin(instance_index) inst: u32) -> VOut {
 	var o = vs_main(p, uv, n, c, l);
 	o.kmx = tie_kmx(l, inst, o.kmx);
+	if (c.a >= 0.0) { o.kmx = moby_kmx(inst); }
 	return o;
+}
+
+// Moby draws (vertex colour alpha >= 0): the first-instance word of the draw (`slot_words` in gpu.rs) carries the material's
+// TEX1 K (bits 2..14, raw signed 12 bits, 1/16 mip) and the top level of the texture's authored chain (bits 14..16), as for a tie.
+// No word (0) gives MXL -1: the fragment takes the plain sample.
+fn moby_kmx(w: u32) -> vec2<f32> {
+	if ((w & 0xfffcu) == 0u) { return vec2<f32>(0.0, -1.0); }
+	var k = i32((w >> 2u) & 0xfffu);
+	if (k >= 2048) { k = k - 4096; }
+	return vec2<f32>(f32(k) / 16.0, f32((w >> 14u) & 3u));
 }
 
 // Tie draws (vertex light w = -3): the first instance's material word (`shrub_inst`) carries the material's GS CLAMP wrap (bits
@@ -284,7 +296,13 @@ struct PropInst { m0: vec4<f32>, m1: vec4<f32>, m2: vec4<f32>, m3: vec4<f32>, li
 @group(2) @binding(0) var<storage, read> insts: array<PropInst>;
 @group(2) @binding(1) var<storage, read> poses: array<f32>;
 
-@vertex fn vs_props(@location(0) p: vec3<f32>, @location(1) uv: vec2<f32>, @location(2) n: vec3<f32>, @location(3) c: vec4<f32>, @location(4) l: vec4<f32>, @location(5) sj: vec2<u32>) -> VOut {
+@vertex fn vs_props(@location(0) p: vec3<f32>, @location(1) uv: vec2<f32>, @location(2) n: vec3<f32>, @location(3) c: vec4<f32>, @location(4) l: vec4<f32>, @location(5) sj: vec2<u32>, @builtin(instance_index) inst: u32) -> VOut {
+	var o = vs_props_pose(p, uv, n, c, l, sj);
+	if (o.c.a >= 0.0) { o.kmx = moby_kmx(inst); }
+	return o;
+}
+
+fn vs_props_pose(p: vec3<f32>, uv: vec2<f32>, n: vec3<f32>, c: vec4<f32>, l: vec4<f32>, sj: vec2<u32>) -> VOut {
 	let s = insts[sj.x];
 	let j = sj.y;
 	let kind = s.k.x & 0xffu;
@@ -481,8 +499,50 @@ fn world_texel(i: VOut) -> vec4<f32> {
 	return textureSampleGrad(tex, samp, i.uv, dx, dy);
 }
 
+// [PC] icefx.rs: Hoven's ice (ties and shrubs whose class tag carries the ice mark, w -3.25 / -2.25) while its gate is on (eye w
+// = 1 + the look, `icefx::ICE_LOOK`): look 1 a cold gloss that follows the camera and a fresnel
+// rim, 2 also light through the thin edges and sparkles, 3 all of it stronger. It only adds light: the retail texel x baked
+// colour stays the base.
+const ICE_RIM_POW: f32 = 3.0;
+const ICE_GLOSS_POW: f32 = 40.0;
+const ICE_GLOSS: f32 = 0.35;
+const ICE_RIM: f32 = 0.18;
+const ICE_THROUGH: f32 = 0.35;
+const ICE_SPARK: f32 = 1.5;
+const ICE_GRAIN: f32 = 4.0;
+const ICE_TINT: vec3<f32> = vec3<f32>(0.80, 0.92, 1.0);
+fn ice_look(i: VOut, rgb: vec3<f32>) -> vec3<f32> {
+	let t = i.l.w;
+	if (u.eye.w < 1.5 || !((t < -2.2 && t > -2.3) || (t < -3.2 && t > -3.3))) { return rgb; }
+	let look = u.eye.w - 1.0;
+	let k = select(1.0, 1.8, look > 2.5);
+	let more = select(0.0, k, look > 1.5);
+	let ln = length(i.n);
+	if (ln < 1e-4) { return rgb; }
+	let v = normalize(u.eye.xyz - i.w);
+	var n = i.n / ln;
+	if (dot(n, v) < 0.0) { n = -n; }
+	let ndv = clamp(dot(n, v), 0.0, 1.0);
+	let rim = pow(1.0 - ndv, ICE_RIM_POW);
+	// The gloss light sits a little above the camera, so the highlight follows the view.
+	let lc = normalize(v + vec3<f32>(0.0, 0.0, 0.6));
+	let gloss = pow(max(dot(n, normalize(lc + v)), 0.0), ICE_GLOSS_POW);
+	// Thin edges: the rim, brighter where the level's key light shines from behind the ice.
+	let kl = u.lights[0][1].xyz;
+	let back = rim * (0.4 + 0.6 * clamp(dot(-v, kl / max(length(kl), 1e-4)), 0.0, 1.0));
+	// Sparkles: a hashed facet per world cell (1 / ICE_GRAIN) that catches the camera light.
+	let cell = floor(i.w * ICE_GRAIN);
+	let h = fract(sin(vec3<f32>(dot(cell, vec3<f32>(127.1, 311.7, 74.7)), dot(cell, vec3<f32>(269.5, 183.3, 246.1)), dot(cell, vec3<f32>(113.5, 271.9, 124.6)))) * 43758.5453);
+	let fnrm = normalize(n + (h - 0.5) * 1.2);
+	let spark = pow(max(dot(reflect(-v, fnrm), lc), 0.0), 300.0) * step(0.8, h.x);
+	let lum = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+	let amt = clamp(lum * 1.6, 0.35, 1.0);
+	return rgb * (1.0 + ICE_THROUGH * back * more) + ICE_TINT * (ICE_GLOSS * gloss * k + ICE_RIM * rim * k + ICE_SPARK * spark * more) * amt;
+}
+
 @fragment fn fs(i: VOut) -> @location(0) vec4<f32> {
-	let c = world_texel(i);
+	var c = world_texel(i);
+	if (i.c.a >= 0.0 && i.kmx.y >= 0.0) { c = textureSampleLevel(tex, samp, i.uv, gs_level(i)); }
 	if (c.a < 0.25) { discard; }
 	// Lit moby texels below alpha 0x80 are blended in the moby pass (fs_moby_a / fs_moby_b), not drawn opaque here.
 	if (i.c.a >= 0.0 && floor(c.a * 128.0 + 0.5) < 128.0) { discard; }
@@ -496,7 +556,7 @@ fn world_texel(i: VOut) -> vec4<f32> {
 		var f = clamp(u.fog.z + (d - u.fog.x) * (u.fog.w - u.fog.z) / max(u.fog.y - u.fog.x, 0.001), min(u.fog.z, u.fog.w), 255.0) / 255.0;
 		if (i.fogf >= 0.0) { f = i.fogf / 255.0; }
 		let shade = sun_baked(min(i.c.rgb, vec3<f32>(255.0 / 128.0)), i.w);
-		return vec4<f32>(mix(u.fog_colour.rgb, c.rgb * shade, f), 1.0);
+		return vec4<f32>(mix(u.fog_colour.rgb, ice_look(i, c.rgb * shade), f), 1.0);
 	}
 	let rgb = c.rgb * i.c.rgb * sun_lit(i);
 	// GS fog: coefficient linear in distance, 255 = unfogged (FUN_001f7900).
@@ -514,7 +574,7 @@ fn shrub_rgba(i: VOut, c: vec4<f32>) -> vec4<f32> {
 	let shade = sun_baked(min(i.c.rgb, vec3<f32>(255.0 / 128.0)), i.w);
 	let a = round((-2.0 - i.c.a) * 256.0);
 	let ta = floor(c.a * 128.0 + 0.5);
-	return vec4<f32>(mix(u.fog_colour.rgb, c.rgb * shade, f), floor(ta * a / 128.0) / 128.0);
+	return vec4<f32>(mix(u.fog_colour.rgb, ice_look(i, c.rgb * shade), f), floor(ta * a / 128.0) / 128.0);
 }
 
 // Billboard texel: the GS picks the mip from LOD = log2(32 vz) + K (Q = 1 / (32 vz)); K and the top level ride in the vertex normal.
@@ -567,7 +627,7 @@ fn tie_rgba(i: VOut) -> vec4<f32> {
 	if (i.fogf >= 0.0) { f = i.fogf / 255.0; }
 	// [PC] Lighting Enhanced: the sun shadow / AO term of the other baked paths (`sun_baked`; identity in Classic).
 	let shade = sun_baked(min(i.c.rgb, vec3<f32>(255.0 / 128.0)), i.w);
-	return vec4<f32>(mix(u.fog_colour.rgb, c.rgb * shade, f), min(floor(c.a * 128.0 + 0.5), 128.0) / 128.0);
+	return vec4<f32>(mix(u.fog_colour.rgb, ice_look(i, c.rgb * shade), f), min(floor(c.a * 128.0 + 0.5), 128.0) / 128.0);
 }
 
 @fragment fn fs_tie(i: VOut) -> @location(0) vec4<f32> {
@@ -622,8 +682,15 @@ fn moby_alpha(i: VOut) -> f32 {
 	return 128.0 - round(abs(i.c.a - floor(i.c.a + 0.5)) * 512.0);
 }
 
-fn moby_rgba(i: VOut) -> vec4<f32> {
+// A moby texel: the plain sample, or the level the material's TEX1 picks (`gs_level`; i.kmx.y >= 0 only with a draw word).
+fn moby_texel(i: VOut) -> vec4<f32> {
 	let c = textureSample(tex, samp, i.uv);
+	if (i.c.a >= 0.0 && i.kmx.y >= 0.0) { return textureSampleLevel(tex, samp, i.uv, gs_level(i)); }
+	return c;
+}
+
+fn moby_rgba(i: VOut) -> vec4<f32> {
+	let c = moby_texel(i);
 	var rgb = c.rgb * i.c.rgb * sun_lit(i);
 	if (i.c.a < -1.5) {
 		// Tinted tail packet: constant unlit colour, same alpha as the lit packets.
@@ -636,7 +703,7 @@ fn moby_rgba(i: VOut) -> vec4<f32> {
 }
 
 @fragment fn fs_moby_a(i: VOut) -> @location(0) vec4<f32> {
-	let ta = floor(textureSample(tex, samp, i.uv).a * 128.0 + 0.5);
+	let ta = floor(moby_texel(i).a * 128.0 + 0.5);
 	if (moby_alpha(i) == 128.0 && (ta >= 128.0 || i.c.a < 0.0)) { discard; }
 	let r = moby_rgba(i);
 	if (r.a * 128.0 < 96.0) { discard; }
@@ -644,7 +711,7 @@ fn moby_rgba(i: VOut) -> vec4<f32> {
 }
 
 @fragment fn fs_moby_b(i: VOut) -> @location(0) vec4<f32> {
-	let ta = floor(textureSample(tex, samp, i.uv).a * 128.0 + 0.5);
+	let ta = floor(moby_texel(i).a * 128.0 + 0.5);
 	if (moby_alpha(i) == 128.0 && (ta >= 128.0 || i.c.a < 0.0)) { discard; }
 	let r = moby_rgba(i);
 	if (r.a * 128.0 >= 96.0) { discard; }
@@ -988,6 +1055,10 @@ struct Scene {
 	shrub_bb: Vec<Option<shrubs::ShrubBillboard>>,
 	shrub_verts: Vec<Vertex>,
 	shrub_first: usize,
+	/// [PC] icefx.rs: per tie / shrub vertex the texture key of a face using it, and the level whose ice marks the vertices carry.
+	tie_vkey: Vec<u32>,
+	shrub_vkey: Vec<u32>,
+	ice_level: usize,
 	shrub_a: Vec<u8>,
 	shrub_opaque: Vec<usize>,
 	shrub_faded: Vec<usize>,
@@ -1100,6 +1171,8 @@ struct Scene {
 	/// [PC] Dynamic shadows: per texture slot, whether most of its texels blend (PS2 alpha below 0x60, `fs_moby_b`): see-through
 	/// effect shells (blast domes, glows) cast no sun shadow (sunshadow.rs).
 	clear_tex: Vec<bool>,
+	/// `bind_groups` index -> the first-instance word of a moby draw with that slot (TEX1 K and chain top level; 0 = plain sample).
+	slot_words: Vec<u32>,
 	/// [PC] perf round 3: `bind_groups` as one texture array (bindless.rs; None = per-draw bind groups).
 	tex_array: Option<wgpu::BindGroup>,
 	clear: wgpu::Color,
@@ -1253,7 +1326,7 @@ struct Gpu {
 	sun: sunshadow::SunShadow,
 	/// Retail mode: a ship fight is on (`shipmouse::in_ship_fight`): space, no sun to cast from (handler.rs sets it).
 	ship_fight: bool,
-	/// The loaded level (handler.rs; [PC] Water Enhanced skips Gaspar's lava).
+	/// The loaded level (handler.rs; [PC] Water Enhanced gives Gaspar's lava its own look, waterfx.rs `LAVA_SLOT`).
 	level: usize,
 	/// SCN-3: the lighting word the scene actors copied from the hero when the scene started (FUN_00244e58); None outside a scene.
 	scene_actor_light: Option<[f32; 4]>,
