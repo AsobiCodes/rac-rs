@@ -6,7 +6,7 @@ An unofficial PC port of **Ratchet & Clank** (PlayStation 2, 2002), written in R
 > The setup reads your own copy of the disc and creates everything it needs on your PC. You need to own the game.
 
 Project site: https://asobicodes.dev
-Support the project (no pressure tho!): https://ko-fi.com/Manage/
+Support the project (no pressure tho!): ko-fi.com/asobicodes
 
 ## Status
 
