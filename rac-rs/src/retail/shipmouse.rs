@@ -177,6 +177,7 @@ impl State {
 		s
 	}
 
+	#[cfg(test)]
 	pub fn at_rest(&self) -> bool {
 		self.v == [0.0; 2] && self.tv == [0.0; 2] && self.tact == [false; 2]
 	}

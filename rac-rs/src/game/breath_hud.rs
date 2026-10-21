@@ -3,7 +3,6 @@
 //! bubble positions persist across ticks here (`Game.breath_hud`); the viewer only draws a copied snapshot and never
 //! advances it or draws from the shared RNG.
 
-use crate::particles::Rng;
 
 /// Slide curves (f32 bit patterns of the tables at 0x17e7a0 / 0x17e800), 24 entries each.
 pub const SHOW: [u32; 24] = [

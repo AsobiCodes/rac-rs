@@ -2,16 +2,22 @@
 name = "rac-rs"
 version = "0.1.0"
 edition = "2024"
+# The game as a library (src/lib.rs, crate rac_game) without the generated game code; the exe `rac-rs` is built by the package in
+# exe/ (rac-rs-exe), which adds ee-game. Kept apart so this crate compiles in parallel with the generated crates.
+autobins = false
+
+[lib]
+name = "rac_game"
+path = "src/lib.rs"
 
 [dependencies]
-bytemuck = { version = "1.25.2", features = ["derive"] }
+bytemuck = { version = "1.25.2", features = ["derive", "extern_crate_alloc"] }
 cpal = "0.18.2"
 pollster = "1.0.1"
 rayon = "1.12.0"
 wgpu = "30.0.1"
 winit = "0.30.13"
 ee-oracle = { path = "../oracle" }
-ee-game = { path = "../oracle/game" }
 
 [features]
 # Public build: the exe uses the Windows GUI subsystem (no console window) and logs panics to <player dir>/crash.log. Off for dev builds and test tools.
@@ -19,8 +25,4 @@ windows_gui = []
 
 [dev-dependencies]
 naga = { version = "30.0.1", features = ["wgsl-in"] }
-
-# Headless Eudora acceptance test (src/accept_main.rs): same module tree as main.rs, so it drives retail::Retail as the exe does.
-[[bin]]
-name = "eudora_accept"
-path = "src/accept_main.rs"
+ee_game_for_tests = { package = "ee-game", path = "../oracle/game" }

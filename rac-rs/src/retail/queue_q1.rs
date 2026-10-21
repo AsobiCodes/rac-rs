@@ -154,7 +154,7 @@ fn hoven_pools(m: &Machine, out: &mut Vec<WorldStrip>) {
 	if !queued || (*crate::retail::disc::pick(&POOL_FN, &POOL_FN_USA)).iter().any(|&(f, h)| code_hash(m, f) != h) {
 		return;
 	}
-	let (table, count, tex, fix, cam, far) = (*crate::retail::disc::pick(&POOLS, &POOLS_USA));
+	let (table, count, tex, fix, cam, far) = *crate::retail::disc::pick(&POOLS, &POOLS_USA);
 	let cam = m.rdv3(cam);
 	for k in 0..count {
 		let r = table + 0x20 * k;

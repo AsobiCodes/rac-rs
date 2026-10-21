@@ -2,8 +2,6 @@
 //! 0-3 of its updater FUN_002927c8. States 4-6 are KER-80b; the placement helper, the per-tick follower and the springs
 //! are KER-81a / KER-81c / KER-81b.
 
-use super::*;
-use crate::shadows::fast_atan2;
 
 /// KER-80a: the ride class (moby 4 drives the class 845 flyer 925; moby 5 is a dormant twin).
 pub(in crate::game) const RIDE822: u32 = 822;

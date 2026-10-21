@@ -5,14 +5,6 @@
 //! frame and states 0/1/6-14, WPN-6.5c2 states 2-5), the agent detonation (WPN-6.5d), its explosion (WPN-6.5e1), the
 //! capsule glow (WPN-6.5e2), the material sparks (WPN-6.5e3) and the landing preview FUN_002dd9d8 (WPN-6.5e4).
 
-use super::*;
-use super::bolt::set_len;
-use super::mouse::wrap_angle;
-use crate::gameplay::{pal_ticks, PAL_DT, PAL_DT2};
-use crate::inventory::GLOVE_OF_DOOM;
-use crate::particles::Rng;
-use crate::physics::Hit;
-use std::f32::consts::{PI, TAU};
 
 /// The held glove class (0xe5).
 pub const HELD: u32 = 229;

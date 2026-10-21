@@ -7,12 +7,8 @@
 //! by their game address.
 
 use super::Game;
-use super::Kind;
-use super::Prop;
-use crate::gameplay::MobyInstance;
-use super::gadget_scene::{GadgetRun, FANFARE_VOICE};
 use super::Event;
-use crate::physics::{add, length, sub, World, V3};
+use crate::physics::V3;
 
 pub(super) const MISSION_NPC: u32 = 790;
 pub(super) const MISSION_NPC_2: u32 = 730;

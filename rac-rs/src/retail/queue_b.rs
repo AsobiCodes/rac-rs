@@ -58,9 +58,12 @@ fn li(level: u32) -> usize {
 	level as usize
 }
 
-/// The level's gp (retail.rs `effect_pool`: gp 0x166c00, levels 0 5 14 16 keep the gp block 0x40 higher) [C].
-fn gp(level: u32) -> u32 {
-	if matches!(level, 0 | 5 | 14 | 16) { 0x166c40 } else { 0x166c00 }
+/// The gp the callbacks run with: 0x166c00 on every level (regs.bin of fg1 / fg2 states of levels 0 5 14 16 all hold gp = 0x166c00;
+/// corrected 2026-10-20: was 0x166c40 for levels 0 5 14 16, which read garbage floats / textures there: the Tesla Claw arc,
+/// Morph-o-Ray, Walloper and the other gp-slot ports drew nothing on Veldin, Rilgar, Oltanis and Kalebo III; queue_q2::gp
+/// had the same fix on 2026-10-12) [C].
+fn gp(_level: u32) -> u32 {
+	0x166c00
 }
 
 /// Queue A / B arrays (fn[], arg[]) of `level`: queue A from retail.rs `draw_queue`, queue B 0x200 past it.

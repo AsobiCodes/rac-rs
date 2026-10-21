@@ -6,7 +6,6 @@
 //! The code is level-agnostic (the update is shared with Novalis 0x2fb8b0 and Veldin 0x2d5790).
 
 use super::*;
-use crate::physics::V3;
 
 /// KER-48a: the infobot class (the mission.rs class id).
 pub(in crate::game) const INFOBOT: u32 = super::super::mission::INFOBOT;

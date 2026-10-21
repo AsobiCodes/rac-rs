@@ -13,7 +13,6 @@ pub(super) struct Early {
 	actors: Vec<u32>,
 	effects: Vec<crate::retail::Effect>,
 	widen: Vec<crate::retail::Widen>,
-	clean: bool,
 }
 
 /// The switch's end of the prefetch thread's channels: `order` is the prop slot order the thread's scene build waits for.
@@ -26,10 +25,21 @@ pub(super) struct PrefetchLink {
 	sent: Option<Vec<u32>>,
 	/// The last speculative order sent (`prefetch_spec`) and the hint pools it came from.
 	spec: Option<(Vec<(u32, u32)>, Vec<u32>)>,
+	/// The hint pools `prefetch_spec` saw last and since when they hold unchanged; how many speculative orders it worked out.
+	calm: Option<(Vec<(u32, u32)>, std::time::Instant)>,
+	tries: u32,
 	/// Set by the thread when its scene build is over.
 	done: std::sync::Arc<std::sync::atomic::AtomicBool>,
 	since: std::time::Instant,
 }
+
+/// [PC] `prefetch_spec` acts on the first hint pools at once (a normal landing: one hint ~0.4 s before the arrival, kept), on changed
+/// ones only once they held this long unchanged, and works out at most `SPEC_TRIES` orders per travel. A hint that changes every
+/// field (Rilgar -> Blarg before `retail::HINT_SLOTS`: ~30 s of it) cost a new order each frame (`slots_game`, 40-50 ms of the main
+/// thread: 15-19 fps) and made the prefetch thread restart its prop slot build for each one (GPU memory +128 MB every 2-4 s,
+/// 2.4 -> 4.2 GB). The arrival's order (`prefetch_ready`) still decides what is built.
+const SPEC_STABLE: std::time::Duration = std::time::Duration::from_millis(300);
+const SPEC_TRIES: u32 = 3;
 
 /// [PC] Drops `t` on a short-lived thread: freeing a level's data (the old scene's buffers, the parsed meshes and textures,
 /// hundreds of MB) took 20-70 ms of the main thread at the level switch. Nothing else changes (drop order of unrelated data).
@@ -127,444 +137,14 @@ pub(super) fn slots_game(instances: &[crate::gameplay::MobyInstance], level: i32
 }
 
 impl App {
-	/// A menu key on the front end: its sound, then whatever it starts.
-	pub(super) fn menu_press(&mut self, key: frontend::Key) {
-		let Some(fe) = &mut self.front else { return };
-		let (cue, action) = fe.menu.press(key, &fe.text);
-		// Menu cues play the global bank's sound of the same index [I].
-		if let (Some(c), Some(a)) = (cue, &mut self.audio) {
-			if let Some(clip) = self.sfx.clips.get(c as usize).and_then(|c| c.as_ref()) {
-				a.play(clip, 1.0, 0.0);
-			}
-		}
-		let disc = || iso::Disc::open(std::path::Path::new(&self.iso_path)).map_err(|e| e.to_string());
-		match action {
-			Some(frontend::Action::NewGame(slot)) => {
-				match disc().and_then(|mut d| save::Save::default_image(&mut d)) {
-					Ok(mut sv) => {
-						sv.record(0, 0, 0);
-						// The default restore keeps only the live music/SFX volume (FUN_0025f1b0, savegame.md).
-						self.settings = self.settings.new_game();
-						self.settings_dirty = true;
-						sv.set_options(&self.settings);
-						self.help_log = HelpLog::default();
-						sv.set_help_log(&self.help_log);
-						if let Some(n) = slot {
-							if let Err(e) = save::write_slot(n, &sv) {
-								eprintln!("save slot {n}: {e}");
-							}
-						}
-						self.save = Some((slot, sv));
-						self.autosave_on = slot.is_some();
-					}
-					Err(e) => eprintln!("default save: {e}"),
-				}
-				self.a3_ticks = 0;
-				self.start_game(0, 0);
-			}
-			Some(frontend::Action::Load(slot)) => match save::load_slot(slot) {
-				Some(sv) => {
-					let (level, bolts) = (sv.level().unwrap_or(0), sv.bolts());
-					self.a3_ticks = sv.global.word(save::PLAY_TIME).unwrap_or(0);
-					// RestoreData writes the saved options and cheats into the live globals.
-					self.settings = sv.options(self.settings);
-					self.help_log = sv.help_log();
-					self.settings_dirty = true;
-					self.save = Some((Some(slot), sv));
-					self.autosave_on = true;
-					self.resume = save::load_where(slot).filter(|w| w.level == level);
-					self.start_game(level, bolts);
-				}
-				None => eprintln!("slot {slot}: no save"),
-			},
-			Some(frontend::Action::Language(l)) => match disc().and_then(|mut d| frontend::Text::load(&mut d, TEXT_SLOT[l.min(4)])) {
-				Ok(t) => self.front.as_mut().unwrap().text = t,
-				Err(e) => eprintln!("text {l}: {e}"),
-			},
-			_ => {}
-		}
-	}
-
-	/// Leave the front end for play on `level` with the save's bolts.
-	pub(super) fn start_game(&mut self, level: usize, bolts: u32) {
-		self.want_front = false;
-		self.level = level.min(toc::LEVEL_COUNT - 1);
-		self.load_level();
-		self.toggle_play();
-		if let Some(g) = &mut self.game {
-			g.bolts = bolts;
-		}
-		self.shown_bolts = bolts as f32;
-	}
-
-	/// Record the current level, bolts and play time in the save image, and write the active slot when
-	/// the trigger saves and autosave is on (decomp/notes/ingame_save_quit.md s6).
-	pub(super) fn autosave(&mut self, why: save::Trigger) {
-		self.autosave_from(why, self.level);
-	}
-
-	/// Back in play after a death: the die function re-armed the one-shot help messages (FUN_00225400, bit 31 of
-	/// the 0x14196c records) and the rebuild re-instantiates the camera, whose first tick is a cut to the hero
-	/// (camera.md; death_respawn.md s7).
-	pub(super) fn respawned(&mut self) {
-		if let Some(f) = &mut self.flow {
-			f.rearm_help();
-		}
-		if let (Some(rig), Some(g)) = (&mut self.rig, &self.game) {
-			rig.reset(g.player.pos, g.player.yaw);
-			self.rig_hero = g.player.pos;
-		}
-	}
-
-	/// `autosave` for a planet change: `source` is the planet being left. The global block names the level
-	/// now current; only the source planet's B block goes to the card (FUN_00260fe0, savegame.md).
-	pub(super) fn autosave_from(&mut self, why: save::Trigger, source: usize) {
-		let Some((slot, sv)) = &mut self.save else { return };
-		let story = self.game.as_ref().map(|g| g.persist()).unwrap_or_default();
-		sv.capture(self.level, self.game.as_ref().map_or(0, |g| g.bolts), self.a3_ticks, &story, self.map.as_ref().map(|m| (&m.explored.0[..], &m.spans[..])));
-		sv.set_options(&self.settings);
-		sv.set_help_log(&self.help_log);
-		let Some(n) = slot.filter(|_| save::autosave_due(why, *slot, self.autosave_on)) else { return };
-		match save::write_autosave(n, sv, source) {
-			Ok(()) => {
-				eprintln!("saved slot {n} ({why:?})");
-				let _ = save::write_where(n, None);
-				// The icon spins while the card write runs; a file write is instant, so it shows ~2 s [PC] port choice.
-				self.save_icon = 2.0;
-				if !self.save_help {
-					self.save_help = true;
-					if let Some(f) = &mut self.flow {
-						let text = self.ui_text.as_ref().map_or("", |t| t.get(SAVE_ICON_TEXT));
-						f.add_message(help::SAVE_ICON_HELP, text);
-						f.queue(help::SAVE_ICON_HELP);
-					}
-				}
-			}
-			Err(e) => {
-				eprintln!("save slot {n}: {e}");
-				self.autosave_on = false;
-				let text = self.ui_text.as_ref().map_or("SAVE FAILED", |t| t.get(frontend::SAVE_FAILED_OFF));
-				self.messages.push((text.to_string(), 4.0));
-			}
-		}
-	}
-
-	/// Pause -> Options -> Save into `slot` (ingame_save_quit.md s3): writes the same image as autosave;
-	/// a good write makes it the active slot and turns autosave back on.
-	pub(super) fn manual_save(&mut self, slot: usize) {
-		if self.save.is_none() {
-			let img = iso::Disc::open(std::path::Path::new(&self.iso_path)).map_err(|e| e.to_string()).and_then(|mut d| save::Save::default_image(&mut d));
-			match img {
-				Ok(sv) => self.save = Some((None, sv)),
-				Err(e) => eprintln!("default save: {e}"),
-			}
-		}
-		let here = self.game.as_ref().map(|g| {
-			let (record, seen) = self.flow.as_ref().map_or((None, Vec::new()), |f| f.progress());
-			save::Where { level: self.level, pos: g.player.pos, yaw: g.player.yaw, health: g.health, moves: g.moves_done, record, seen, requested: self.help_log.0.clone(), inv: g.inv.clone() }
-		});
-		let Some((active, sv)) = &mut self.save else { return };
-		let story = self.game.as_ref().map(|g| g.persist()).unwrap_or_default();
-		sv.capture(self.level, self.game.as_ref().map_or(0, |g| g.bolts), self.a3_ticks, &story, self.map.as_ref().map(|m| (&m.explored.0[..], &m.spans[..])));
-		sv.set_options(&self.settings);
-		sv.set_help_log(&self.help_log);
-		match save::write_slot(slot, sv).and_then(|()| save::write_where(slot, here.as_ref())) {
-			Ok(()) => {
-				*active = Some(slot);
-				self.autosave_on = true;
-				if let Some(m) = &mut self.pause {
-					m.slots = save::summaries();
-				}
-			}
-			Err(e) => {
-				eprintln!("save slot {slot}: {e}");
-				self.autosave_on = false;
-				if let Some(m) = &mut self.pause {
-					m.notify(frontend::SAVE_FAILED_OFF);
-				}
-			}
-		}
-	}
-
-	/// What the pause pages list, from the game state.
-	pub(super) fn ingame(&self) -> frontend::InGame {
-		let t = |id: u32| self.ui_text.as_ref().map_or(String::new(), |t| t.get(id).to_string());
-		let mut out = frontend::InGame { planet: t(planet_name(self.level)), ..Default::default() };
-		// The map's area title: location text 0x4eb9 + id (Veldin 'Kyzil Plateau').
-		out.area = t(0x4eb9 + self.level as u32);
-		if let Some(g) = &self.game {
-			// Found = nonzero bytes of the 20x4 gold-bolt array, capped at 40; Used = 4 x the gold upgrades, at most 10
-			// (FUN_00264198 / FUN_00264208).
-			let st = g.persist();
-			let found = st.gold.iter().flatten().filter(|&&b| b != 0).count().min(40) as u32;
-			let used = 4 * st.gold_upgrades.iter().filter(|&&b| b != 0).count().min(10) as u32;
-			out.gold = (found, used);
-			out.items = frontend::ITEM_GRID
-				.iter()
-				.map(|&(_, _, kind, id, label, desc)| {
-					let owned = if kind == 0 { g.inv.have.get(id as usize).copied().unwrap_or(false) } else { st.a5[id as usize] != 0 };
-					owned.then(|| (t(label), t(desc)))
-				})
-				.collect();
-			let inv = &g.inv;
-			let owned = |id: u8| id == crate::inventory::WRENCH || inv.have.get(id as usize).copied().unwrap_or(false);
-			out.weapons = (0..crate::inventory::GADGETS as u8)
-				.filter(|&id| owned(id) && crate::inventory::info(id).is_some_and(|i| i.slot == 0))
-				.map(|id| (id, t(crate::inventory::name_text(id)), crate::inventory::info(id).filter(|i| i.max > 0).map(|i| (inv.ammo(id), i.max))))
-				.collect();
-			out.equipped = inv.equipped;
-			out.quick_ids = inv.quick.to_vec();
-			out.golds = (0..crate::inventory::GADGETS as u8).filter(|&id| g.gold(id)).collect();
-			out.quick = inv.quick.iter().map(|&id| if id == 0 { String::new() } else { t(crate::inventory::name_text(id)) }).collect();
-			// Gadgets Help list: the owned ids of the 14 Gadgets-page cells in cell order (list builder FUN_0027eca0, 0x13d4c0 owned flags) [I: the builder's caller is a data pointer].
-			out.gadgets = frontend::GADGET_GRID_IDS.iter().filter(|&&id| inv.have.get(id as usize).copied().unwrap_or(false)).map(|&id| t(crate::inventory::name_text(id))).collect();
-			out.gadget_help = frontend::GADGET_GRID_IDS.iter().enumerate().filter(|&(_, &id)| inv.have.get(id as usize).copied().unwrap_or(false)).map(|(c, &id)| (id, c)).collect();
-			// Hand lists the owned non-weapon hand items (the weapons are on their own page) [I].
-			out.wear = frontend::GADGET_CATEGORIES.map(|cat| {
-				let opts: Vec<(u8, String)> = (0..crate::inventory::GADGETS as u8)
-					.filter(|&id| inv.have[id as usize] && crate::inventory::category(id) == Some(cat) && (cat != 0 || crate::inventory::info(id).is_none()))
-					.map(|id| (id, t(crate::inventory::name_text(id))))
-					.collect();
-				(opts, if cat == 0 { inv.equipped } else { inv.worn[cat] })
-			});
-		}
-		out.help_log = self
-			.help_log
-			.entries()
-			.into_iter()
-			.map(|(h, title)| (t(title), self.flow.as_ref().and_then(|f| f.message(h)).map_or_else(String::new, |m| m.replace('\u{1}', " "))))
-			.collect();
-		out.controls = CONTROLS.iter().map(|s| s.to_string()).collect();
-		out
-	}
-
-	/// Start (Esc / Enter) or Select (M): opens the pause menu or the map over the frozen game, but
-	/// not in a cutscene or on the death screen (ingame_pause_menu.md s1).
-	pub(super) fn open_pause(&mut self, map: bool) {
-		let Some(g) = &self.game else { return };
-		if g.dead.is_some() || g.cam_cut.is_some() || self.flow.as_ref().is_some_and(|f| f.cutscene.is_some()) || self.ui_text.is_none() {
-			return;
-		}
-		let lang = self.settings.lang as usize;
-		let ig = self.ingame();
-		if map {
-			if let (Some(mv), Some(gpu)) = (&mut self.map, &mut self.gpu) {
-				gpu.hud_texture(Some(mv.slot), &map::composite(&mv.bundle, &mv.explored));
-			}
-		}
-		if self.ui_sfx.is_empty() {
-			if let Ok(mut d) = iso::Disc::open(std::path::Path::new(&self.iso_path)) {
-				self.ui_sfx = global_sfx(&mut d).clips;
-			}
-		}
-		self.pause = Some(if map { frontend::Menu::map(lang, self.settings, ig) } else { frontend::Menu::pause(lang, self.settings, ig) });
-		// The open sets the target page to the current one, so the controller plays cue 3 (FUN_00275cf8 / FUN_00276560).
-		self.pause_cue(frontend::Cue::Open);
-		self.pause_saved_tan_half = Some(pause_projection_save(&mut self.cam));
-		self.wheel = None;
-	}
-
-	/// Closes the pause menu; a pause opened by `open_pause` restores the saved projection (SCN-6, FUN_0028c2a8
-	/// OV:86289, before the HUD/audio resume).
-	pub(super) fn close_pause(&mut self) {
-		self.pause = None;
-		if let Some(t) = self.pause_saved_tan_half.take() {
-			self.cam.tan_half = t;
-		}
-	}
-
-	/// A menu key to whichever menu is up (pause menu first).
-	pub(super) fn menu_key(&mut self, key: frontend::Key) {
-		if self.pause.is_some() {
-			self.pause_press(key);
-		} else if self.front.is_some() {
-			self.menu_press(key);
-		}
-	}
-
-	/// Port extra (mouse control): hovering a row selects it, a click is Cross on it (Circle / Triangle on
-	/// Yes / No), and the Sound page bars follow a click or drag.
-	pub(super) fn menu_pointer(&mut self, click: bool) {
-		if self.retail.is_some() {
-			return;
-		}
-		let (Some((x, y)), Some(g)) = (self.cursor, &self.gpu) else { return };
-		let (w, h) = (g.config.width as f32, g.config.height as f32);
-		let in_pause = self.pause.is_some();
-		let (menu, text) = match (&mut self.pause, &self.ui_text, &mut self.front) {
-			(Some(m), Some(t), _) => (m, t),
-			(None, _, Some(fe)) => (&mut fe.menu, &fe.text),
-			_ => return,
-		};
-		let mut key = None;
-		let mut moved = false;
-		match menu.point(x, y, w, h, text) {
-			Some(frontend::Point::Row(i)) => {
-				moved = menu.hover(i, text);
-				if click {
-					key = Some(frontend::Key::Confirm);
-				}
-			}
-			Some(frontend::Point::Yes) if click => key = Some(frontend::Key::Circle),
-			Some(frontend::Point::No) if click => key = Some(frontend::Key::Back),
-			Some(frontend::Point::Volume(i, f)) if click || self.menu_drag => menu.set_volume(i, f),
-			_ => {}
-		}
-		if moved {
-			if in_pause {
-				self.pause_cue(frontend::Cue::Navigate);
-			} else if let (Some(a), Some(clip)) = (&mut self.audio, self.sfx.clips.get(frontend::Cue::Navigate as usize).and_then(|c| c.as_ref())) {
-				a.play(clip, 1.0, 0.0);
-			}
-		}
-		if let Some(k) = key {
-			self.menu_key(k);
-		}
-	}
-
-	/// A pause-menu cue: class 0x472's class sound `c` through the level's remap (`Events::menu`), played with
-	/// play flags 0x11 (FUN_0028d590(c, 0x11, panel moby)): no distance attenuation (instance volume 0x400 = full),
-	/// no pan, and the def's fixed pitch through the tone's bend range (cue 3 +0xfe, cue 4 +0x1fc; FUN_0028d318,
-	/// FUN_0028c5b0). A level whose class table lacks 0x472 falls back to the global bank sound of the same
-	/// index [I] (decomp/notes/ingame_pause_menu.md s2).
-	pub(super) fn pause_cue(&mut self, c: frontend::Cue) {
-		let Some(a) = &mut self.audio else { return };
-		match self.sfx.ev.menu.get(c as usize) {
-			Some(Some(cue)) => {
-				if let Some(clip) = self.sfx.clips.get(cue.sound).and_then(|c| c.as_ref()) {
-					let shift = cue.random_shift(|n| particles::Rng::shared().small(n));
-					a.play_with(clip, 1.0, 0.0, sound::pitch_ratio(shift), false);
-				}
-			}
-			_ => {
-				if let Some(clip) = self.ui_sfx.get(c as usize).and_then(|c| c.as_ref()) {
-					a.play(clip, 1.0, 0.0);
-				}
-			}
-		}
-	}
-
-	/// A key on the pause menu: its action (resume, save, load, quit, equip).
-	pub(super) fn pause_press(&mut self, key: frontend::Key) {
-		let (Some(m), Some(text)) = (&mut self.pause, &self.ui_text) else { return };
-		if matches!(key, frontend::Key::Left | frontend::Key::Right) {
-			// A tap moves the volume one step; holding keeps stepping (Menu::hold).
-			m.hold(if key == frontend::Key::Left { -1 } else { 1 }, 0.02);
-		}
-		let (cue, action) = m.press(key, text);
-		if let Some(c) = cue {
-			self.pause_cue(c);
-		}
-		match action {
-			// The same planet lands again (FUN_002a2178 -> FUN_002a1de8(8)).
-			Some(frontend::Action::Depart(n)) => {
-				self.close_pause();
-				if n == self.level {
-					self.start_ship_stream(true);
-				} else {
-					self.start_travel(n);
-				}
-			}
-			// Backing out of the ship's map also lands [I].
-			Some(frontend::Action::Resume) => {
-				let map = self.pause.as_ref().is_some_and(|m| matches!(m.page, frontend::Page::Galactic | frontend::Page::GalacticInfo));
-				self.close_pause();
-				if map {
-					self.start_ship_stream(true);
-				}
-			}
-			Some(frontend::Action::Save(n)) => self.manual_save(n),
-			Some(frontend::Action::Wear(cat, id)) => {
-				if let Some(g) = &mut self.game {
-					if cat == 0 {
-						g.inv.equipped = id;
-					} else {
-						g.inv.worn[cat] = id;
-					}
-				}
-			}
-			Some(frontend::Action::Equip(id)) => {
-				if let Some(g) = &mut self.game {
-					g.inv.equipped = id;
-					if id != crate::inventory::WRENCH {
-						g.inv.last = id;
-					}
-				}
-			}
-			Some(frontend::Action::Load(n)) => match save::load_slot(n) {
-				Some(sv) => {
-					let (level, bolts) = (sv.level().unwrap_or(0), sv.bolts());
-					self.a3_ticks = sv.global.word(save::PLAY_TIME).unwrap_or(0);
-					self.settings = sv.options(self.settings);
-					self.help_log = sv.help_log();
-					self.settings_dirty = true;
-					self.save = Some((Some(n), sv));
-					self.autosave_on = true;
-					self.close_pause();
-					self.resume = save::load_where(n).filter(|w| w.level == level);
-					self.start_game(level, bolts);
-				}
-				None => {
-					if let Some(m) = &mut self.pause {
-						m.notify(frontend::LOAD_FAILED);
-					}
-				}
-			},
-			// Yes: drop the slot, autosave off, back to the title; nothing is saved (ingame_save_quit.md s5).
-			Some(frontend::Action::Quit) => {
-				self.close_pause();
-				self.save = None;
-				self.autosave_on = false;
-				self.want_front = true;
-				self.load_level();
-			}
-			_ => {}
-		}
-	}
-
 	/// Per frame: the pause menu (update, held volume keys, RAC_PAUSE_KEYS), the wheel, the settings.
 	pub(super) fn pause_frame(&mut self, dt: f32) {
-		self.travel_frame(dt);
-		// RAC_PAUSE_KEYS (for --shot): 's' Start, 'm' map, 'w' wheel, u/d/l/r/c/b/o menu keys, one per 25 frames
-		// once 50 play ticks have run.
-		if self.game.is_some() && !self.pause_script.is_empty() && self.play_ticks >= 50 {
-			self.pause_script_t += 1;
-			if self.pause_script_t >= 25 {
-				self.pause_script_t = 0;
-				use frontend::Key::*;
-				let c = self.pause_script.remove(0);
-				let key = match c { 'u' => Some(Up), 'd' => Some(Down), 'l' => Some(Left), 'r' => Some(Right), 'c' => Some(Confirm), 'b' => Some(Back), 'o' => Some(Circle), _ => None };
-				match (c, key) {
-					('s', _) if self.pause.is_none() => self.open_pause(false),
-					('s', _) => self.pause_press(Start),
-					('m', _) if self.pause.is_none() => self.open_pause(true),
-					('g', _) => self.open_galactic(),
-				// 'w' holds Triangle from here on: the Quick Select wheel stays open.
-				('w', _) => self.tri_held = Some(0.0),
-					(_, Some(k)) => self.pause_press(k),
-					_ => {}
-				}
-			}
-		}
 		let held = |k: &[KeyCode]| k.iter().any(|k| self.keys.contains(k));
 		let dir = held(&[KeyCode::ArrowRight, KeyCode::KeyD]) as i32 - held(&[KeyCode::ArrowLeft, KeyCode::KeyA]) as i32;
-		if self.pause.is_some() {
-			let combo = self.keys.contains(&KeyCode::KeyC) && self.keys.contains(&KeyCode::KeyV);
-			if let Some(g) = self.game.as_mut() {
-				g.code_hold(combo);
-			}
-		}
-		if let Some(m) = &mut self.pause {
-			m.update(dt);
-			m.hold(dir, dt);
-		}
-		if let Some(fe) = &mut self.front {
-			fe.menu.hold(dir, dt);
-		}
 		// Quick Select: Triangle held opens the wheel; the stick picks a sector (0 = up, clockwise).
 		if let Some(t) = &mut self.tri_held {
 			*t += dt;
-			let open = self.pause.is_none() && self.game.as_ref().is_some_and(|g| g.dead.is_none()) && self.flow.as_ref().map_or(true, |f| f.cutscene.is_none());
+			let open = self.game.as_ref().is_some_and(|g| g.dead.is_none()) && self.flow.as_ref().map_or(true, |f| f.cutscene.is_none());
 			if open {
 				let (x, y) = (dir as f32, held(&[KeyCode::ArrowUp, KeyCode::KeyW]) as i32 as f32 - held(&[KeyCode::ArrowDown, KeyCode::KeyS]) as i32 as f32);
 				// Opens on the equipped item's sector [I].
@@ -584,149 +164,11 @@ impl App {
 
 	/// Applies changed Options (audio volumes, mono) and writes them once off the Sound page.
 	pub(super) fn apply_settings(&mut self) {
-		let menu = self.pause.as_ref().or(self.front.as_ref().map(|f| &f.menu));
-		if let Some(m) = menu {
-			if m.settings != self.settings {
-				self.settings = m.settings;
-				self.settings_dirty = true;
-			}
-		}
 		if let Some(a) = &mut self.audio {
 			let (sfx, music, mono) = (self.settings.sfx_gain(), self.settings.music_gain(), !self.settings.stereo);
 			if (a.master, a.music, a.mono) != (sfx, music, mono) {
 				(a.master, a.music, a.mono) = (sfx, music, mono);
-				if let Some(fe) = &self.front {
-					for &id in &fe.bed {
-						a.set(id, 0.5, 0.0);
-					}
-				}
 			}
-		}
-		if self.settings_dirty && menu.map_or(true, |m| m.page != frontend::Page::Sound) {
-			self.settings.store();
-			self.settings_dirty = false;
-		}
-	}
-
-	/// One front-end frame: the title scene's camera and actors, its ambience, and the menu overlay.
-	/// UI-11c: the title idle clock, the attract movie and the black ticks around it.
-	fn attract_frame(&mut self, dt: f32) {
-		let any_key = !self.keys.is_empty();
-		let Some(fe) = &mut self.front else { return };
-		let mut started = None;
-		fe.acc += dt * 50.0;
-		while fe.acc >= 1.0 {
-			fe.acc -= 1.0;
-			match fe.att.tick(fe.menu.page == frontend::Page::Title) {
-				Some(frontend::AttractEvent::Movie(id)) => started = Some(id),
-				Some(frontend::AttractEvent::Title) => {
-					fe.tick = 0.0;
-					fe.menu.restart_title();
-				}
-				None => {}
-			}
-		}
-		if let Some(id) = started {
-			let r = iso::Disc::open(std::path::Path::new(&self.iso_path)).map_err(|e| e.to_string()).and_then(|mut d| scene::movie(&mut d, id));
-			match r {
-				Ok(m) => {
-					if let Some(a) = &mut self.audio {
-						a.pause_all(true);
-					}
-					fe.attract_movie = Some(fmv::player::Player::start(&self.iso_path, &m, self.settings.lang, self.audio.as_mut()));
-				}
-				Err(e) => {
-					eprintln!("attract movie {id}: {e}");
-					fe.att.end_movie();
-				}
-			}
-		}
-		let mut end = false;
-		if let Some(p) = &mut fe.attract_movie {
-			if let (Some(f), Some(g)) = (p.poll(), &mut self.gpu) {
-				g.movie.upload(&g.device, &g.queue, &f);
-			}
-			end = p.finished || any_key;
-		}
-		if end {
-			fe.attract_movie = None;
-			fe.att.end_movie();
-			if let Some(a) = &mut self.audio {
-				a.pause_all(false);
-			}
-			if let Some(g) = &mut self.gpu {
-				g.movie.clear();
-			}
-		}
-	}
-
-	pub(super) fn front_frame(&mut self, dt: f32) {
-		let scripted = self.front.as_mut().and_then(|fe| {
-			fe.script_t = fe.script_t.saturating_sub(1);
-			(fe.script_t == 0 && !fe.script.is_empty()).then(|| {
-				fe.script_t = 40;
-				fe.script.remove(0)
-			})
-		});
-		if let Some(k) = scripted {
-			self.menu_press(k);
-		}
-		self.attract_frame(dt);
-		let Some(fe) = &mut self.front else { return };
-		fe.menu.update(dt);
-		let mut actors: Vec<Option<(Posed, [f32; 3])>> = vec![None; self.actor_slots.len()];
-		let (mut at, mut skinned) = (None, None);
-		if let Some((sc, _)) = self.scenes.get(&u32::MAX) {
-			fe.tick = (fe.tick + dt * scene::TICKS_PER_SECOND) % sc.ticks.max(1) as f32;
-			let tick = fe.tick;
-			if let Some(k) = sc.camera_at(tick) {
-				let f = k.forward();
-				self.cam.pos = k.pos;
-				self.cam.yaw = f[1].atan2(f[0]);
-				self.cam.pitch = f[2].clamp(-1.0, 1.0).asin();
-				self.cam.tan_half = k.tan_half_fov * PROJ_Y_RATIO;
-			}
-			if let (Some(actor), Some((class, a))) = (sc.actors.iter().find(|a| a.class_id == 0), &self.hero_anim) {
-				if let (Some((ka, kb, t)), Some(pos)) = (actor.pair(tick), actor.pos_at(tick)) {
-					let mats = a.pose_frames(&ka.frame, &kb.frame, t);
-					skinned = Some(anim::skin(class, &mats));
-					at = Some((pos, 0.0));
-				}
-			}
-			for (slot, &(sid, index, class_id)) in actors.iter_mut().zip(&self.actor_slots) {
-				let (Some(actor), Some((class, a))) = (sc.actors.iter().find(|a| a.index == index).filter(|_| sid == u32::MAX), self.prop_anims.get(&class_id)) else { continue };
-				if let (Some((ka, kb, t)), Some(pos)) = (actor.pair(tick), actor.pos_at(tick)) {
-					*slot = Some((anim::skin(class, &a.pose_frames(&ka.frame, &kb.frame, t)), pos));
-				}
-			}
-		}
-		if let Some(a) = &mut self.audio {
-			for (k, &(i, from, to)) in TITLE_TIMED.iter().enumerate() {
-				let clip = self.sfx.clips.get(i).and_then(|c| c.as_ref());
-				match ((from..to).contains(&fe.tick), fe.timed[k]) {
-					(true, None) => fe.timed[k] = clip.map(|c| a.play(c, 0.5, 0.0)),
-					(false, Some(id)) => {
-						// One-shots finish on their own; loops stop when the window ends.
-						if clip.is_some_and(|c| c.loop_start.is_some()) {
-							a.stop(id);
-						}
-						fe.timed[k] = None;
-					}
-					_ => {}
-				}
-			}
-		}
-		if let Some(g) = &mut self.gpu {
-			g.hud.clear();
-			g.hud_split = None;
-			g.movie.black = fe.att.black > 0;
-			if let (Some(art), false) = (&fe.art, fe.attract_movie.is_some() || fe.att.black > 0) {
-				fe.menu.draw(&mut g.hud, g.config.width as f32, g.config.height as f32, art, &fe.text);
-			}
-			g.set_clip_view(None);
-			g.set_marker(at, skinned.as_ref());
-			g.set_props(Some(&[]), &HashMap::new(), &HashMap::new(), &actors, &[], &[], &[], &[]);
-			g.set_particles(&[], &[], &[], &[], &self.cam, None);
 		}
 	}
 
@@ -736,7 +178,7 @@ impl App {
 			self.flow = None;
 			self.retail = None;
 			if let Some(g) = &mut self.gpu {
-				g.set_marker(None, None);
+				g.set_marker(None, None, None);
 				g.set_props(None, &HashMap::new(), &HashMap::new(), &[], &[], &[], &[], &[]);
 			}
 			return;
@@ -921,7 +363,7 @@ impl App {
 		if self.retail_prop_meshes.is_empty() {
 			return false;
 		}
-		let mut slots_game = slots_game(&self.instances, self.level as i32);
+		let slots_game = slots_game(&self.instances, self.level as i32);
 		let mut order: Vec<u32> = slots_game.props.iter().map(|p| p.class_id).collect();
 		order.extend(self.actor_slots.iter().map(|s| s.2));
 		let Some(gpu) = &mut self.gpu else { return false };
@@ -944,6 +386,7 @@ impl App {
 			classes.extend(std::iter::repeat_n(c, (n - k) as usize));
 		}
 		let (Some(game), Some(gpu)) = (self.game.as_mut(), self.gpu.as_mut()) else { return None };
+		let _h = super::profile::span("ap_order");
 		let at = game.props.len();
 		let order: Vec<usize> = order.filter(|o| o.len() == at).map_or_else(|| (0..at).collect(), <[usize]>::to_vec);
 		if self.retail_prop_meshes.is_empty() || gpu.scene.as_ref().is_none_or(|s| s.props_ranges.len() != at + self.actor_slots.len()) {
@@ -964,9 +407,11 @@ impl App {
 		let mut order: Vec<usize> = pool.into_values().flatten().collect();
 		order.extend(rest);
 		let slots: Vec<usize> = order.iter().copied().chain(at + classes.len()..at + classes.len() + self.actor_slots.len()).collect();
+		drop(_h);
 		if !gpu.append_props(at, &classes, &self.retail_prop_meshes, &slots) {
 			return None;
 		}
+		let _g = super::profile::span("ap_game");
 		game.append_retail(&classes, self.level as i32);
 		Some(order)
 	}
@@ -1018,12 +463,30 @@ impl App {
 		if link.spec.as_ref().is_some_and(|s| s.0 == hint) {
 			return;
 		}
+		// [PC] The first hint at once, a changed one only once it held `SPEC_STABLE`; at most `SPEC_TRIES` orders per travel.
+		if link.tries >= SPEC_TRIES {
+			return;
+		}
+		match &mut link.calm {
+			Some((h, t)) if *h == hint => {
+				if link.tries > 0 && t.elapsed() < SPEC_STABLE {
+					return;
+				}
+			}
+			c => {
+				*c = Some((hint.clone(), std::time::Instant::now()));
+				if link.tries > 0 {
+					return;
+				}
+			}
+		}
 		if link.got.is_none() {
 			match link.early.try_recv() {
 				Ok(e) => link.got = Some(e),
 				Err(_) => return,
 			}
 		}
+		link.tries += 1;
 		let e = link.got.as_ref().unwrap();
 		let level = *n as i32;
 		let order = crate::retail::with_pools(crate::retail::widen_all(hint.clone(), &e.widen), || {
@@ -1155,7 +618,7 @@ crate::loadlog::say(|| "host: terrain/shrub mips done".into());
 					// Retail mode: pools for the classes the game swaps in or spawns after the start state (retail::widen_pools),
 					// before the slot order (`slots_game`) and the game (`toggle_play`) read them.
 					if crate::retail::active() && !front {
-						crate::retail::widen_pools(&all, classes.iter().filter(|(_, c)| !c.mesh.faces.is_empty()).map(|(&id, _)| id));
+						crate::retail::widen_pools(&all, classes.iter().filter(|(_, c)| !c.mesh.faces.is_empty()).map(|(&id, c)| (id, c.mesh.positions.len() as u32)));
 						crate::retail::asset_feed::load(&l);
 					}
 					hero = classes.remove(&0);
@@ -1282,7 +745,7 @@ crate::loadlog::say(|| "host: hero anim + clips done".into());
 							prop_anims.insert(id, (c.clone(), a));
 						}
 					}
-					added.push(id);
+					added.push((id, c.mesh.positions.len() as u32));
 				}
 				crate::retail::widen_pools(&[], added);
 			}
@@ -1603,7 +1066,7 @@ crate::loadlog::say(|| "host: scenes done".into());
 								if let Some(an) = ship_anims.get(&id) {
 									prop_anims.insert(id, (c.clone(), an.clone()));
 								}
-								added.push(id);
+								added.push((id, c.mesh.positions.len() as u32));
 							}
 							crate::retail::widen_pools(&[], added);
 						}
@@ -1878,10 +1341,10 @@ crate::loadlog::say(|| "host: (rest) before metal textures".into());
 				let mut scene = None;
 				// The collision copy the sound occlusion queries (`set_world` at the switch), made here too.
 				let mut world_copy = None;
-				if let (true, Some(ctx), Ok(res)) = (clean && std::env::var_os("RAC_NO_PREBUILD").is_none(), ctx.as_ref(), &mut r) {
+				if let (true, Some(ctx), Ok(res)) = (clean, ctx.as_ref(), &mut r) {
 					let ((meshes, tie_set, occ, (tfrags, tfrag_b, shrub_set, (_bb_tex, terrain_chains))), textures, sky, w_t, _sp, hero_anim, instances, prop_meshes, _pa, (_dh, _p, _e, _r, _m, _l, actor_slots, _sm, _md), _f, (wrench, (glove, (pyro_rig, ((suck_rig, (held_rigs, hook_rig)), (back_rig, (clank_rig, (_bj, light_rig)))))), held_bomb, (previews, _h2, _mcb, _d, _c)), ..) = res;
 					world_copy = Some(w_t.clone());
-					let early = Early { instances: instances.clone(), actors: actor_slots.iter().map(|s| s.2).collect(), effects: std::mem::take(&mut effects), widen, clean };
+					let early = Early { instances: instances.clone(), actors: actor_slots.iter().map(|s| s.2).collect(), effects: std::mem::take(&mut effects), widen };
 					if tx_early.send(early).is_ok() {
 						let combined = combined_hero!(hero_anim, wrench, glove, held_bomb, pyro_rig, suck_rig, held_rigs, back_rig, clank_rig, hook_rig, light_rig);
 						let tint = hero_anim.as_ref().and_then(|h| mobies::glow_rgb(h.0.glow).map(|c| (c, h.0.colour_start, h.0.mesh.positions.len())));
@@ -1915,7 +1378,7 @@ crate::loadlog::say(|| "host: (rest) before metal textures".into());
 			});
 			if let Ok(h) = h {
 				self.prefetch = Some((level_no, Box::new(h)));
-				self.prefetch_link = Some((level_no, PrefetchLink { early: rx_early, order: tx_order, got: None, sent: None, spec: None, done, since: std::time::Instant::now() }));
+				self.prefetch_link = Some((level_no, PrefetchLink { early: rx_early, order: tx_order, got: None, sent: None, spec: None, calm: None, tries: 0, done, since: std::time::Instant::now() }));
 			}
 			return;
 		}
@@ -1982,7 +1445,7 @@ crate::loadlog::say(|| "host: closure done (all host parsing)".into());
 				let hero = combined.as_ref();
 				// The prop slots must match `Game::new`'s order: build one to read it.
 				if crate::retail::active() && !front {
-					crate::retail::set_modelled(prop_meshes.iter().filter(|(_, m)| !m.faces.is_empty()).map(|(&c, _)| c).collect());
+					crate::retail::set_modelled(prop_meshes.iter().filter(|(_, m)| !m.faces.is_empty()).map(|(&c, m)| (c, m.positions.len() as u32)).collect());
 				}
 				// [PC] Retail pool growth rebuilds the prop slots from these (`regrow_props`), not the level.
 				self.retail_prop_meshes = if crate::retail::active() && !front { prop_meshes.clone() } else { HashMap::new() };
@@ -1990,7 +1453,7 @@ crate::loadlog::say(|| "host: closure done (all host parsing)".into());
 					let p = crate::retail::pools();
 					eprintln!("retail: prop pools {} classes, {} props", p.len(), p.iter().map(|c| c.1).sum::<u32>());
 				}
-								let mut slots_game = slots_game(&instances, self.level as i32);
+								let slots_game = slots_game(&instances, self.level as i32);
 				let mut order: Vec<u32> = slots_game.props.iter().map(|p| p.class_id).collect();
 				order.extend(actor_slots.iter().map(|s| s.2));
 				let debris_classes: Vec<u32> = particles::DEBRIS_CLASSES.into_iter().chain(particles::DEBRIS_CLASSES_EXTRA).chain(std::iter::once(game::TELE_RING_CLASS)).filter(|c| prop_meshes.contains_key(c)).collect();
@@ -2001,6 +1464,8 @@ crate::loadlog::say(|| "host: pre gpu.load_scene".into());
 				}
 crate::loadlog::say(|| "host: load_scene returned".into());
 				gpu.set_shrub_bb_textures(&bb_tex);
+				// [PC] PREVIEW (vegfx.rs, RAC_VEG): where the extra plants go.
+				gpu.plan_veg(&world, &instances, &shrub_set, &textures, &terrain_chains.0, &terrain_chains.1, &prop_meshes, &tie_set, &terrain_chains.2, self.level);
 crate::loadlog::say(|| "host: bb textures".into());
 				gpu.load_debris(&debris_classes, &prop_meshes, &textures);
 crate::loadlog::say(|| "host: debris".into());
@@ -2016,6 +1481,8 @@ crate::loadlog::say(|| "host: t lighting".into());
 				gpu.fog_live = None;
 				self.part_far_next = crate::water::PART_FAR;
 				gpu.part_far = crate::water::PART_FAR;
+				gpu.under_flag = false;
+				gpu.under_surf = None;
 				gpu.hero_placed = instances.iter().find(|m| m.class_id == 0).map_or((gameplay::SPAWN_AMBIENT, 0), |m| (m.col, m.light));
 				gpu.hero_env = gameplay::placed_env(gpu.hero_placed.0, gpu.hero_placed.1);
 				old.push(Box::new(std::mem::replace(&mut self.hero_anim, hero_anim)));
@@ -2196,7 +1663,9 @@ crate::loadlog::say(|| "host: t title".into());
 				(self.fm_ov, self.fm_movie_hold) = (false, false);
 crate::loadlog::say(|| "host: t ui_text".into());
 				// [PC] The parsed level data the scene and game were built from is freed off the main thread (40+ ms at a switch).
-				drop_later((meshes, tie_set, shrub_set, textures, prop_meshes, previews, terrain_chains, bb_tex, fx_textures, art_textures, sky));
+				// [PC] The plant planner keeps the data a Vegetation replan reads (vegfx.rs `keep_veg_src`); the rest is freed.
+				let veg_drop = gpu.keep_veg_src(shrub_set, textures, terrain_chains, tie_set, self.instances.len(), self.level);
+				drop_later((meshes, prop_meshes, previews, bb_tex, fx_textures, art_textures, sky, veg_drop));
 				if front {
 					gpu.window.set_title(crate::app_name());
 					self.title = crate::app_name().into();

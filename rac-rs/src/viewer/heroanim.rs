@@ -1,8 +1,7 @@
 //! The hero and his held gadgets' animation clocks: one `anim::PropAnim` (the retail 0x264df8 clock) each, stepped once
 //! per 50 Hz game tick after `Game::update` (decomp/notes/moby_animation.md "Clock", hero_movement.md section 7).
 use super::*;
-use crate::anim::{share_timing, PropAnim};
-use crate::player::{Gnd, State};
+use crate::anim::PropAnim;
 
 
 

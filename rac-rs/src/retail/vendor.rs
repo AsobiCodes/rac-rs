@@ -31,7 +31,6 @@ const ID_NO_BOLTS: u32 = 0x4f60;
 const COLOUR: u64 = 0xffff_ffff_80f0_f0f0;
 
 /// One level's addresses.
-#[allow(dead_code)]
 struct VLevel {
 	stage: u32,
 	sel: u32,

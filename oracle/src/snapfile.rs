@@ -8,9 +8,9 @@ use std::collections::HashMap;
 /// hashes them; reading them here ties the hash to the compilation of this crate (a build that races an edit of the
 /// sources cannot pair old code with a new hash). Not part of it: gs.rs (only used by the GS capture, off in fndiff),
 /// rec/ (the recompiled table is never built there), gate.rs, main.rs.
-pub const SRC: [&str; 25] = [
+pub const SRC: [&str; 29] = [
     include_str!("cpu.rs"),
-    include_str!("fpu.rs"),
+    include_str!("../core/src/fpu.rs"),
     include_str!("hle.rs"),
     include_str!("lib.rs"),
     include_str!("mem.rs"),
@@ -34,6 +34,10 @@ pub const SRC: [&str; 25] = [
     include_str!("snd989/pitch.rs"),
     include_str!("snd989/rng.rs"),
     include_str!("snd989/adopt.rs"),
+    include_str!("../core/src/cpu.rs"),
+    include_str!("../core/src/mem.rs"),
+    include_str!("../core/src/vu.rs"),
+    include_str!("../core/src/rec.rs"),
 ];
 
 /// Every field of the structs `save_dyn` / `load_dyn` have to cover: saved ones, ones rebuilt by `Machine::load`, and
@@ -44,7 +48,7 @@ const CPU_FIELDS: &[&str] = &[
     "r", "hi", "lo", "sa", "pc", "npc", "cp0", "f", "facc", "fcr31", "vf", "vacc", "vi", "mem", "icount", "stop",
     "stub_bits", "stubs", "stub_hits", "syscalls", "sema_next", "div_csr", "ring", "ri", "vu_calls", "vsync", "irqs",
     "vsync_armed", "watch", "watch_hits", "trace_call", "trace_left", "trace_pend", "snd", "pad", "iop",
-    "iso", "rec", "vblank_cb", "rec_unwind", "rec_flush", "rec_catch", "vu0_stats", "vu0_trace", "mc", "vu0_aot",
+    "iso", "rec", "vblank_cb", "rec_unwind", "rec_flush", "rec_catch", "vu0_stats", "vu0_trace", "mc", "vu0_aot", "skinff",
 ];
 const MEM_FIELDS: &[&str] = &[
     "ram", "spr", "vu0m", "vu0m_gen", "vu0d", "vu1m", "vu1d", "hw", "gs", "rcnt1", "hw_reads", "hw_writes", "dma_kicks",
@@ -464,6 +468,7 @@ impl Cpu {
         m.now = r.u64();
         m.irq_dirty = r.bool();
         m.due = r.u64();
+        m.limit = if m.irq_dirty { 0 } else { m.due };
         m.dma_delay = r.u64();
         m.vif1_pend = if r.bool() { Some([r.u32(), r.u32(), r.u32(), r.u32(), r.u32()]) } else { None };
         m.vif1_stops = r.u64();

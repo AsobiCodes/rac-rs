@@ -2,21 +2,16 @@
 //! enemies, health and death. Numbers come from decomp/notes/veldin_mobies.md and hero_movement.md;
 //! veldin_enemies.md; the ones the notes leave open are placeholders and marked [P].
 
-use crate::gameplay::{self, Cuboid, MobyInstance, Polygon};
-use crate::inventory::{Inventory, BOMB_GLOVE, GLOVE_OF_DOOM, MINE_GLOVE};
+use crate::gameplay::{self, Cuboid, MobyInstance};
+use crate::inventory::{Inventory, BOMB_GLOVE};
 use crate::physics::add;
 use crate::physics::dot;
 use crate::physics::length;
-use crate::physics::qmask;
 use crate::physics::scale;
 use crate::physics::sub;
 use crate::physics::MobySolid;
-use crate::physics::Scene;
-use crate::physics::World;
 use crate::physics::V3;
-use crate::player::Input;
 use crate::player::Player;
-use crate::player::State;
 use std::collections::{HashMap, HashSet};
 
 mod camtrig;

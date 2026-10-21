@@ -6,6 +6,7 @@ use super::{Gs, Overlay, Vtx};
 use rayon::prelude::*;
 
 pub(super) mod pmemo;
+pub(super) mod gpu;
 
 #[derive(Clone, Copy)]
 struct St {
@@ -80,11 +81,11 @@ impl Gs {
     }
 
     fn draw_in(&mut self, ty: u32, vs: &[Vtx]) {
-        let at = self.attrs();
+        let mut at = self.attrs();
         let c = ((at >> 9) & 1) as usize;
         let frame = self.r[0x4c + c];
         let fbp = (frame & 0x1ff) as u32;
-        let tme = at & 0x10 != 0;
+        let mut tme = at & 0x10 != 0;
         let tex0 = self.r[0x06 + c];
         let tbp = (tex0 & 0x3fff) as u32;
         let test = self.r[0x47 + c];
@@ -129,6 +130,20 @@ impl Gs {
         if self.full && fbp != disp {
             return;
         }
+        // The level-load loop (`load`, retail.rs `LOAD_ON`): retail draws its starfield into the main buffer (FBP 0x80) and
+        // copies it here with textured sprites the next field. Full mode keeps no main buffer, so the copy would show stale
+        // VRAM (black after a cold boot, level textures after a Quit Game). Copy-shaped sprites (textured, from a page start
+        // of another buffer, the `copy` rule below) are drawn untextured in the main buffer's clear colour (black, alpha
+        // 0x80: the loop's 16 clear sprites [C]) instead.
+        let solid: [Vtx; 3];
+        let vs = if self.full && self.load && tme && ty == 6 && tbp % 32 == 0 && tbp / 32 != disp {
+            at &= !0x10;
+            tme = false;
+            solid = std::array::from_fn(|i| Vtx { rgba: [0, 0, 0, 0x80], ..vs.get(i).copied().unwrap_or_default() });
+            &solid[..vs.len().min(3)]
+        } else {
+            vs
+        };
         // The main render buffer is learnt from the sprites that copy it to the display buffer; the first strip
         // of each copy ends the frame.
         let copy = !self.full && fbp == disp && tme && ty == 6 && tbp % 32 == 0 && tbp / 32 != disp;
@@ -166,7 +181,20 @@ impl Gs {
         // display buffer read a picture the capture does not have.
         let dsp = self.full || (!ov && !copy && fbp == disp && !self.copied && self.main_fbp.is_some() && !(tme && tbp / 32 == disp));
         if dsp && self.dcur.is_none() {
-            self.dcur = Some(self.held.clone());
+            self.dcur = Some(if self.gpu.is_some() {
+                self.gpu_ov(1, gpu::HELD, gpu::DCUR);
+                Vec::new()
+            } else {
+                // The display picture starts as a copy of `held`, into the buffer the last field end left (no allocation).
+                self.dcur_dirty = self.held_dirty;
+                let mut d = std::mem::take(&mut self.dspare);
+                if d.len() == self.held.len() {
+                    d.copy_from_slice(&self.held);
+                    d
+                } else {
+                    self.held.clone()
+                }
+            });
         }
         if dsp && std::env::var("RAC_GSDISP").is_ok() {
             eprintln!("gsdisp f{} ty {ty} tme {} abe {} alpha {:x} rgba {:?} xy ({},{})-({},{})", self.frames, tme as u8, (at >> 6) & 1, self.r[0x42 + c], vs[0].rgba, vs[0].x / 16, vs[0].y / 16, vs.get(1).map_or(0, |v| v.x / 16), vs.get(1).map_or(0, |v| v.y / 16));
@@ -220,14 +248,28 @@ impl Gs {
         let xy = self.r[0x18 + c];
         let sc = self.r[0x40 + c];
         if tme {
-            let (tw, th) = (1u32 << ((tex0 >> 26) & 0xf).min(10), 1u32 << ((tex0 >> 30) & 0xf).min(10));
-            let (lo, hi) = Self::span(((tex0 >> 20) & 0x3f) as u32, tbp, ((tex0 >> 14) & 0x3f) as u32, 0, 0, tw, th);
+            let (lo, hi) = match self.sp_t {
+                Some((k, v)) if k == tex0 => v,
+                _ => {
+                    let (tw, th) = (1u32 << ((tex0 >> 26) & 0xf).min(10), 1u32 << ((tex0 >> 30) & 0xf).min(10));
+                    let v = Self::span(((tex0 >> 20) & 0x3f) as u32, tbp, ((tex0 >> 14) & 0x3f) as u32, 0, 0, tw, th);
+                    self.sp_t = Some((tex0, v));
+                    v
+                }
+            };
             self.flush(lo, hi);
         }
         if !ov && !dsp {
             let (x0, x1, y0, y1) = ((sc & 0x7ff) as u32, ((sc >> 16) & 0x7ff) as u32, ((sc >> 32) & 0x7ff) as u32, ((sc >> 48) & 0x7ff) as u32);
             if x1 >= x0 && y1 >= y0 {
-                let (lo, hi) = Self::span(((frame >> 24) & 0x3f) as u32, fbp * 32, ((frame >> 16) & 0x3f) as u32, x0, y0, x1 - x0 + 1, y1 - y0 + 1);
+                let (lo, hi) = match self.sp_f {
+                    Some((k, v)) if k == (frame, sc) => v,
+                    _ => {
+                        let v = Self::span(((frame >> 24) & 0x3f) as u32, fbp * 32, ((frame >> 16) & 0x3f) as u32, x0, y0, x1 - x0 + 1, y1 - y0 + 1);
+                        self.sp_f = Some(((frame, sc), v));
+                        v
+                    }
+                };
                 self.flush(lo, hi);
             }
         }
@@ -267,7 +309,14 @@ impl Gs {
     }
 
     fn raster(&mut self, st: &St, ty: u32, vs: &[Vtx]) {
+        if self.gpu.is_some() {
+            self.gpu_raster(st, ty, vs);
+            return;
+        }
         self.tcr = (0, 0, 0, 0);
+        if st.ov {
+            self.mark_prim(st, ty, vs);
+        }
         match ty {
             6 => self.sprite(st, vs[0], vs[1]),
             3..=5 => self.tri(st, &vs[..3]),
@@ -281,27 +330,101 @@ impl Gs {
         }
     }
 
+    /// Rows a prim of the overlay can touch (its vertices' y range, a row of margin each side), into the dirty rows of the
+    /// buffer `view` draws into.
+    fn mark_prim(&mut self, st: &St, ty: u32, vs: &[Vtx]) {
+        let n = match ty {
+            6 | 1 | 2 => 2,
+            3..=5 => 3,
+            0 => 1,
+            _ => return,
+        };
+        let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+        for v in &vs[..n.min(vs.len())] {
+            let y = v.y as f32 / 16.0 - st.ofy;
+            lo = lo.min(y);
+            hi = hi.max(y);
+        }
+        let d = if self.to_disp && self.dcur.is_some() { &mut self.dcur_dirty } else { &mut self.cur_dirty };
+        d.mark(lo.floor() as i32 - 1, hi.ceil() as i32 + 1);
+    }
+
     /// Ends the overlay frame: the finished overlay becomes `done`.
     fn publish(&mut self) {
-        let blank = Overlay { w: self.cur.w, h: self.cur.h, rows: self.cur.h, frozen: false, disp: false, px: vec![[0.0, 0.0, 0.0, 1.0]; self.cur.px.len()] };
-        let mut o = std::mem::replace(&mut self.cur, blank);
+        let t0 = self.prof.is_some().then(std::time::Instant::now);
+        let gpu = self.gpu.is_some();
+        let mut rows = self.cur.rows;
         if let Some(f) = self.main_fbp {
-            o.rows = ((self.main_end.saturating_sub(f * 32)) / (self.main_bw.max(1) * 32) * 32).clamp(1, o.h);
+            rows = ((self.main_end.saturating_sub(f * 32)) / (self.main_bw.max(1) * 32) * 32).clamp(1, self.cur.h);
         }
-        o.rows = o.rows.min(disp_rows());
-        self.held.copy_from_slice(&o.px);
-        self.held_rows = o.rows;
-        for p in &mut o.px {
-            for k in 0..3 {
-                p[k] = (p[k] / 255.0).clamp(0.0, 1.0);
+        rows = rows.min(disp_rows());
+        self.held_rows = rows;
+        if gpu {
+            let blank = Overlay { w: self.cur.w, h: self.cur.h, rows: self.cur.h, frozen: false, disp: false, px: Vec::new(), rgba: Vec::new(), hd: None };
+            let mut o = std::mem::replace(&mut self.cur, blank);
+            o.rows = rows;
+            self.gpu_publish(gpu::CUR, o);
+            self.done = None;
+        } else {
+            // CPU capture. The finished picture becomes `held` by swapping the two buffers (no copy); the old `held` buffer,
+            // blanked over its dirty rows only, is the next `cur` (no allocation). The RGBA8 picture the main thread takes is
+            // converted from the first `rows` rows here, blank rows being a constant.
+            let (w, h) = (self.cur.w, self.cur.h);
+            let (frozen, disp) = (self.cur.frozen, self.cur.disp);
+            self.cur.frozen = false;
+            self.cur.disp = false;
+            self.cur.rows = h;
+            if self.check {
+                self.check_blank("cur", &self.cur.px, &self.cur_dirty, w);
+                self.check_blank("held", &self.held, &self.held_dirty, w);
             }
+            std::mem::swap(&mut self.cur.px, &mut self.held);
+            std::mem::swap(&mut self.cur_dirty, &mut self.held_dirty);
+            blank_rows(&mut self.cur.px, w, &self.cur_dirty);
+            self.cur_dirty = Rows::default();
+            let rgba = to_rgba(&self.held, w, rows, &self.held_dirty);
+            if self.check {
+                self.check_rgba(&rgba, &self.held, w, rows);
+            }
+            self.done = Some(Overlay { w, h, rows, frozen, disp, px: Vec::new(), rgba, hd: None });
         }
-        self.done = Some(o);
         if self.log && std::env::var("ORACLE_GSSEQ").is_ok() {
             eprintln!("seq publish {}", self.frames + 1);
         }
         self.mscal = 0;
         self.frames += 1;
+        self.prof_add("publish (overlay)", t0);
+    }
+
+    /// RAC_GSCAP_CHECK: every row outside `dirty` of `buf` must be the blank pixel.
+    fn check_blank(&self, what: &str, buf: &[[f32; 4]], dirty: &Rows, w: u32) {
+        let bad = buf.chunks(w as usize).enumerate().filter(|(y, r)| !dirty.has(*y as i32) && r.iter().any(|p| *p != BLANK)).count();
+        if bad != 0 {
+            eprintln!("gscap check: {bad} rows of {what} outside the dirty rows are not blank (publish {})", self.frames);
+        }
+    }
+
+    /// RAC_GSCAP_CHECK: the old conversion (every pixel of the picture normalised, then rounded) gives the same bytes.
+    fn check_rgba(&self, rgba: &[[u8; 4]], pic: &[[f32; 4]], w: u32, rows: u32) {
+        let n = (w * rows) as usize;
+        let bad = if rgba.len() != n {
+            n.max(1)
+        } else {
+            pic[..n]
+                .iter()
+                .zip(rgba)
+                .filter(|(p, r)| {
+                    let mut p = **p;
+                    for k in 0..3 {
+                        p[k] = (p[k] / 255.0).clamp(0.0, 1.0);
+                    }
+                    p.map(|c| (c * 255.0 + 0.5) as u8) != **r
+                })
+                .count()
+        };
+        if bad != 0 {
+            eprintln!("gscap check: {bad} RGBA8 pixels differ from the whole-picture conversion (publish {})", self.frames);
+        }
     }
 
     /// The field ended (retail.rs worker marker): a display-buffer picture drawn this field becomes `done`, and it
@@ -310,18 +433,40 @@ impl Gs {
         self.copied = false;
         self.to_disp = false;
         let Some(px) = self.dcur.take() else { return };
-        self.held.copy_from_slice(&px);
-        let px = px.iter().map(|p| [(p[0] / 255.0).clamp(0.0, 1.0), (p[1] / 255.0).clamp(0.0, 1.0), (p[2] / 255.0).clamp(0.0, 1.0), p[3]]).collect();
-        self.done = Some(Overlay { w: self.cur.w, h: self.cur.h, rows: self.held_rows.min(disp_rows()), frozen: false, disp: true, px });
+        let t0 = self.prof.is_some().then(std::time::Instant::now);
+        if self.gpu.is_some() {
+            let o = gpu::meta(self.cur.w, self.cur.h, self.held_rows, false, true);
+            self.gpu_publish(gpu::DCUR, o);
+            return;
+        }
+        // CPU capture: the field's picture becomes `held` by a swap (no copy), the old buffer waits for the next `dcur`.
+        let (w, h) = (self.cur.w, self.cur.h);
+        let rows = self.held_rows.min(disp_rows());
+        if self.check {
+            self.check_blank("dcur", &px, &self.dcur_dirty, w);
+        }
+        self.dspare = std::mem::replace(&mut self.held, px);
+        self.held_dirty = self.dcur_dirty;
+        let rgba = to_rgba(&self.held, w, rows, &self.held_dirty);
+        if self.check {
+            self.check_rgba(&rgba, &self.held, w, rows);
+        }
+        self.done = Some(Overlay { w, h, rows, frozen: false, disp: true, px: Vec::new(), rgba, hd: None });
         if std::env::var("RAC_GSDISP").is_ok() {
             eprintln!("gsdisp publish f{}", self.frames);
         }
+        self.prof_add("field_end (display overlay)", t0);
     }
 
     /// The movie player's picture is in the display buffer now (FUN_0028a1c8 path, rac-rs presents it): a later
     /// draw into the display buffer (the movie-end fade) goes over a clear overlay, so the presented movie shows through.
     pub(super) fn movie_shown(&mut self) {
-        self.held.fill([0.0, 0.0, 0.0, 1.0]);
+        if self.gpu.is_some() {
+            self.gpu_fill(gpu::HELD);
+        } else {
+            self.held.fill([0.0, 0.0, 0.0, 1.0]);
+            self.held_dirty = Rows::default();
+        }
         self.dcur = None;
     }
 
@@ -482,9 +627,10 @@ impl Gs {
             // Untextured: every pixel has the last vertex's colour and fog (the interpolated coordinates are not read), so
             // the colour pipeline runs once.
             if let Some((c, wa)) = v.shade(st, &pb) {
+                let pt = Pt::new(st, &v);
                 let row = |y: i32| {
                     for x in ix0.max(0)..ix1 {
-                        v.put(st, x, y, &c, wa, pb.z);
+                        v.put_h(st, &pt, x, y, &c, wa, pb.z);
                     }
                 };
                 if par {
@@ -496,20 +642,55 @@ impl Gs {
             self.pm_end(tok);
             return;
         }
+        // Textured. The fragment colour, fog factor and Z are the last vertex's; only the texture coordinates vary, u (or s)
+        // with x alone and v (or t) with y alone, so they are computed once per column and per row with the same operations
+        // the per-pixel interpolation used (`pa + (pb - pa) * t`, then for ST `s / q * tw`), and the texel fetch indices
+        // follow from them.
+        let sh = Sh::new(st, &v);
+        let pt = Pt::new(st, &v);
+        let q = if pb.q != 0.0 { pb.q } else { 1.0 };
+        let coord = |p: i32, lo: f32, hi: f32, a: f32, b: f32, size: f32| -> (i32, f32) {
+            let t = if hi != lo { (p as f32 - lo) / (hi - lo) } else { 0.0 };
+            let w = a + (b - a) * t;
+            let u = if fst { w } else { w / q * size };
+            if sh.bil {
+                let u = u - 0.5;
+                let f = ffloor(u);
+                (f as i32, u - f)
+            } else {
+                (ffloor(u) as i32, 0.0)
+            }
+        };
+        let (ua, ub, va, vb) = if fst { (pa.u, pb.u, pa.v, pb.v) } else { (pa.s, pb.s, pa.t, pb.t) };
+        let cols: Vec<(i32, f32)> = (ix0..ix1).map(|x| coord(x, x0, x1, ua, ub, sh.tw)).collect();
+        let rows: Vec<(i32, f32)> = (iy0..iy1).map(|y| coord(y, y0, y1, va, vb, sh.th)).collect();
         let row = |y: i32| {
-            let ty = if y1 != y0 { (y as f32 - y0) / (y1 - y0) } else { 0.0 };
-            for x in ix0..ix1 {
-                let tx = if x1 != x0 { (x as f32 - x0) / (x1 - x0) } else { 0.0 };
-                let mut p = pb;
-                if fst {
-                    p.u = pa.u + (pb.u - pa.u) * tx;
-                    p.v = pa.v + (pb.v - pa.v) * ty;
+            if y < 0 {
+                return;
+            }
+            let (iv, fy) = rows[(y - iy0) as usize];
+            for x in ix0.max(0)..ix1 {
+                let (iu, fx) = cols[(x - ix0) as usize];
+                let t = if sh.bil {
+                    let t00 = v.texel(st, iu, iv);
+                    let t10 = v.texel(st, iu + 1, iv);
+                    let t01 = v.texel(st, iu, iv + 1);
+                    let t11 = v.texel(st, iu + 1, iv + 1);
+                    let mut o = [0.0; 4];
+                    for k in 0..4 {
+                        let a = t00[k] + (t10[k] - t00[k]) * fx;
+                        let b = t01[k] + (t11[k] - t01[k]) * fx;
+                        o[k] = a + (b - a) * fy;
+                    }
+                    o
                 } else {
-                    p.s = pa.s + (pb.s - pa.s) * tx;
-                    p.t = pa.t + (pb.t - pa.t) * ty;
-                    p.q = pb.q;
+                    v.texel(st, iu, iv)
+                };
+                let mut c = pb.rgba;
+                View::tex_fx(&sh, &t, &mut c);
+                if let Some((c, wa)) = v.post(&sh, c, pb.f) {
+                    v.put_h(st, &pt, x, y, &c, wa, pb.z);
                 }
-                v.pixel(st, x, y, &p);
             }
         };
         if par {
@@ -539,6 +720,7 @@ impl Gs {
         let par = self.par_ok(st, minx, maxx, miny, maxy);
         self.tex_cache(st, &pxs, (minx, maxx, miny, maxy));
         let vw = self.view();
+        let (sh, pt) = (Sh::new(st, &vw), Pt::new(st, &vw));
         let (fst, fog, zon) = (st.at & 0x100 != 0, st.at & 0x20 != 0, st.zb.is_some());
         let neg = area < 0.0;
         let row = |y: i32| {
@@ -584,7 +766,7 @@ impl Gs {
                 if zon {
                     q.z = mix(pxs[0].z, pxs[1].z, pxs[2].z);
                 }
-                vw.pixel(st, x, y, &q);
+                vw.pixel_h(st, &sh, &pt, x, y, &q);
             }
         };
         if par {
@@ -601,6 +783,7 @@ impl Gs {
         let n = (x1 - x0).abs().max((y1 - y0).abs()).ceil().max(1.0) as i32;
         let (pa, pb) = (self.px(st, &a), self.px(st, &b));
         let v = self.view();
+        let (sh, pt) = (Sh::new(st, &v), Pt::new(st, &v));
         for i in 0..n {
             let t = i as f32 / n as f32;
             let mut p = pb;
@@ -611,7 +794,7 @@ impl Gs {
             }
             let (x, y) = ((x0 + (x1 - x0) * t).round() as i32, (y0 + (y1 - y0) * t).round() as i32);
             if x >= st.sc[0] && x <= st.sc[1] && y >= st.sc[2] && y <= st.sc[3] {
-                v.pixel(st, x, y, &p);
+                v.pixel_h(st, &sh, &pt, x, y, &p);
             }
         }
     }
@@ -660,12 +843,16 @@ impl Gs {
         if t4 {
             let off = if cfmt == 2 { csa * 16 } else { (csa & 15) * 16 };
             self.clut_off = off;
-            if load {
+            if load && self.gpu.is_some() {
+                self.gpu_clut(cbp, cfmt, true, off);
+            } else if load {
                 for i in 0..16u32 {
                     let raw = self.rd_px(cfmt, cbp, 1, i % 8, i / 8);
                     self.clut[off + i as usize] = Self::unpack_col(cfmt, raw, texa);
                 }
             }
+        } else if load && self.gpu.is_some() {
+            self.gpu_clut(cbp, cfmt, false, 0);
         } else if load {
             for i in 0..256u32 {
                 let p = (i & 0xe7) | ((i & 8) << 1) | ((i & 0x10) >> 1);
@@ -673,6 +860,123 @@ impl Gs {
                 self.clut[i as usize] = Self::unpack_col(cfmt, raw, texa);
             }
         }
+    }
+}
+
+/// Which rows of a picture buffer may differ from the blank pixel [0, 0, 0, 1]: one bit per row.
+#[derive(Clone, Copy, Default)]
+pub(super) struct Rows([u64; (super::H as usize).div_ceil(64)]);
+
+impl Rows {
+    /// Marks rows `lo..=hi` (clamped to the picture).
+    pub(super) fn mark(&mut self, lo: i32, hi: i32) {
+        let (lo, hi) = (lo.max(0), hi.min(super::H as i32 - 1));
+        for y in lo..=hi {
+            self.0[y as usize / 64] |= 1 << (y % 64);
+        }
+    }
+
+    fn has(&self, y: i32) -> bool {
+        self.0[y as usize / 64] >> (y % 64) & 1 != 0
+    }
+}
+
+/// The overlay pixel of an untouched row.
+const BLANK: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+
+/// Blanks the dirty rows of a picture buffer.
+fn blank_rows(buf: &mut [[f32; 4]], w: u32, dirty: &Rows) {
+    for (y, r) in buf.chunks_mut(w as usize).enumerate() {
+        if dirty.has(y as i32) {
+            r.fill(BLANK);
+        }
+    }
+}
+
+/// One premultiplied overlay pixel as RGBA8: the colour normalised (/ 255, clamped to 0..1), then x 255 + 0.5 rounded down;
+/// alpha is already 0..1.
+#[inline]
+fn px8(p: &[f32; 4]) -> [u8; 4] {
+    let n = |c: f32| ((c / 255.0).clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+    [n(p[0]), n(p[1]), n(p[2]), (p[3] * 255.0 + 0.5) as u8]
+}
+
+/// The first `rows` rows of a picture as RGBA8; the rows that are not dirty are blank and become the constant.
+fn to_rgba(pic: &[[f32; 4]], w: u32, rows: u32, dirty: &Rows) -> Vec<[u8; 4]> {
+    let w = w as usize;
+    let blank = px8(&BLANK);
+    let mut out = Vec::with_capacity(w * rows as usize);
+    for (y, r) in pic.chunks(w).take(rows as usize).enumerate() {
+        if dirty.has(y as i32) {
+            out.extend(r.iter().map(px8));
+        } else {
+            out.resize(out.len() + w, blank);
+        }
+    }
+    out
+}
+
+/// A prim's shade state (texture, TFX, fog, alpha test) decoded once from the registers, so the per-pixel code only
+/// reads it. The values are the ones `shade` derived for every pixel before.
+#[derive(Clone, Copy)]
+struct Sh {
+    tex: bool,
+    fst: bool,
+    bil: bool,
+    /// The texture's width and height as floats.
+    tw: f32,
+    th: f32,
+    tcc: bool,
+    tfx: u64,
+    fog: bool,
+    fogc: [f32; 3],
+    ate: bool,
+    aref: f32,
+    atst: u64,
+    afail: u64,
+}
+
+impl Sh {
+    fn new(st: &St, v: &View) -> Sh {
+        let (at, tex0, test) = (st.at, st.tex0, st.test);
+        let fc = v.fogcol;
+        Sh {
+            tex: at & 0x10 != 0,
+            fst: at & 0x100 != 0,
+            bil: st.tex1 & 0x20 != 0,
+            tw: (1u32 << ((tex0 >> 26) & 0xf).min(10)) as f32,
+            th: (1u32 << ((tex0 >> 30) & 0xf).min(10)) as f32,
+            tcc: tex0 & (1 << 34) != 0,
+            tfx: (tex0 >> 35) & 3,
+            fog: at & 0x20 != 0,
+            fogc: std::array::from_fn(|k| ((fc >> (8 * k)) & 0xff) as f32),
+            ate: test & 1 != 0,
+            aref: ((test >> 4) & 0xff) as f32,
+            atst: (test >> 1) & 7,
+            afail: (test >> 12) & 3,
+        }
+    }
+}
+
+/// A prim's blend state, decoded once (see `Sh`).
+#[derive(Clone, Copy)]
+struct Pt {
+    ov: bool,
+    abe: bool,
+    /// PABE is on (the blend is skipped for fragments with alpha < 128).
+    pabe: bool,
+    al: u64,
+    fix: f32,
+    a: u8,
+    b: u8,
+    d: u8,
+    cfs: u64,
+}
+
+impl Pt {
+    fn new(st: &St, v: &View) -> Pt {
+        let al = st.alpha;
+        Pt { ov: st.ov, abe: st.at & 0x40 != 0, pabe: v.pabe & 1 != 0, al, fix: ((al >> 32) & 0xff) as f32, a: (al & 3) as u8, b: ((al >> 2) & 3) as u8, d: ((al >> 6) & 3) as u8, cfs: (al >> 4) & 3 }
     }
 }
 
@@ -796,71 +1100,90 @@ impl View {
     }
 
     /// One pixel: `shade`, then `put`.
-    #[inline]
     fn pixel(&self, st: &St, x: i32, y: i32, p: &Px) {
         if x < 0 || y < 0 {
             return;
         }
-        if let Some((c, wa)) = self.shade(st, p) {
-            self.put(st, x, y, &c, wa, p.z);
+        self.pixel_h(st, &Sh::new(st, self), &Pt::new(st, self), x, y, p);
+    }
+
+    /// `pixel` with the prim's decoded state (`Sh`, `Pt`).
+    #[inline]
+    fn pixel_h(&self, st: &St, sh: &Sh, pt: &Pt, x: i32, y: i32, p: &Px) {
+        if x < 0 || y < 0 {
+            return;
+        }
+        if let Some((c, wa)) = self.shade_h(st, sh, p) {
+            self.put_h(st, pt, x, y, &c, wa, p.z);
         }
     }
 
     /// Texture, TFX, fog and alpha test of one fragment: its colour and whether the alpha is written; None when the
     /// alpha test drops it.
-    #[inline]
     fn shade(&self, st: &St, p: &Px) -> Option<([f32; 4], bool)> {
-        let at = st.at;
+        self.shade_h(st, &Sh::new(st, self), p)
+    }
+
+    #[inline]
+    fn shade_h(&self, st: &St, sh: &Sh, p: &Px) -> Option<([f32; 4], bool)> {
         let mut c = p.rgba;
-        if at & 0x10 != 0 {
-            let tex0 = st.tex0;
-            let (tw, th) = (1u32 << ((tex0 >> 26) & 0xf).min(10), 1u32 << ((tex0 >> 30) & 0xf).min(10));
-            let (u, v) = if at & 0x100 != 0 {
+        if sh.tex {
+            let (u, v) = if sh.fst {
                 (p.u, p.v)
             } else {
                 let q = if p.q != 0.0 { p.q } else { 1.0 };
-                (p.s / q * tw as f32, p.t / q * th as f32)
+                (p.s / q * sh.tw, p.t / q * sh.th)
             };
-            let t = if st.tex1 & 0x20 != 0 { self.bilinear(st, u - 0.5, v - 0.5) } else { self.texel(st, ffloor(u) as i32, ffloor(v) as i32) };
-            let tcc = tex0 & (1 << 34) != 0;
-            match (tex0 >> 35) & 3 {
-                0 => {
-                    for k in 0..3 {
-                        c[k] = (t[k] * c[k] / 128.0).min(255.0);
-                    }
-                    c[3] = if tcc { (t[3] * c[3] / 128.0).min(255.0) } else { c[3] };
+            let t = if sh.bil { self.bilinear(st, u - 0.5, v - 0.5) } else { self.texel(st, ffloor(u) as i32, ffloor(v) as i32) };
+            Self::tex_fx(sh, &t, &mut c);
+        }
+        self.post(sh, c, p.f)
+    }
+
+    /// The TFX combine of a fetched texel `t` with the fragment colour `c`.
+    #[inline(always)]
+    fn tex_fx(sh: &Sh, t: &[f32; 4], c: &mut [f32; 4]) {
+        let tcc = sh.tcc;
+        match sh.tfx {
+            0 => {
+                for k in 0..3 {
+                    c[k] = (t[k] * c[k] / 128.0).min(255.0);
                 }
-                1 => {
-                    for k in 0..3 {
-                        c[k] = t[k];
-                    }
-                    if tcc {
-                        c[3] = t[3];
-                    }
+                c[3] = if tcc { (t[3] * c[3] / 128.0).min(255.0) } else { c[3] };
+            }
+            1 => {
+                for k in 0..3 {
+                    c[k] = t[k];
                 }
-                tfx => {
-                    let a = c[3];
-                    for k in 0..3 {
-                        c[k] = (t[k] * c[k] / 128.0 + a).min(255.0);
-                    }
-                    c[3] = if tcc { if tfx == 2 { (t[3] + a).min(255.0) } else { t[3] } } else { a };
+                if tcc {
+                    c[3] = t[3];
                 }
             }
+            tfx => {
+                let a = c[3];
+                for k in 0..3 {
+                    c[k] = (t[k] * c[k] / 128.0 + a).min(255.0);
+                }
+                c[3] = if tcc { if tfx == 2 { (t[3] + a).min(255.0) } else { t[3] } } else { a };
+            }
         }
-        if at & 0x20 != 0 {
-            let fc = self.fogcol;
-            let f = p.f / 255.0;
+    }
+
+    /// Fog and alpha test of a fragment colour (`f` the fog factor).
+    #[inline(always)]
+    fn post(&self, sh: &Sh, mut c: [f32; 4], pf: f32) -> Option<([f32; 4], bool)> {
+        if sh.fog {
+            let f = pf / 255.0;
             for k in 0..3 {
-                c[k] = c[k] * f + ((fc >> (8 * k)) & 0xff) as f32 * (1.0 - f);
+                c[k] = c[k] * f + sh.fogc[k] * (1.0 - f);
             }
         }
         // Alpha test.
-        let test = st.test;
         let mut wa = true;
-        if test & 1 != 0 {
-            let aref = ((test >> 4) & 0xff) as f32;
+        if sh.ate {
+            let aref = sh.aref;
             let a = ffloor(c[3]);
-            let pass = match (test >> 1) & 7 {
+            let pass = match sh.atst {
                 0 => false,
                 1 => true,
                 2 => a < aref,
@@ -871,7 +1194,7 @@ impl View {
                 _ => a != aref,
             };
             if !pass {
-                match (test >> 12) & 3 {
+                match sh.afail {
                     0 | 2 => return None,
                     1 => {}
                     _ => wa = false,
@@ -883,15 +1206,13 @@ impl View {
 
     /// Blend and write of a shaded fragment at (x, y), x and y >= 0.
     #[inline]
-    fn put(&self, st: &St, x: i32, y: i32, c: &[f32; 4], wa: bool, z: f32) {
-        let at = st.at;
+    fn put_h(&self, st: &St, pt: &Pt, x: i32, y: i32, c: &[f32; 4], wa: bool, z: f32) {
         let c = *c;
-        let abe = at & 0x40 != 0;
-        let al = st.alpha;
-        let fix = ((al >> 32) & 0xff) as f32;
-        let pabe = self.pabe & 1 != 0 && c[3] < 128.0;
-        let blend = abe && !pabe;
-        if st.ov {
+        let al = pt.al;
+        let fix = pt.fix;
+        let pabe = pt.pabe && c[3] < 128.0;
+        let blend = pt.abe && !pabe;
+        if pt.ov {
             let (w, h) = (self.w, self.h);
             if x >= w || y >= h {
                 return;
@@ -902,9 +1223,8 @@ impl View {
                 *o = [c[0], c[1], c[2], 0.0];
                 return;
             }
-            let sel = |s: u64| (s & 3) as u8;
-            let (a, b, d) = (sel(al), sel(al >> 2), sel(al >> 6));
-            let cf = match (al >> 4) & 3 {
+            let (a, b, d) = (pt.a, pt.b, pt.d);
+            let cf = match pt.cfs {
                 0 => c[3] / 128.0,
                 1 => 1.0, // destination alpha: the overlay does not know the scene's alpha [I]
                 _ => fix / 128.0,

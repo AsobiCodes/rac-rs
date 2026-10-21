@@ -4,16 +4,6 @@
 //! block, recall and group aggression, the bite (6), gadget (9) and death (24) states, the debris FUN_002d3700 and the
 //! death launch on `foes::Mover`; ARI-11: the Suck Cannon / Morph-o-Ray side (`Shark::victim`, `shark_finish`).
 
-use super::aridia::self;
-use super::foes::self;
-use super::{Event, Game, Kind, Prop};
-use crate::camera::{fast_cos, fast_sin};
-use crate::gameplay::{pal_ticks, MobyInstance, Polygon, PAL_DT, PAL_DT2, PAL_SCALE};
-use crate::particles::euler_m;
-use crate::particles::Rng;
-use crate::particles::Spawn;
-use crate::physics::{length, sub, World, V3};
-use crate::shadows::fast_atan2;
 
 
 

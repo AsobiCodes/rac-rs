@@ -4,11 +4,8 @@
 //! FUN_002cc930 with their draw callback FUN_002ccb00 (WPN-6.9c). No ammo, no fire dispatch case, no stance call.
 
 use super::*;
-use super::mine::horizontal;
-use crate::gameplay::pal_ticks;
-use crate::particles::{Rng, WorldQuad};
+use crate::particles::WorldQuad;
 use crate::physics::{cross, normalize};
-use crate::shadows::fast_atan2;
 
 /// The held class (item row 14 word 4).
 pub const HELD: u32 = 175;

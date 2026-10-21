@@ -4,7 +4,6 @@
 
 use crate::anim::{parse_sequence, Sequence};
 use crate::bytes::{f32_at, span, u16_at, u32_at, R};
-use crate::physics::{add, V3};
 
 /// The port targets the PAL release (`iRam0015ed80` = PAL flag: TOC +0x15a0 and 0x50-tick chunks).
 pub const PAL: bool = true;

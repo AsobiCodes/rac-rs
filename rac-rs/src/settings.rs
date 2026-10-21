@@ -5,8 +5,6 @@ use std::path::PathBuf;
 
 /// Volume range of 0x15edf0 / 0x15edec.
 pub const VOLUME_MAX: u16 = 0x400;
-/// Sound page: Left/Right held moves the volume by 3 per frame.
-pub const VOLUME_STEP: u16 = 3;
 /// Camera rotation speed table 0x161d70 (Slow, Medium, Fast), radians per tick.
 pub const ROTATE_RATES: [f32; 3] = [0.017_453, 0.022_689, 0.027_925];
 
@@ -47,17 +45,7 @@ impl Default for Settings {
 	}
 }
 
-/// One frame of a held Left (-1) or Right (+1) on a volume row.
-pub fn step_volume(v: u16, dir: i32) -> u16 {
-	(v as i32 + dir * VOLUME_STEP as i32).clamp(0, VOLUME_MAX as i32) as u16
-}
-
 impl Settings {
-	/// The options a new game starts with: FUN_0025f1b0 restores the default image but keeps the live
-	/// music and SFX volume (savegame.md); the port's own extras (language, video mode, modern camera) stay.
-	pub fn new_game(&self) -> Settings {
-		Settings { sfx: self.sfx, music: self.music, lang: self.lang, hz60: self.hz60, cam_modern: self.cam_modern, smooth: self.smooth, ..Settings::default() }
-	}
 
 	/// Sound effects gain 0..1.
 	pub fn sfx_gain(&self) -> f32 {
@@ -71,14 +59,6 @@ impl Settings {
 
 	pub fn rotate_rate(&self) -> f32 {
 		ROTATE_RATES[(self.cam_speed as usize).min(2)]
-	}
-
-	pub fn to_text(&self) -> String {
-		let b = |v: bool| v as u8;
-		format!(
-			"sfx={}\nmusic={}\nstereo={}\ncam_lr={}\ncam_ud={}\ncam_speed={}\nsubtitles={}\nhelp_voice={}\nhelp_text={}\nlang={}\nhz60={}\ncam_modern={}\nsmooth={}\n",
-			self.sfx, self.music, b(self.stereo), b(self.cam_lr), b(self.cam_ud), self.cam_speed, b(self.subtitles), b(self.help_voice), b(self.help_text), self.lang, b(self.hz60), b(self.cam_modern), b(self.smooth)
-		)
 	}
 
 	/// Unknown keys and bad values keep their defaults.
@@ -111,15 +91,6 @@ impl Settings {
 		std::fs::read_to_string(path()).map(|s| Settings::parse(&s)).unwrap_or_default()
 	}
 
-	pub fn store(&self) {
-		let p = path();
-		if let Some(d) = p.parent() {
-			let _ = std::fs::create_dir_all(d);
-		}
-		if let Err(e) = std::fs::write(&p, self.to_text()) {
-			eprintln!("settings: {e}");
-		}
-	}
 }
 
 fn path() -> PathBuf {
@@ -131,24 +102,11 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn volume_steps_and_round_trip() {
-		assert_eq!(step_volume(0x400, 1), 0x400);
-		assert_eq!(step_volume(1, -1), 0);
-		assert_eq!(step_volume(0x2cc, 1), 0x2cf);
-		// A full sweep at 3 per frame takes 342 frames.
-		let mut v = 0;
-		let mut n = 0;
-		while v < VOLUME_MAX {
-			v = step_volume(v, 1);
-			n += 1;
-		}
-		assert_eq!(n, 342);
+	fn parse_reads_the_settings_file_format() {
 		let s = Settings { sfx: 17, music: 900, stereo: false, cam_lr: false, cam_ud: true, cam_speed: 2, subtitles: true, help_voice: false, help_text: true, lang: 3, hz60: true, cam_modern: true, smooth: false, cheats: [0; 12], cheat_unlocks: [0; 12] };
-		assert_eq!(Settings::parse(&s.to_text()), s);
+		let text = "sfx=17\nmusic=900\nstereo=0\ncam_lr=0\ncam_ud=1\ncam_speed=2\nsubtitles=1\nhelp_voice=0\nhelp_text=1\nlang=3\nhz60=1\ncam_modern=1\nsmooth=0\n";
+		assert_eq!(Settings::parse(text), s);
 		assert_eq!(Settings::parse("junk\nsfx=x\nmusic=5000"), Settings { music: 0x400, ..Settings::default() });
 		assert!((Settings::default().music_gain() - 1.0).abs() < 1e-6);
-		let n = Settings { sfx: 9, music: 8, stereo: false, cam_lr: false, cam_speed: 2, subtitles: true, help_voice: false, lang: 2, cheats: [1; 12], ..Settings::default() }.new_game();
-		assert_eq!((n.sfx, n.music, n.lang), (9, 8, 2));
-		assert_eq!(Settings { sfx: 9, music: 8, lang: 2, ..Settings::default() }, n);
 	}
 }

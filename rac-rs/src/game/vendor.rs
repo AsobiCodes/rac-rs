@@ -3,13 +3,10 @@
 
 use super::Event;
 use super::Game;
-use super::Kind;
-use super::Prop;
-use super::gadget_scene::{GadgetRun, GadgetScene, SceneFrame, FANFARE_VOICE};
-use crate::physics::{add, length, sub, World, V3};
+use super::gadget_scene::{GadgetRun, GadgetScene};
+use crate::physics::{add, V3};
 use crate::particles::WorldQuad;
 use std::collections::HashMap;
-use std::f32::consts::{PI, TAU};
 
 pub(super) const VENDOR: u32 = 11;
 pub(super) const ORB: u32 = 1143;

@@ -30,10 +30,8 @@ pub struct Sky {
 	/// RGBA shown where no shell covers; alpha is 255.
 	pub colour: [u8; 4],
 	/// ARI-4: header +8, the live sky sprite count (0 on disc; the Aridia sky pass sets it to 256 on its first frame).
-	#[allow(dead_code)] // read by the disc test; retail gates the pass on the level only
 	pub sprite_count: i16,
 	/// ARI-4: header +0xa, the sprite buffer capacity (256 on Aridia, 0 on Veldin and Novalis).
-	#[allow(dead_code)]
 	pub sprite_max: u16,
 }
 

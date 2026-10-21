@@ -3,12 +3,10 @@
 //! the cutscene and level-end controller is class 834. Scenes 1-4 play from scene.wad (scene.rs, driven
 //! from viewer.rs); the FMV (movie 0x4001) plays through scene::movie.
 
-use crate::game::{self, Game};
+use crate::game::{self};
 use crate::gameplay::{Cuboid, Help, MobyInstance};
-use crate::game::hints::self;
 use crate::game::hints::HelpRecords;
 use crate::help::HelpBox;
-use crate::physics::{length, sub, V3};
 use std::collections::HashMap;
 
 const TUTOR: u32 = 1413;
@@ -122,13 +120,6 @@ impl Flow {
 		}
 	}
 
-	/// Save-anywhere progress (save.rs `Where`, a rac-rs extension [PC] port choice): the controller's next record
-	/// (-1 once finished, None without a controller) and the help slots shown.
-	pub fn progress(&self) -> (Option<i32>, Vec<i16>) {
-		let record = self.controller.as_ref().map(|c| c.record.map_or(-1, |r| r as i32));
-		(record, self.records.seen())
-	}
-
 	pub fn restore(&mut self, record: Option<i32>, seen: &[i16]) {
 		if let (Some(c), Some(r)) = (&mut self.controller, record) {
 			c.record = usize::try_from(r).ok().filter(|&r| r < VELDIN_SCENES.len());
@@ -154,11 +145,6 @@ impl Flow {
 
 
 
-	/// A death re-arms the help slots (HelpRecords::rearm); `sync_out` carries it to `Game::story`.
-	pub fn rearm_help(&mut self) {
-		self.records.rearm();
-	}
-
 
 
 
@@ -168,21 +154,6 @@ impl Flow {
 	/// Help message `id`'s voice (entry +8; -1 = none).
 	pub fn voice_of(&self, id: u32) -> Option<usize> {
 		self.messages.get(&id).and_then(|m| usize::try_from(m.1).ok())
-	}
-
-	/// The text of help message `id`.
-	pub fn message(&self, id: u32) -> Option<&str> {
-		self.messages.get(&id).map(|m| m.0.as_str())
-	}
-
-	/// Adds a help text the level data lacks (the generic 20000+ helps live in all_text).
-	pub fn add_message(&mut self, id: u32, text: &str) {
-		self.messages.entry(id).or_insert_with(|| (text.to_string(), -1));
-	}
-
-	/// Shows help `id` once nothing else is up (no per-slot check).
-	pub fn queue(&mut self, id: u32) {
-		self.queue.push(id);
 	}
 
 

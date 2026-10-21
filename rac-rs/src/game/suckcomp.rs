@@ -2,17 +2,7 @@
 //! capture / fire / cancel / clear entry points the held weapon calls on a Peckbot or Amoeboid, and the per-tick state
 //! machine `suck_step` (pull, stored, flight, landing). Per-tick units throughout (retail game ticks at 50 Hz).
 
-use super::foes::self;
-use super::mouse::wrap_angle;
-use super::Event;
-use super::Game;
-use super::Kind;
-use super::Prop;
-use crate::gameplay::pal_ticks;
-use crate::gameplay::PAL_DT2;
-use crate::particles::euler_m;
-use crate::physics::{add, cross, dot, length, scale, sub, Scene, World, V3};
-use std::f32::consts::PI;
+use crate::physics::{add, cross, dot, scale};
 
 
 

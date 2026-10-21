@@ -6,6 +6,12 @@
 //! - `fs_ao` (Ambient occlusion On): screen-space ambient occlusion from that depth (normals from the depth, 12 samples on a
 //!   rotated spiral within 1 world unit, distance falloff), then a depth-aware blur across and down;
 //! - Water Enhanced (waterfx.rs): the water pixels shaded over the scene;
+//! - Global illumination (Low / Medium / High): one bounce of light between nearby surfaces, in screen space on a quarter-size
+//!   (High: half-size) grid: `fs_gsrc` keeps each cell's colour (linear) and surface normal (from the half-size depth), `fs_gi`
+//!   gathers a few cells on a rotated spiral within a few world units, each weighted by how the two surfaces face each other
+//!   and by distance (no visibility test, no ray tracing), then a depth-aware blur across and down; `fs_comp` lights the
+//!   surface's own colour with it (depth-aware upsample). The water pass's pixels (water, waterfalls, the underwater look)
+//!   take none: their look stays the water pass's;
 //! - bloom: the bright part of the picture (a soft threshold on luminance; sky pixels count a quarter, so skies do not wash
 //!   out) plus, with Particles Enhanced, the additive particles' glow target (partfx.rs) down a chain of five half sizes and back up with a tent filter;
 //! - Sun rays On: `fs_rmask` keeps the bright sky around the key light's screen position (half size), `fs_rays` blurs it
@@ -19,7 +25,7 @@
 use super::*;
 
 const POST_SHADER: &str = r#"
-struct P { size: vec4<f32>, half: vec4<f32>, proj: vec4<f32>, params: vec4<f32>, grade: vec4<f32>, extra: vec4<f32>, sun: vec4<f32>, cam: array<vec4<f32>, 4>, fxl: array<vec4<f32>, 16> };
+struct P { size: vec4<f32>, half: vec4<f32>, proj: vec4<f32>, params: vec4<f32>, grade: vec4<f32>, extra: vec4<f32>, sun: vec4<f32>, cam: array<vec4<f32>, 4>, fxl: array<vec4<f32>, 16>, q: vec4<f32>, gi: vec4<f32>, gi2: vec4<f32>, gi3: vec4<f32> };
 @group(0) @binding(0) var<uniform> p: P;
 @group(0) @binding(1) var scene: texture_2d<f32>;
 @group(0) @binding(2) var depth_ms: texture_depth_multisampled_2d;
@@ -29,6 +35,11 @@ struct P { size: vec4<f32>, half: vec4<f32>, proj: vec4<f32>, params: vec4<f32>,
 @group(0) @binding(6) var lsamp: sampler;
 @group(0) @binding(7) var glow_in: texture_2d<f32>;
 @group(0) @binding(8) var rays_in: texture_2d<f32>;
+// [PC] Global illumination: the gathered bounce light (blur input / the composite's), the water pass's position target and the
+// scene as it was before the water pass (both read by the composite only while the water pass ran this frame: p.gi.w = 1).
+@group(0) @binding(9) var gi_in: texture_2d<f32>;
+@group(0) @binding(10) var wpos_in: texture_2d<f32>;
+@group(0) @binding(11) var prew_in: texture_2d<f32>;
 
 struct VO { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
 
@@ -98,10 +109,10 @@ fn ign(x: vec2<f32>) -> f32 {
 	// Far away the radius shrinks under a few pixels: the occlusion fades out instead of turning into noise.
 	let fade = smoothstep(2.0, 6.0, R * ppu);
 	if (fade <= 0.0) { return vec4<f32>(1.0); }
-	let rad = clamp(R * ppu, 3.0, 48.0);
+	let rad = clamp(R * ppu, 3.0, p.q.y);
 	let rot = ign(v.pos.xy) * 6.2831853;
 	var occ = 0.0;
-	let N = 12;
+	let N = i32(p.q.x);
 	for (var i = 0; i < N; i++) {
 		let a = rot + f32(i) * 2.3999632;
 		let t = sqrt((f32(i) + 0.5) / f32(N)) * rad;
@@ -137,6 +148,146 @@ fn ign(x: vec2<f32>) -> f32 {
 
 fn to_linear(c: vec3<f32>) -> vec3<f32> {
 	return pow(max(c, vec3<f32>(0.0)), vec3<f32>(2.2));
+}
+
+// [PC] Global illumination. p.gi = (strength in the composite, world radius, taps, water mask valid); p.gi2 = (albedo: 0 the
+// lit colour .. 1 its hue, floor, largest radius in grid cells, half-size texels per grid cell); p.gi3 = (blur depth
+// tolerance, cap of the gathered light, 0, 0). A grid cell stands for half-size texel `q * s` (its depth, position and normal).
+fn gi_normal(h: vec2<i32>) -> vec3<f32> {
+	// As `fs_ao`: per axis the neighbour with the smaller step (no smearing across silhouettes), facing the eye.
+	let P = view_pos(h);
+	let r = view_pos(h + vec2<i32>(1, 0)) - P;
+	let l = P - view_pos(h - vec2<i32>(1, 0));
+	let d = view_pos(h + vec2<i32>(0, 1)) - P;
+	let u = P - view_pos(h - vec2<i32>(0, 1));
+	let dx = select(l, r, abs(r.z) < abs(l.z));
+	let dy = select(u, d, abs(d.z) < abs(u.z));
+	var n = cross(dy, dx);
+	if (dot(n, n) < 1e-12) { return vec3<f32>(0.0, 0.0, 1.0); }
+	n = normalize(n);
+	if (dot(n, P) > 0.0) { n = -n; }
+	return n;
+}
+
+// A moby (Ratchet, enemies, crates, pickups) leaves alpha 0 in the post scene, every other pixel 1 (viewer.rs `fs`; a vegetation leaf's
+// soft edge at least 0.78, from its alpha-to-coverage): the share (0 .. 1) of a resolved pixel (4 samples: alpha 1 - k / 4) that is moby.
+fn moby_cover(a: f32) -> f32 {
+	return clamp((0.78 - a) / 0.5, 0.0, 1.0);
+}
+
+struct GSO { @location(0) rad: vec4<f32>, @location(1) nrm: vec4<f32> };
+
+// Each grid cell: the scene's linear colour over the cell (one filtered tap in its middle) and the view-space normal; sky
+// cells: alpha 0 (they send no light and receive none).
+@fragment fn fs_gsrc(v: VO) -> GSO {
+	let q = vec2<i32>(v.pos.xy);
+	let s = i32(p.gi2.w);
+	let hs = vec2<i32>(textureDimensions(lin));
+	let h = min(q * s, hs - vec2<i32>(1));
+	var o: GSO;
+	o.rad = vec4<f32>(0.0);
+	o.nrm = vec4<f32>(0.0);
+	if (sky(textureLoad(lin, h, 0).r)) { return o; }
+	let uv = (vec2<f32>(q * s * 2) + f32(s)) * p.size.zw;
+	// A cell the cell's middle or corners show a moby in is left empty, like sky: no light from it, none for it.
+	let ho = f32(s) * p.size.zw;
+	var amin = textureSampleLevel(scene, lsamp, uv, 0.0).a;
+	for (var k = 0; k < 4; k++) {
+		let sg = vec2<f32>(select(-1.0, 1.0, (k & 1) == 1), select(-1.0, 1.0, (k & 2) == 2));
+		amin = min(amin, textureSampleLevel(scene, lsamp, uv + sg * ho, 0.0).a);
+	}
+	if (moby_cover(amin) > 0.0) { return o; }
+	o.rad = vec4<f32>(to_linear(textureSampleLevel(scene, lsamp, uv, 0.0).rgb), 1.0);
+	o.nrm = vec4<f32>(gi_normal(h) * 0.5 + 0.5, 1.0);
+	return o;
+}
+
+// The bounce light reaching each grid cell: taps on a rotated spiral within the world radius (at least 1.5 cells, at most
+// p.gi2.z), each sending its colour times the receiver's facing, the sender's facing (a surface turned away sends nothing: no
+// halo behind objects) and a distance falloff. Inputs: cell colours in bloom_in, normals in ao_in.
+@fragment fn fs_gi(v: VO) -> @location(0) vec4<f32> {
+	let q = vec2<i32>(v.pos.xy);
+	let s = i32(p.gi2.w);
+	let gd = vec2<i32>(textureDimensions(ao_in));
+	let nr = textureLoad(ao_in, q, 0);
+	if (nr.a < 0.5) { return vec4<f32>(0.0); }
+	let n = normalize(nr.xyz * 2.0 - 1.0);
+	let P = view_pos(q * s);
+	let R = p.gi.y;
+	// Grid cells per world unit at this depth.
+	let ppu = p.half.y * 0.5 / (p.proj.y * -P.z * f32(s));
+	let rad = clamp(R * ppu, 1.5, p.gi2.z);
+	let rot = ign(v.pos.xy) * 6.2831853;
+	let N = i32(p.gi.z);
+	var acc = vec3<f32>(0.0);
+	for (var i = 0; i < N; i++) {
+		let a = rot + f32(i) * 2.3999632;
+		let t = sqrt((f32(i) + 0.5) / f32(N)) * rad;
+		let o = vec2<i32>(round(vec2<f32>(cos(a), sin(a)) * t));
+		let qs = q + o;
+		if (all(o == vec2<i32>(0)) || any(qs < vec2<i32>(0)) || any(qs >= gd)) { continue; }
+		let ns = textureLoad(ao_in, qs, 0);
+		if (ns.a < 0.5) { continue; }
+		let w = view_pos(qs * s) - P;
+		let d2 = dot(w, w);
+		let dir = w * inverseSqrt(max(d2, 1e-6));
+		let cr = max(dot(n, dir), 0.0);
+		let cs = max(dot(ns.xyz * 2.0 - 1.0, -dir), 0.0);
+		let fall = clamp(1.0 - d2 / (R * R), 0.0, 1.0);
+		acc += textureLoad(bloom_in, qs, 0).rgb * (cr * cs * fall);
+	}
+	return vec4<f32>(acc * (2.0 / f32(N)), 1.0);
+}
+
+// Depth-aware 7-tap blur of the bounce light on the grid; p.grade.z picks the axis (0 across, 1 down).
+@fragment fn fs_giblur(v: VO) -> @location(0) vec4<f32> {
+	let q = vec2<i32>(v.pos.xy);
+	let s = i32(p.gi2.w);
+	let gd = vec2<i32>(textureDimensions(gi_in));
+	let hs = vec2<i32>(textureDimensions(lin));
+	let axis = select(vec2<i32>(1, 0), vec2<i32>(0, 1), p.grade.z > 0.5);
+	let z0 = textureLoad(lin, min(q * s, hs - vec2<i32>(1)), 0).r;
+	var sum = vec3<f32>(0.0);
+	var wsum = 0.0;
+	for (var k = -3; k <= 3; k++) {
+		let qq = clamp(q + axis * k, vec2<i32>(0), gd - vec2<i32>(1));
+		let z = textureLoad(lin, min(qq * s, hs - vec2<i32>(1)), 0).r;
+		let w = exp(-f32(k * k) / 8.0) * max(0.0, 1.0 - abs(z - z0) / (p.gi3.x * z0 + 0.05));
+		sum += textureLoad(gi_in, qq, 0).rgb * w;
+		wsum += w;
+	}
+	return vec4<f32>(sum / max(wsum, 1e-4), 1.0);
+}
+
+// The bounce light at full-size pixel `c0` of linear depth `z`: the grid cells around it, those whose depth is closest weighing most.
+fn gi_at(c0: vec2<i32>, z: f32) -> vec3<f32> {
+	let s = i32(p.gi2.w);
+	let gd = vec2<i32>(textureDimensions(gi_in));
+	let hs = vec2<i32>(textureDimensions(lin));
+	// Cell q's value sits at full-size coordinate 2 q s + 1 (the middle of half-size texel q s).
+	let h = (vec2<f32>(c0) - 0.5) / f32(2 * s);
+	let b = vec2<i32>(floor(h));
+	let f = h - floor(h);
+	var sum = vec3<f32>(0.0);
+	var wsum = 0.0;
+	for (var k = 0; k < 4; k++) {
+		let o = vec2<i32>(k & 1, k >> 1);
+		let q = clamp(b + o, vec2<i32>(0), gd - vec2<i32>(1));
+		let bw = select(1.0 - f.x, f.x, o.x == 1) * select(1.0 - f.y, f.y, o.y == 1);
+		let zq = textureLoad(lin, min(q * s, hs - vec2<i32>(1)), 0).r;
+		let w = bw * (1.0 / (abs(zq - z) / (0.02 * z + 0.02) + 0.05)) + 1e-4;
+		sum += textureLoad(gi_in, q, 0).rgb * w;
+		wsum += w;
+	}
+	return sum / wsum;
+}
+
+// Whether the water pass drew pixel `c0` this frame (a water surface in its position target, or any pixel it changed: the
+// water, its waterfalls, the underwater look): no bounce light there.
+fn gi_skip(c0: vec2<i32>) -> bool {
+	if (p.gi.w < 0.5) { return false; }
+	if (textureLoad(wpos_in, c0, 0).a > 0.5) { return true; }
+	return any(textureLoad(prew_in, c0, 0).rgb != textureLoad(scene, c0, 0).rgb);
 }
 
 fn luma(c: vec3<f32>) -> f32 {
@@ -187,17 +338,25 @@ fn luma(c: vec3<f32>) -> f32 {
 
 // Radial blur of the mask (in bloom_in) towards the key light, dithered start against banding.
 @fragment fn fs_rays(v: VO) -> @location(0) vec4<f32> {
-	let n = 48;
+	// p.q.z = taps (48 = High, the picture before the levels existed); fewer taps cover the same span with a steeper decay per tap
+	// and the same total weight, so the shafts keep their brightness.
+	let n = i32(p.q.z);
 	let delta = (v.uv - p.sun.xy) * (0.85 / f32(n));
 	var uv = v.uv - delta * ign(v.pos.xy);
 	var acc = vec3<f32>(0.0);
 	var w = 1.0;
+	var decay = 0.955;
+	var gain = 1.0;
+	if (n < 48) {
+		decay = pow(0.955, 48.0 / f32(n));
+		gain = (1.0 - decay) / 0.045;
+	}
 	for (var i = 0; i < n; i++) {
 		acc += textureSampleLevel(bloom_in, lsamp, uv, 0.0).rgb * w;
-		w *= 0.955;
+		w *= decay;
 		uv -= delta;
 	}
-	return vec4<f32>(acc / 14.0, 1.0);
+	return vec4<f32>(acc / 14.0 * gain, 1.0);
 }
 
 // 13-tap downsample (the larger level in bloom_in).
@@ -342,6 +501,21 @@ fn scene_at(c: vec2<i32>, dim: vec2<i32>, off: vec2<f32>) -> vec3<f32> {
 	let wt = amp * peak;
 	var c = clamp((e + (n + s + w + ea) * wt) / (1.0 + 4.0 * wt), vec3<f32>(0.0), vec3<f32>(1.0));
 	var l = to_linear(c);
+	if (p.gi.x > 0.0) {
+		// Global illumination: the bounce light on the surface's own colour (p.gi2.x: towards its hue, so surfaces in shade
+		// catch it too) plus a faint floor; occluded with the rest below. Not on sky or the water pass's pixels.
+		let hs = vec2<i32>(textureDimensions(lin));
+		let z = textureLoad(lin, min(c0 / 2, hs - vec2<i32>(1)), 0).r;
+		// Mobys (Ratchet, enemies, crates, pickups: `moby_cover`) catch none; an edge pixel catches the share that is not moby.
+		let mine = 1.0 - moby_cover(textureLoad(scene, c0, 0).a);
+		if (!sky(z) && !gi_skip(c0) && mine > 0.0) {
+			let mx = max(l.r, max(l.g, l.b));
+			let alb = mix(l, l * (0.5 / max(mx, 0.1)), p.gi2.x);
+			// The gathered light, softly held under p.gi3.y (linear: a bright object right next to a surface tints it, never lights it up).
+			let gs = gi_at(c0, z) * p.gi.x;
+			l += gs / (1.0 + max(gs.r, max(gs.g, gs.b)) / p.gi3.y) * (alb + vec3<f32>(p.gi2.y)) * mine;
+		}
+	}
 	if (p.params.x > 0.0) {
 		let hs = vec2<i32>(textureDimensions(lin));
 		let z = textureLoad(lin, min(c0 / 2, hs - vec2<i32>(1)), 0).r;
@@ -388,6 +562,45 @@ struct PostU {
 	/// [PC] Particles Enhanced: eye, forward, right x horizontal tan, up x vertical tan; the effect lights (partfx.rs `FxLights::rows`).
 	cam: [[f32; 4]; 4],
 	fxl: [[f32; 4]; 2 * super::partfx::FX_LIGHTS],
+	/// [PC] Quality levels (Graphics -> Low / Medium / High): x = occlusion taps, y = the occlusion's largest screen radius (half-size pixels).
+	q: [f32; 4],
+	/// [PC] Global illumination (`fs_gi`; the shader's `P` names each lane): strength (0 = off), world radius, taps, water mask valid;
+	/// albedo towards the hue, floor, largest radius in grid cells, half-size texels per grid cell; blur depth tolerance, cap.
+	gi: [f32; 4],
+	gi2: [f32; 4],
+	gi3: [f32; 4],
+}
+
+/// Global illumination by Graphics level (1 Low, 2 Medium, otherwise High): (taps per cell, world radius, largest radius in grid
+/// cells at 720 lines, grid size divisor of the window: 4 = quarter size, 2 = half size). The largest radius scales with the
+/// window height: a bigger window gathers over the same share of the picture, so things close to the camera do not bounce
+/// more. Every level gathers over the same world radius: the levels differ in grid size and noise, not in brightness. GPU time at 1280x720 (RTX 5070 Ti, 2026-10-19): Low ~0.025 ms,
+/// Medium ~0.07 ms, High 0.09-0.16 ms, plus ~0.005 ms in the composite.
+const fn gi_quality(level: u8) -> (f32, f32, f32, u32) {
+	match level {
+		1 => (6.0, 4.0, 10.0, 4),
+		2 => (8.0, 4.0, 14.0, 4),
+		_ => (12.0, 4.0, 32.0, 2),
+	}
+}
+
+/// Ambient occlusion by Graphics level (1 Low, 2 Medium, otherwise High): (taps per pixel, largest radius in half-size pixels).
+/// High is the picture before the levels existed (12 taps, 48 px). The half-size target and the two blur passes are the same.
+const fn ao_quality(level: u8) -> (f32, f32) {
+	match level {
+		1 => (5.0, 24.0),
+		2 => (8.0, 36.0),
+		_ => (12.0, 48.0),
+	}
+}
+
+/// Sun rays by Graphics level (1 Low, 2 Medium, otherwise High): taps of the radial blur in `fs_rays` (High = the 48 of before the levels).
+const fn sun_taps(level: u8) -> f32 {
+	match level {
+		1 => 16.0,
+		2 => 32.0,
+		_ => 48.0,
+	}
 }
 
 /// The look's numbers (one tuning for every level).
@@ -404,6 +617,18 @@ const GLOW_GAIN: f32 = 1.6;
 const RAYS: f32 = 0.55;
 /// [PC] Heat shimmer strength (pixels at 1080 lines; `fs_comp` `shimmer`).
 const SHIMMER: f32 = 2.5;
+/// [PC] Global illumination: the bounce light's strength, how far the lit surface's colour goes towards its hue (0 the colour
+/// as lit, 1 its hue at half brightness), the floor every surface catches, the blur's depth tolerance (fraction of the depth)
+/// and the soft cap of the gathered light (linear; tuned on Kerwan, Pokitaru, Eudora, Blarg and Novalis, 2026-10-19; cap 1.0 ->
+/// 0.2 after the user's playtest: Ratchet close to the camera lit the sand under his feet too much).
+const GI_STRENGTH: f32 = 48.0;
+const GI_ALBEDO: f32 = 0.5;
+const GI_FLOOR: f32 = 0.02;
+const GI_BLUR_TOL: f32 = 0.05;
+const GI_CAP: f32 = 0.2;
+/// Grid formats: the cells' colour (linear) and normal, the bounce light.
+const GI_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+const GI_NORMAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 /// Seconds since the first call (the shimmer's clock), wrapped so the shader's sines keep their precision.
 fn seconds() -> f32 {
@@ -473,6 +698,36 @@ struct Targets {
 	rays: [wgpu::TextureView; 2],
 	g_rmask: wgpu::BindGroup,
 	g_rays: wgpu::BindGroup,
+	/// The depth target's depth aspect (binding 2 of every group).
+	depth_only: wgpu::TextureView,
+}
+
+/// [PC] Global illumination's grid targets (made with the first frame that asks for them, kept while the level stays on).
+struct GiTargets {
+	/// Window size, grid divisor, the `Targets` generation they bind.
+	key: (u32, u32, u32, u64),
+	/// The cells' colour, the cells' normal, the bounce light and its blur's middle step.
+	src: [wgpu::TextureView; 2],
+	gi: [wgpu::TextureView; 2],
+	g_src: wgpu::BindGroup,
+	g_gi: wgpu::BindGroup,
+	g_blur: [wgpu::BindGroup; 2],
+	g_comp: wgpu::BindGroup,
+	/// The composite's group with the water pass's position target and pre-water scene copy (`bind_water`), and those two.
+	g_comp_w: Option<(wgpu::TextureView, wgpu::Texture, wgpu::BindGroup)>,
+}
+
+/// The views of one post bind group; None = the 1x1 placeholder of that binding.
+#[derive(Clone, Copy, Default)]
+struct Views<'a> {
+	lin: Option<&'a wgpu::TextureView>,
+	ao: Option<&'a wgpu::TextureView>,
+	bloom: Option<&'a wgpu::TextureView>,
+	glow: Option<&'a wgpu::TextureView>,
+	rays: Option<&'a wgpu::TextureView>,
+	gi: Option<&'a wgpu::TextureView>,
+	wpos: Option<&'a wgpu::TextureView>,
+	prew: Option<&'a wgpu::TextureView>,
 }
 
 pub(super) struct Post {
@@ -490,11 +745,18 @@ pub(super) struct Post {
 	p_comp: wgpu::RenderPipeline,
 	p_rmask: wgpu::RenderPipeline,
 	p_rays: wgpu::RenderPipeline,
+	/// [PC] Global illumination: cells, gather, blur.
+	p_gsrc: wgpu::RenderPipeline,
+	p_gi: wgpu::RenderPipeline,
+	p_giblur: wgpu::RenderPipeline,
 	/// A 1x1 placeholder for bindings a pass does not read.
 	dummy: wgpu::TextureView,
 	dummy_r32: wgpu::TextureView,
 	format: wgpu::TextureFormat,
 	t: Option<Targets>,
+	gi: Option<GiTargets>,
+	/// This frame's water pass ran: the composite reads its targets (`bind_water`).
+	gi_water: bool,
 }
 
 const LIN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
@@ -503,7 +765,7 @@ const BLOOM_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 impl Post {
 	pub(super) fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Post {
-		let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("post"), source: wgpu::ShaderSource::Wgsl(POST_SHADER.into()) });
+		let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("post"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("post", POST_SHADER.into())) });
 		let tex = |binding: u32, sample_type: wgpu::TextureSampleType, multisampled: bool| wgpu::BindGroupLayoutEntry {
 			binding,
 			visibility: wgpu::ShaderStages::FRAGMENT,
@@ -523,6 +785,9 @@ impl Post {
 				wgpu::BindGroupLayoutEntry { binding: 6, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
 				tex(7, float, false),
 				tex(8, float, false),
+				tex(9, wgpu::TextureSampleType::Float { filterable: false }, false),
+				tex(10, wgpu::TextureSampleType::Float { filterable: false }, false),
+				tex(11, wgpu::TextureSampleType::Float { filterable: false }, false),
 			],
 		});
 		let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("post"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
@@ -541,6 +806,23 @@ impl Post {
 			})
 		};
 		let add = wgpu::BlendState { color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add }, alpha: wgpu::BlendComponent::REPLACE };
+		// [PC] Global illumination's cells: colour and normal in one pass (two targets).
+		let p_gsrc = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+			label: Some("fs_gsrc"),
+			layout: Some(&pl),
+			vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs_full"), compilation_options: Default::default(), buffers: &[] },
+			fragment: Some(wgpu::FragmentState {
+				module: &shader,
+				entry_point: Some("fs_gsrc"),
+				compilation_options: Default::default(),
+				targets: &[Some(wgpu::ColorTargetState { format: GI_FORMAT, blend: None, write_mask: wgpu::ColorWrites::ALL }), Some(wgpu::ColorTargetState { format: GI_NORMAL_FORMAT, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+			}),
+			primitive: Default::default(),
+			depth_stencil: None,
+			multisample: Default::default(),
+			multiview_mask: None,
+			cache: None,
+		});
 		let ubuf = |label| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: std::mem::size_of::<PostU>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
 		let small = |format| {
 			device
@@ -557,6 +839,9 @@ impl Post {
 			p_comp: make("fs_comp", format, None, true),
 			p_rmask: make("fs_rmask", BLOOM_FORMAT, None, false),
 			p_rays: make("fs_rays", BLOOM_FORMAT, None, false),
+			p_gsrc,
+			p_gi: make("fs_gi", GI_FORMAT, None, false),
+			p_giblur: make("fs_giblur", GI_FORMAT, None, false),
 			layout,
 			ubuf: ubuf("post uniforms"),
 			ubuf_v: ubuf("post uniforms (blur down)"),
@@ -565,13 +850,102 @@ impl Post {
 			dummy_r32: small(LIN_FORMAT),
 			format,
 			t: None,
+			gi: None,
+			gi_water: false,
 		}
 	}
 
 	/// Makes the targets for a `w` x `h` frame (created or resized as the window is); `depth` is the level pass's MSAA depth target.
-	pub(super) fn prepare(&mut self, device: &wgpu::Device, w: u32, h: u32, depth: &wgpu::TextureView) {
+	/// `gi_level` > 0 (Global illumination Low / Medium / High): also the grid targets of that level's size.
+	pub(super) fn prepare(&mut self, device: &wgpu::Device, w: u32, h: u32, depth: &wgpu::TextureView, gi_level: u8) {
 		if self.t.as_ref().is_none_or(|t| t.size != (w, h)) {
 			self.t = Some(self.targets(device, w, h, depth));
+		}
+		self.gi_water = false;
+		if gi_level > 0 {
+			let Some(t) = &self.t else { return };
+			let key = (w, h, gi_quality(gi_level).3, t.generation);
+			if self.gi.as_ref().is_none_or(|g| g.key != key) {
+				self.gi = Some(self.gi_targets(device, t, key));
+			}
+		}
+	}
+
+	/// Global illumination, after the water pass's positions: `mask` = its position target and its copy of the scene before
+	/// it shaded (waterfx.rs `gi_mask`) when it runs this frame, so the composite leaves its pixels alone.
+	pub(super) fn bind_water(&mut self, device: &wgpu::Device, mask: Option<(&wgpu::TextureView, &wgpu::Texture)>) {
+		self.gi_water = false;
+		let (Some(t), Some(g), Some((wpos, copy))) = (&self.t, &self.gi, mask) else { return };
+		if g.g_comp_w.as_ref().is_none_or(|(v, c, _)| v != wpos || c != copy) {
+			let prew = copy.create_view(&Default::default());
+			let group = self.bind(device, &self.ubuf, t, &t.scene, Views { lin: Some(&t.lin), ao: Some(&t.ao[0]), bloom: Some(&t.bloom[0]), glow: Some(&t.glow), rays: Some(&t.rays[1]), gi: Some(&g.gi[0]), wpos: Some(wpos), prew: Some(&prew) });
+			if let Some(g) = &mut self.gi {
+				g.g_comp_w = Some((wpos.clone(), copy.clone(), group));
+			}
+		}
+		self.gi_water = true;
+	}
+
+	/// One post bind group: uniforms `buf`, `scene` and the views `v` (placeholders for the rest).
+	fn bind(&self, device: &wgpu::Device, buf: &wgpu::Buffer, t: &Targets, scene: &wgpu::TextureView, v: Views) -> wgpu::BindGroup {
+		self.bind_d(device, buf, &t.depth_only, scene, v)
+	}
+
+	fn bind_d(&self, device: &wgpu::Device, buf: &wgpu::Buffer, depth_only: &wgpu::TextureView, scene: &wgpu::TextureView, v: Views) -> wgpu::BindGroup {
+		let (d, d32) = (&self.dummy, &self.dummy_r32);
+		fn tv(binding: u32, view: &wgpu::TextureView) -> wgpu::BindGroupEntry<'_> {
+			wgpu::BindGroupEntry { binding, resource: wgpu::BindingResource::TextureView(view) }
+		}
+		device.create_bind_group(&wgpu::BindGroupDescriptor {
+			label: Some("post"),
+			layout: &self.layout,
+			entries: &[
+				wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() },
+				tv(1, scene),
+				tv(2, depth_only),
+				tv(3, v.lin.unwrap_or(d32)),
+				tv(4, v.ao.unwrap_or(d32)),
+				tv(5, v.bloom.unwrap_or(d)),
+				wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+				tv(7, v.glow.unwrap_or(d)),
+				tv(8, v.rays.unwrap_or(d)),
+				tv(9, v.gi.unwrap_or(d)),
+				tv(10, v.wpos.unwrap_or(d32)),
+				tv(11, v.prew.unwrap_or(d)),
+			],
+		})
+	}
+
+	/// The grid targets and their bind groups for `key` (`prepare`).
+	fn gi_targets(&self, device: &wgpu::Device, t: &Targets, key: (u32, u32, u32, u64)) -> GiTargets {
+		let (w, h, div, _) = key;
+		let (gw, gh) = (w.div_ceil(div), h.div_ceil(div));
+		let make = |label, format| {
+			device
+				.create_texture(&wgpu::TextureDescriptor {
+					label: Some(label),
+					size: wgpu::Extent3d { width: gw.max(1), height: gh.max(1), depth_or_array_layers: 1 },
+					mip_level_count: 1,
+					sample_count: 1,
+					dimension: wgpu::TextureDimension::D2,
+					format,
+					usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+					view_formats: &[],
+				})
+				.create_view(&Default::default())
+		};
+		let src = [make("post gi cells", GI_FORMAT), make("post gi normals", GI_NORMAL_FORMAT)];
+		let gi = [make("post gi", GI_FORMAT), make("post gi blur", GI_FORMAT)];
+		let lin = Some(&t.lin);
+		GiTargets {
+			key,
+			g_src: self.bind(device, &self.ubuf, t, &t.scene, Views { lin, ..Default::default() }),
+			g_gi: self.bind(device, &self.ubuf, t, &t.scene, Views { lin, ao: Some(&src[1]), bloom: Some(&src[0]), ..Default::default() }),
+			g_blur: [self.bind(device, &self.ubuf, t, &t.scene, Views { lin, gi: Some(&gi[0]), ..Default::default() }), self.bind(device, &self.ubuf_v, t, &t.scene, Views { lin, gi: Some(&gi[1]), ..Default::default() })],
+			g_comp: self.bind(device, &self.ubuf, t, &t.scene, Views { lin, ao: Some(&t.ao[0]), bloom: Some(&t.bloom[0]), glow: Some(&t.glow), rays: Some(&t.rays[1]), gi: Some(&gi[0]), ..Default::default() }),
+			g_comp_w: None,
+			src,
+			gi,
 		}
 	}
 
@@ -628,36 +1002,18 @@ impl Post {
 		let bloom: Vec<wgpu::TextureView> = (0..LEVELS as u32).map(|m| bloom_tex.create_view(&wgpu::TextureViewDescriptor { base_mip_level: m, mip_level_count: Some(1), ..Default::default() })).collect();
 		let depth_only = depth.texture().create_view(&wgpu::TextureViewDescriptor { aspect: wgpu::TextureAspect::DepthOnly, ..Default::default() });
 		let rays = [make("post ray mask", hw, hh, BLOOM_FORMAT, 1).create_view(&Default::default()), make("post rays", hw, hh, BLOOM_FORMAT, 1).create_view(&Default::default())];
-		let group_x = |buf: &wgpu::Buffer, scene_v: &wgpu::TextureView, lin_v: &wgpu::TextureView, ao_v: &wgpu::TextureView, bloom_v: &wgpu::TextureView, glow_v: &wgpu::TextureView, rays_v: &wgpu::TextureView| {
-			device.create_bind_group(&wgpu::BindGroupDescriptor {
-				label: Some("post"),
-				layout: &self.layout,
-				entries: &[
-					wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() },
-					wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(scene_v) },
-					wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&depth_only) },
-					wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(lin_v) },
-					wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(ao_v) },
-					wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(bloom_v) },
-					wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-					wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(glow_v) },
-					wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(rays_v) },
-				],
-			})
-		};
-		let group_g = |buf: &wgpu::Buffer, scene_v: &wgpu::TextureView, lin_v: &wgpu::TextureView, ao_v: &wgpu::TextureView, bloom_v: &wgpu::TextureView, glow_v: &wgpu::TextureView| group_x(buf, scene_v, lin_v, ao_v, bloom_v, glow_v, &self.dummy);
-		let group = |buf: &wgpu::Buffer, scene_v: &wgpu::TextureView, lin_v: &wgpu::TextureView, ao_v: &wgpu::TextureView, bloom_v: &wgpu::TextureView| group_g(buf, scene_v, lin_v, ao_v, bloom_v, &self.dummy);
-		let (d, d32) = (&self.dummy, &self.dummy_r32);
+		let group = |buf: &wgpu::Buffer, v: Views| self.bind_d(device, buf, &depth_only, &scene, v);
+		let l = Some(&lin);
 		Targets {
-			g_lin: group(&self.ubuf, &scene, d32, d32, d),
-			g_ao: group(&self.ubuf, &scene, &lin, d32, d),
-			g_blur: [group(&self.ubuf, &scene, &lin, &ao[0], d), group(&self.ubuf_v, &scene, &lin, &ao[1], d)],
-			g_bright: group_g(&self.ubuf, &scene, &lin, d32, d, &glow),
-			g_down: (1..LEVELS).map(|m| group(&self.ubuf, &scene, &lin, d32, &bloom[m - 1])).collect(),
-			g_up: (1..LEVELS).map(|m| group(&self.ubuf, &scene, &lin, d32, &bloom[m])).collect(),
-			g_comp: group_x(&self.ubuf, &scene, &lin, &ao[0], &bloom[0], &glow, &rays[1]),
-			g_rmask: group(&self.ubuf, &scene, &lin, d32, d),
-			g_rays: group(&self.ubuf, &scene, &lin, d32, &rays[0]),
+			g_lin: group(&self.ubuf, Views::default()),
+			g_ao: group(&self.ubuf, Views { lin: l, ..Default::default() }),
+			g_blur: [group(&self.ubuf, Views { lin: l, ao: Some(&ao[0]), ..Default::default() }), group(&self.ubuf_v, Views { lin: l, ao: Some(&ao[1]), ..Default::default() })],
+			g_bright: group(&self.ubuf, Views { lin: l, glow: Some(&glow), ..Default::default() }),
+			g_down: (1..LEVELS).map(|m| group(&self.ubuf, Views { lin: l, bloom: Some(&bloom[m - 1]), ..Default::default() })).collect(),
+			g_up: (1..LEVELS).map(|m| group(&self.ubuf, Views { lin: l, bloom: Some(&bloom[m]), ..Default::default() })).collect(),
+			g_comp: group(&self.ubuf, Views { lin: l, ao: Some(&ao[0]), bloom: Some(&bloom[0]), glow: Some(&glow), rays: Some(&rays[1]), ..Default::default() }),
+			g_rmask: group(&self.ubuf, Views { lin: l, ..Default::default() }),
+			g_rays: group(&self.ubuf, Views { lin: l, bloom: Some(&rays[0]), ..Default::default() }),
 			size: (w, h),
 			generation: {
 				static GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -669,6 +1025,7 @@ impl Post {
 			ao,
 			bloom,
 			rays,
+			depth_only,
 		}
 	}
 
@@ -676,19 +1033,23 @@ impl Post {
 	/// the bloom chain (with the particle glow when `glow`) and the sun rays (`sun` = the key light's screen uv and strength).
 	/// `cam` / `aspect` are the level pass's projection.
 	#[allow(clippy::too_many_arguments)]
-	/// `fx`: the effect lights (with `glow`).
-	pub(super) fn encode(&self, queue: &wgpu::Queue, enc: &mut wgpu::CommandEncoder, cam: &Camera, aspect: f32, ao: bool, glow: bool, fx: &super::partfx::FxLights, sun: Option<([f32; 2], f32)>, mid: impl FnOnce(&mut wgpu::CommandEncoder, &wgpu::TextureView)) {
+	/// `fx`: the effect lights (with `glow`). `gi_level` > 0: the global illumination after `mid` (as given to `prepare`). `far`: the
+	/// world far plane the depth was drawn with (`Gpu::world_far`).
+	pub(super) fn encode(&self, queue: &wgpu::Queue, enc: &mut wgpu::CommandEncoder, cam: &Camera, aspect: f32, ao_level: u8, sun_level: u8, part_level: u8, glow: bool, fx: &super::partfx::FxLights, sun: Option<([f32; 2], f32)>, gi_level: u8, far: f32, mid: impl FnOnce(&mut wgpu::CommandEncoder, &wgpu::TextureView, Option<&wgpu::TextureView>)) {
 		let Some(t) = &self.t else { return };
+		let gi = self.gi_on(t, gi_level);
+		let ao = ao_level > 0;
 		let (w, h) = t.size;
 		let (hw, hh) = (w.div_ceil(2) as f32, h.div_ceil(2) as f32);
+		let (ao_taps, ao_reach) = ao_quality(ao_level);
 		let mut u = PostU {
 			size: [w as f32, h as f32, 1.0 / w as f32, 1.0 / h as f32],
 			half: [hw, hh, 1.0 / hw, if view_ao() { -1.0 } else { 1.0 / hh }],
-			proj: [cam.tan_half * aspect, cam.tan_half, RETAIL_NEAR, RETAIL_FAR],
+			proj: [cam.tan_half * aspect, cam.tan_half, RETAIL_NEAR, far],
 			params: [if ao { AO_STRENGTH } else { 0.0 }, BLOOM_STRENGTH, SHARPEN, BLOOM_THRESHOLD],
 			grade: [CONTRAST, SATURATION, 0.0, AO_RADIUS],
 			extra: match glow {
-				true => [GLOW_GAIN, fx.n as f32, seconds(), if super::partfx::FX_ON { SHIMMER } else { 0.0 }],
+				true => [GLOW_GAIN, fx.n as f32, seconds(), if super::partfx::FX_ON && part_level >= 2 { SHIMMER } else { 0.0 }],
 				false => [0.0; 4],
 			},
 			sun: sun.map_or([0.0; 4], |(uv, s)| [uv[0], uv[1], s * RAYS, 0.0]),
@@ -700,7 +1061,17 @@ impl Post {
 				[[cam.pos[0], cam.pos[1], cam.pos[2], 0.0], [f[0], f[1], f[2], 0.0], [r[0] * tx, r[1] * tx, r[2] * tx, 0.0], [u[0] * ty, u[1] * ty, u[2] * ty, 0.0]]
 			},
 			fxl: fx.rows(),
+			q: [ao_taps, ao_reach, sun_taps(sun_level), 0.0],
+			gi: [0.0; 4],
+			gi2: [0.0; 4],
+			gi3: [0.0; 4],
 		};
+		if gi.is_some() {
+			let (taps, reach, cells, div) = gi_quality(gi_level);
+			u.gi = [GI_STRENGTH, reach, taps, if self.gi_water { 1.0 } else { 0.0 }];
+			u.gi2 = [GI_ALBEDO, GI_FLOOR, cells * h as f32 / 720.0, (div / 2) as f32];
+			u.gi3 = [GI_BLUR_TOL, GI_CAP, 0.0, 0.0];
+		}
 		queue.write_buffer(&self.ubuf, 0, bytemuck::bytes_of(&u));
 		u.grade[2] = 1.0;
 		queue.write_buffer(&self.ubuf_v, 0, bytemuck::bytes_of(&u));
@@ -724,7 +1095,21 @@ impl Post {
 			run(enc, "post ao across", &t.ao[1], &self.p_blur, &t.g_blur[0], clear);
 			run(enc, "post ao down", &t.ao[0], &self.p_blur, &t.g_blur[1], clear);
 		}
-		mid(enc, &t.scene);
+		mid(enc, &t.scene, ao.then_some(&t.ao[0]));
+		if let Some(g) = gi {
+			// The grid's cells (colour and normal at once), the gather, its blur across and down.
+			let at = |view| Some(wgpu::RenderPassColorAttachment { view, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: clear, store: wgpu::StoreOp::Store } });
+			let pass = |enc: &mut wgpu::CommandEncoder, label: &str, targets: &[Option<wgpu::RenderPassColorAttachment>], pipeline: &wgpu::RenderPipeline, group: &wgpu::BindGroup| {
+				let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor { label: Some(label), color_attachments: targets, depth_stencil_attachment: None, timestamp_writes: None, occlusion_query_set: None, multiview_mask: None });
+				pass.set_pipeline(pipeline);
+				pass.set_bind_group(0, group, &[]);
+				pass.draw(0..3, 0..1);
+			};
+			pass(enc, "post gi cells", &[at(&g.src[0]), at(&g.src[1])], &self.p_gsrc, &g.g_src);
+			pass(enc, "post gi", &[at(&g.gi[0])], &self.p_gi, &g.g_gi);
+			pass(enc, "post gi across", &[at(&g.gi[1])], &self.p_giblur, &g.g_blur[0]);
+			pass(enc, "post gi down", &[at(&g.gi[0])], &self.p_giblur, &g.g_blur[1]);
+		}
 		run(enc, "post bright", &t.bloom[0], &self.p_bright, &t.g_bright, clear);
 		for m in 1..LEVELS {
 			run(enc, "post bloom down", &t.bloom[m], &self.p_down, &t.g_down[m - 1], clear);
@@ -738,9 +1123,16 @@ impl Post {
 		}
 	}
 
-	/// The graded picture into every sample of the MSAA target (`msaa`), stored for the HUD pass to load.
-	pub(super) fn composite(&self, enc: &mut wgpu::CommandEncoder, msaa: &wgpu::TextureView) {
+	/// The graded picture into every sample of the MSAA target (`msaa`), stored for the HUD pass to load (`gi_level` as for `encode`).
+	pub(super) fn composite(&self, enc: &mut wgpu::CommandEncoder, msaa: &wgpu::TextureView, gi_level: u8) {
 		let Some(t) = &self.t else { return };
+		let group = match self.gi_on(t, gi_level) {
+			Some(g) => match (&g.g_comp_w, self.gi_water) {
+				(Some((_, _, w)), true) => w,
+				_ => &g.g_comp,
+			},
+			None => &t.g_comp,
+		};
 		let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
 			label: Some("post composite"),
 			color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: msaa, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store } })],
@@ -750,7 +1142,12 @@ impl Post {
 			multiview_mask: None,
 		});
 		pass.set_pipeline(&self.p_comp);
-		pass.set_bind_group(0, &t.g_comp, &[]);
+		pass.set_bind_group(0, group, &[]);
 		pass.draw(0..3, 0..1);
+	}
+
+	/// The grid targets when global illumination runs this frame (level `gi_level`, made by `prepare` for these targets).
+	fn gi_on(&self, t: &Targets, gi_level: u8) -> Option<&GiTargets> {
+		self.gi.as_ref().filter(|g| gi_level > 0 && g.key.3 == t.generation && g.key.2 == gi_quality(gi_level).3)
 	}
 }

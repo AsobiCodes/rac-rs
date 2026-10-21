@@ -160,8 +160,6 @@ const LOG_TABLE: [(u32, u32); 148] = [
 /// History capacity (the table has 150 rows).
 const LOG_MAX: usize = 150;
 pub const WELCOME: u32 = 3;
-/// Help 20011: the save icon explanation, shown the first time an autosave runs.
-pub const SAVE_ICON_HELP: u32 = 20011;
 
 /// The help history (0x141e08, count 0x15ee30): help ids in the order last seen.
 #[derive(Clone, Debug, PartialEq)]
@@ -187,20 +185,6 @@ impl HelpLog {
 		}
 	}
 
-	/// (help id, title text id), newest first, as the Help Log page lists them.
-	pub fn entries(&self) -> Vec<(u32, u32)> {
-		self.0.iter().rev().filter_map(|&h| Some((h, title(h)?))).collect()
-	}
-}
-
-/// Row index of a help id in the Help Log table (FUN_002264d0).
-pub fn row(help_id: u32) -> Option<usize> {
-	LOG_TABLE.iter().position(|e| e.0 == help_id)
-}
-
-/// Help id of a Help Log table row.
-pub fn help_id(row: usize) -> Option<u32> {
-	LOG_TABLE.get(row).map(|e| e.0)
 }
 
 pub fn title(help_id: u32) -> Option<u32> {
@@ -328,14 +312,6 @@ pub fn text_line_xy(out: &mut Vec<Quad>, font: &(usize, Vec<Glyph>), s: &str, x:
 #[cfg(test)]
 mod tests {
 	// UI-TEXT-1 test (2): the help text colour is 0x80ffa888 as bytes / 128.
-	#[test]
-	fn help_rows_cover_novalis() {
-		assert_eq!(super::row(20019), Some(147));
-		assert_eq!(super::row(7), None);
-		let mut l = super::HelpLog::default();
-		l.add(2000);
-		assert_eq!(l.entries()[0], (2000, 0x5279));
-	}
 
 	use super::*;
 
@@ -347,7 +323,7 @@ mod tests {
 		log.add(999); // not in the table: not logged
 		log.add(5); // a repeat moves to the end
 		assert_eq!(log.0, [3, 4, 5]);
-		assert_eq!(log.entries(), [(5, 0x5278), (4, 0x5277), (3, 0x5272)]);
+		assert_eq!([5, 4, 3].map(title), [Some(0x5278), Some(0x5277), Some(0x5272)]);
 	}
 
 }

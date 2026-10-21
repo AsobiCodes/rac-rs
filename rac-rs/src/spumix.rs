@@ -197,9 +197,14 @@ impl SpuVoices {
 	/// first batch anchors the timeline `LIVE_LEAD` samples ahead of the audio clock and later drift re-anchors it.
 	pub fn push(&mut self, ev: Vec<Ev>) {
 		let Some(first) = ev.first() else { return };
+		crate::audio::ST_SPU_PUSH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 		if self.live {
 			let lead = |s: &SpuVoices| s.base + SAMPLES_PER_TICK as i64 * first.w.tick as i64 - s.pos;
+			if lead(self) < 0 {
+				crate::audio::ST_SPU_LATE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+			}
 			if !self.anchored || (lead(self) - LIVE_LEAD).abs() > LIVE_SLACK {
+				crate::audio::ST_SPU_REANCHOR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 				// Keep the events behind the new anchor after the ones already queued.
 				self.base += LIVE_LEAD - lead(self);
 				self.anchored = true;
@@ -222,34 +227,34 @@ impl SpuVoices {
 		}
 	}
 
-	/// Samples rendered so far.
-	pub fn position(&self) -> i64 {
-		self.pos
-	}
-
 	/// Voices still sounding (envelope not stopped).
+	#[cfg(test)]
 	pub fn active(&self) -> usize {
 		self.voices.iter().filter(|v| v.spu.active()).count()
 	}
 
+	/// ENVX of a voice (tests, diagnostics).
+	#[cfg(test)]
+	pub fn envx(&self, v: usize) -> u16 {
+		self.voices[v].spu.envx()
+	}
+
 	/// Starts logging the applied key-ons (verification).
+	#[cfg(test)]
 	pub fn log_kons(&mut self) {
 		self.kons = Some(Vec::new());
 	}
 
 	/// The key-ons applied since `log_kons` (sample position, voice).
+	#[cfg(test)]
 	pub fn kon_log(&self) -> &[(i64, usize)] {
 		self.kons.as_deref().unwrap_or(&[])
 	}
 
 	/// (ESA, EEA, EVOL L/R) of core 1's effect unit (tests, diagnostics).
+	#[cfg(test)]
 	pub fn effect_regs(&self) -> (u32, u32, [i16; 2]) {
 		(self.esa, self.eea, self.evol)
-	}
-
-	/// ENVX of a voice (tests, diagnostics).
-	pub fn envx(&self, v: usize) -> u16 {
-		self.voices[v].spu.envx()
 	}
 
 	fn apply(&mut self, e: &Ev) {
@@ -415,6 +420,7 @@ impl SpuVoices {
 	}
 
 	/// Renders `n` samples with no reverb (tests, the offline WAV render): `(dry * MVOL) >> 15` per side.
+	#[cfg(test)]
 	pub fn render(&mut self, n: usize) -> Vec<[i16; 2]> {
 		(0..n)
 			.map(|_| {
@@ -472,9 +478,6 @@ pub struct Batch {
 }
 
 impl Batch {
-	pub fn len(&self) -> usize {
-		self.ev.len()
-	}
 }
 
 /// The driver state taken before the first field (`attach_state`), handed to the viewer with the first batch.

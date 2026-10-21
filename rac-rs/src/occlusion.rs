@@ -154,16 +154,8 @@ impl Occlusion {
 	pub fn update(&mut self, campos: [f32; 3]) {
 		self.update_mask(campos);
 		if let (Some(f), true) = (self.forced, self.enabled) {
-			if std::env::var_os("RAC_OCC_CMP").is_some() {
-				let bits: u32 = self.mask.iter().zip(&f).map(|(a, b)| (a ^ b).count_ones()).sum();
-				let ours: u32 = self.mask.iter().map(|b| b.count_ones()).sum();
-				let theirs: u32 = f.iter().map(|b| b.count_ones()).sum();
-				eprintln!("OCCCMP eye={campos:?} differing_bits={bits} ours_set={ours} retail_set={theirs}");
-			}
-			if std::env::var_os("RAC_OCC_OWN").is_none() {
-				self.mask = f;
-				self.mask[0x7f] |= 0x80;
-			}
+			self.mask = f;
+			self.mask[0x7f] |= 0x80;
 		}
 		self.mode = 0;
 	}

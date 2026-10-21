@@ -3,12 +3,11 @@
 //! "KER-63b port spec"). The camera-record driver (`CameraRig::drive`, decomp/notes/camera.md "SHR-CAMDRVa port
 //! spec") runs `exit` -> `select_record` with `class1_pred` -> `setup` on a switch -> `update` ->
 //! `CameraRig::publish_rows(pos, rows)` each camera frame.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use super::super::aridia::set_len;
 use super::super::bolt::{wrap_add, wrap_sub};
 use super::super::suckcomp::qmul;
-use crate::camera::{fast_cos, fast_sin, retail_asin, CamBlendRegs, CamRec};
+use crate::camera::{fast_cos, fast_sin, retail_asin, CamRec};
 use crate::gameplay::Cuboid;
 use crate::particles::euler_m;
 use crate::physics::{cross, dot, sub, vadd1, vmul, vsub1, V3};

@@ -84,6 +84,7 @@ impl Pipe {
                     self.out.qs.clear();
                     self.out.segs.clear();
                     self.vif.feed(&w, &marks, &mut self.vu, &mut self.out);
+                    ee_oracle::gs::recycle_words(w);
                     let base = f.qs.len() as u32;
                     f.qs.extend_from_slice(&self.out.qs);
                     for &(s, p, g) in &self.out.segs {

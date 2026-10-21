@@ -1,7 +1,6 @@
 //! NOV-14.5 (B) / NOV-15.1b: the Novalis strip-surface actors 678 / 1225 / 761 and the environment-map passes of class
 //! 1848: overlay table loaders, the scroll step, the strip wave and the sphere-map UV (decomp/notes/novalis_environment.md
 //! "NOV-15.1b port spec").
-#![allow(dead_code)]
 
 /// Overlay image base (the `elf_at` convention of water.rs): data virtual address minus this indexes the image.
 const IMAGE_BASE: usize = 0x15ef38;
@@ -136,32 +135,9 @@ impl StripGroup {
 	}
 
 
-	/// FUN_002b9010 for every record: step the scroll and phase, then two passes over the waved positions (texture and
-	/// FIX per pass). With `pulse_from` (class 1225) the pulse of every record is rewritten after the strips are
-	/// submitted. The 400-unit sphere reject is left to the GPU clip.
-	pub fn draw(&mut self, pulse_from: Option<u32>) -> Vec<crate::particles::WorldStrip> {
-		crate::viewer::gs_state::guard_path("strips");
-		use crate::particles::WorldStrip;
-		let mut out = Vec::new();
-		if !std::mem::take(&mut self.reg) {
-			return out;
-		}
-		for k in 0..self.recs.len() {
-			let rec = &self.recs[k];
-			strip_scroll_step(rec, &mut self.scroll[k], &mut self.phase[k]);
-			let (pos, a, b) = strip_wave(rec, &self.scroll[k], self.phase[k], self.pulse);
-			let c = [0, 8, 16].map(|s| ((rec.colour >> s) & 0xff) as f32 / 128.0);
-			let colour = vec![[c[0], c[1], c[2], 0.0]; pos.len()];
-			out.push(WorldStrip { pos: pos.clone(), uv: a, colour: colour.clone(), tex: rec.tex[0], fix: rec.fix[0], add: false });
-			out.push(WorldStrip { pos, uv: b, colour, tex: rec.tex[1], fix: rec.fix[1], add: false });
-		}
-		if let Some(tick) = pulse_from {
-			self.pulse = pulse_1225(tick);
-		}
-		out
-	}
 }
 
+#[cfg(test)]
 fn wrap(v: &mut f32) {
 	if 1.0 < *v {
 		*v -= 1.0;
@@ -172,6 +148,7 @@ fn wrap(v: &mut f32) {
 
 /// FUN_002b9010 per strip per drawn tick: the two scroll pairs advance by rate x gain and wrap strictly past +-1, the
 /// wave phase by the record step (24 bits).
+#[cfg(test)]
 pub fn strip_scroll_step(rec: &StripRec, scroll: &mut [f32; 4], phase: &mut u32) {
 	scroll[0] += rec.rate[0] * rec.gain[0];
 	scroll[1] += rec.rate[1] * rec.gain[0];

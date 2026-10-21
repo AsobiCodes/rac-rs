@@ -13,6 +13,7 @@ impl Gpu {
 			apply_limit_buckets: false,
 		}))
 		.expect("no GPU adapter");
+		super::tiegpu::note_adapter(&adapter);
 		// [PC] perf round 3 (bindless.rs): texture binding arrays for the tie / shrub draws when the adapter has them.
 		let bindless = super::bindless::wanted(&adapter);
 		let multi = bindless && super::bindless::multi_wanted(&adapter);
@@ -21,27 +22,34 @@ impl Gpu {
 		let stencil32 = adapter.features().contains(wgpu::Features::DEPTH32FLOAT_STENCIL8);
 		let depth_format = if stencil32 { wgpu::TextureFormat::Depth32FloatStencil8 } else { wgpu::TextureFormat::Depth24PlusStencil8 };
 		let stencil_feature = if stencil32 { wgpu::Features::DEPTH32FLOAT_STENCIL8 } else { wgpu::Features::empty() };
+		// [PC] perf (lane D5b, tiegpu.rs): the tie vertex buffer (64 B x ~3M vertices) is bound as one storage buffer, which needs more than
+		// the 128 MiB default binding size where the adapter offers it (else the path stays off).
+		let storage_bind = adapter.limits().max_storage_buffer_binding_size.min(512 << 20).max(wgpu::Limits::default().max_storage_buffer_binding_size);
 		let desc = match bindless {
 			true => wgpu::DeviceDescriptor {
 				required_features: super::bindless::features() | stencil_feature | if multi { wgpu::Features::INDIRECT_FIRST_INSTANCE } else { wgpu::Features::empty() },
-				required_limits: wgpu::Limits { max_binding_array_elements_per_shader_stage: super::bindless::TEX_CAP, ..Default::default() },
+				required_limits: wgpu::Limits { max_binding_array_elements_per_shader_stage: super::bindless::TEX_CAP, max_storage_buffer_binding_size: storage_bind, ..Default::default() },
 				..Default::default()
 			},
-			false => wgpu::DeviceDescriptor { required_features: stencil_feature, ..Default::default() },
+			false => wgpu::DeviceDescriptor { required_features: stencil_feature, required_limits: wgpu::Limits { max_storage_buffer_binding_size: storage_bind, ..Default::default() }, ..Default::default() },
 		};
 		let (device, queue) = pollster::block_on(adapter.request_device(&desc)).expect("device");
+		super::gpuhero::device_created(&adapter, &device);
 		let size = window.inner_size();
 		let mut config = surface.get_default_config(&adapter, size.width.max(1), size.height.max(1)).expect("surface config");
 		config.usage |= wgpu::TextureUsages::COPY_SRC; // for --shot
 		// The GS blends and modulates raw 8-bit values: render in gamma space like it does.
 		config.format = config.format.remove_srgb_suffix();
 		config.present_mode = present_mode(&surface.get_capabilities(&adapter).present_modes, std::env::var("RAC_VSYNC").is_ok_and(|v| v == "1"), std::env::var("RAC_PRESENT").ok().as_deref());
+		if let Some(n) = std::env::var("RAC_FRAME_LATENCY").ok().and_then(|v| v.parse::<u32>().ok()) {
+			config.desired_maximum_frame_latency = n.clamp(1, 3); // [PC] A/B knob: swapchain frames in flight (default: wgpu 2)
+		}
 		configure_surface(&surface, &device, &config);
 		eprintln!("gpu: {:?} {}, present mode {:?}, frame latency {}", adapter.get_info().backend, adapter.get_info().name, config.present_mode, config.desired_maximum_frame_latency);
 
 		let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
 			label: Some("level"),
-			source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+			source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("level", SHADER.into())),
 		});
 		// [PC] Bindings 1 and 2: the dynamic-shadow cascades and their compare sampler (sunshadow.rs; read only while shadows run).
 		let ulayout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -237,7 +245,7 @@ impl Gpu {
 		];
 		let bindless = bindless.then(|| {
 			let bl_layout = super::bindless::Bindless::layout(&device);
-			let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("level bindless"), source: wgpu::ShaderSource::Wgsl(super::bindless::shader_source(SHADER).into()) });
+			let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("level bindless"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("level bindless", super::bindless::shader_source(SHADER).into())) });
 			let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("level bindless"), bind_group_layouts: &[Some(&ulayout), Some(&bl_layout)], immediate_size: 0 });
 			let make_bl = |vs: &str, fs: &str, blend: Option<wgpu::BlendState>, depth_write: bool, cull: Option<wgpu::Face>, compare: wgpu::CompareFunction| {
 				device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -287,7 +295,7 @@ impl Gpu {
 		});
 		// [PC] perf round 3 (gpuskin.rs): the props batch's pipelines, posed in `vs_props` from the static model, the (slot, vertex)
 		// attribute and the storage records; same fragment states as `pipeline`, `pipeline_cull` and `moby_pipelines`.
-		let props_gpu = (!super::gpuskin::cpu_skin()).then(|| {
+		let props_gpu = (|| {
 			let skin_layout = super::gpuskin::PropsGpu::layout(&device);
 			let props_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
 				label: Some("props skin"),
@@ -346,11 +354,11 @@ impl Gpu {
 				]
 			});
 			super::gpuskin::PropsGpu::new(&device, skin_layout, opaque, cull, moby, [mc0, mc1, mc2, mc3])
-		});
-		let sun = super::sunshadow::SunShadow::new(&device, props_gpu.as_ref().map(|p| &p.layout), bindless.as_ref().filter(|b| b.indirect.is_some()).map(|b| &b.layout));
+		})();
+		let sun = super::sunshadow::SunShadow::new(&device, Some(&props_gpu.layout), bindless.as_ref().filter(|b| b.indirect.is_some()).map(|b| &b.layout));
 		let ubuf = buffer(&device, "uniforms", bytemuck::bytes_of(&Uniforms::zeroed()), wgpu::BufferUsages::UNIFORM);
 		let ubind = device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("uniforms"), layout: &ulayout, entries: &sun.entries(&ubuf) });
-		let mirror = super::mirror::Mirror::new(&device, &ulayout, &sun);
+		let mirror: Vec<super::mirror::Mirror> = (0..super::mirror::MAX_MIRRORS).map(|_| super::mirror::Mirror::new(&device, &ulayout, &sun)).collect();
 		let bed = super::mirror::Mirror::new(&device, &ulayout, &sun);
 		let pbuf = [0, 1, 2, 3, 4, 5, 6, 7].map(|_| buffer(&device, "preview uniforms", bytemuck::bytes_of(&Uniforms::zeroed()), wgpu::BufferUsages::UNIFORM));
 		let pbind = [0, 1, 2, 3, 4, 5, 6, 7].map(|i| {
@@ -420,9 +428,13 @@ impl Gpu {
 		};
 		let (item_panel, popup_panel, portrait_panel) = (new_panel(), new_panel(), new_panel());
 		let post = super::post::Post::new(&device, config.format);
-		let waterfx = super::waterfx::WaterFx::new(&device, config.format, depth_format);
+		let waterfx = super::waterfx::WaterFx::new(&device, config.format, depth_format, &tex_layout);
+		let under = super::underwater::Under::new(&device, config.format);
 		let partfx = super::partfx::PartFx::new(&device, &shader, &ulayout, &tex_layout, config.format, depth_format);
-		let mut gpu = Gpu { window, surface, device, queue, config, pipeline, pipeline_cull, moby_pipelines, moby_cull, shrub_pipelines, clamp_sampler, wrap_samplers, tfrag_pipeline, tfrag_pipeline_lt, tie_pipelines, sky_pipeline, sky_add_pipeline, hud_pipeline, clear_pipeline, pbuf, pbind, preview: None, preview_gold: false, preview_pair: None, preview_worn: None, preview2: None, shop_models: Vec::new(), shop_panel_models: Vec::new(), item_panel, popup_panel, portrait_panel, portrait_shown: false, popup_bolt: None, icon_bolt: None, icon_bolt_sphere: None, popup_bolt_sphere: None, panel_posed: None, metal: MetalDraw::default(), props_gpu, bindless, hud_split: None, hud_textures: Vec::new(), nearest, hud: Vec::new(), retail_ov: None, ubuf, ubind, tex_layout, sampler, depth, msaa, scene: None, lighting: None, reserved_lights: None, fog_live: None, shrub_cap: shrubs::SHRUB_CAP, part_far: crate::water::PART_FAR, points: [[0.0; 4]; 16], table: [None; 8], moby_dyn: Vec::new(), hero_placed: (gameplay::SPAWN_AMBIENT, 0), hero_env: gameplay::placed_env(gameplay::SPAWN_AMBIENT, 0), scene_actor_light: None, marker_v: None, prop_v: None, class_uv: HashMap::new(), marker_ghosts: [None; 5], marker_bomb: None, marker_light: None, part_pipelines, strip_pipeline, pool_pipeline, pool_add_pipeline, part_tex: None, part_verts: BTreeMap::new(), line_pipeline, line_verts: Vec::new(), part_defs: Vec::new(), fx_meshes: HashMap::new(), fx_tex: HashMap::new(), fx_quads: Vec::new(), water_quads: Vec::new(), strip_draws: Vec::new(), pool_draws: Vec::new(), ocean_pipeline, ocean_tex: None, ocean_draws: Vec::new(), ocean_rgba: Vec::new(), ocean_frame: None, ocean_level_fog: false, ocean_fog: None, ocean_g_pipeline, ocean_ram: Vec::new(), warp_fx: None, movie, hero_tint_out: None, depth_format, shadow, volume_buf: None, volume_counts: (0, 0), marker_tilt: [0.0; 2], post, waterfx, mirror, bed, partfx, level: usize::MAX, modern_ok: false, sun, ship_fight: false };
+		let veg = super::vegfx::VegFx::new(&device, &ulayout, &tex_layout, config.format, depth_format);
+		let presenter = super::presenter::Presenter::new(queue.clone());
+		let queue = presenter.gated();
+		let mut gpu = Gpu { window, surface, device, queue, presenter, config, pipeline, pipeline_cull, moby_pipelines, moby_cull, shrub_pipelines, clamp_sampler, wrap_samplers, tfrag_pipeline, tfrag_pipeline_lt, tie_pipelines, sky_pipeline, sky_add_pipeline, hud_pipeline, clear_pipeline, pbuf, pbind, preview: None, preview_gold: false, preview_pair: None, preview_worn: None, preview2: None, shop_models: Vec::new(), shop_panel_models: Vec::new(), item_panel, popup_panel, portrait_panel, portrait_shown: false, popup_bolt: None, icon_bolt: None, icon_bolt_sphere: None, popup_bolt_sphere: None, panel_posed: None, metal: MetalDraw::default(), props_gpu, bindless, hud_split: None, hud_textures: Vec::new(), nearest, hud: Vec::new(), retail_ov: None, ubuf, ubind, tex_layout, sampler, depth, msaa, scene: None, lighting: None, reserved_lights: None, fog_live: None, shrub_cap: shrubs::SHRUB_CAP, part_far: crate::water::PART_FAR, under_flag: false, under_surf: None, under, points: [[0.0; 4]; 16], table: [None; 8], moby_dyn: Vec::new(), hero_placed: (gameplay::SPAWN_AMBIENT, 0), hero_env: gameplay::placed_env(gameplay::SPAWN_AMBIENT, 0), scene_actor_light: None, marker_v: None, prop_v: None, class_uv: HashMap::new(), marker_ghosts: [None; 5], hero_gens: (0, 0), marker_bomb: None, marker_light: None, part_pipelines, strip_pipeline, pool_pipeline, pool_add_pipeline, part_tex: None, part_verts: BTreeMap::new(), line_pipeline, line_verts: Vec::new(), part_defs: Vec::new(), fx_meshes: HashMap::new(), fx_tex: HashMap::new(), fx_quads: Vec::new(), water_quads: Vec::new(), strip_draws: Vec::new(), pool_draws: Vec::new(), ocean_pipeline, ocean_tex: None, ocean_draws: Vec::new(), ocean_rgba: Vec::new(), ocean_frame: None, ocean_level_fog: false, ocean_fog: None, ocean_g_pipeline, ocean_ram: Vec::new(), warp_fx: None, movie, hero_tint_out: None, depth_format, shadow, volume_buf: None, volume_counts: (0, 0), marker_tilt: [0.0; 2], post, waterfx, mirror, bed, partfx, veg, level: usize::MAX, modern_ok: false, sun, ship_fight: false };
 		let font = gpu.upload(Some(&overlay::font_texture()), &gpu.nearest);
 		gpu.hud_textures.push(font);
 		// prog2 maps each sprite's full texture (decomp/notes/particles.md "Draw size"); this soft disc is only
@@ -439,7 +451,7 @@ impl Gpu {
 	}
 
 	pub(super) fn ctx(&self) -> SceneCtx {
-		SceneCtx { device: self.device.clone(), queue: self.queue.clone(), sampler: self.sampler.clone(), wrap_samplers: self.wrap_samplers.clone(), tex_layout: self.tex_layout.clone(), tex_log: std::cell::RefCell::new(None), bindless_layout: self.bindless.as_ref().map(|b| b.layout.clone()), gpu_posing: self.props_gpu.is_some(), paced: false }
+		SceneCtx { device: self.device.clone(), queue: self.queue.clone(), sampler: self.sampler.clone(), wrap_samplers: self.wrap_samplers.clone(), tex_layout: self.tex_layout.clone(), tex_log: std::cell::RefCell::new(None), bindless_layout: self.bindless.as_ref().map(|b| b.layout.clone()), paced: false }
 	}
 
 	pub(super) fn upload(&self, t: Option<&Texture>, sampler: &wgpu::Sampler) -> wgpu::BindGroup {
@@ -823,11 +835,8 @@ impl Gpu {
 		debug_assert!(bind.is_empty());
 		let scene = self.scene.as_mut().unwrap();
 		scene.tex_slots = slots;
-		let n = p.ranges.len();
-		scene.props_verts = if self.props_gpu.is_some() { Vec::new() } else { p.model.clone() };
-		scene.props_hidden = vec![false; n];
-		scene.props_key = vec![None; n];
 		scene.props = p.batch;
+		scene.props_ibuf_spare = None;
 		scene.props_model = p.model;
 		scene.props_sj = p.sj;
 		scene.props_rad = p.rad;
@@ -854,23 +863,25 @@ impl Gpu {
 	/// [PC] Retail pool growth without a rebuild: one new prop slot per class in `classes`, inserted at slot `at` (after the
 	/// game's props, before the scene actors); `order` is the new slot order the faces are drawn in (a rebuilt scene's:
 	/// each class's new slots after its old ones). The existing slots keep their vertices; the new slots' vertices go into
-	/// the buffer's spare room after them, and the indices, draws, `slot_runs` and `prop_faces` are rebuilt for `order` as
-	/// `load_scene` builds them for that slot order. False (scene untouched) when there is no scene, a
+	/// the buffer's spare room after them, and the indices, draws, `slot_runs` and `prop_faces` come out as `load_scene`
+	/// builds them for that slot order. False (scene untouched) when there is no scene, a
 	/// slot needs a texture the scene never uploaded, or a class is the purchase prompt; the caller then rebuilds the slots.
 	/// Short of room the prop buffers grow first (GPU copy of the old slots).
+	/// [PC] perf (lane A7): when `order` is the old order with the new slots put in (`grow_plan`, the usual case) the old
+	/// indices are not rebuilt: a GPU copy moves them into the other index buffer around the new slots' faces, which are
+	/// the only indices written; the old slots' runs only move and their faces (run-relative) stay (unit tests: `grow_tests`).
 	pub(super) fn append_props(&mut self, at: usize, classes: &[u32], prop_meshes: &HashMap<u32, Mesh>, order: &[usize]) -> bool {
-		let gpu_posing = self.props_gpu.is_some();
 		let (device, queue, Some(scene)) = (&self.device, &self.queue, self.scene.as_mut()) else { return false };
+		let _s = super::profile::span("ap_head");
 		let empty = Mesh::new(String::new());
 		let meshes = slot_meshes(classes, prop_meshes, &empty);
-		let n = scene.props_ranges.len() + classes.len();
-		if at > scene.props_ranges.len() || scene.props_class.len() != scene.props_ranges.len() || order.len() != n || classes.contains(&game::vendor::PROMPT_CLASS) || !meshes.iter().all(|m| m.faces.iter().all(|&(t, _)| scene.tex_slots.contains_key(&(t & crate::mobies::SLOT_MASK)))) {
+		let (n0, m) = (scene.props_ranges.len(), classes.len());
+		let n = n0 + m;
+		if at > n0 || scene.props_class.len() != n0 || order.len() != n || classes.contains(&game::vendor::PROMPT_CLASS) || !meshes.iter().all(|m| m.faces.iter().all(|&(t, _)| scene.tex_slots.contains_key(&(t & crate::mobies::SLOT_MASK)))) {
 			return false;
 		}
 		let mut all_classes = scene.props_class.clone();
 		all_classes.splice(at..at, classes.iter().copied());
-		let all_meshes = slot_meshes(&all_classes, prop_meshes, &empty);
-		let n_idx: usize = all_meshes.iter().map(|m| m.faces.len() * 3).sum();
 		let v0 = scene.props_model.len();
 		let (mut verts, mut ranges) = (Vec::new(), Vec::new());
 		let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
@@ -879,13 +890,28 @@ impl Gpu {
 			push_mesh_vertices(m, mi, None, &mut verts, &mut lo, &mut hi);
 			ranges.push(base..v0 + verts.len());
 		}
+		for (&c, &mesh) in classes.iter().zip(&meshes) {
+			scene.class_faces.entry(c).or_insert_with(|| ClassFaces::of(mesh));
+		}
+		let mut all_ranges = scene.props_ranges.clone();
+		all_ranges.splice(at..at, ranges.iter().cloned());
+		let mut plan = {
+			let _p = super::profile::span("ap_plan");
+			grow_plan(&GrowOld::of(scene), at, classes, &ranges, order)
+		};
+		let n_idx = match &plan {
+			Some(p) => p.n_idx,
+			None => slot_meshes(&all_classes, prop_meshes, &empty).iter().map(|m| m.faces.len() * 3).sum(),
+		};
 		// Room short: larger buffers (a 16th spare again), the old slots' vertices and (slot, vertex) attributes moved over by
-		// a GPU copy; the indices are written whole below.
+		// a GPU copy; the indices are written whole below (rebuild) or copied over (`plan`).
 		let vsz = std::mem::size_of::<Vertex>();
 		let need = v0 + verts.len();
 		let vcap = (scene.props.vbuf.size() as usize / vsz).min(scene.props_sj.as_ref().map_or(usize::MAX, |b| b.size() as usize / 8));
-		if need > vcap || n_idx > scene.props.ibuf.size() as usize / 4 {
-			let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("props grow") });
+		let mut enc = None;
+		if need > vcap || (plan.is_none() && n_idx > scene.props.ibuf.size() as usize / 4) {
+			let _g = super::profile::span("ap_grow");
+			let enc = enc.get_or_insert_with(|| device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("props grow") }));
 			if need > vcap {
 				let cap = need + (need / 16).max(1 << 16);
 				let vbuf = sized_buffer(device, "vertices", cap * vsz, wgpu::BufferUsages::VERTEX);
@@ -897,113 +923,109 @@ impl Gpu {
 					scene.props_sj = Some(sj);
 				}
 			}
-			if n_idx > scene.props.ibuf.size() as usize / 4 {
+			if plan.is_none() && n_idx > scene.props.ibuf.size() as usize / 4 {
 				scene.props.ibuf = sized_buffer(device, "indices", (n_idx + (n_idx / 16).max(3 << 16)) * 4, wgpu::BufferUsages::INDEX);
-			}
-			queue.submit(Some(enc.finish()));
-		}
-		let mut all_ranges = scene.props_ranges.clone();
-		all_ranges.splice(at..at, ranges.iter().cloned());
-		// Each class's faces by texture key and its clippable faces (kept in the scene: the class meshes never change).
-		for (&c, &m) in all_classes.iter().zip(&all_meshes) {
-			scene.class_faces.entry(c).or_insert_with(|| ClassFaces::of(m));
-		}
-		let mut count: BTreeMap<u32, u32> = BTreeMap::new();
-		for c in &all_classes {
-			for (key, f) in &scene.class_faces[c].groups {
-				*count.entry(*key).or_default() += f.len() as u32;
+				scene.props_ibuf_spare = None;
 			}
 		}
-		// One draw per texture key in ascending order (`batch`); `pos` = each draw's next free index.
-		let mut draws = Vec::with_capacity(count.len());
-		let mut draw_of: HashMap<u32, usize> = HashMap::with_capacity(count.len());
-		let (mut pos, mut start) = (Vec::with_capacity(count.len()), 0);
-		for (d, (&key, &c)) in count.iter().enumerate() {
-			draws.push(Draw { inst: 0, cull: ((key >> 24) & 3) as u8, texture: scene.tex_slots[&(key & crate::mobies::SLOT_MASK)], start, count: c });
-			draw_of.insert(key, d);
-			pos.push(start);
-			start += c;
-		}
-		// Per slot (in `order`) its runs; per draw the (vertex base, faces) it holds in order.
-		let mut slot_runs: Vec<Vec<(u32, u32, u32)>> = vec![Vec::new(); n];
-		let mut per_draw: Vec<Vec<(u32, &[u32])>> = vec![Vec::new(); draws.len()];
-		for &s in order {
-			let base = all_ranges[s].start as u32;
-			for (key, f) in &scene.class_faces[&all_classes[s]].groups {
-				let d = draw_of[key];
-				slot_runs[s].push((d as u32, pos[d], f.len() as u32));
-				per_draw[d].push((base, f));
-				pos[d] += f.len() as u32;
-			}
-		}
-		let mut indices = vec![0u32; n_idx];
-		{
-			let mut rest: &mut [u32] = &mut indices;
-			let mut outs = Vec::with_capacity(draws.len());
-			for d in &draws {
-				let (a, b) = rest.split_at_mut(d.count as usize);
-				outs.push(a);
-				rest = b;
-			}
-			outs.into_par_iter().zip(per_draw.par_iter()).for_each(|(out, segs)| {
-				let mut k = 0;
-				for &(base, f) in segs {
-					for (o, &i) in out[k..k + f.len()].iter_mut().zip(f) {
-						*o = i + base;
-					}
-					k += f.len();
+		drop(_s);
+		let inserted = plan.is_some();
+		let (prop_faces, clip_masked) = match plan.as_mut() {
+			Some(plan) => {
+				let _s = super::profile::span("ap_insert");
+				// The old indices around the new slots' faces into the spare index buffer (as large as the current one; larger,
+				// a 16th spare again, when the indices outgrow it).
+				let size = scene.props.ibuf.size() as usize;
+				let ibuf = match scene.props_ibuf_spare.take() {
+					Some(b) if b.size() as usize >= size.max(n_idx * 4) => b,
+					_ => sized_buffer(device, "indices", if n_idx * 4 > size { (n_idx + (n_idx / 16).max(3 << 16)) * 4 } else { size }, wgpu::BufferUsages::INDEX),
+				};
+				let e = enc.get_or_insert_with(|| device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("props grow") }));
+				for &(src, dst, len) in &plan.copies {
+					e.copy_buffer_to_buffer(&scene.props.ibuf, src as u64 * 4, &ibuf, dst as u64 * 4, len as u64 * 4);
 				}
-			});
-		}
-		// NOV-5.9c: the clippable faces' index positions (`clip::replay_faces`); the old slots' faces only move.
-		let m = classes.len();
-		let mut prop_faces = std::mem::take(&mut scene.prop_faces);
-		prop_faces.splice(at..at, (0..m).map(|_| Vec::new()));
+				{
+					let _c = super::profile::span("ap_submit");
+					queue.submit(enc.take().map(|e| e.finish()));
+				}
+				for (dst, r) in &plan.chunks {
+					queue.write_buffer(&ibuf, *dst as u64 * 4, bytemuck::cast_slice(&plan.fresh[r.clone()]));
+				}
+				scene.props_ibuf_spare = Some(std::mem::replace(&mut scene.props.ibuf, ibuf));
+				// The old runs only move (and change draw numbers when a texture key is new); the new slots' runs go in at `at`.
+				let slot_runs = plan.moved_runs(std::mem::take(&mut scene.slot_runs), at);
+				scene.props.draws = std::mem::take(&mut plan.draws);
+				scene.slot_runs = slot_runs;
+				// The masked faces moved with their indices: the same (slot, face) pairs stay masked, the actors' slots move up.
+				let mut masked = std::mem::take(&mut scene.clip_masked);
+				for k in masked.iter_mut().filter(|k| k.0 as usize >= at) {
+					k.0 += m as u32;
+				}
+				(std::mem::take(&mut scene.prop_faces), masked)
+			}
+			None => {
+				let _s = super::profile::span("ap_index");
+				let (draws, slot_runs, indices) = prop_layout(&scene.class_faces, &scene.tex_slots, &all_classes, &all_ranges, order);
+				if let Some(e) = enc.take() {
+					queue.submit(Some(e.finish()));
+				}
+				queue.write_buffer(&scene.props.ibuf, 0, bytemuck::cast_slice(&indices));
+				scene.props.draws = draws;
+				scene.slot_runs = slot_runs;
+				// The indices were written whole: nothing is masked for the clipper (as after a rebuild).
+				(std::mem::take(&mut scene.prop_faces), Vec::new())
+			}
+		};
+		// NOV-5.9c: the clippable faces' index positions (`clip::replay_faces`), run-relative: the old slots' faces stay (after
+		// an insert only the new slots' are built; a rebuild also checks the old ones).
+		let _s = super::profile::span("ap_pfaces");
+		let mut prop_faces = prop_faces;
 		let (cf, tex_slots) = (&scene.class_faces, &scene.tex_slots);
-		prop_faces.par_iter_mut().enumerate().for_each(|(s, faces)| {
-			let cf = &cf[&all_classes[s]];
-			let first = &slot_runs[s];
-			let base = all_ranges[s].start as u32;
-			if faces.len() == cf.clipped.len() && (s < at || s >= at + m) {
-				for (f, &(g, rank, _, _)) in faces.iter_mut().zip(&cf.clipped) {
-					f.slot = first[g].1 + rank * 3;
-				}
-			} else {
-				*faces = cf.clipped.iter().map(|&(g, rank, idx, phase)| {
-					let key = cf.groups[g].0;
-					super::clip::PropFace { slot: first[g].1 + rank * 3, idx: idx.map(|i| i + base), phase, tex: tex_slots.get(&(key & crate::mobies::SLOT_MASK)).copied().unwrap_or(0), cull: ((key >> 24) & 3) as u8 }
-				}).collect();
-			}
-		});
+		let faces_of = |s: usize| {
+			let (cf, base) = (&cf[&all_classes[s]], all_ranges[s].start as u32);
+			cf.clipped.iter().map(|&(g, rank, idx, phase)| {
+				let key = cf.groups[g].0;
+				super::clip::PropFace { slot: rank * 3, run: g as u32, idx: idx.map(|i| i + base), phase, tex: tex_slots.get(&(key & crate::mobies::SLOT_MASK)).copied().unwrap_or(0), cull: ((key >> 24) & 3) as u8 }
+			}).collect::<Vec<_>>()
+		};
+		prop_faces.splice(at..at, (at..at + m).map(faces_of));
+		if !inserted {
+			prop_faces.par_iter_mut().enumerate().filter(|(s, faces)| faces.len() != cf[&all_classes[*s]].clipped.len()).for_each(|(s, faces)| *faces = faces_of(s));
+		}
+		drop(_s);
+		let _s = super::profile::span("ap_write");
 		queue.write_buffer(&scene.props.vbuf, (v0 * std::mem::size_of::<Vertex>()) as u64, bytemuck::cast_slice(&verts));
-		queue.write_buffer(&scene.props.ibuf, 0, bytemuck::cast_slice(&indices));
 		if let Some(sj) = &scene.props_sj {
-			// The new slots' (slot, vertex) attribute, and the scene actors' slot numbers moved up by `m`.
-			let attr = |s: usize, r: &std::ops::Range<usize>| (0..r.len() as u32).map(|j| [s as u32, j]).collect::<Vec<[u32; 2]>>();
-			for (k, r) in ranges.iter().enumerate().filter(|(_, r)| !r.is_empty()) {
-				queue.write_buffer(sj, r.start as u64 * 8, bytemuck::cast_slice(&attr(at + k, r)));
-			}
-			for (s, r) in scene.props_ranges.iter().enumerate().skip(at).filter(|(_, r)| !r.is_empty()) {
-				queue.write_buffer(sj, r.start as u64 * 8, bytemuck::cast_slice(&attr(s + m, r)));
-			}
+			// The new slots' (slot, vertex) attribute, and the scene actors' slot numbers moved up by `m` (one write per run of
+			// slots whose vertices follow each other).
+			let put = |slots: &mut dyn Iterator<Item = (usize, &std::ops::Range<usize>)>| {
+				let (mut at_v, mut attr) = (0usize, Vec::<[u32; 2]>::new());
+				for (s, r) in slots.filter(|(_, r)| !r.is_empty()) {
+					if !attr.is_empty() && r.start != at_v + attr.len() {
+						queue.write_buffer(sj, at_v as u64 * 8, bytemuck::cast_slice(&attr));
+						attr.clear();
+					}
+					if attr.is_empty() {
+						at_v = r.start;
+					}
+					attr.extend((0..r.len() as u32).map(|j| [s as u32, j]));
+				}
+				if !attr.is_empty() {
+					queue.write_buffer(sj, at_v as u64 * 8, bytemuck::cast_slice(&attr));
+				}
+			};
+			put(&mut ranges.iter().enumerate().map(|(k, r)| (at + k, r)));
+			put(&mut scene.props_ranges.iter().enumerate().skip(at).map(|(s, r)| (s + m, r)));
 		}
-		if gpu_posing {
-			let rad: Vec<f32> = ranges.iter().map(|r| verts[r.start - v0..r.end - v0].iter().map(|v| (v.pos[0] * v.pos[0] + v.pos[1] * v.pos[1] + v.pos[2] * v.pos[2]).sqrt()).fold(0.0, f32::max)).collect();
-			scene.props_rad.splice(at..at, rad);
-		} else {
-			scene.props_verts.extend_from_slice(&verts);
-		}
-		scene.props.draws = draws;
-		scene.slot_runs = slot_runs;
+		drop(_s);
+		let rad: Vec<f32> = ranges.iter().map(|r| verts[r.start - v0..r.end - v0].iter().map(|v| (v.pos[0] * v.pos[0] + v.pos[1] * v.pos[1] + v.pos[2] * v.pos[2]).sqrt()).fold(0.0, f32::max)).collect();
+		scene.props_rad.splice(at..at, rad);
 		scene.prop_faces = prop_faces;
+		scene.clip_masked = clip_masked;
 		scene.props_model.extend(verts);
 		scene.props_ranges = all_ranges;
 		scene.props_class = all_classes;
 		scene.props_order = order.to_vec();
-		scene.props_hidden.splice(at..at, vec![false; m]);
-		scene.props_key.splice(at..at, vec![None; m]);
-		// The indices were written whole: nothing is masked for the clipper (as after a rebuild).
-		scene.clip_masked = Vec::new();
 		scene.prompt_slot = scene.prompt_slot.map(|p| if p >= at { p + m } else { p });
 		for pi in scene.props_late.iter_mut().filter(|pi| **pi >= at) {
 			*pi += m;
@@ -1017,6 +1039,11 @@ impl Gpu {
 	pub(super) fn load_scene(&mut self, meshes: &[Mesh], shrub_set: &[shrubs::ShrubInstance], tie_set: &[ties::LitTie], textures: &HashMap<u32, Texture>, sky: Option<&sky::Sky>, hero: Option<&Mesh>, hero_tint: Option<([f32; 3], usize, usize)>, props: &[u32], prop_meshes: &HashMap<u32, Mesh>, preview_meshes: &HashMap<u32, Mesh>, occ: crate::occlusion::Occlusion, tfrag_set: Vec<terrain::TfragLods>, tfrag_b: f32, terrain_chains: &[Option<Vec<Texture>>], shrub_chains: &[Option<Vec<Texture>>], tie_chains: &[Option<Vec<Texture>>]) {
 		let order = props.to_vec();
 		let scene = self.ctx().build_scene(meshes, shrub_set, tie_set, textures, sky, hero, hero_tint, move |_| Some(order.clone()), prop_meshes, preview_meshes, occ, tfrag_set, tfrag_b, terrain_chains, shrub_chains, tie_chains);
+		if std::env::var("RAC_PERF_LOG").is_ok_and(|v| v == "1") {
+			if let Some(sc) = &scene {
+				eprintln!("scene: {} prop slots, {} prop vertices", sc.props_ranges.len(), sc.props_model.len());
+			}
+		}
 		self.scene = scene;
 	}
 
@@ -1060,6 +1087,9 @@ impl Gpu {
 				// them in `cull_ties` (its Q picks the blend).
 				scene.tie_cols[r.at] = r.colours;
 				scene.tie_stale[r.at] = [true; 3];
+				if let Some(g) = &mut scene.tie_gpu {
+					g.caps_dirty.push(r.at);
+				}
 				continue;
 			}
 			if r.kind == crate::mesh::LitKind::Tfrag {
@@ -1082,39 +1112,103 @@ impl Gpu {
 		}
 	}
 
+	/// [PC] Draw distance (fardraw.rs): the Graphics row's level (with either Lighting) over a retail level drawn by rac-rs;
+	/// None = Low, retail's distances.
+	pub(super) fn far_draw(&self) -> Option<super::fardraw::Level> {
+		super::fardraw::on(crate::retail::pcext::graphics().draw_q(), self.modern_ok)
+	}
+
+	/// [PC] The world far plane (m) of the frame's draw distance (fardraw.rs `far_plane`): `RETAIL_FAR` but with High. Every world
+	/// draw and every pass that reads their depth back uses it.
+	pub(super) fn world_far(&self) -> f32 {
+		super::fardraw::far_plane(self.far_draw())
+	}
+
+	/// [PC] Graphics -> Culling (On by default): Off draws the ties, tfrags and props this renderer leaves out as hidden (the
+	/// occlusion mask) or out of view (the tfrag viewport test). Retail's own verdicts (props_drawn, the deferred list) and the
+	/// draw distances stay as they are.
+	pub(super) fn culling(&self) -> bool {
+		crate::retail::pcext::graphics().culling
+	}
+
 	/// BRIDGE-29 / REN-CULL-TIE, once per drawn frame before the scene is borrowed: per tie instance the LOD and geomorph
 	/// factor from the view depth of its sphere centre (`ties::tie_pick`; with no clip view every tie draws at LOD 0 unmorphed
 	/// [I]), the picked LOD's draws rebuilt into `scene.ties.draws`, and the picked range's positions rewritten when its Q
 	/// changed. A tie whose occlusion bytes fail the frame's mask (REN-CULL-OCC, skipped with no clip view) is not drawn.
 	pub(super) fn cull_ties(&mut self) {
 		let _s = super::profile::span("cull_ties");
+		let far = self.far_draw();
+		let cull = self.culling();
 		let Some(scene) = &mut self.scene else { return };
 		if scene.tie_cull.is_empty() {
 			return;
 		}
-		let mut draws = Vec::new();
+		if let Some(g) = &scene.tie_gpu {
+			g.flush_pending(&self.device, &self.queue);
+		}
+		// [PC] perf (lane A, B3): with the same clip view, occlusion mask and draw-distance mode as the last pass and no stale tie
+		// range, every pick, Q and draw list is the same as last time and no range is rewritten (`tie_q` already holds each
+		// drawn range's Q), so the pass is skipped. RAC_CULL_CHECK=1 runs it anyway and compares.
+		// Culling Off passes every tie, as an all-ones mask does.
+		let key = super::gpucache::TiePassKey { view: scene.clip_view.as_ref().map(super::gpucache::view_bits), mask: if cull { scene.occ.mask } else { [0xff; 128] }, far };
+		let same_inputs = scene.tie_pass.as_ref() == Some(&key) && scene.tie_lod.len() == scene.tie_cull.len() && !scene.tie_stale.iter().any(|s| s.iter().any(|&b| b));
+		let check = super::gpucache::cull_check_on();
+		if same_inputs && !check {
+			return;
+		}
+		let before = (same_inputs && check).then(|| (scene.ties.draws.iter().map(|d| (d.inst, d.cull, d.texture, d.start, d.count)).collect::<Vec<_>>(), scene.tie_lod.clone()));
+		scene.tie_lod.clear();
+		scene.tie_lod.resize(scene.tie_cull.len(), u8::MAX);
+		// The draw list and the job list keep their capacity from frame to frame.
+		let mut draws = std::mem::take(&mut scene.ties.draws);
+		draws.clear();
 		// [PC] perf: the vertex rewrites (tie, LOD, Q, moved, all) run on the frame worker pool after the pick loop.
-		let mut jobs: Vec<(usize, usize, f32, bool, bool)> = Vec::new();
+		let mut jobs: Vec<super::tiegpu::Job> = std::mem::take(&mut scene.tie_jobs);
+		let gcheck = super::tiegpu::check_on();
+		jobs.clear();
+		let sp_pick = super::profile::span("ct_pick");
 		for i in 0..scene.tie_cull.len() {
 			let c = scene.tie_cull[i];
-			let pick = match &scene.clip_view {
-				Some(v) => ties::tie_pick(&c, v.view(c.centre)[2]),
-				None => Some((0, 0.0)),
+			let pick = match (&scene.clip_view, far) {
+				// [PC] Draw distance Medium / High (fardraw.rs): LOD 0, drawn farther.
+				(Some(v), Some(l)) => super::fardraw::tie(l, &c, v.view(c.centre)[2]),
+				(Some(v), None) => ties::tie_pick(&c, v.view(c.centre)[2]),
+				(None, _) => Some((0, 0.0)),
 			};
 			let Some((lod, q)) = pick else { continue };
-			if scene.clip_view.is_some() && !scene.occ.passes(c.occ) {
+			if cull && scene.clip_view.is_some() && !scene.occ.passes(c.occ) {
 				continue;
 			}
 			draws.extend_from_slice(&scene.tie_draws[scene.tie_ranges[i][lod].start as usize..scene.tie_ranges[i][lod].end as usize]);
+			scene.tie_lod[i] = lod as u8;
 			// Positions follow Q for fat vertices; colours follow Q too, and a relight leaves every range stale (BRIDGE-32).
 			let moved = scene.tie_fat[i][lod] && q != scene.tie_q[i][lod];
 			if moved || scene.tie_stale[i][lod] {
 				let all = scene.tie_stale[i][lod] || !scene.tie_full[i][lod];
-				jobs.push((i, lod, q, moved, all));
+				// [PC] perf (lane D5b): a job inside the proven domain goes to the GPU rewrite (tiegpu.rs).
+				let mut job = (i, lod, q, moved, all, false);
+				if let Some(g) = scene.tie_gpu.as_mut() {
+					job = g.route(job, scene.tie_fat[i][lod], gcheck);
+				}
+				jobs.push(job);
 				scene.tie_q[i][lod] = q;
 				scene.tie_stale[i][lod] = false;
 				scene.tie_full[i][lod] = true;
 			}
+		}
+		drop(sp_pick);
+		if gcheck {
+			if let Some(g) = scene.tie_gpu.as_mut() {
+				for j in g.stress_jobs(&scene.tie_lod, &scene.tie_fat, 6) {
+					jobs.push(j);
+					scene.tie_q[j.0][j.1] = f32::NAN;
+					scene.tie_full[j.0][j.1] = false;
+					scene.tie_stale[j.0][j.1] = true;
+				}
+			}
+		}
+		if let Some(g) = scene.tie_gpu.as_mut() {
+			g.flush_caps(&self.queue, &scene.tie_cols);
 		}
 		{
 			let (base, morph, slots, cols, qdep, tri, tris) = (&scene.tie_base, &scene.tie_morph, &scene.tie_slots, &scene.tie_cols, &scene.tie_qdep, &scene.tie_tri, &scene.tie_tris);
@@ -1138,13 +1232,63 @@ impl Gpu {
 					v.colour = [c[0] / 128.0, c[1] / 128.0, c[2] / 128.0, -2.0];
 				}
 			};
-			let ranges: Vec<std::ops::Range<usize>> = jobs.iter().map(|&(i, lod, ..)| scene.tie_vranges[i][lod].clone()).collect();
-			par_chunked(&mut scene.tie_verts, &ranges, |k, off, verts| rewrite(verts, ranges[k].start + off, jobs[k]));
-			for vr in ranges {
-				self.queue.write_buffer(&scene.ties.vbuf, (vr.start * std::mem::size_of::<Vertex>()) as u64, bytemuck::cast_slice(&scene.tie_verts[vr]));
+			// The CPU rewrites every job the GPU does not take (all of them in check mode, which keeps the mirror exact to compare with).
+			let sel: Vec<usize> = (0..jobs.len()).filter(|&k| gcheck || !jobs[k].5).collect();
+			let ranges: Vec<std::ops::Range<usize>> = sel.iter().map(|&k| scene.tie_vranges[jobs[k].0][jobs[k].1].clone()).collect();
+			let sp_rw = super::profile::span("ct_rewrite");
+			par_chunked(&mut scene.tie_verts, &ranges, |k, off, verts| {
+				let j = jobs[sel[k]];
+				rewrite(verts, ranges[k].start + off, (j.0, j.1, j.2, j.3, j.4))
+			});
+			drop(sp_rw);
+			let ranges: Vec<std::ops::Range<usize>> = sel.iter().zip(ranges).filter(|(k, _)| !jobs[**k].5).map(|(_, r)| r).collect();
+			let sp_wr = super::profile::span("ct_write");
+			// Adjacent ranges go up as one write (same bytes at the same offsets).
+			let raw = ranges.len();
+			let mut writes = 0usize;
+			let mut covered = 0usize;
+			let mut cur: Option<std::ops::Range<usize>> = None;
+			let mut flush = |r: std::ops::Range<usize>| {
+				covered += r.len();
+				writes += 1;
+				self.queue.write_buffer(&scene.ties.vbuf, (r.start * std::mem::size_of::<Vertex>()) as u64, bytemuck::cast_slice(&scene.tie_verts[r]));
+			};
+			for vr in ranges.iter().cloned() {
+				match cur.take() {
+					Some(c) if c.end == vr.start => cur = Some(c.start..vr.end),
+					Some(c) => {
+						flush(c);
+						cur = Some(vr);
+					}
+					None => cur = Some(vr),
+				}
+			}
+			if let Some(c) = cur {
+				flush(c);
+			}
+			drop(sp_wr);
+			let sp_gp = super::profile::span("ct_gpu");
+			let mut tasks = 0;
+			if let Some(g) = scene.tie_gpu.as_mut() {
+				if jobs.iter().any(|j| j.5) {
+					tasks = g.dispatch(&self.device, &self.queue, &jobs, &scene.tie_vranges, &scene.tie_verts, gcheck);
+				}
+			}
+			drop(sp_gp);
+			if let Some(g) = &scene.tie_gpu {
+				g.note_pass(scene.tie_cull.len(), draws.len(), &jobs, &scene.tie_vranges, tasks);
+			}
+			if check {
+				let total: usize = ranges.iter().map(|r| r.len()).sum();
+				let same_out = before.as_ref().is_none_or(|(d, l)| {
+					jobs.is_empty() && *l == scene.tie_lod && d.len() == draws.len() && d.iter().zip(&draws).all(|(a, b)| *a == (b.inst, b.cull, b.texture, b.start, b.count))
+				}) && covered == total;
+				super::gpucache::cull_note(same_inputs, same_out, raw, writes);
 			}
 		}
 		scene.ties.draws = draws;
+		scene.tie_jobs = jobs;
+		scene.tie_pass = Some(key);
 	}
 
 	/// BRIDGE-27 / REN-CULL-SHRUB, first thing in `draw`: per shrub instance (class load-slot order) the view depth of its sphere
@@ -1154,6 +1298,7 @@ impl Gpu {
 		let _s = super::profile::span("cull_shrubs");
 		let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
 		let cap = self.shrub_cap;
+		let far = self.far_draw();
 		let Some(scene) = &mut self.scene else { return };
 		scene.shrub_opaque.clear();
 		scene.shrub_faded.clear();
@@ -1166,7 +1311,12 @@ impl Gpu {
 		for k in 0..scene.shrub_order.len() {
 			let i = scene.shrub_order[k];
 			let c = scene.shrub_cull[i];
-			let Some(st) = c.state_cap(cv.view(c.centre)[2], cap) else { continue };
+			// [PC] Draw distance Medium / High (fardraw.rs): the mesh and its billboard switch farther out.
+			let (pz, cap) = match far {
+				Some(l) => super::fardraw::shrub(l, cv.view(c.centre)[2], cap),
+				None => (cv.view(c.centre)[2], cap),
+			};
+			let Some(st) = c.state_cap(pz, cap) else { continue };
 			if let Some(a) = st.mesh {
 				if let Some(w) = shrub_rewrite(scene.shrub_a[i], a) {
 					let vr = scene.shrub_ranges[i].1.clone();
@@ -1207,8 +1357,20 @@ impl Gpu {
 		}
 		scene.ice_level = level;
 		let (tk, sk) = super::icefx::ice_keys(level);
+		// [PC] perf (lane D5b): after GPU rewrites the mirror is stale, so only the ice marks (light w) of the changed vertices go up.
+		let before = scene.tie_gpu.as_ref().is_some_and(|g| g.dirty_mirror()).then(|| scene.tie_verts.iter().map(|v| v.light[3]).collect::<Vec<f32>>());
 		if super::icefx::retag(&mut scene.tie_verts, &scene.tie_vkey, tk, -3.0) {
-			self.queue.write_buffer(&scene.ties.vbuf, 0, bytemuck::cast_slice(&scene.tie_verts));
+			match before {
+				None => self.queue.write_buffer(&scene.ties.vbuf, 0, bytemuck::cast_slice(&scene.tie_verts)),
+				Some(b) => {
+					let off = std::mem::offset_of!(Vertex, light) + 12;
+					for (k, (v, w)) in scene.tie_verts.iter().zip(&b).enumerate() {
+						if v.light[3] != *w {
+							self.queue.write_buffer(&scene.ties.vbuf, (k * std::mem::size_of::<Vertex>() + off) as u64, bytemuck::bytes_of(&v.light[3]));
+						}
+					}
+				}
+			}
 		}
 		if super::icefx::retag(&mut scene.shrub_verts, &scene.shrub_vkey, sk, -2.0) {
 			self.queue.write_buffer(&scene.shrubs.vbuf, 0, bytemuck::cast_slice(&scene.shrub_verts));
@@ -1232,6 +1394,8 @@ impl Gpu {
 	pub(super) fn cull_tfrags(&mut self) {
 		let _s = super::profile::span("cull_tfrags");
 		let fog = self.lighting.as_ref().map_or([0.0, 524288.0, 255.0, 0.0], |l| l.fog);
+		let far = self.far_draw();
+		let cull = self.culling();
 		let Some(scene) = &mut self.scene else { return };
 		if scene.tfrag_set.is_empty() {
 			return;
@@ -1239,6 +1403,8 @@ impl Gpu {
 		// FUN_001f7900: the clip-w depth scale (the fog slope per 1024 world units).
 		let cc60 = (fog[3] - fog[2]) / ((fog[1] - fog[0]).max(0.001) / 1024.0);
 		let (t, ints) = terrain::lod_distances(scene.tfrag_b);
+		scene.tfrag_lod.clear();
+		scene.tfrag_lod.resize(scene.tfrag_set.len(), u8::MAX);
 		let mut draws = Vec::new();
 		let mut st = [0u32; 4];
 		// [PC] perf: (fragment, LOD code, LOD) of the drawn fragments; the posing and the vertex compare run on the frame worker pool.
@@ -1274,19 +1440,21 @@ impl Gpu {
 				Some(v) => {
 					let p = v.view(c.centre).map(|x| x * 1024.0);
 					let r = c.radius * 1024.0;
-					if terrain::beyond_draw_cap(p[2], r) { st[0] += 1; continue; }
+					// [PC] Draw distance Medium / High (fardraw.rs): the cap moves out to the level's cap.
+					if match far { Some(l) => super::fardraw::tfrag_beyond(l, p[2], r), None => terrain::beyond_draw_cap(p[2], r) } { st[0] += 1; continue; }
 					if 32.0 - (p[2] + r) >= 0.0 { st[1] += 1; continue; }
-					if !scene.occ.passes(c.occ) { st[2] += 1; continue; }
+					if cull && !scene.occ.passes(c.occ) { st[2] += 1; continue; }
 					let mut near_only = false;
 					if !v.sphere_wholly_inside(p, r) {
 						let flags: Vec<u8> = c.corners.iter().map(|&k| v.viewport().flags(v.view(k))).collect();
-						if flags.iter().fold(0x3f, |a, f| a & f) != 0 {
+						if cull && flags.iter().fold(0x3f, |a, f| a & f) != 0 {
 							st[3] += 1;
 							continue;
 						}
 						near_only = c.corners.iter().any(|&k| v.band().flags(v.view(k)) != 0);
 					}
-					if near_only {
+					// [PC] Draw distance Medium / High: the full-detail near mesh unmorphed (a forced-far fragment keeps its far mesh).
+					if near_only || (far.is_some() && !c.force_far) {
 						0x14
 					} else {
 						terrain::lod_code(c.force_far, (p[2] - r) as i32, (p[2] + r) as i32, ints)
@@ -1299,6 +1467,7 @@ impl Gpu {
 				_ => 2,
 			};
 			draws.extend_from_slice(&scene.tfrag_draws[scene.tfrag_ranges[i][lod].start as usize..scene.tfrag_ranges[i][lod].end as usize]);
+			scene.tfrag_lod[i] = lod as u8;
 			jobs.push((i, code, lod));
 		}
 		if std::env::var_os("RAC_TFRAG_STATS").is_some() { eprintln!("TFSTATS total={} cap={} near={} occ={} frustum={} drawn={} occ_enabled={}", scene.tfrag_set.len(), st[0], st[1], st[2], st[3], jobs.len(), scene.occ.enabled); }
@@ -1334,7 +1503,8 @@ impl Gpu {
 		self.scene.as_ref().map(|s| s.marker_model.len())
 	}
 
-	pub(super) fn set_marker(&mut self, at: Option<([f32; 3], f32)>, skinned: Option<&Posed>) {
+	/// `blend` = (the pose before the newest tick, factor): the GPU hero's blend source (see `gpuhero.rs`); the CPU path blends it here.
+	pub(super) fn set_marker(&mut self, at: Option<([f32; 3], f32)>, skinned: Option<&Posed>, blend: Option<(&Posed, f32)>) {
 		let _s = super::profile::span("set_marker");
 		// The first posing call of a frame: the posed mobies' third lights start over.
 		self.moby_dyn.clear();
@@ -1364,10 +1534,133 @@ impl Gpu {
 			],
 			None => [v[0] * c - v[1] * sn, v[0] * sn + v[1] * c, v[2]],
 		};
+		let _l = super::profile::span("sm_light");
 		let (light, tint) = Self::hero_light_tint(&self.lighting, feet, self.hero_placed, &mut self.hero_env);
 		self.hero_tint_out = Some(tint);
 		let id = dyn_id(&self.table, &mut self.moby_dyn, feet);
+		drop(_l);
 		let shift = self.marker_v.take();
+		// [PC] perf (lane R2, gpuhero.rs): a compute pass builds the vertices from the model and the two step poses (RAC_HERO_GPU=1).
+		// Falls back to the CPU build below when the hero is not clearly inside / outside the clip guard band (the clipper needs the
+		// world vertices then); RAC_HERO_GPU_CHECK=1 runs both and compares the bytes.
+		let n_model = scene.marker_model.len();
+		let blend = blend.filter(|(b, _)| skin.is_some() && b.0.len() == n_model && b.1.len() == n_model);
+		let (gen_now, gen_before) = std::mem::take(&mut self.hero_gens);
+		let mut check_bytes: Option<Vec<u8>> = None;
+		let mut gpu_taken = false;
+		// Self-check kind (gpuhero.rs): set when this frame is compared with the CPU build although the GPU build is the one in use.
+		let mut self_kind: Option<usize> = None;
+		let mut hero_check = super::gpuhero::gpu_hero_check();
+		if let (Some(cur), true, true) = (skin, scene.marker_gpu.is_some(), super::gpuhero::gpu_hero_on()) {
+			let hg = scene.marker_gpu.as_mut().expect("checked");
+			let _p = super::profile::span("sm_poses");
+			let can_blend = hg.set_poses(&self.queue, blend.map(|b| (b.0, gen_before)), (cur, gen_now));
+			drop(_p);
+			let t = if can_blend { blend.map_or(1.0, |b| b.1) } else { 1.0 };
+			let r = rows.unwrap_or([[0.0; 3]; 3]);
+			let row4 = |i: usize| [r[i][0], r[i][1], r[i][2], 0.0];
+			let mut gh = [[0.0f32; 4]; 5];
+			let mut gr = [[0u32; 4]; 5];
+			for (k, g) in ghosts.iter().enumerate() {
+				if let Some(&(a, b, al)) = g.as_ref() {
+					gh[k][0] = moby_alpha_encoding(id, al).0;
+					gr[k] = [a as u32, b as u32, 1, 0];
+				}
+			}
+			let tint3 = scene.marker_tint.map(|(t, s)| (t, s as u32));
+			let hp = super::gpuhero::HeroParams {
+				feet: [feet[0], feet[1], feet[2], 1.0],
+				cs: [c, sn, t, id],
+				r0: { let mut r = row4(0); r[3] = hg.parity(); r },
+				r1: row4(1),
+				r2: row4(2),
+				light,
+				tint: tint3.map_or([0.0; 4], |(t, _)| [t[0], t[1], t[2], 0.0]),
+				clank: clank_light.map_or([0.0; 4], |(_, _, t)| [t[0], t[1], t[2], 0.0]),
+				bomb: [bomb.map_or(0.0, |b| b.2[0]), bomb.map_or(0.0, |b| b.2[1]), bomb.map_or(0.0, |b| b.2[2]), shift.map_or(0.0, |s| s.2)],
+				gh,
+				gr,
+				u0: [n_model as u32, can_blend as u32, rows.is_some() as u32, tint3.is_some() as u32],
+				u1: [tint3.map_or(0, |t| t.1), scene.marker_hero_len as u32, clank_light.map_or(0, |l| l.0 as u32), clank_light.map_or(0, |l| l.1 as u32)],
+				u2: [clank_light.is_some() as u32, bomb.is_some() as u32, shift.is_some() as u32, 0],
+				u3: [bomb.map_or(0, |b| b.0 as u32), bomb.map_or(0, |b| b.1 as u32), shift.map_or(0, |s| s.0 as u32), shift.map_or(0, |s| s.1 as u32)],
+			};
+			let skip = scene.clip_view.as_ref().is_none_or(|v| super::gpuskin::sphere_skips(v, feet, hg.radius));
+			// The first frames of each kind run the GPU build and the CPU build and compare them (the CPU result is drawn).
+			let kind = super::gpuhero::kind(can_blend && t != 1.0, rows.is_some(), ghosts.iter().any(Option::is_some) || bomb.is_some() || shift.is_some() || clank_light.is_some());
+			if skip && !hero_check && super::gpuhero::self_check_wanted(kind) {
+				self_kind = Some(kind);
+				hero_check = true;
+			}
+			if skip || hero_check {
+				hg.queue_build(&self.queue, hp);
+			}
+			gpu_taken = skip && !hero_check;
+			if hero_check {
+				check_bytes = Some(hg.build_and_read(&self.device, &self.queue, &scene.marker.vbuf));
+			}
+		}
+		if gpu_taken {
+			// The clipper's verdict is "no face to take" for any pose in the sphere: unmask what an earlier frame masked.
+			clip_marker(&self.queue, scene, &[]);
+			scene.marker_verts.clear();
+			scene.marker_key = None;
+			scene.marker_shown = true;
+			scene.marker_alpha = ghosts.iter().any(Option::is_some);
+			return;
+		}
+		if let Some(hg) = scene.marker_gpu.as_mut() {
+			hg.cancel();
+		}
+		// The CPU build: the blend the GPU would have done.
+		let blended_cpu = blend.and_then(|(b, t)| skin.and_then(|s| super::smooth::blend_posed(b, s, t)));
+		let skin = blended_cpu.as_ref().or(skin);
+		// [PC] perf (lane A, B2): the same inputs and skinned pose as the call that filled `marker_verts` and the vertex buffer give the
+		// same vertices: no rebuild and no upload (the clip pass below still runs against this frame's view). RAC_MARKER_CHECK=1
+		// rebuilds anyway and compares the bytes with the kept ones.
+		let b3 = super::gpucache::bits3;
+		let key = super::gpucache::MarkerKey {
+			skin: skin.map(|(ps, _)| ps.len()),
+			feet: b3(feet),
+			yaw: yaw.to_bits(),
+			tilt: tilt.map(f32::to_bits),
+			light: light.map(f32::to_bits),
+			id: id.to_bits(),
+			tint: scene.marker_tint.map(|(t, s)| (b3(t), s)),
+			hero_len: scene.marker_hero_len,
+			clank: clank_light.map(|(a, b, t)| (a, b, b3(t))),
+			ghosts,
+			bomb: bomb.map(|(a, b, t)| (a, b, b3(t))),
+			shift: shift.map(|(a, b, d)| (a, b, d.to_bits())),
+		};
+		let skin_same = match skin {
+			Some((ps, ns)) => {
+				let eq = |a: &[[f32; 3]], b: &[[f32; 3]]| a.len() == b.len() && bytemuck::cast_slice::<_, u8>(a) == bytemuck::cast_slice::<_, u8>(b);
+				eq(&scene.marker_skin.0, ps) && eq(&scene.marker_skin.1, ns)
+			}
+			None => true,
+		};
+		let same_inputs = skin_same && scene.marker_key.as_ref() == Some(&key) && !scene.marker_verts.is_empty();
+		let check = super::gpucache::marker_check_on();
+		if same_inputs && !check && check_bytes.is_none() {
+			let verts = std::mem::take(&mut scene.marker_verts);
+			clip_marker(&self.queue, scene, &verts);
+			scene.marker_verts = verts;
+			scene.marker_shown = true;
+			scene.marker_alpha = ghosts.iter().any(Option::is_some);
+			return;
+		}
+		if !skin_same {
+			if let Some((ps, ns)) = skin {
+				scene.marker_skin.0.clear();
+				scene.marker_skin.0.extend_from_slice(ps);
+				scene.marker_skin.1.clear();
+				scene.marker_skin.1.extend_from_slice(ns);
+			}
+		}
+		let kept = (same_inputs && check).then(|| scene.marker_verts.clone());
+		let why = if check { scene.marker_key.as_ref().map_or(0x1fff, |k| k.diff(&key)) | (!skin_same as u32) << 12 } else { 0 };
+		scene.marker_key = Some(key);
 		let mut verts = std::mem::take(&mut scene.marker_verts);
 		verts.clear();
 		verts.extend(scene.marker_model
@@ -1402,6 +1695,15 @@ impl Gpu {
 				Vertex { pos: [p[0] + feet[0], p[1] + feet[1], p[2] + feet[2]], uv, normal: turn(v.normal), colour, light, ..*v }
 			}));
 		self.queue.write_buffer(&scene.marker.vbuf, 0, bytemuck::cast_slice(&verts));
+		if let Some(gb) = &check_bytes {
+			match self_kind {
+				Some(k) => super::gpuhero::self_check_result(k, gb, bytemuck::cast_slice(&verts)),
+				None => super::gpuhero::note_check(gb, bytemuck::cast_slice(&verts)),
+			}
+		}
+		if check {
+			super::gpucache::marker_note(same_inputs, kept.as_ref().is_none_or(|k| bytemuck::cast_slice::<_, u8>(&k[..]) == bytemuck::cast_slice::<_, u8>(&verts[..])), why);
+		}
 		clip_marker(&self.queue, scene, &verts);
 		scene.marker_verts = verts;
 		scene.marker_shown = true;
@@ -1410,8 +1712,9 @@ impl Gpu {
 
 	/// NOV-5.9c: this frame's view basis for the CPU clipper (None disables it for the calls that follow).
 	pub(super) fn set_clip_view(&mut self, view: Option<(&Camera, f32)>) {
+		let wfar = self.world_far();
 		if let Some(scene) = &mut self.scene {
-			scene.clip_view = view.map(|(cam, aspect)| super::clip::ClipView::new(cam, aspect));
+			scene.clip_view = view.map(|(cam, aspect)| super::clip::ClipView::new(cam, aspect).with_far(wfar));
 			// REN-CULL-OCC: the mask is rebuilt once per frame, before any tie / fragment / moby test; with no view (menus) it
 			// stays as it was and nothing tests it.
 			if let Some(v) = &scene.clip_view {
@@ -1429,12 +1732,13 @@ impl Gpu {
 	/// FRAME-1a: the draw verdict of one tick's render from that tick's camera, with its own occlusion state (`occ_tick`) so the
 	/// display frame's mask rebuild does not disturb it. Empty without a scene.
 	pub(super) fn props_verdict(&mut self, cam: &Camera, aspect: f32, props: &[Prop], centres: &[[f32; 3]], radii: &[Option<f32>]) -> Vec<bool> {
+		let far = self.far_draw();
 		let Some(scene) = &mut self.scene else { return Vec::new() };
-		let v = super::clip::ClipView::new(cam, aspect);
+		let v = super::clip::ClipView::new(cam, aspect).with_far(super::fardraw::far_plane(far));
 		scene.occ_tick.update(v.e);
 		// As `set_props`, only the scene's prop slots are tested; the rest stay not drawn.
 		let n = props.len().min(scene.props_ranges.len());
-		let mut drawn = prop_verdicts(&v, &scene.occ_tick.mask, &props[..n], &prop_alphas(Some((v.e, v.f)), &props[..n], centres, radii), centres, radii);
+		let mut drawn = prop_verdicts(&v, &scene.occ_tick.mask, &props[..n], &prop_alphas(Some((v.e, v.f)), &props[..n], centres, radii, far), centres, radii, far);
 		drawn.resize(props.len(), false);
 		drawn
 	}
@@ -1445,7 +1749,12 @@ impl Gpu {
 	/// baked in) at a world position, or None to hide.
 	pub(super) fn set_props(&mut self, props: Option<&[Prop]>, posed: &HashMap<PoseKey, Posed>, fx_posed: &HashMap<usize, Posed>, actors: &[Option<(Posed, [f32; 3])>], debris: &[particles::Debris], insts: &[particles::WorldInst], centres: &[[f32; 3]], radii: &[Option<f32>]) {
 		let _s = super::profile::span("set_props");
+		if let Some(props) = props {
+			self.waterfx.track_props(props);
+		}
 		let prop_v = self.prop_v.take();
+		let far = self.far_draw();
+		let cull = self.culling();
 		let Some(scene) = &mut self.scene else { return };
 		let Some(props) = props else {
 			scene.props_shown = false;
@@ -1456,7 +1765,7 @@ impl Gpu {
 		};
 		// Draw-distance fade (MOBY-FADE): None = past the limit (culled), else the moby draw alpha.
 		let view = scene.clip_view.as_ref().map(|v| (v.e, v.f));
-		let alphas = prop_alphas(view, props, centres, radii);
+		let alphas = prop_alphas(view, props, centres, radii, far);
 		scene.props_alpha = props.iter().zip(&alphas).any(|(p, a)| p.draw_shown() && a.is_some_and(|a| moby_alpha_encoding(0.0, a).1));
 		let n_slots = scene.props_ranges.len();
 		let mut shown = vec![false; n_slots];
@@ -1467,11 +1776,13 @@ impl Gpu {
 		// BRIDGE-45: the drawn props whose metal packets `set_metal_props` builds (prop, placement, scale, dynamic-light id).
 		let mut metal_jobs = Vec::new();
 		// [PC] perf: what each slot's vertices are built from this frame, in slot order: written by the CPU path below
-		// (RAC_CPU_SKIN=1) or posed by `vs_props` from one record per slot (gpuskin.rs).
+		// or posed by `vs_props` from one record per slot (gpuskin.rs).
 		let mut srcs: Vec<SlotSrc> = Vec::with_capacity(n_slots);
 		for (pi, (p, r)) in props.iter().zip(&scene.props_ranges).enumerate() {
 			// REN-CULL-OCC-MOBY: a prop whose occlusion bytes fail this frame's mask is not drawn (no view: nothing is tested).
-			let Some(alpha) = alphas[pi].filter(|_| p.draw_shown() && (!masked || crate::occlusion::occ_pass(&scene.occ.mask, p.sched_occ()))) else {
+			// [PC] Culling Off: an occluded prop is drawn too; retail's verdict for it stays "not drawn" (no side test, no list entry).
+			let occluded = masked && !crate::occlusion::occ_pass(&scene.occ.mask, p.sched_occ());
+			let Some(alpha) = alphas[pi].filter(|_| p.draw_shown() && (!occluded || !cull)) else {
 				srcs.push(SlotSrc::Hidden);
 				continue;
 			};
@@ -1485,10 +1796,10 @@ impl Gpu {
 				(Some(v), Some(&c), Some(r)) => v.moby_side_near_out(c, r),
 				_ => false,
 			};
-			scene.props_drawn[pi] = !side_out;
-			if p.sched_flags() & 0x800 != 0 && !side_out {
+			scene.props_drawn[pi] = !side_out && !occluded;
+			if p.sched_flags() & 0x800 != 0 && !side_out && !occluded {
 				committed += 1;
-				if committed > DEFERRED_CAP {
+				if committed > DEFERRED_CAP && far.is_none() {
 					// List full: not drawn; the verdict is 0 when the override was set, else the side pass stands.
 					scene.props_drawn[pi] = p.sched_over() == 0;
 					srcs.push(SlotSrc::Deferred { ps: &ps[..posed_n], ns: &ns[..posed_n] });
@@ -1513,7 +1824,7 @@ impl Gpu {
 			if water_log() && cuv != [0.0; 2] {
 				eprintln!("water: uv-scroll class {} slot {pi} at {:?} scale {scale} uv {cuv:?}", p.class_id, [m[12], m[13], m[14]]);
 			}
-			srcs.push(SlotSrc::Prop(SlotJob { range: r.clone(), ps: &ps[..posed_n], ns: &ns[..posed_n], m, scale, light, alpha_code, prop_tint: p.tint, tint, alpha, dv, du }));
+			srcs.push(SlotSrc::Prop(SlotJob { ps: &ps[..posed_n], ns: &ns[..posed_n], m, scale, light, alpha_code, prop_tint: p.tint, tint, alpha, dv, du }));
 		}
 		// Debris: every live piece is instanced into the per-frame debris batch (the moby pool bounds the count).
 		if let Some(batch) = &mut scene.debris {
@@ -1586,7 +1897,8 @@ impl Gpu {
 			}
 		}
 		scene.props_vis = shown.clone();
-		if let Some(pg) = &mut self.props_gpu {
+		{
+			let pg = &mut self.props_gpu;
 			// [PC] perf round 3: one record per slot and each distinct pose once; `vs_props` poses the static model.
 			let (mut inst, mut pose, mut rad) = (std::mem::take(&mut scene.props_inst), std::mem::take(&mut scene.props_pose), Vec::new());
 			{
@@ -1611,104 +1923,6 @@ impl Gpu {
 			pg.upload(&self.device, &self.queue, &inst, &pose);
 			(scene.props_inst, scene.props_pose) = (inst, pose);
 			scene.props_shown = true;
-		} else {
-			// PC perf: the mirror of `props.vbuf`; every slot range this frame changes is rebuilt from the model and marked
-			// `dirty`, a slot already holding the plain hidden copy is left alone (same buffer contents as a full rebuild).
-			let mut verts = std::mem::take(&mut scene.props_verts);
-			let mut dirty = vec![false; n_slots];
-			{
-				let model = &scene.props_model;
-				let hidden = &mut scene.props_hidden;
-				let keys = &mut scene.props_key;
-				// [PC] perf: the slot rebuilds, run on the frame worker pool after the loop (`SlotJob::fill`).
-				let mut jobs: Vec<&SlotJob> = Vec::new();
-				for (i, src) in srcs.iter().enumerate() {
-					let r = scene.props_ranges[i].clone();
-					match src {
-						SlotSrc::Hidden => {
-							keys[i] = None;
-							hide_slot(&mut verts, model, hidden, &mut dirty, i, r);
-						}
-						SlotSrc::Deferred { ns, .. } => {
-							hidden[i] = false;
-							keys[i] = None;
-							dirty[i] = true;
-							for (j, (v, m0)) in verts[r.clone()].iter_mut().zip(&model[r]).enumerate() {
-								*v = *m0;
-								if j < ns.len() {
-									v.normal = ns[j];
-								}
-								v.pos = HIDDEN_POS;
-							}
-						}
-						SlotSrc::Prop(job) => {
-							// An unposed slot built last frame from the very same inputs already holds this frame's vertices (PC perf).
-							let key = (job.ps.is_empty() && job.dv == 0.0 && job.du == 0.0).then(|| slot_key(&job.m, job.scale, job.light, job.alpha_code, job.alpha, job.tint, job.prop_tint));
-							if key.is_some() && !hidden[i] && keys[i] == key {
-								continue;
-							}
-							keys[i] = key;
-							hidden[i] = false;
-							dirty[i] = true;
-							jobs.push(job);
-						}
-						SlotSrc::Actor { ps, ns, at, light, id, tint } => {
-							verts[r.clone()].copy_from_slice(&model[r.clone()]);
-							hidden[i] = false;
-							keys[i] = None;
-							dirty[i] = true;
-							for (j, (v, (q, n))) in verts[r].iter_mut().zip(ps.iter().zip(ns.iter())).enumerate() {
-								v.pos = [q[0] + at[0], q[1] + at[1], q[2] + at[2]];
-								v.normal = *n;
-								v.colour[3] = *id;
-								v.light = *light;
-								if let Some((c, _)) = tint.filter(|&(_, start)| j >= start) {
-									v.colour = [c[0], c[1], c[2], -2.0]; // baked-colour path: constant RGB, no lights
-								}
-							}
-						}
-					}
-				}
-				let _s = super::profile::span("props_slots");
-				let ranges: Vec<std::ops::Range<usize>> = jobs.iter().map(|j| j.range.clone()).collect();
-				par_chunked(&mut verts, &ranges, |k, off, dst| jobs[k].fill(dst, &model[ranges[k].start + off..ranges[k].end], off));
-			}
-			// BRIDGE-36 (c2): with a HUD split the posed prompt goes to its own batch and leaves the props batch (and the clip overlay).
-			if let (Some(_), Some(pi), Some(prompt)) = (self.hud_split, scene.prompt_slot, scene.prompt.as_ref()) {
-				if pi < props.len() {
-					let r = scene.props_ranges[pi].clone();
-					self.queue.write_buffer(&prompt.vbuf, 0, bytemuck::cast_slice(&verts[r.clone()]));
-					for v in &mut verts[r] {
-						v.pos = HIDDEN_POS;
-					}
-					scene.props_key[pi] = None;
-					dirty[pi] = true;
-				}
-			}
-			{
-				let _s = super::profile::span("props_clip");
-				clip_props(&self.queue, scene, ClipSrc::Cpu(&verts), &shown);
-				flush_clip(&self.device, &self.queue, scene);
-			}
-			// The rewritten slots, adjacent ones merged into one write.
-			let _u = super::profile::span("props_upload");
-			let mut k = 0;
-			while k < dirty.len() {
-				if !dirty[k] {
-					k += 1;
-					continue;
-				}
-				let start = scene.props_ranges[k].start;
-				let mut end = scene.props_ranges[k].end;
-				k += 1;
-				while k < dirty.len() && dirty[k] && scene.props_ranges[k].start == end {
-					end = scene.props_ranges[k].end;
-					k += 1;
-				}
-				self.queue.write_buffer(&scene.props.vbuf, (start * std::mem::size_of::<Vertex>()) as u64, bytemuck::cast_slice(&verts[start..end]));
-			}
-			scene.props_verts = verts;
-			scene.props_shown = true;
 		}
 		let _m = super::profile::span("props_metal");
 		self.set_metal_props(props, &metal_jobs, posed, fx_posed, centres, radii);
@@ -1720,6 +1934,7 @@ impl Gpu {
 		}
 		self.config.width = w;
 		self.config.height = h;
+		self.presenter.flush();
 		configure_surface(&self.surface, &self.device, &self.config);
 		self.depth = depth_view(&self.device, w, h, self.depth_format);
 		self.msaa = msaa_view(&self.device, self.config.format, w, h);
@@ -1769,6 +1984,7 @@ impl Gpu {
 			sun: [0.0; 4],
 			sun_bias: [0.0; 4],
 			sun_texel: [0.0; 4],
+			sun_q: [0.0; 4],
 		}
 	}
 
@@ -1929,13 +2145,14 @@ impl Gpu {
 		let _s = super::profile::span("set_particles");
 		let f = [cam.pitch.cos() * cam.yaw.cos(), cam.pitch.cos() * cam.yaw.sin(), cam.pitch.sin()];
 		let (slots, pool_ribbons, pool_lines, line_slots) = fx.map_or((&[][..], &[][..], &[][..], &[][..]), |x| (&x.sprite_slots[..], &x.ribbons[..], &x.lines[..], &x.line_slots[..]));
-		// [PC] Water Enhanced contact rings (waterfx.rs `Rings`): the hero and the pool particles (a line by its lower end).
+		// [PC] Water Enhanced contact rings and wakes (waterfx.rs `Rings`, `Wakes`): the hero, the pool particles (a line by its
+		// lower end) and the drawn mobys.
 		if let Some(x) = fx {
 			let parts = sprites.iter().filter(|sp| sp.pool.is_some()).map(|sp| sp.pos).chain(pool_lines.iter().map(|l| if l.a[2] < l.b[2] { l.a } else { l.b }));
-			self.waterfx.contacts(x.frames, x.hero, parts);
+			self.waterfx.contacts(x.frames, x.hero, parts, &x.movers);
 		}
 		let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
-		let m = view_proj(cam, aspect, RETAIL_NEAR, RETAIL_FAR);
+		let m = view_proj(cam, aspect, RETAIL_NEAR, self.world_far());
 		// KER-92: pool lines, kept when both points pass the clip test and the midpoint view depth is inside (near, far).
 		self.line_verts.clear();
 		if !lines.is_empty() {
@@ -2238,10 +2455,14 @@ impl Gpu {
 		let scene = self.scene.as_ref()?;
 		let aspect = self.config.width as f32 / self.config.height as f32;
 		let eye = Camera { pos: [0.0; 3], yaw: cam.yaw, pitch: cam.pitch, tan_half: cam.tan_half, up: cam.up };
-		let mut u = self.uniforms(cam, &eye, aspect, (RETAIL_NEAR, RETAIL_FAR));
+		let sp_un = super::profile::span("d_uniforms");
+		// [PC] Draw distance High pushes the world far plane out (fardraw.rs); Low and Medium keep retail's.
+		let wfar = self.world_far();
+		let mut u = self.uniforms(cam, &eye, aspect, (RETAIL_NEAR, wfar));
+		drop(sp_un);
 		// [PC] Graphics -> Lighting Enhanced (post.rs): the level pass resolves into the post scene target, the post
 		// passes grade it and the HUD pass draws over the result. Dynamic shadows On adds the cascades (sunshadow.rs) from the
-		// hero's key light. Classic: the frame below is drawn exactly as before (the shadow uniforms stay zero).
+		// level's key light. Classic: the frame below is drawn exactly as before (the shadow uniforms stay zero).
 		let gfx = crate::retail::pcext::graphics();
 		let post_on = gfx.enhanced() && self.modern_ok;
 		// Moby draws: the material's TEX1 word (`moby_word`), so a moby texel takes the level the PS2 picks, only for the Classic
@@ -2250,18 +2471,24 @@ impl Gpu {
 		let sun = match post_on && gfx.shadows && !scene.warp_shown && !self.ship_fight {
 			true => {
 				let rows = self.light_rows();
-				let (a, b, t, _) = self.hero_env;
 				let id = scene.world_verts.len() ^ (scene.radius.to_bits() as usize) << 20;
-				self.sun.frame(cam, aspect, &rows, (a, b, t), id)
+				self.sun.frame(cam, aspect, &rows, id, super::sunshadow::quality(gfx.shadows_q))
 			}
 			false => None,
 		};
 		super::sunshadow::write_uniforms(&mut u, sun.as_ref());
+		// [PC] Enhanced flag for the shaders (`crisp_leaf`).
+		u.sun_texel[3] = if post_on { 1.0 } else { 0.0 };
 		self.queue.write_buffer(&self.ubuf, 0, bytemuck::bytes_of(&u));
+		// [PC] PREVIEW (vegfx.rs, RAC_VEG): more vegetation with Lighting Enhanced.
+		let sp_veg = super::profile::span("d_veg");
+		self.veg.prepare(&self.queue, scene, post_on && !scene.warp_shown && !self.ship_fight, cam.pos, &u.view_proj);
+		drop(sp_veg);
 		// [PC] Graphics -> Water Enhanced (waterfx.rs): the level pass records its water draws for the water pass.
 		let water_on = post_on && gfx.water && !scene.warp_shown && !self.ship_fight;
 		let mut wrec: Vec<super::waterfx::WaterDraw> = Vec::new();
 		let strips_water = water_on && super::waterfx::strips_are_water(self.level);
+		self.waterfx.clear_falls();
 		let strip_flows = if strips_water { self.waterfx.strip_flows(&self.strip_draws) } else { Vec::new() };
 		// [PC] Water Enhanced: a river drawn as effect quads (Batalia) goes to the water pass, grouped by its flow downstream.
 		let river: Vec<usize> = match super::waterfx::river_fx_tex(self.level).filter(|t| water_on && self.fx_tex.contains_key(t)) {
@@ -2269,6 +2496,12 @@ impl Gpu {
 			None => Vec::new(),
 		};
 		let river_groups = if river.is_empty() { Vec::new() } else { self.waterfx.quad_flows(&river.iter().map(|&i| (self.fx_quads[i].pos, self.fx_quads[i].uv)).collect::<Vec<_>>()) };
+		// [PC] Water Enhanced: waterfall sheets drawn as effect quads (Pokitaru) churn the water at their feet.
+		let fall_tex = super::waterfx::fall_fx_tex(self.level);
+		if water_on && !fall_tex.is_empty() {
+			use crate::retail::efx_draw::{plain_tex, FX_REFILL};
+			self.waterfx.sheet_falls(self.level, self.fx_quads.iter().filter(|q| fall_tex.contains(&(plain_tex(q.tex) & !FX_REFILL))).map(|q| (q.pos, q.uv, q.colour, q.tex & FX_REFILL != 0)));
+		}
 		// [PC] Graphics -> Particles Enhanced (partfx.rs): the level pass keeps its MSAA colour for the particle pass.
 		let part_on = post_on && gfx.particles && !scene.warp_shown;
 		// [PC] Graphics -> Sun rays On (post.rs `fs_rays`): from the sun the level's sky paints (`sky_sun`); off in ship fights.
@@ -2282,17 +2515,23 @@ impl Gpu {
 			super::waterfx::WaterFrame {
 				vp: u.view_proj,
 				eye: cam.pos,
-				proj: [cam.tan_half * aspect, cam.tan_half, RETAIL_NEAR, RETAIL_FAR],
-				key: super::sunshadow::key_light(&rows, a, b, t).map(|(d, l)| (sun.as_ref().map_or(d, |f| f.dir), l)),
+				proj: [cam.tan_half * aspect, cam.tan_half, RETAIL_NEAR, wfar],
+				key: super::sunshadow::key_light(&rows, a, b, t),
 				fog: [u.fog_colour[0], u.fog_colour[1], u.fog_colour[2]],
+				level: gfx.water_q,
+				waves: gfx.waves,
 			}
 		});
 		self.write_warp_uniforms(cam, aspect);
 		let warp_hud = self.warp_hud(self.config.width as f32, self.config.height as f32);
 		super::profile::lap(super::profile::Phase::Cull);
+		// The surface holds one acquired image at a time: the previous frame's present (on the present thread) must have returned
+		// before the next acquire, or wgpu panics "Surface image is already acquired" (seen 2026-10-19 on fg1/1_0016, dev s49).
+		self.presenter.flush();
 		let frame = match self.surface.get_current_texture() {
 			wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
 			wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+				self.presenter.flush();
 				configure_surface(&self.surface, &self.device, &self.config);
 				return None;
 			}
@@ -2301,14 +2540,25 @@ impl Gpu {
 		super::profile::lap(super::profile::Phase::Acquire);
 		let view = frame.texture.create_view(&Default::default());
 		let mut enc = self.device.create_command_encoder(&Default::default());
+		if let Some(g) = &scene.tie_gpu {
+			g.encode(&mut enc);
+		}
+		if let Some(h) = &scene.marker_gpu {
+			h.record(&mut enc);
+		}
+		let mut cuts = super::presenter::Cuts::new();
+		// [PC] Global illumination (post.rs `fs_gi`): with Lighting Enhanced, not under water (the underwater look replaces the light).
+		let gi_level = if post_on && !self.under_flag && !self.under.active() { gfx.gi_q } else { 0 };
 		if post_on {
-			self.post.prepare(&self.device, self.config.width, self.config.height, &self.depth);
+			self.post.prepare(&self.device, self.config.width, self.config.height, &self.depth, gi_level);
 		}
 		if let Some(f) = &sun {
-			let skin = self.props_gpu.as_ref().map(|p| (&p.bind, scene.props_sj.as_ref()));
+			let skin = Some((&self.props_gpu.bind, scene.props_sj.as_ref()));
 			self.sun.encode(&self.device, &self.queue, &mut enc, scene, f, skin);
+			cuts.cut(&self.device, &mut enc, "f_sun");
 		}
 		self.draw_item_panel(&mut enc, cam, scene);
+		cuts.cut(&self.device, &mut enc, "f_pre");
 		// Overlay quads to clip space, one draw per run of the same texture.
 		let (sw, sh) = (self.config.width as f32, self.config.height as f32);
 		let (mut hv, mut hi, mut hd) = (Vec::new(), Vec::new(), Vec::<(Draw, bool)>::new());
@@ -2321,6 +2571,8 @@ impl Gpu {
 			}
 			let [x, y, w, h] = q.rect;
 			let base = hv.len() as u32;
+			// [PC] Sharp title / main menu (hudsharp.rs): the quad's UV rectangle rides in the flat vertex light; off: zero as before.
+			let sharp = super::hudsharp::wants(q.tex, self.hud_textures.len());
 			let (cx, cy, (sa, ca)) = (x + w / 2.0, y + h / 2.0, q.angle.sin_cos());
 			for (k, (px, py, u, v)) in [(x, y, q.uv[0], q.uv[1]), (x + w, y, q.uv[2], q.uv[1]), (x + w, y + h, q.uv[2], q.uv[3]), (x, y + h, q.uv[0], q.uv[3])].into_iter().enumerate() {
 				// BRIDGE-74: four free corners (window pixels) replace the rotated rect, with the same UV pattern.
@@ -2332,13 +2584,14 @@ impl Gpu {
 					}
 				};
 				let [r, g, b, a] = q.colour;
-				hv.push(Vertex { pos: [px / sw * 2.0 - 1.0, 1.0 - py / sh * 2.0, 0.0], uv: [u, v], normal: [0.0; 3], colour: [r, g, b, a.abs()], light: [0.0; 4] });
+				hv.push(Vertex { pos: [px / sw * 2.0 - 1.0, 1.0 - py / sh * 2.0, 0.0], uv: [u, v], normal: [0.0; 3], colour: [r, g, b, a.abs()], light: if sharp { q.uv } else { [0.0; 4] } });
 			}
 			let add = q.colour[3] < 0.0;
-			if let Some((d, _)) = hd.last_mut().filter(|(d, a)| !at_split && d.texture == q.tex && *a == add) {
+			if let Some((d, _)) = hd.last_mut().filter(|(d, a)| !at_split && d.texture == q.tex && *a == add && (d.inst != 0) == sharp) {
 				d.count += 6;
 			} else {
-				hd.push((Draw { inst: 0, cull: 0, texture: q.tex, start: hi.len() as u32, count: 6 }, add));
+				// `inst` (unused by the HUD pipelines) marks a sharp group.
+				hd.push((Draw { inst: sharp as u32, cull: 0, texture: q.tex, start: hi.len() as u32, count: 6 }, add));
 			}
 			hi.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
 		}
@@ -2346,6 +2599,7 @@ impl Gpu {
 			split_group = Some(hd.len());
 		}
 		// [PC] perf round 3 (bindless.rs): this frame's tie and shrub draw lists as indirect arguments (multi-draw runs).
+		let sp_args = super::profile::span("d_args");
 		let multi = match (&mut self.bindless, &scene.tex_array) {
 			(Some(bl), Some(_)) if bl.indirect.is_some() => {
 				let mut args = Vec::with_capacity(scene.ties.draws.len() + scene.shrub_opaque.len() + scene.shrub_faded.len());
@@ -2357,6 +2611,8 @@ impl Gpu {
 			}
 			_ => None,
 		};
+		drop(sp_args);
+		let sharp_pipes = hd.iter().any(|(d, _)| d.inst != 0).then(|| super::hudsharp::pipelines(&self.device, &self.pipeline, &self.tex_layout, self.config.format, self.depth_format));
 		let hud_buffers = (!hv.is_empty()).then(|| {
 			let vb = buffer(&self.device, "hud vertices", bytemuck::cast_slice(&hv), wgpu::BufferUsages::VERTEX);
 			self.queue.write_buffer(&vb, 0, bytemuck::cast_slice(&hv));
@@ -2429,7 +2685,7 @@ impl Gpu {
 			let props = (scene.props_shown && !warp).then_some(&scene.props);
 			let debris = scene.debris.as_ref().filter(|_| scene.props_shown && !warp);
 			let clipped = (scene.props_shown && !warp && !scene.clip_batch.draws.is_empty()).then_some(&scene.clip_batch);
-			let skinned = self.props_gpu.as_ref().zip(scene.props_sj.as_ref());
+			let skinned = scene.props_sj.as_ref().map(|sj| (&self.props_gpu, sj));
 			let array = self.bindless.as_ref().zip(scene.tex_array.as_ref());
 			// BRIDGE-64a: with volumes this frame the deferred-list slots leave the opaque props draws for the redraw after them.
 			// M3a shadows: in retail mode a frame whose only deferred caster is the hero still draws its volumes.
@@ -2472,7 +2728,7 @@ impl Gpu {
 					}
 					continue;
 				}
-				// [PC] perf round 3: the props batch is posed by `vs_props` (gpuskin.rs) unless RAC_CPU_SKIN=1.
+				// [PC] perf round 3: the props batch is posed by `vs_props` (gpuskin.rs).
 				let (pipeline, cull) = match skinned.filter(|_| std::ptr::eq(batch, &scene.props)) {
 					Some((pg, sj)) => {
 						pass.set_bind_group(2, &pg.bind, &[]);
@@ -2612,6 +2868,10 @@ impl Gpu {
 						}
 					}
 				}
+			}
+			// [PC] PREVIEW (vegfx.rs): the extra plants, after the level's own shrubs.
+			if !warp && !dskip("veg") {
+				self.veg.encode(&mut pass, scene);
 			}
 			// BRIDGE-64a: the shadow volumes and the darken, then the deferred-list slots drawn opaque over them.
 			if let Some(vb) = volumes.filter(|_| !dskip("vol")) {
@@ -2785,14 +3045,29 @@ impl Gpu {
 				// [PC] Water Enhanced: a sea drawn as effect quads (Pokitaru) goes to the water pass too.
 				let sea_tex = if water_on && !fogged && !warp { super::waterfx::sea_fx_tex(self.level) } else { &[] };
 				let mut sea: Vec<Vertex> = Vec::new();
+				let mut sea_t: Vec<usize> = Vec::new();
+				// [PC] Water Enhanced: a pond drawn as effect quads (Pokitaru's waterfall ponds), its own draw (its own plane).
+				let pond_tex = if water_on && !fogged && !warp { super::waterfx::pond_fx_tex(self.level) } else { &[] };
+				let mut pond: Vec<Vertex> = Vec::new();
+				// [PC] Water Enhanced: waterfall sheets drawn as effect quads (Pokitaru) are drawn by the water pass instead
+				// (waterfx.rs `fs_fall`, fed by `sheet_falls` above).
+				let fall_tex = if water_on && !fogged && !warp { super::waterfx::fall_fx_tex(self.level) } else { &[] };
 				for q in quads {
 					// The effects layer's GS fog rides in the high bits of `tex` (retail/efx_draw.rs `fog_tex`).
 					let tex = crate::retail::efx_draw::plain_tex(q.tex);
-					if !table.contains_key(&tex) {
+					if !table.contains_key(&tex) || fall_tex.contains(&tex) {
 						continue;
 					}
 					if sea_tex.contains(&tex) {
+						sea_t.push(tex);
 						sea.extend((0..4).map(|k| Vertex { pos: q.pos[k], uv: q.uv[k], normal: [0.0; 3], colour: q.colour[k], light: [0.0; 4] }));
+					}
+					// RAC_SEA_LAYERS=off (dev): the additive sea layers 40 / 41 stay out of the picture (seam A/B).
+					if sea_tex.contains(&tex) && tex != 22 && sea_layers_off() {
+						continue;
+					}
+					if pond_tex.contains(&tex) {
+						pond.extend((0..4).map(|k| Vertex { pos: q.pos[k], uv: q.uv[k], normal: [0.0; 3], colour: q.colour[k], light: [0.0; 4] }));
 					}
 					let base = verts.len() as u32 / 4 * 6;
 					for k in 0..4 {
@@ -2822,12 +3097,21 @@ impl Gpu {
 					}
 				}
 				if !sea.is_empty() {
+					sea_shading_mesh(&mut sea, &sea_t, sea_tex[0], cam.pos);
 					let idx: Vec<u32> = (0..sea.len() as u32 / 4).flat_map(|q| [q * 4, q * 4 + 1, q * 4 + 2, q * 4, q * 4 + 2, q * 4 + 3]).collect();
 					let vb = buffer(&self.device, "sea quad vertices", bytemuck::cast_slice(&sea), wgpu::BufferUsages::VERTEX);
 					self.queue.write_buffer(&vb, 0, bytemuck::cast_slice(&sea));
 					let ib = buffer(&self.device, "sea quad indices", bytemuck::cast_slice(&idx), wgpu::BufferUsages::INDEX);
 					self.queue.write_buffer(&ib, 0, bytemuck::cast_slice(&idx));
 					wrec.push(super::waterfx::WaterDraw::new(vb, ib, idx.len() as u32, sea.iter().map(|v| v.pos)).kind("sea fx quads"));
+				}
+				if !pond.is_empty() {
+					let idx: Vec<u32> = (0..pond.len() as u32 / 4).flat_map(|q| [q * 4, q * 4 + 1, q * 4 + 2, q * 4, q * 4 + 2, q * 4 + 3]).collect();
+					let vb = buffer(&self.device, "pond quad vertices", bytemuck::cast_slice(&pond), wgpu::BufferUsages::VERTEX);
+					self.queue.write_buffer(&vb, 0, bytemuck::cast_slice(&pond));
+					let ib = buffer(&self.device, "pond quad indices", bytemuck::cast_slice(&idx), wgpu::BufferUsages::INDEX);
+					self.queue.write_buffer(&ib, 0, bytemuck::cast_slice(&idx));
+					wrec.push(super::waterfx::WaterDraw::new(vb, ib, idx.len() as u32, pond.iter().map(|v| v.pos)).kind("pond fx quads").opaque());
 				}
 				for (slot, group) in river_groups.iter().filter(|_| !fogged && !warp) {
 					{
@@ -2854,7 +3138,7 @@ impl Gpu {
 			for (k, (class, m)) in self.shop_models.iter().take(if warp { 0 } else { 2 }).enumerate() {
 				let Some((batch, ..)) = scene.previews.get(class) else { continue };
 				let slot = 2 + k;
-				let mut pu = self.uniforms(cam, &eye, aspect, (RETAIL_NEAR, RETAIL_FAR));
+				let mut pu = self.uniforms(cam, &eye, aspect, (RETAIL_NEAR, wfar));
 				let vp = pu.view_proj;
 				for (c, col) in pu.view_proj.iter_mut().enumerate() {
 					*col = [0, 1, 2, 3].map(|row| (0..4).map(|j| vp[j][row] * m[4 * c + j]).sum());
@@ -2893,13 +3177,14 @@ impl Gpu {
 			// [PC] Particles Enhanced: the additive pool particles' light (partfx.rs `lights`; runs > 0 = the retail pool, so the
 			// fixed glows and the ribbons at run 0 stay out) on the smoke and, in post, the scene.
 			let fx_lights = match part_on && !warp && super::partfx::FX_ON {
-				true => super::partfx::lights(self.part_verts.iter().filter(|((run, additive, key), _)| *run > 0 && *additive && *key != LINE_KEY).map(|((_, _, key), v)| (*key, &v[..])), &self.partfx.tints, cam.pos),
+				true => super::partfx::lights(self.part_verts.iter().filter(|((run, additive, key), _)| *run > 0 && *additive && *key != LINE_KEY).map(|((_, _, key), v)| (*key, &v[..])), &self.partfx.tints, cam.pos, super::partfx::light_count(gfx.particles_q)),
 				false => super::partfx::FxLights::default(),
 			};
 			if let (true, Some(resolve), Some(glow)) = (part_on, self.post.scene(), self.post.glow()) {
 				drop(pass);
+				cuts.cut(&self.device, &mut enc, "f_lvl");
 				let generation = self.post.water_inputs().map_or(0, |w| w.3);
-				pass = self.partfx.begin(&self.device, &self.queue, &mut enc, &self.msaa, &self.depth, resolve, glow, generation, &fx_lights);
+				pass = self.partfx.begin(&self.device, &self.queue, &mut enc, &self.msaa, &self.depth, resolve, glow, generation, &fx_lights, wfar);
 				pass.set_bind_group(0, &self.ubind, &[]);
 			}
 			// One vertex / index buffer for every run (the retail pool order makes many small runs), one draw per run;
@@ -2958,7 +3243,7 @@ impl Gpu {
 				if let (true, false, Some((vb, ib)), Some(resolve), Some(glow)) = (water_on, part_on, tris.as_ref(), self.post.scene(), self.post.glow()) {
 					drop(pass);
 					let generation = self.post.water_inputs().map_or(0, |w| w.3);
-					pass = self.partfx.begin(&self.device, &self.queue, &mut enc, &self.msaa, &self.depth, resolve, glow, generation, &super::partfx::FxLights::default());
+					pass = self.partfx.begin(&self.device, &self.queue, &mut enc, &self.msaa, &self.depth, resolve, glow, generation, &super::partfx::FxLights::default(), wfar);
 					pass.set_bind_group(0, &self.ubind, &[]);
 					pass.set_vertex_buffer(0, vb.slice(..));
 					pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
@@ -2984,32 +3269,52 @@ impl Gpu {
 			// HUD pass loads it and draws everything below (HUD, retail overlay, prompt model, item previews) as the level pass would.
 			if post_on {
 				drop(pass);
+				cuts.cut(&self.device, &mut enc, "f_fx");
+				// [PC] The planar mirrors (mirror.rs) of the flat water planes below the eye the view looks at most: Water High up to
+				// three planes (each its own pass and layer), Medium the one, Low none (the reflection march alone, no second scene pass).
+				let mirrors: Vec<f32> = water_frame.as_ref().map(|f| mirror_pick(self.level, &wrec, cam.pos, &f.vp, mirror_count(gfx.water_q))).unwrap_or_default();
 				if water_log() {
-					eprintln!("water: level {} draws {} ({:?}) mirror {:?}", self.level, wrec.len(), wrec.iter().map(|w| (w.kind, w.n, w.plane.map(|b| b[0]), w.flow)).collect::<Vec<_>>(), super::mirror::pick(&wrec, cam.pos));
+					let planes = water_frame.as_ref().map(|f| super::mirror::view_stats(&wrec, cam.pos, super::mirror::inverse(&f.vp).as_ref())).unwrap_or_default();
+					eprintln!("water: level {} draws {} ({:?}) mirrors {:?} planes (rays of 81, height) {:?}", self.level, wrec.len(), wrec.iter().map(|w| (w.kind, w.n, w.plane.map(|b| b[0]), w.flow)).collect::<Vec<_>>(), mirrors, planes);
 				}
 				let water = match (&water_frame, self.post.water_inputs()) {
-					(Some(f), Some(inputs)) if !wrec.is_empty() => {
-						// [PC] The planar mirror (mirror.rs) of the nearest flat water plane below the eye.
-						let mirror_h = super::mirror::pick(&wrec, cam.pos);
-						self.waterfx.positions(&self.device, &self.queue, &mut enc, &self.depth, inputs, f, &wrec, mirror_h, part_on || covered);
-						if let (Some(h), Some(target)) = (mirror_h, self.waterfx.mirror_target()) {
-							self.draw_mirror(&mut enc, scene, &u, h, target, multi.as_ref().map(|m| &m.0));
+					// (Also with no water in view but a waterfall, which the water pass draws.)
+					(Some(f), Some(inputs)) if !wrec.is_empty() || self.waterfx.has_falls() => {
+						self.waterfx.positions(&self.device, &self.queue, &mut enc, &self.depth, inputs, f, &wrec, &mirrors, part_on || covered);
+						cuts.cut(&self.device, &mut enc, "f_wpos");
+						for (k, &h) in mirrors.iter().enumerate() {
+							if let Some(target) = self.waterfx.mirror_target(k) {
+								self.draw_mirror(&mut enc, scene, &u, h, k, target, multi.as_ref().map(|m| &m.0));
+								cuts.cut(&self.device, &mut enc, "f_mir");
+							}
 						}
 						// [PC] What lies under the water (mirror.rs `draw_bed`), for the clear shallows and the lava's shore glow.
 						if let Some(target) = self.waterfx.bed_target() {
+							// (With the geometric sea waves (waterfx.rs `sea_waves`) between: the shore map from the bed, the sea's grid.)
 							self.draw_bed(&mut enc, scene, &u, target, multi.as_ref().map(|m| &m.0));
+							cuts.cut(&self.device, &mut enc, "f_bed");
 						}
 						true
 					}
 					_ => false,
 				};
+				self.post.bind_water(&self.device, if water { self.waterfx.gi_mask() } else { None });
 				let waterfx = &self.waterfx;
-				self.post.encode(&self.queue, &mut enc, cam, aspect, gfx.ao, part_on, &fx_lights, rays, |enc, scene| {
+				let fall_tex = super::waterfx::fall_fx_tex(self.level).first().and_then(|t| self.fx_tex.get(t));
+				// [PC] Water Low / Medium / High: the underwater look (underwater.rs), after the water pass, before bloom and the grade.
+				let under_in = water_frame.as_ref().map(|f| super::underwater::frame(cam, aspect, self.under_flag, self.under_surf, &wrec, f.fog, f.key.map(|k| k.0), f.level, wfar));
+				let (under, device, queue, depth) = (&mut self.under, &self.device, &self.queue, &self.depth);
+				self.post.encode(&self.queue, &mut enc, cam, aspect, gfx.ao_q, gfx.sun_q, gfx.particles_q, part_on, &fx_lights, rays, gi_level, wfar, |enc, scene, ao| {
 					if water {
-						waterfx.shade(enc, scene);
+						waterfx.shade(enc, scene, ao, fall_tex);
+					}
+					if let Some(uf) = &under_in {
+						under.run(device, queue, enc, scene, depth, uf);
 					}
 				});
-				self.post.composite(&mut enc, &self.msaa);
+				cuts.cut(&self.device, &mut enc, "f_pe");
+				self.post.composite(&mut enc, &self.msaa, gi_level);
+				cuts.cut(&self.device, &mut enc, "f_post");
 				pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
 					label: Some("hud"),
 					color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &self.msaa, resolve_target: Some(&view), depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Discard } })],
@@ -3043,7 +3348,10 @@ impl Gpu {
 						pass.set_pipeline(&self.hud_pipeline[if self.retail_ov.is_some() { 1 } else { 2 }]);
 						pass.set_bind_group(1, if d.texture == ITEM_PANEL_TEX { &self.item_panel.bind } else if d.texture == POPUP_PANEL_TEX { &self.popup_panel.bind } else { &self.portrait_panel.bind }, &[]);
 					} else {
-						pass.set_pipeline(&self.hud_pipeline[*add as usize]);
+						pass.set_pipeline(match sharp_pipes.filter(|_| d.inst != 0) {
+							Some(p) => &p[*add as usize],
+							None => &self.hud_pipeline[*add as usize],
+						});
 						pass.set_bind_group(1, &self.hud_textures[d.texture.min(self.hud_textures.len() - 1)], &[]);
 					}
 					pass.draw_indexed(d.start..d.start + d.count, 0, 0..1);
@@ -3184,11 +3492,19 @@ impl Gpu {
 			buf
 		});
 		super::profile::lap(super::profile::Phase::Encode);
+		let _t = super::profile::span("finish");
 		let cmd = enc.finish();
-		let _t = super::profile::span("submit");
-		self.queue.submit([cmd]);
 		drop(_t);
-		self.queue.present(frame);
+		// [PC] The present thread collects the finished parts, submits and presents (presenter.rs `present_frame`); a screenshot
+		// frame needs its readback at once and submits here.
+		let _t = super::profile::span("submit");
+		if capture {
+			self.queue.submit(cuts.take(cmd));
+			self.presenter.present(frame);
+		} else {
+			self.presenter.present_frame(cuts, cmd, frame);
+		}
+		drop(_t);
 		super::profile::lap(super::profile::Phase::Present);
 		let buf = readback?;
 		buf.slice(..).map_async(wgpu::MapMode::Read, |_| {});
@@ -3301,41 +3617,11 @@ fn clip_inside(m: &[[f32; 4]; 4], p: [f32; 3]) -> bool {
 /// `part_verts` texture key of a retail pool line run (drawn with `line_pipeline`, 2 vertices per line).
 const LINE_KEY: u32 = u32::MAX - 1;
 
-/// `set_props`: everything an unposed prop slot's vertices are built from besides its model, as raw bits (placement,
-/// scale, light word, alpha code and byte, class tint, prop tint).
-type SlotKey = [u32; 32];
-
-fn slot_key(m: &[f32; 16], scale: f32, light: [f32; 4], alpha_code: f32, alpha: u8, tint: Option<([f32; 3], usize)>, prop_tint: Option<[f32; 3]>) -> SlotKey {
-	let mut k = [0u32; 32];
-	for i in 0..16 {
-		k[i] = m[i].to_bits();
-	}
-	k[16] = scale.to_bits();
-	for i in 0..4 {
-		k[17 + i] = light[i].to_bits();
-	}
-	k[21] = alpha_code.to_bits();
-	k[22] = alpha as u32;
-	if let Some((c, start)) = tint {
-		k[23] = 1;
-		k[24..27].copy_from_slice(&c.map(f32::to_bits));
-		k[27] = start as u32;
-	}
-	if let Some(c) = prop_tint {
-		k[28] = 1;
-		k[29..32].copy_from_slice(&c.map(f32::to_bits));
-	}
-	k
-}
-
 /// A hidden prop slot's vertices sit far below the world (collapsed to a point).
 pub(super) const HIDDEN_POS: [f32; 3] = [0.0, 0.0, -1.0e6];
 
-/// `set_props`: slot `slot` (vertex range `r`) becomes the plain hidden copy of the model, rewritten only when it is not
-/// one already.
 /// `set_props`: one shown prop slot's rebuild from the model (pose, placement, colour).
 pub(super) struct SlotJob<'a> {
-	pub(super) range: std::ops::Range<usize>,
 	/// The pose's first positions and normals (empty: the model's).
 	pub(super) ps: &'a [[f32; 3]],
 	pub(super) ns: &'a [[f32; 3]],
@@ -3355,6 +3641,7 @@ pub(super) struct SlotJob<'a> {
 impl SlotJob<'_> {
 	/// One pass per vertex: model copy, pose, placement, colour (PC perf: no separate copy and pose passes).
 	/// `dst` / `model`: the slot's vertices from `off` on.
+	#[cfg(test)]
 	pub(super) fn fill(&self, dst: &mut [Vertex], model: &[Vertex], off: usize) {
 		let (m, scale) = (&self.m, self.scale);
 		for (j, (v, m0)) in dst.iter_mut().zip(model).enumerate().map(|(j, x)| (j + off, x)) {
@@ -3458,22 +3745,11 @@ fn build_records(srcs: &[SlotSrc], ranges: &[std::ops::Range<usize>], model_rad:
 	}
 }
 
-/// `clip_props`: the slots' vertices, as the CPU mirror or as the records `vs_props` poses.
+/// `clip_props`: the slots' vertices, as the records `vs_props` poses.
 #[derive(Clone, Copy)]
 enum ClipSrc<'a> {
-	Cpu(&'a [Vertex]),
 	/// Records, pose entries and per-slot model-space bounding radii.
 	Gpu(&'a [super::gpuskin::PropInst], &'a [super::gpuskin::PoseEntry], &'a [f32]),
-}
-
-fn hide_slot(verts: &mut [Vertex], model: &[Vertex], hidden: &mut [bool], dirty: &mut [bool], slot: usize, r: std::ops::Range<usize>) {
-	if !hidden[slot] {
-		for (v, m) in verts[r.clone()].iter_mut().zip(&model[r]) {
-			*v = Vertex { pos: HIDDEN_POS, ..*m };
-		}
-		hidden[slot] = true;
-		dirty[slot] = true;
-	}
 }
 
 /// Initial capacity of the clipped-polygon overlay (vertices, indices); it only grows (NOV-5.9c Order 7).
@@ -3525,6 +3801,245 @@ impl ClassFaces {
 	}
 }
 
+/// [PC] The props batch's layout for the slot order `order` (`load_scene`'s for index order): one draw per texture key in
+/// ascending order holding each slot's faces of that key in `order`; per slot its runs (draw, first index, count) in key
+/// order; the indices (the class faces moved to each slot's vertices, `ranges`).
+fn prop_layout(class_faces: &HashMap<u32, ClassFaces>, tex_slots: &HashMap<u32, usize>, classes: &[u32], ranges: &[std::ops::Range<usize>], order: &[usize]) -> (Vec<Draw>, Vec<Vec<(u32, u32, u32)>>, Vec<u32>) {
+	let mut count: BTreeMap<u32, u32> = BTreeMap::new();
+	for c in classes {
+		for (key, f) in &class_faces[c].groups {
+			*count.entry(*key).or_default() += f.len() as u32;
+		}
+	}
+	// One draw per texture key in ascending order (`batch`); `pos` = each draw's next free index.
+	let mut draws = Vec::with_capacity(count.len());
+	let mut draw_of: HashMap<u32, usize> = HashMap::with_capacity(count.len());
+	let (mut pos, mut start) = (Vec::with_capacity(count.len()), 0);
+	for (d, (&key, &c)) in count.iter().enumerate() {
+		draws.push(Draw { inst: 0, cull: ((key >> 24) & 3) as u8, texture: tex_slots[&(key & crate::mobies::SLOT_MASK)], start, count: c });
+		draw_of.insert(key, d);
+		pos.push(start);
+		start += c;
+	}
+	// Per slot (in `order`) its runs; per draw the (vertex base, faces) it holds in order.
+	let mut slot_runs: Vec<Vec<(u32, u32, u32)>> = vec![Vec::new(); classes.len()];
+	let mut per_draw: Vec<Vec<(u32, &[u32])>> = vec![Vec::new(); draws.len()];
+	for &s in order {
+		let base = ranges[s].start as u32;
+		for (key, f) in &class_faces[&classes[s]].groups {
+			let d = draw_of[key];
+			slot_runs[s].push((d as u32, pos[d], f.len() as u32));
+			per_draw[d].push((base, f));
+			pos[d] += f.len() as u32;
+		}
+	}
+	let mut indices = vec![0u32; start as usize];
+	{
+		let mut rest: &mut [u32] = &mut indices;
+		let mut outs = Vec::with_capacity(draws.len());
+		for d in &draws {
+			let (a, b) = rest.split_at_mut(d.count as usize);
+			outs.push(a);
+			rest = b;
+		}
+		outs.into_par_iter().zip(per_draw.par_iter()).for_each(|(out, segs)| {
+			let mut k = 0;
+			for &(base, f) in segs {
+				for (o, &i) in out[k..k + f.len()].iter_mut().zip(f) {
+					*o = i + base;
+				}
+				k += f.len();
+			}
+		});
+	}
+	(draws, slot_runs, indices)
+}
+
+#[cfg(test)]
+fn same_draws(a: &[Draw], b: &[Draw]) -> bool {
+	a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x.inst, x.cull, x.texture, x.start, x.count) == (y.inst, y.cull, y.texture, y.start, y.count))
+}
+
+/// [PC] perf (lane A7): a pool growth as an insert into the props batch's layout (`Gpu::append_props`): the new draws, the
+/// old draw numbers' new ones (`dmap`), the old index positions the new faces go in before with the count put in up to
+/// and including each (`ins`, ascending), the new slots' runs, their indices (`fresh`) and where each piece of them goes
+/// (`chunks`: new position, range of `fresh`), and the old pieces kept (`copies`: old start, new start, length).
+#[derive(Clone, Copy)]
+struct GrowOld<'a> {
+	cf: &'a HashMap<u32, ClassFaces>,
+	tex_slots: &'a HashMap<u32, usize>,
+	classes: &'a [u32],
+	order: &'a [usize],
+	draws: &'a [Draw],
+	runs: &'a [Vec<(u32, u32, u32)>],
+}
+
+impl<'a> GrowOld<'a> {
+	fn of(scene: &'a Scene) -> GrowOld<'a> {
+		GrowOld { cf: &scene.class_faces, tex_slots: &scene.tex_slots, classes: &scene.props_class, order: &scene.props_order, draws: &scene.props.draws, runs: &scene.slot_runs }
+	}
+}
+
+impl GrowPlan {
+	/// The old slots' runs moved (and renumbered when a texture key is new), the new slots' runs put in at `at`.
+	fn moved_runs(&mut self, mut runs: Vec<Vec<(u32, u32, u32)>>, at: usize) -> Vec<Vec<(u32, u32, u32)>> {
+		let (dmap, ins) = (&self.dmap, &self.ins);
+		let shift = |x: u32| ins.partition_point(|&(p, _)| p <= x).checked_sub(1).map_or(0, |j| ins[j].1);
+		for r in runs.iter_mut().flatten() {
+			*r = (dmap[r.0 as usize], r.1 + shift(r.1), r.2);
+		}
+		runs.splice(at..at, std::mem::take(&mut self.runs));
+		runs
+	}
+
+	/// The new indices from the old ones on the CPU, as the GPU copy and the writes give them (tests).
+	#[cfg(test)]
+	fn apply(&self, old: &[u32]) -> Vec<u32> {
+		let mut out = vec![u32::MAX; self.n_idx];
+		for &(src, dst, len) in &self.copies {
+			out[dst as usize..(dst + len) as usize].copy_from_slice(&old[src as usize..(src + len) as usize]);
+		}
+		for (dst, r) in &self.chunks {
+			out[*dst as usize..*dst as usize + r.len()].copy_from_slice(&self.fresh[r.clone()]);
+		}
+		out
+	}
+}
+
+struct GrowPlan {
+	draws: Vec<Draw>,
+	dmap: Vec<u32>,
+	ins: Vec<(u32, u32)>,
+	runs: Vec<Vec<(u32, u32, u32)>>,
+	fresh: Vec<u32>,
+	chunks: Vec<(u32, std::ops::Range<usize>)>,
+	copies: Vec<(u32, u32, u32)>,
+	n_idx: usize,
+}
+
+/// The insert that turns the scene's props layout (built for `props_order`) into `prop_layout`'s for `order`, with the slots
+/// `at..at + classes.len()` (vertices `ranges`, class faces already in `class_faces`) new. None when `order` is not
+/// `props_order` with the new slots put in, or the scene's draws are not the ones its classes give (then the caller
+/// rebuilds the layout). Each new face run goes after the run of the same key of the nearest slot before it in `order`
+/// that has that key (new slots before it at the same place first), else at the start of its key's draw.
+/// `old` = the scene's class faces, texture slots, slot classes, slot order, draws and runs (`GrowOld::of`).
+fn grow_plan(old: &GrowOld, at: usize, classes: &[u32], ranges: &[std::ops::Range<usize>], order: &[usize]) -> Option<GrowPlan> {
+	let GrowOld { cf, tex_slots, classes: old_classes, order: old_order, draws: old_draws, runs: old_runs } = *old;
+	let m = classes.len();
+	let new = at..at + m;
+	// Where each new slot sits in `order`; the old slots must keep their order.
+	let mut q_of = vec![usize::MAX; m];
+	let mut old = old_order.iter();
+	for (q, &s) in order.iter().enumerate() {
+		if new.contains(&s) {
+			if q_of[s - at] != usize::MAX {
+				return None;
+			}
+			q_of[s - at] = q;
+		} else if old.next() != Some(&if s < at { s } else { s - m }) {
+			return None;
+		}
+	}
+	if old.next().is_some() || q_of.contains(&usize::MAX) {
+		return None;
+	}
+	// The old draws as the old slots' classes give them (one per key, ascending).
+	let mut per_class: HashMap<u32, u32> = HashMap::new();
+	for &c in old_classes {
+		*per_class.entry(c).or_default() += 1;
+	}
+	let mut count: BTreeMap<u32, u32> = BTreeMap::new();
+	for (c, &k) in &per_class {
+		for (key, f) in &cf.get(c)?.groups {
+			*count.entry(*key).or_default() += k * f.len() as u32;
+		}
+	}
+	let keys: Vec<u32> = count.keys().copied().collect();
+	let mut start = 0;
+	if keys.len() != old_draws.len() || count.values().zip(old_draws).any(|(&c, d)| {
+		let bad = c != d.count || d.start != start;
+		start += d.count;
+		bad
+	}) {
+		return None;
+	}
+	let old_n = old_draws.last().map_or(0, |d| d.start + d.count);
+	let has = |c: u32, key: u32| cf[&c].groups.binary_search_by_key(&key, |g| g.0).ok();
+	// Per new slot (in `order`) and face run the old index position it goes in before.
+	let mut by_q: Vec<usize> = (0..m).collect();
+	by_q.sort_unstable_by_key(|&k| q_of[k]);
+	let mut ins_at: Vec<Vec<u32>> = vec![Vec::new(); m];
+	let mut items: Vec<(u32, u32, usize, usize, usize)> = Vec::new();
+	for &k in &by_q {
+		let groups = &cf[&classes[k]].groups;
+		let mut here = Vec::with_capacity(groups.len());
+		for (g, &(key, _)) in groups.iter().enumerate() {
+			let mut found = None;
+			for &s in order[..q_of[k]].iter().rev() {
+				if new.contains(&s) {
+					if let Some(gj) = has(classes[s - at], key) {
+						found = Some(ins_at[s - at][gj]);
+						break;
+					}
+				} else {
+					let so = if s < at { s } else { s - m };
+					if let Some(gj) = has(old_classes[so], key) {
+						let r = old_runs[so][gj];
+						found = Some(r.1 + r.2);
+						break;
+					}
+				}
+			}
+			let p = found.unwrap_or_else(|| old_draws.get(keys.partition_point(|&x| x < key)).map_or(old_n, |d| d.start));
+			here.push(p);
+			items.push((p, key, q_of[k], k, g));
+		}
+		ins_at[k] = here;
+	}
+	items.sort_unstable_by_key(|&(p, key, q, _, _)| (p, key, q));
+	// The new draws.
+	for &(_, key, _, k, g) in &items {
+		*count.entry(key).or_default() += cf[&classes[k]].groups[g].1.len() as u32;
+	}
+	let new_keys: Vec<u32> = count.keys().copied().collect();
+	let mut draws = Vec::with_capacity(count.len());
+	let mut start = 0;
+	for (&key, &c) in &count {
+		draws.push(Draw { inst: 0, cull: ((key >> 24) & 3) as u8, texture: tex_slots[&(key & crate::mobies::SLOT_MASK)], start, count: c });
+		start += c;
+	}
+	let dmap: Vec<u32> = keys.iter().map(|k| new_keys.binary_search(k).unwrap() as u32).collect();
+	// The new faces in buffer order: one chunk per old position, the old pieces between them copied.
+	let added: usize = items.iter().map(|&(_, _, _, k, g)| cf[&classes[k]].groups[g].1.len()).sum();
+	let (mut fresh, mut chunks, mut copies, mut ins) = (Vec::with_capacity(added), Vec::new(), Vec::new(), Vec::new());
+	let mut runs: Vec<Vec<(u32, u32, u32)>> = classes.iter().map(|c| vec![(0, 0, 0); cf[c].groups.len()]).collect();
+	let (mut prev, mut cum, mut i) = (0u32, 0u32, 0);
+	while i < items.len() {
+		let p = items[i].0;
+		if p > prev {
+			copies.push((prev, prev + cum, p - prev));
+		}
+		let from = fresh.len();
+		while i < items.len() && items[i].0 == p {
+			let (_, key, _, k, g) = items[i];
+			let f = &cf[&classes[k]].groups[g].1;
+			let base = ranges[k].start as u32;
+			runs[k][g] = (new_keys.binary_search(&key).unwrap() as u32, p + cum + (fresh.len() - from) as u32, f.len() as u32);
+			fresh.extend(f.iter().map(|&x| x + base));
+			i += 1;
+		}
+		chunks.push((p + cum, from..fresh.len()));
+		cum += (fresh.len() - from) as u32;
+		ins.push((p, cum));
+		prev = p;
+	}
+	if old_n > prev {
+		copies.push((prev, prev + cum, old_n - prev));
+	}
+	debug_assert_eq!(start as usize, old_n as usize + added);
+	Some(GrowPlan { draws, dmap, ins, runs, fresh, chunks, copies, n_idx: start as usize })
+}
+
 /// `buffer` of `bytes` (rounded up to 4, at least 4) for data written later (copyable: `append_props` grows the prop
 /// buffers by a GPU copy).
 fn sized_buffer(device: &wgpu::Device, label: &str, bytes: usize, usage: wgpu::BufferUsages) -> wgpu::Buffer {
@@ -3537,7 +4052,9 @@ fn slot_meshes<'a>(props: &[u32], prop_meshes: &'a HashMap<u32, Mesh>, empty: &'
 	props.iter().map(|&c| prop_meshes.get(&c).or(if (game::BOLT..game::BOLT + 4).contains(&c) { fallback } else { None }).unwrap_or(empty)).collect()
 }
 
-fn prop_alphas(view: Option<([f32; 3], [f32; 3])>, props: &[Prop], centres: &[[f32; 3]], radii: &[Option<f32>]) -> Vec<Option<u8>> {
+/// `far`: [PC] Draw distance Medium / High (fardraw.rs), the fade tests see the depth `scale` times shorter and nothing past
+/// the level's cap.
+fn prop_alphas(view: Option<([f32; 3], [f32; 3])>, props: &[Prop], centres: &[[f32; 3]], radii: &[Option<f32>], far: Option<super::fardraw::Level>) -> Vec<Option<u8>> {
 	props
 		.iter()
 		.enumerate()
@@ -3546,11 +4063,16 @@ fn prop_alphas(view: Option<([f32; 3], [f32; 3])>, props: &[Prop], centres: &[[f
 				(Some((e, f)), Some(c)) => {
 					let d: [f32; 3] = std::array::from_fn(|k| c[k] - e[k] * 1024.0);
 					let z = f[0] * d[0] + f[1] * d[1] + f[2] * d[2];
+					let k = far.map_or(1.0, |l| l.scale());
+					let z = match far {
+						Some(l) => super::fardraw::moby_depth(l, z)?,
+						None => z,
+					};
 					let fade = moby_fade(p.draw_dist(), z)?;
 					// SCH-6b: an in-game prop on the deferred-list path (flags 0x400 / 0x800) fades by the unclamped distance and the
 					// sphere's near edge, in integers.
 					match radii.get(pi).copied().flatten() {
-						Some(w) if p.sched_flags() & 0xc00 != 0 => moby_fade_alt(p.draw_dist(), z, w),
+						Some(w) if p.sched_flags() & 0xc00 != 0 => moby_fade_alt(p.draw_dist(), z, w / k),
 						_ => fade,
 					}
 				}
@@ -3563,7 +4085,8 @@ fn prop_alphas(view: Option<([f32; 3], [f32; 3])>, props: &[Prop], centres: &[[f
 
 /// FRAME-1a / BRIDGE-33: the draw verdict of `set_props` without the vertex writes: occlusion mask, near / side planes and
 /// the 48-entry deferred list (SCH-6b).
-fn prop_verdicts(view: &super::clip::ClipView, mask: &[u8; 128], props: &[Prop], alphas: &[Option<u8>], centres: &[[f32; 3]], radii: &[Option<f32>]) -> Vec<bool> {
+/// `far`: [PC] Draw distance Medium / High, the 48-entry list has no limit (far mobys must not push near ones out).
+fn prop_verdicts(view: &super::clip::ClipView, mask: &[u8; 128], props: &[Prop], alphas: &[Option<u8>], centres: &[[f32; 3]], radii: &[Option<f32>], far: Option<super::fardraw::Level>) -> Vec<bool> {
 	let mut drawn = vec![false; props.len()];
 	let mut committed = 0;
 	for (pi, p) in props.iter().enumerate() {
@@ -3577,7 +4100,7 @@ fn prop_verdicts(view: &super::clip::ClipView, mask: &[u8; 128], props: &[Prop],
 		drawn[pi] = !side_out;
 		if p.sched_flags() & 0x800 != 0 && !side_out {
 			committed += 1;
-			if committed > DEFERRED_CAP {
+			if committed > DEFERRED_CAP && far.is_none() {
 				drawn[pi] = p.sched_over() == 0;
 			}
 		}
@@ -3614,12 +4137,6 @@ fn clip_props(queue: &wgpu::Queue, scene: &mut Scene, src: ClipSrc, shown: &[boo
 				let clip = |slot: &[Vertex], base: usize| faces.iter().enumerate().filter_map(|(fi, f)| super::clip::clip_face(&view, f.idx.map(|i| slot[i as usize - base]), f.phase, f.tex, f.cull).map(|poly| (fi as u32, poly))).collect();
 				let r = ranges[pi].clone();
 				match src {
-					ClipSrc::Cpu(verts) => {
-						if !straddles(&mut verts[r].iter().map(|v| v.pos)) {
-							return Vec::new();
-						}
-						clip(verts, 0)
-					}
 					// [PC] perf round 3: the slot's vertices as `vs_props` poses them (positions only for the scan).
 					ClipSrc::Gpu(inst, pose, rad) => {
 						let s = &inst[pi];
@@ -3646,7 +4163,8 @@ fn clip_props(queue: &wgpu::Queue, scene: &mut Scene, src: ClipSrc, shown: &[boo
 	if taken != scene.clip_masked {
 		let write = |(pi, fi): (u32, u32), idx: Option<[u32; 3]>, scene: &Scene| {
 			let f = &scene.prop_faces[pi as usize][fi as usize];
-			queue.write_buffer(&scene.props.ibuf, f.slot as u64 * 4, bytemuck::cast_slice(&idx.unwrap_or([0; 3])));
+			let at = scene.slot_runs[pi as usize].get(f.run as usize).map_or(f.slot, |r| r.1 + f.slot);
+			queue.write_buffer(&scene.props.ibuf, at as u64 * 4, bytemuck::cast_slice(&idx.unwrap_or([0; 3])));
 		};
 		let (old, new): (HashSet<_>, HashSet<_>) = (scene.clip_masked.iter().copied().collect(), taken.iter().copied().collect());
 		for &k in old.difference(&new) {
@@ -4166,7 +4684,7 @@ mod instance_tests {
 	/// Test (7): the draw order follows the class load slot, stable within a slot.
 	#[test]
 	fn shrub_order_sorts_by_class_slot() {
-		let inst = |slot| shrubs::ShrubInstance { mesh: Mesh::new(String::new()), cull: shrubs::ShrubCull { centre: [0.0; 3], radius: 0.0, dist: 0.0, bb: None }, bb: None, class_slot: slot };
+		let inst = |slot| shrubs::ShrubInstance { mesh: Mesh::new(String::new()), cull: shrubs::ShrubCull { centre: [0.0; 3], radius: 0.0, dist: 0.0, bb: None }, bb: None, class_slot: slot, class_id: 0 };
 		assert_eq!(shrub_order(&[inst(2), inst(0), inst(1)]), vec![1, 2, 0]);
 		assert_eq!(shrub_order(&[inst(1), inst(1), inst(0), inst(1)]), vec![2, 0, 1, 3]);
 	}
@@ -4245,8 +4763,6 @@ pub(super) struct SceneCtx {
 	pub(super) tex_log: std::cell::RefCell<Option<HashMap<wgpu::BindGroup, wgpu::TextureView>>>,
 	/// The bindless array layout (None: per-draw bind groups).
 	pub(super) bindless_layout: Option<wgpu::BindGroupLayout>,
-	/// The props are posed in the vertex shader (`Gpu::props_gpu` is Some).
-	pub(super) gpu_posing: bool,
 	/// Set on the level-prefetch thread: big buffer writes go in 4 MB pieces (see `wb`).
 	pub(super) paced: bool,
 }
@@ -4461,7 +4977,7 @@ impl SceneCtx {
 	/// meshes, but every mesh keeps its own draws, one per (mesh, texture) in ascending texture key, in mesh order. Returns
 	/// the batch (its `draws` are that static list), the bounds, the vertices as uploaded, and per mesh its range in
 	/// `draws` and its vertex range.
-	pub(super) fn batch_instances(&self, meshes: &[&Mesh], textures: &HashMap<u32, Texture>, bind: &mut Vec<wgpu::BindGroup>, slots: &mut HashMap<u32, usize>, terrain: Option<&TerrainRule>, shrub_chains: &[Option<Vec<Texture>>]) -> (Batch, [f32; 3], [f32; 3], Vec<Vertex>, Vec<(std::ops::Range<usize>, std::ops::Range<usize>)>) {
+	pub(super) fn batch_instances(&self, meshes: &[&Mesh], textures: &HashMap<u32, Texture>, bind: &mut Vec<wgpu::BindGroup>, slots: &mut HashMap<u32, usize>, terrain: Option<&TerrainRule>, shrub_chains: &[Option<Vec<Texture>>], extra: wgpu::BufferUsages) -> (Batch, [f32; 3], [f32; 3], Vec<Vertex>, Vec<(std::ops::Range<usize>, std::ops::Range<usize>)>) {
 		let mut verts: Vec<Vertex> = Vec::new();
 		let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
 		for (mi, m) in meshes.iter().enumerate() {
@@ -4516,7 +5032,7 @@ impl SceneCtx {
 				draws.push(Draw { inst, cull, texture, start, count });
 			}
 		}
-		let vbuf = buffer(&self.device, "instance vertices", bytemuck::cast_slice(&verts), wgpu::BufferUsages::VERTEX);
+		let vbuf = buffer(&self.device, "instance vertices", bytemuck::cast_slice(&verts), wgpu::BufferUsages::VERTEX | extra);
 		self.wb(&vbuf, 0, bytemuck::cast_slice(&verts));
 		let ibuf = buffer(&self.device, "instance indices", bytemuck::cast_slice(&indices), wgpu::BufferUsages::INDEX);
 		self.wb(&ibuf, 0, bytemuck::cast_slice(&indices));
@@ -4543,20 +5059,25 @@ impl SceneCtx {
 		let slot_runs = super::shadowvol::slot_runs(&slot_meshes);
 		crate::loadlog::say(|| "ps: slot_runs done".into());
 		// NOV-5.9c: where each clippable face sits in `props.ibuf`, and the overlay batch its clipped polygons go to.
-		let faces = super::clip::replay_faces(&slot_meshes, slots);
+		let mut faces = super::clip::replay_faces(&slot_meshes, slots);
+		// [PC] perf (lane A7): each face's position counted from the start of its slot's run (`clip::PropFace`).
+		faces.par_iter_mut().zip(&slot_runs).for_each(|(fs, runs)| {
+			for f in fs {
+				let r = runs.partition_point(|r| r.1 + r.2 <= f.slot);
+				f.run = r as u32;
+				f.slot -= runs[r].1;
+			}
+		});
 		crate::loadlog::say(|| "ps: replay_faces done".into());
 		// [PC] perf round 3: the static (slot, vertex) attribute of the vertex-shader posing (gpuskin.rs).
-		let sj = self.gpu_posing.then(|| {
+		let sj = Some({
 			let sj = super::gpuskin::slot_attr(&ranges);
 			let b = sized_buffer(&self.device, "props slot attribute", (sj.len() + spare) * 8, wgpu::BufferUsages::VERTEX);
 			self.wb(&b, 0, bytemuck::cast_slice(&sj));
 			b
 		});
 		crate::loadlog::say(|| "ps: sj done".into());
-		let rad: Vec<f32> = match self.gpu_posing {
-			true => ranges.iter().map(|r| model[r.clone()].iter().map(|v| (v.pos[0] * v.pos[0] + v.pos[1] * v.pos[1] + v.pos[2] * v.pos[2]).sqrt()).fold(0.0, f32::max)).collect(),
-			false => Vec::new(),
-		};
+		let rad: Vec<f32> = ranges.iter().map(|r| model[r.clone()].iter().map(|v| (v.pos[0] * v.pos[0] + v.pos[1] * v.pos[1] + v.pos[2] * v.pos[2]).sqrt()).fold(0.0, f32::max)).collect();
 		crate::loadlog::say(|| "ps: rad done".into());
 		// [PC] Retail: each class's faces as `append_props` regroups them, built here (level load) so a pool growth does not.
 		let mut uniq: Vec<(u32, &Mesh)> = if spare > 0 { props.iter().copied().zip(slot_meshes.iter().copied()).collect() } else { Vec::new() };
@@ -4575,7 +5096,7 @@ impl SceneCtx {
 		// Ties: three LOD meshes per instance in their own batch (BRIDGE-29); the bounds still take LOD 0 so the scene
 		// centre and radius are what the merged world batch gave.
 		let tie_refs: Vec<&Mesh> = tie_set.iter().flat_map(|t| t.lods.iter()).collect();
-		let (mut ties, _, _, tie_verts, tie_vr) = self.batch_instances(&tie_refs, textures, &mut bind, &mut slots, None, tie_chains);
+		let (mut ties, _, _, tie_verts, tie_vr) = self.batch_instances(&tie_refs, textures, &mut bind, &mut slots, None, tie_chains, if super::tiegpu::wanted() { wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC } else { wgpu::BufferUsages::empty() });
 		crate::loadlog::say(|| "gpu: ties batch".into());
 		let tie_draws = std::mem::take(&mut ties.draws);
 		let (mut lo, mut hi) = (lo, hi);
@@ -4598,7 +5119,7 @@ impl SceneCtx {
 		let tf_meshes: Vec<Mesh> = tfrag_set.iter().flat_map(|t| [(&t.far, &t.face_mat[0]), (&t.mid, &t.face_mat[1]), (&t.near, &t.face_mat[2])]).map(|(m, mats)| terrain_face_keys(m, mats)).collect();
 		let tf_refs: Vec<&Mesh> = tf_meshes.iter().collect();
 		let rule = TerrainRule { chains: terrain_chains, materials: tfrag_set.iter().flat_map(|t| [&t.materials[..]; 3]).collect() };
-		let (mut tfrags, _, _, mut tfrag_verts, tf_vr) = self.batch_instances(&tf_refs, textures, &mut bind, &mut slots, Some(&rule), &[]);
+		let (mut tfrags, _, _, tfrag_verts, tf_vr) = self.batch_instances(&tf_refs, textures, &mut bind, &mut slots, Some(&rule), &[], wgpu::BufferUsages::empty());
 		crate::loadlog::say(|| "gpu: tfrag batch".into());
 		let tfrag_draws = std::mem::take(&mut tfrags.draws);
 		for (_, vr) in tf_vr.iter().skip(2).step_by(3) {
@@ -4615,7 +5136,7 @@ impl SceneCtx {
 		let tfrag_lit: Vec<&Mesh> = tfrag_set.iter().map(|t| &t.lit).collect();
 		// Shrubs (BRIDGE-27): one batch with per-instance ranges, bounds merged into the scene's, chained last in the light world.
 		let shrub_refs: Vec<&Mesh> = shrub_set.iter().map(|s| &s.mesh).collect();
-		let (shrub_batch, slo, shi, shrub_verts, shrub_ranges) = self.batch_instances(&shrub_refs, textures, &mut bind, &mut slots, None, shrub_chains);
+		let (shrub_batch, slo, shi, shrub_verts, shrub_ranges) = self.batch_instances(&shrub_refs, textures, &mut bind, &mut slots, None, shrub_chains, wgpu::BufferUsages::empty());
 		crate::loadlog::say(|| "gpu: shrub batch".into());
 		let shrub_vkey = super::icefx::vertex_keys(shrub_refs.iter().copied().zip(shrub_ranges.iter().map(|r| r.1.start)), shrub_verts.len());
 		for j in 0..3 {
@@ -4710,6 +5231,15 @@ impl SceneCtx {
 			}
 		};
 		let (marker, _, _, marker_model) = self.batch(&[hero.0], None, false, hero.1, &mut bind, &mut slots);
+		// [PC] perf (lane R2, gpuhero.rs): with RAC_HERO_GPU=1 the marker's vertex buffer is also a storage buffer a compute pass fills.
+		let (marker, marker_gpu) = if super::gpuhero::gpu_hero_on() && !marker_model.is_empty() {
+			let vb = sized_buffer(&self.device, "marker vertices", marker_model.len() * std::mem::size_of::<Vertex>(), wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::STORAGE);
+			self.queue.write_buffer(&vb, 0, bytemuck::cast_slice(&marker_model));
+			let hg = super::gpuhero::HeroGpu::new(&self.device, &self.queue, &marker_model, &vb);
+			(Batch { vbuf: vb, ..marker }, hg)
+		} else {
+			(marker, None)
+		};
 		crate::loadlog::say(|| "gpu: marker".into());
 		let marker_faces = super::clip::replay_faces(&[hero.0], &slots).pop().unwrap_or_default();
 		// Gameplay props: one mesh copy per slot, posed every frame.
@@ -4719,6 +5249,7 @@ impl SceneCtx {
 		// (Before the prop slots: the prefetch thread has them done when the final order comes.)
 		let tie_qdep: Vec<bool> = tie_slots.iter().zip(&tie_morph).map(|(s, d)| s.1 || *d != [0.0; 3]).collect();
 		let (tie_tri, tie_tris) = tie_triples(&tie_slots, &tie_vranges);
+		let tie_gpu = super::tiegpu::TieGpu::new(&self.device, &self.queue, &ties.vbuf, &tie_base, &tie_morph, &tie_slots, &tie_qdep, &tie_vranges, &tie_cols);
 		let (bind0, slots0) = (bind.len(), slots.clone());
 		let mut order_p = props_fn(None)?;
 		let (ranges, prompt_slot, props, props_model, slot_runs, prop_faces, props_sj, props_rad, props_class, class_faces, prompt, portrait, portrait_model, clip_cap, clip_batch, previews, preview_models, previews_gold) = loop {
@@ -4782,6 +5313,187 @@ impl SceneCtx {
 		for (&key, &i) in &slots {
 			slot_words[i] = moby_word(key, textures.get(&(key & crate::mobies::KEY_MASK)));
 		}
-		Some(Scene { previews, previews_gold, preview_models, world, world_verts, lit, ties, tie_draws, tie_ranges, tie_cull: tie_set.iter().map(|t| t.cull).collect(), occ_tick: occ.clone(), occ, tfrags, tfrag_set, tfrag_draws, tfrag_ranges, tfrag_vranges, tfrag_verts, tfrag_cols, tfrag_b, tie_verts, tie_base, tie_morph, tie_vranges, tie_fat, tie_q: vec![[0.0; 3]; tie_set.len()], tie_qdep, tie_full: vec![[false; 3]; tie_set.len()], tie_slots, tie_tri, tie_tris, tie_cols, tie_stale, tie_first, shrubs: shrub_batch, shrub_ranges, shrub_cull: shrub_set.iter().map(|s| s.cull).collect(), shrub_order: shrub_order(shrub_set), shrub_bb: shrub_set.iter().map(|s| s.bb).collect(), shrub_verts, shrub_first, tie_vkey, shrub_vkey, ice_level: usize::MAX, shrub_a: vec![0; shrub_set.len()], shrub_opaque: Vec::new(), shrub_faded: Vec::new(), shrub_bb_quads: Vec::new(), shrub_bb_tex: HashMap::new(), sky, sky_shells, sky_sprites, marker, marker_verts: Vec::new(), marker_model, marker_tint: hero_tint.map(|(c, s, _)| (c, s)), marker_hero_len: hero_tint.map_or(0, |t| t.2), marker_shown: false, marker_alpha: false, props_verts: if self.gpu_posing { Vec::new() } else { props_model.clone() }, props_hidden: vec![false; ranges.len()], props_key: vec![None; ranges.len()], props, props_model, props_sj, props_rad, props_inst: Vec::new(), props_pose: Vec::new(), props_ranges: ranges, props_shown: false, props_alpha: false, props_drawn: Vec::new(), props_vis: Vec::new(), slot_runs, props_order: (0..props_class.len()).collect(), props_class, props_late: Vec::new(), prop_faces, class_faces, clip_masked: Vec::new(), clip_batch, clip_cap, clip_view: None, clip_queue: Vec::new(), marker_faces, marker_masked: Vec::new(), debris_model: HashMap::new(), debris: None, debris_cap: (0, 0), warp_model: HashMap::new(), warp_batch: None, warp_shown: false, prompt, prompt_slot, portrait, portrait_model, clear_tex: clear_slots(&slots, bind.len(), textures), bind_groups: bind, tex_slots: slots, slot_words, tex_array, clear, centre, radius })
+		Some(Scene { previews, previews_gold, preview_models, world, world_verts, lit, ties, tie_draws, tie_ranges, tie_cull: tie_set.iter().map(|t| t.cull).collect(), tie_lod: vec![u8::MAX; tie_set.len()], occ_tick: occ.clone(), occ, tfrags, tfrag_set, tfrag_draws, tfrag_ranges, tfrag_vranges, tfrag_verts, tfrag_cols, tfrag_b, tfrag_lod: Vec::new(), tie_verts, tie_base, tie_morph, tie_vranges, tie_fat, tie_q: vec![[0.0; 3]; tie_set.len()], tie_qdep, tie_full: vec![[false; 3]; tie_set.len()], tie_slots, tie_tri, tie_tris, tie_cols, tie_stale, tie_first, shrubs: shrub_batch, shrub_ranges, shrub_cull: shrub_set.iter().map(|s| s.cull).collect(), shrub_order: shrub_order(shrub_set), shrub_bb: shrub_set.iter().map(|s| s.bb).collect(), shrub_verts, shrub_first, tie_vkey, shrub_vkey, ice_level: usize::MAX, shrub_a: vec![0; shrub_set.len()], shrub_opaque: Vec::new(), shrub_faded: Vec::new(), shrub_bb_quads: Vec::new(), shrub_bb_tex: HashMap::new(), sky, sky_shells, sky_sprites, marker, marker_verts: Vec::new(), marker_model, marker_tint: hero_tint.map(|(c, s, _)| (c, s)), marker_hero_len: hero_tint.map_or(0, |t| t.2), marker_shown: false, marker_alpha: false, props, props_ibuf_spare: None, props_model, props_sj, props_rad, props_inst: Vec::new(), props_pose: Vec::new(), props_ranges: ranges, props_shown: false, props_alpha: false, props_drawn: Vec::new(), props_vis: Vec::new(), slot_runs, props_order: (0..props_class.len()).collect(), props_class, props_late: Vec::new(), prop_faces, class_faces, clip_masked: Vec::new(), clip_batch, clip_cap, clip_view: None, clip_queue: Vec::new(), marker_faces, marker_masked: Vec::new(), marker_key: None, marker_skin: (Vec::new(), Vec::new()), marker_gpu, tie_pass: None, tie_jobs: Vec::new(), tie_gpu, debris_model: HashMap::new(), debris: None, debris_cap: (0, 0), warp_model: HashMap::new(), warp_batch: None, warp_shown: false, prompt, prompt_slot, portrait, portrait_model, clear_tex: clear_slots(&slots, bind.len(), textures), bind_groups: bind, tex_slots: slots, slot_words, tex_array, clear, centre, radius })
 	}
+}
+
+/// RAC_SEA_LAYERS=off (dev aid, off by default): see the sea quad loop in `Gpu::draw`.
+fn sea_layers_off() -> bool {
+	static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+	*OFF.get_or_init(|| std::env::var("RAC_SEA_LAYERS").is_ok_and(|v| v == "off"))
+}
+
+/// [PC] Water Enhanced: the sea's shading mesh (the `WaterDraw` copy of the effect-quad sea; the visible quads keep retail z).
+/// Retail draws Pokitaru's sea as long overlapping triangles of the base texture (22) at slightly different heights (a few
+/// hundredths) plus two more layers (40 / 41); the position pass (depth test Less) writes whichever surface is nearest, so the
+/// shaded surface creased along the triangles' intersections. The shading mesh keeps only the base texture's quads, each vertex
+/// slid along its view ray onto the sea's plane height (the same screen position, one height). RAC_SEA_MESH=old (dev aid): the old mesh.
+fn sea_shading_mesh(sea: &mut Vec<Vertex>, tex: &[usize], base: usize, eye: [f32; 3]) {
+	static OLD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+	if base != 22 || *OLD.get_or_init(|| std::env::var("RAC_SEA_MESH").is_ok_and(|v| v == "old")) {
+		return;
+	}
+	let keep: Vec<Vertex> = sea.chunks(4).zip(tex).filter(|(_, t)| **t == base).flat_map(|(c, _)| c.iter().copied()).collect();
+	if !keep.is_empty() {
+		*sea = keep;
+	}
+	if let Some(pl) = super::mirror::plane_of(sea.iter().map(|v| v.pos)).filter(|pl| eye[2] > pl[0] + 0.05) {
+		for v in sea.iter_mut() {
+			let dz = v.pos[2] - eye[2];
+			if dz < -0.01 {
+				let k = (pl[0] - eye[2]) / dz;
+				if k > 0.0 {
+					for a in 0..2 {
+						v.pos[a] = eye[a] + (v.pos[a] - eye[a]) * k;
+					}
+					v.pos[2] = pl[0];
+				}
+			}
+		}
+	}
+}
+
+#[cfg(test)]
+mod grow_tests {
+	use super::*;
+
+	fn rnd(s: &mut u64) -> u64 {
+		*s ^= *s << 13;
+		*s ^= *s >> 7;
+		*s ^= *s << 17;
+		*s
+	}
+
+	/// Lane A7: a pool growth as `grow_plan`'s insert (old indices copied around the new faces, runs moved) gives exactly the
+	/// layout a whole rebuild (`prop_layout`) gives for the new order, over random classes (1-4 texture keys each, cull bits,
+	/// keys new to the scene), pools, other props, actors and several growths in a row, as `App::append_pools` orders them.
+	#[test]
+	fn grow_plan_is_a_rebuild() {
+		let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+		let mut tex_slots: HashMap<u32, usize> = HashMap::new();
+		for k in 0..12u32 {
+			for cull in [0, 1 << 24, 2 << 24] {
+				tex_slots.insert((k | cull) & crate::mobies::SLOT_MASK, k as usize);
+			}
+		}
+		let (mut grown, mut new_keys) = (0, 0);
+		for _ in 0..400 {
+			let mut cf: HashMap<u32, ClassFaces> = HashMap::new();
+			for c in 1..=10u32 {
+				let ng = 1 + rnd(&mut seed) % 4;
+				let mut keys: Vec<u32> = (0..ng).map(|_| (rnd(&mut seed) % 12) as u32 | [0, 1 << 24, 2 << 24][(rnd(&mut seed) % 3) as usize]).collect();
+				keys.sort_unstable();
+				keys.dedup();
+				let groups = keys.iter().map(|&k| (k, (0..3 * (1 + rnd(&mut seed) % 3) as u32).map(|i| (i * 7 + k) % 5).collect())).collect();
+				cf.insert(c, ClassFaces { groups, clipped: Vec::new() });
+			}
+			// Classes 9 and 10 only arrive by growth (keys the scene may not have yet).
+			let pick = |s: &mut u64, hi: u64| 1 + (rnd(s) % hi) as u32;
+			let mut pools: Vec<u32> = (0..rnd(&mut seed) % 12).map(|_| pick(&mut seed, 8)).collect();
+			pools.sort_unstable();
+			let rest: Vec<u32> = (0..rnd(&mut seed) % 4).map(|_| pick(&mut seed, 8)).collect();
+			let actors: Vec<u32> = (0..rnd(&mut seed) % 3).map(|_| pick(&mut seed, 8)).collect();
+			let mut is_pool: Vec<bool> = pools.iter().map(|_| true).chain(rest.iter().map(|_| false)).collect();
+			let mut classes: Vec<u32> = pools.iter().chain(&rest).chain(&actors).copied().collect();
+			let mut ranges: Vec<std::ops::Range<usize>> = (0..classes.len()).map(|i| i * 5..i * 5 + 5).collect();
+			let mut verts = classes.len() * 5;
+			let mut game_order: Vec<usize> = (0..pools.len() + rest.len()).collect();
+			let mut order: Vec<usize> = (0..classes.len()).collect();
+			let (mut draws, mut runs, mut indices) = prop_layout(&cf, &tex_slots, &classes, &ranges, &order);
+			for _ in 0..3 {
+				let at = is_pool.len();
+				let mut add: Vec<u32> = (0..1 + rnd(&mut seed) % 4).map(|_| pick(&mut seed, 10)).collect();
+				add.sort_unstable();
+				let m = add.len();
+				// App::append_pools: the pools by class (each class's new props after its old ones), then the other props, then the actors.
+				let mut pool: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+				let mut other = Vec::new();
+				for &i in &game_order {
+					if is_pool[i] { pool.entry(classes[i]).or_default().push(i) } else { other.push(i) }
+				}
+				for (k, &c) in add.iter().enumerate() {
+					pool.entry(c).or_default().push(at + k);
+				}
+				let mut new_game: Vec<usize> = pool.into_values().flatten().collect();
+				new_game.extend(other);
+				let n_actors = classes.len() - at;
+				let new_order: Vec<usize> = new_game.iter().copied().chain(at + m..at + m + n_actors).collect();
+				let new_ranges: Vec<std::ops::Range<usize>> = (0..m).map(|k| verts + k * 5..verts + k * 5 + 5).collect();
+				let mut all_classes = classes.clone();
+				all_classes.splice(at..at, add.iter().copied());
+				let mut all_ranges = ranges.clone();
+				all_ranges.splice(at..at, new_ranges.iter().cloned());
+				let (nd, nr, ni) = prop_layout(&cf, &tex_slots, &all_classes, &all_ranges, &new_order);
+				let old = GrowOld { cf: &cf, tex_slots: &tex_slots, classes: &classes, order: &order, draws: &draws, runs: &runs };
+				let mut plan = grow_plan(&old, at, &add, &new_ranges, &new_order).expect("an insert");
+				new_keys += (plan.draws.len() > draws.len()) as u32;
+				assert_eq!(plan.apply(&indices), ni);
+				assert!(same_draws(&plan.draws, &nd));
+				assert_eq!(plan.moved_runs(runs.clone(), at), nr);
+				grown += 1;
+				(draws, runs, indices) = (nd, nr, ni);
+				is_pool.splice(at..at, vec![true; m]);
+				(classes, ranges, order, game_order) = (all_classes, all_ranges, new_order, new_game);
+				verts += m * 5;
+			}
+		}
+		assert!(grown == 1200 && new_keys > 50, "{grown} growths, {new_keys} with a new texture key");
+	}
+
+	/// An order that is not the old one with the new slots put in gives no plan (the caller rebuilds).
+	#[test]
+	fn grow_plan_refuses_a_reorder() {
+		let mut cf: HashMap<u32, ClassFaces> = HashMap::new();
+		cf.insert(1, ClassFaces { groups: vec![(0, vec![0, 1, 2])], clipped: Vec::new() });
+		let tex_slots: HashMap<u32, usize> = [(0, 0)].into_iter().collect();
+		let classes = [1, 1];
+		let ranges = [0..3, 3..6];
+		let (draws, runs, _) = prop_layout(&cf, &tex_slots, &classes, &ranges, &[0, 1]);
+		let old = GrowOld { cf: &cf, tex_slots: &tex_slots, classes: &classes, order: &[0, 1], draws: &draws, runs: &runs };
+		assert!(grow_plan(&old, 2, &[1], &[6..9], &[1, 0, 2]).is_none());
+		assert!(grow_plan(&old, 2, &[1], &[6..9], &[0, 2, 1]).is_some());
+	}
+}
+
+/// [PC] How many planes the water pass mirrors per frame: Water High (`water_q` 3) `mirror::MAX_MIRRORS`, Medium 1, Low none.
+/// RAC_WATER_MIRRORS=0..3 overrides it (probe: time 0 / 1 / 2 / 3 mirrors in one exe).
+fn mirror_count(water_q: u8) -> usize {
+	static S: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+	let o = *S.get_or_init(|| std::env::var("RAC_WATER_MIRRORS").ok().and_then(|v| v.trim().parse::<usize>().ok()));
+	o.unwrap_or(match water_q {
+		0 | 1 => 0,
+		2 => 1,
+		_ => super::mirror::MAX_MIRRORS,
+	})
+	.min(super::mirror::MAX_MIRRORS)
+}
+
+/// [PC] The planes to mirror this frame, at most `n` heights (`mirror::pick` for one, `mirror::pick_many` for more, given last
+/// frame's planes of this level). A plane the estimate misses for a frame (the culled patch set shows no flat height that frame)
+/// stays for `MIRROR_HOLD` frames while a slot is free, instead of dropping to the screen-space reflection.
+fn mirror_pick(level: usize, draws: &[super::waterfx::WaterDraw], eye: [f32; 3], vp: &[[f32; 4]; 4], n: usize) -> Vec<f32> {
+	const MIRROR_HOLD: u32 = 12;
+	thread_local! {
+		static LAST: std::cell::RefCell<(usize, Vec<(f32, u32)>)> = const { std::cell::RefCell::new((usize::MAX, Vec::new())) };
+	}
+	if n == 0 {
+		return Vec::new();
+	}
+	LAST.with(|l| {
+		let mut l = l.borrow_mut();
+		if l.0 != level {
+			*l = (level, Vec::new());
+		}
+		let prev: Vec<f32> = l.1.iter().map(|p| p.0).collect();
+		let ivp = super::mirror::inverse(vp);
+		let fresh: Vec<f32> = if n == 1 { super::mirror::pick(draws, eye, ivp.as_ref(), prev.first().copied()).into_iter().collect() } else { super::mirror::pick_many(draws, eye, ivp.as_ref(), &prev, n) };
+		let mut now: Vec<(f32, u32)> = fresh.into_iter().map(|h| (h, 0)).collect();
+		for &(h, age) in &l.1 {
+			if now.len() < n && age < MIRROR_HOLD && now.iter().all(|p| (p.0 - h).abs() >= 0.5) {
+				now.push((h, age + 1));
+			}
+		}
+		l.1 = now;
+		l.1.iter().map(|p| p.0).collect()
+	})
 }

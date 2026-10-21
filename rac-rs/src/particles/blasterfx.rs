@@ -17,7 +17,6 @@ pub struct Fade27 {
 /// Type 0x48 beam sprite: placed by its owner every tick, spinning by `spin`; it frees itself only at size <= 0.
 /// `shrink`, `mode` and `extra` are ctor writes, write-only in retail (no reader: updater FUN_00289e90, draw FUN_0027c190
 /// mode 0); the rand(30) draws that pick `extra` stay for the RNG order (WPN-6.1e4).
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct Beam48 {
 	pub pos: [f32; 3],

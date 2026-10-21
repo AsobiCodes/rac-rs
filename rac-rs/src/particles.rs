@@ -6,13 +6,11 @@
 //! Positions are world units (Ratchet is 1.42 tall). Per-tick values keep the notes' units and
 //! the pool runs at 50 Hz (`TICK_HZ`); velocities handed to the caller are per second.
 
-use crate::dynlight::{SlotLight, View};
-use crate::gameplay::ee_add;
-use crate::gameplay::ee_mul;
-use std::f32::consts::{PI, TAU};
+use crate::dynlight::SlotLight;
+use std::f32::consts::TAU;
 mod blastfx;
 mod fume;
-pub use fume::{Fume, FumeParams};
+pub use fume::Fume;
 pub use blastfx::{BlastEmber, BlastSpark, Flame, Puff10, Smoke, SmokeLoft, WaterDebris};
 mod spawn;
 mod fx;
@@ -122,7 +120,6 @@ impl Rng {
 		})
 	}
 	/// The state word without a draw (PC debug aid: the viewer bench's determinism hash).
-	#[cfg_attr(not(test), allow(dead_code))]
 	pub fn state(&self) -> u32 {
 		RAND.with(|s| s.get())
 	}

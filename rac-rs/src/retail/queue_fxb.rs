@@ -4,7 +4,6 @@
 //! so the update function's ring buffer and the gp words are their draw-time values. Retail facts: decomp/notes/draw_producers.md
 //! (rows Rilgar 0x2d72b0 / Pokitaru 0x318bf8, 2026-10-12 fxb).
 
-#![allow(dead_code)]
 
 use crate::particles::WorldQuad;
 use ee_oracle::Machine;

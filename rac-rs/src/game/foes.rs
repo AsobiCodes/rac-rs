@@ -4,21 +4,8 @@
 //! controller FUN_0026d540) are used as is, `dt * k` constants are u/s, scale(n) tick counts are n / 60 s.
 //! The launch mover FUN_00270fb0/FUN_002710f0 keeps its own dt-based [P] conversion.
 
-use super::pyro::sc;
-use super::Event;
 use super::Game;
-use super::Kind;
-use crate::gameplay::{self, MobyInstance, Polygon};
-use crate::physics::add;
-use crate::physics::length;
-use crate::physics::normalize;
-use crate::physics::qmask;
-use crate::physics::scale;
-use crate::physics::sub;
-use crate::physics::Scene;
-use crate::physics::World;
 use crate::physics::V3;
-use std::f32::consts::PI;
 
 pub const BIRDBOT: u32 = 459;
 pub(super) const AMOEBOID: u32 = 572;

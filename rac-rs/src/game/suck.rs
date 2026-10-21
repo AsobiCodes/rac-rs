@@ -2,15 +2,8 @@
 //! weapon's state machine (wind-up, suction, stored, launch), the scan that registers victims, and the pickups it
 //! draws through the tube. The per-victim half is `suckcomp.rs`, the tube is `tube.rs`. Per-tick units throughout.
 
-use super::foes::self;
-use super::pyro::sc;
-use super::sched;
-use super::{Event, Game, Kind};
+use super::Game;
 use crate::anim::PropAnim;
-use crate::gameplay::pal_ticks;
-use crate::inventory::SUCK_CANNON;
-use crate::particles::euler_m;
-use crate::physics::{add, length, scale, sub, Scene, World, V3};
 
 
 

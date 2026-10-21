@@ -16,9 +16,9 @@ pub(super) fn features() -> wgpu::Features {
 }
 
 /// With INDIRECT_FIRST_INSTANCE as well, the draws of a list go as multi-draw-indirect runs (one call per run of the same
-/// pipeline, same order; RAC_MULTIDRAW=0 keeps one call per draw).
+/// pipeline, same order).
 pub(super) fn multi_wanted(adapter: &wgpu::Adapter) -> bool {
-	!std::env::var("RAC_MULTIDRAW").is_ok_and(|v| v == "0") && adapter.features().contains(wgpu::Features::INDIRECT_FIRST_INSTANCE)
+	adapter.features().contains(wgpu::Features::INDIRECT_FIRST_INSTANCE)
 }
 
 /// Whether to use the path on an adapter with these features and limits (RAC_BINDLESS=0 turns it off).
@@ -135,12 +135,6 @@ impl Bindless {
 			pass.set_pipeline(&set[cull as usize]);
 			pass.multi_draw_indexed_indirect(buf, off, n);
 		}
-	}
-
-	/// The scene's array bind group: slot k = the texture of `scene.bind_groups[k]` (`views`, logged by `Gpu::upload`; the
-	/// rest padded with slot 0). None when a slot's view is unknown or the scene has more than `TEX_CAP` slots.
-	pub(super) fn bind_group(&self, device: &wgpu::Device, binds: &[wgpu::BindGroup], views: &HashMap<wgpu::BindGroup, wgpu::TextureView>, sampler: &wgpu::Sampler, wrap: &[wgpu::Sampler; 3]) -> Option<wgpu::BindGroup> {
-		array_group(&self.layout, device, binds, views, sampler, wrap)
 	}
 }
 

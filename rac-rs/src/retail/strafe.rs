@@ -115,8 +115,8 @@ static ROWS_USA: [Row; 19] = [
 ];
 
 // Hashes: rec::hash (FNV-1a over the words) of [entry, end) of each overlay.elf; every function is 39 instructions
-// (Eudora's equals the ee-hand `combo_input_fire` row 0x87731a4978079f20). A Hand here replaces the ee-hand of the same
-// entry while registered: its fall-back runs the retail code, which that hand matches bit for bit.
+// (Eudora's was the ee-hand `combo_input_fire` row 0x87731a4978079f20; the Eudora hands are gone, 2026-10-19). Its fall-back
+// runs the retail code.
 static HANDS: [Hand; 19] = [
 	Hand { entry: 0x228758, end: 0x2287f4, hash: 0x9b39924c29812120, est: 0, f: jump_any }, // 0
 	Hand { entry: 0x2414d0, end: 0x24156c, hash: 0x1b12cb9128bfc53e, est: 0, f: jump_any }, // 1
@@ -156,6 +156,8 @@ pub struct Draw {
 	pub twist: f32,
 	/// Play the run clip reversed (backpedal).
 	pub rev: bool,
+	/// How far retail's leg rotation overrides are faded out (0 = as retail, 1 = none; `leg_fx`): eased in and out with `rev`.
+	pub leg_off: f32,
 }
 
 struct S {
@@ -183,17 +185,12 @@ struct S {
 	log_tried: bool,
 }
 
-static ST: Mutex<S> = Mutex::new(S { field: 0, pos: [0.0; 2], have_pos: false, twist: 0.0, rev: false, dir: 0.0, have_dir: false, hist: [[0.0; 2]; AVG], hn: 0, hi: 0, cand: 0, draw: Draw { twist: 0.0, rev: false }, flips: 0, flip: 0.0, back: false, log: None, log_tried: false });
+static ST: Mutex<S> = Mutex::new(S { field: 0, pos: [0.0; 2], have_pos: false, twist: 0.0, rev: false, dir: 0.0, have_dir: false, hist: [[0.0; 2]; AVG], hn: 0, hi: 0, cand: 0, draw: Draw { twist: 0.0, rev: false, leg_off: 0.0 }, flips: 0, flip: 0.0, back: false, log: None, log_tried: false });
 static IN: AtomicBool = AtomicBool::new(false);
 
 /// The twist / reverse state of the last field (`retail::snap` copies it into the hero parts).
 pub fn current() -> Draw {
 	ST.lock().map_or(Draw::default(), |s| s.draw)
-}
-
-/// Flips started (tests).
-pub fn flips() -> u32 {
-	ST.lock().map_or(0, |s| s.flips)
 }
 
 fn wrap(a: f32) -> f32 {
@@ -411,6 +408,8 @@ const SETTLE: f32 = 0.04;
 /// and the run direction changes only after `LATCH` fields in a row asked for it (the twist holds still meanwhile).
 const AVG: usize = 6;
 const LATCH: u8 = 3;
+/// Per field step of `Draw::leg_off` (4 fields from retail's leg overrides to none and back).
+const LEG_FADE: f32 = 0.25;
 /// Air states (fall 6, jump 7, 9, 0xe): retail's move vector reads 0 there, so the twist, the run direction and the path are
 /// held through the jump instead of measured.
 const AIR_STATES: [u32; 4] = [6, 7, 9, 0xe];
@@ -504,14 +503,38 @@ pub fn post_field(m: &ee_oracle::Machine) {
 		}
 		mode = 'R';
 	}
-	s.draw = Draw { twist: s.twist, rev: s.rev && (track || hold) };
+	let rev = s.rev && (track || hold);
+	let leg_off = (s.draw.leg_off + if rev { LEG_FADE } else { -LEG_FADE }).clamp(0.0, 1.0);
+	s.draw = Draw { twist: s.twist, rev, leg_off };
 	if s.log.is_some() || !s.log_tried {
 		let (seq, cur, nxt, old, ph) = if moby != 0 { (m.rd8(moby + 0x53), m.rd8(moby + 0x50), m.rd8(moby + 0x51), m.rd8(moby + 0x52), m.rdf(moby + 0x54)) } else { (0, 0, 0, 0, 0.0) };
 		// Leg direction against the path (0 = the legs point along the path, forward or reversed).
 		let err = if track { wrap(mv[1].atan2(mv[0]) - drawn - s.twist - if s.rev { std::f32::consts::PI } else { 0.0 }).to_degrees() } else { f32::NAN };
+		// The hero +0x60 layer list (retail.rs `layer_list`): seq, frame, from seq / frame, t, weight, joints (count, min..max).
+		let mut lay = String::new();
+		let mut o = if moby != 0 { m.rd32(moby + 0x60) & 0x01ff_ffff } else { 0 };
+		for _ in 0..6 {
+			if o == 0 {
+				break;
+			}
+			let (list, n) = (m.rd32(o + 0xc) & 0x01ff_ffff, m.rd16(o + 2).min(128) as u32);
+			let js: Vec<u8> = (0..n).map(|k| m.rd8(list + k)).collect();
+			lay += &format!(" [s{} f{} fs{} ff{} t{:.2} w{:.2} j{}:{}..{}]", m.rd8(o + 0x23), m.rd8(o + 0x21), m.rd8(o + 0x22), m.rd8(o + 0x20), m.rdf(o + 0x24), m.rdf(o + 8), n, js.iter().min().unwrap_or(&0), js.iter().max().unwrap_or(&0));
+			o = m.rd32(o + 0x1c) & 0x01ff_ffff;
+		}
+		// The hero +0x64 joint override records (retail.rs `joint_records`): joint, mode, rotation xyz.
+		let mut r = if moby != 0 { m.rd32(moby + 0x64) & 0x01ff_ffff } else { 0 };
+		lay += " fx";
+		for _ in 0..16 {
+			if r == 0 {
+				break;
+			}
+			lay += &format!(" [j{} b{} {:.3} {:.3} {:.3}]", (m.rd32(r + 4) & 0xffff) / 0x40, m.rd8(r + 3), m.rdf(r + 0x10), m.rdf(r + 0x14), m.rdf(r + 0x18));
+			r = m.rd32(r + 8) & 0x01ff_ffff;
+		}
 		let line = format!(
-			"field {} state {state:#x} seq {seq} cur {cur} next {nxt} pos {:.3} {:.3} {:.3} speed {speed:.3} step {:.3} {:.3} vel {:.3} {:.3} logic {:.3} drawn {drawn:.3} wish {:.3} aim {} d {:.1} twist {:.1} rev {} flips {} dir {:.1} mode {mode} err {err:.1} old {old} p {ph:.3} inst {inst:.4} ramp {:.3} carry {:.3} fh {:.3} fc {:.3} land {} tick {}",
-			s.field, pos[0], pos[1], m.rdf(HERO_POS + 8), step[0], step[1], mv[0], mv[1], m.rdf(HERO_YAW), m.rdf(HERO_WISH), aim.map_or("-".to_string(), |a| format!("{a:.3}")), d_log.to_degrees(), s.twist.to_degrees(), s.draw.rev, s.flips, s.dir.to_degrees(), m.rdf(0x13f7a8), m.rdf(0x13f7a4), m.rdf(FLIP_HEAD), m.rdf(FLIP_CARRY), m.rd32(0x13f768), m.rd32(0x13f4e8)
+			"field {} state {state:#x} eq {} layers{lay} seq {seq} cur {cur} next {nxt} pos {:.3} {:.3} {:.3} speed {speed:.3} step {:.3} {:.3} vel {:.3} {:.3} logic {:.3} drawn {drawn:.3} wish {:.3} aim {} d {:.1} twist {:.1} rev {} flips {} dir {:.1} mode {mode} err {err:.1} old {old} p {ph:.3} inst {inst:.4} ramp {:.3} carry {:.3} fh {:.3} fc {:.3} land {} tick {}",
+			s.field, m.rd32(0x140408), pos[0], pos[1], m.rdf(HERO_POS + 8), step[0], step[1], mv[0], mv[1], m.rdf(HERO_YAW), m.rdf(HERO_WISH), aim.map_or("-".to_string(), |a| format!("{a:.3}")), d_log.to_degrees(), s.twist.to_degrees(), s.draw.rev, s.flips, s.dir.to_degrees(), m.rdf(0x13f7a8), m.rdf(0x13f7a4), m.rdf(FLIP_HEAD), m.rdf(FLIP_CARRY), m.rd32(0x13f768), m.rd32(0x13f4e8)
 		);
 		log(&mut s, &line);
 	}
@@ -531,7 +554,7 @@ const HEAD_ITEMS: [u32; 3] = [433, 1289, 1290];
 /// joint (+0x34 bit 0x100)
 /// at the joints of ITS hero matrix (rows +0xc0, the logic yaw), while modcam turns only the drawn yaw +0x48 of the hero. They
 /// are turned about the hero by (drawn - rows yaw) so they ride with the drawn Ratchet. Draw only; RAM is not written.
-pub fn turn_parts(m: &ee_oracle::Machine, hero: u32, held: u32, mobys: &mut [super::Moby]) {
+pub fn turn_parts(m: &ee_oracle::Machine, hero: u32, held: u32, mobys: &mut [super::Moby], glows: &mut [([f32; 3], f32, f32, u32)]) {
 	if !modcam::enabled() || modcam::aim_yaw().is_none() {
 		return;
 	}
@@ -575,6 +598,13 @@ pub fn turn_parts(m: &ee_oracle::Machine, hero: u32, held: u32, mobys: &mut [sup
 		mb.pos[0] = hp[0] + cs * x - sn * y;
 		mb.pos[1] = hp[1] + sn * x + cs * y;
 		mb.rot[2] = wrap(mb.rot[2] + delta);
+	}
+	// Clank's bulb glow (retail's slot-3 item light, queue_fx `hero_glows`) is placed from the logic-yaw joints like the bulb mesh
+	// (class 1204) above: turned with it, so it stays on the bulb.
+	for g in glows.iter_mut().filter(|g| super::is_bulb_glow(g)) {
+		let (x, y) = (g.0[0] - hp[0], g.0[1] - hp[1]);
+		g.0[0] = hp[0] + cs * x - sn * y;
+		g.0[1] = hp[1] + sn * x + cs * y;
 	}
 }
 
@@ -621,6 +651,29 @@ pub fn twist_mats(mats: &mut [[f32; 12]], anim: &crate::anim::Animated, theta: f
 				m[4 + k] = ny;
 			}
 		}
+	}
+}
+
+/// Hero leg joints (`twist_share`: 92..97 one leg, 98..103 the other).
+const LEG_JOINTS: std::ops::RangeInclusive<usize> = 92..=103;
+
+/// Retail's leg rotation overrides (hero +0x64 records on the leg joints: the feet-on-slope pass FUN_0022c088 that bends hips,
+/// knees and feet to the ground under each foot, and the run lean) are computed for Ratchet facing his path with the clip
+/// playing forward. A backpedal draws the legs turned 180 degrees with the clip reversed, so those bends land on the wrong leg
+/// and the wrong way: on a slope one leg stayed lifted while backpedaling (seen on Veldin, and on the Novalis start slope,
+/// runs/g1.slog fields 48-108: hips -0.087 / -0.195). While `leg_off` > 0 the rotation of every mode-0 leg record is eased
+/// toward none (scale and offset records stay: the boots hide the feet through them); a backpedal plays the plain clip.
+pub fn leg_fx(fx: &mut [crate::anim::JointFx], d: Draw) {
+	if d.leg_off <= 0.0 {
+		return;
+	}
+	let w = 1.0 - d.leg_off.min(1.0);
+	for f in fx.iter_mut().filter(|f| f.blend.is_none() && LEG_JOINTS.contains(&f.joint)) {
+		// Toward the identity of the record's own sign (q and -q are the same turn; the multiply keeps the sign).
+		let one = if f.rot[3] < 0.0 { -1.0 } else { 1.0 };
+		let q = [f.rot[0] * w, f.rot[1] * w, f.rot[2] * w, f.rot[3] * w + (1.0 - w) * one];
+		let n = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
+		f.rot = if n > 1e-6 { q.map(|v| v / n) } else { [0.0, 0.0, 0.0, one] };
 	}
 }
 

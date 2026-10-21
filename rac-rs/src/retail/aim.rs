@@ -5,12 +5,16 @@
 //! modern camera off, menus, cutscenes, death, vehicles: `active()` is false, nothing is written and every weapon runs
 //! retail's own code (auto-lock and all). Per-weapon decisions: scratch_aim/AIM.md.
 //!
-//! - Crosshair: `pre_field` appends one entry to retail's screen-sprite queue (FUN_001e07c8's slot layout, Eudora 0x169140 stride
+//! - Crosshair (only for the items that shoot straight, `aims_straight`): `pre_field` appends one entry to retail's screen-sprite queue (FUN_001e07c8's slot layout, Eudora 0x169140 stride
 //!   0x30, count 0x169200; `modcam::sprite_queue`) with retail's lock-on reticle (texture id 0x26, colour 0xff0fff0f, scale 1) and
 //!   no position, which retail's own consumer (FUN_001e08a8) draws at the screen centre.
 //! - Aim point: one ray per field from the point of the camera ray level with Ratchet's chest (so nothing between the camera and
 //!   him blocks it) along the camera's forward axis (the screen centre), cast with retail's segment test (`modcam::cast`); the
 //!   contact point (terrain or moby) is the aim point, else the point `RANGE` out (the ray is cast in pieces of `CHUNK`).
+//! - Strafe lock-on (PC extra with the wide lock-on, `strafe_lock`): the Blaster's target search, which retail's code would answer
+//!   with its own cone about the hero's heading, looks for the nearest actor in a cone about the crosshair line instead; the shot
+//!   flies to it and the crosshair icon moves onto it, red (the same reticle sprite in retail's other colour). No target: the green
+//!   crosshair and the shot to the point under it, as before. RAC_LOCKON_CLASSIC=1 / RAC_PC_EXT=0: none of it.
 //! - Hooks (hash-gated wrappers per level, rows made by scratch_aim/mkaim.py from the twin tables): each overrides only the
 //!   aim or target input of one retail function and then runs the retail function; with `active()` false it returns at once and
 //!   the retail code runs untouched.
@@ -33,6 +37,21 @@ const LOCK_TARGET: u32 = 0x13fda0;
 /// Retail's lock-on reticle: texture id 0x26 (circle with three tabs), colour 0xff0fff0f (green), request FUN_001e07c8.
 const RETICLE_TEX: u32 = 0x26;
 const RETICLE_COLOUR: u32 = 0xff0f_ff0f;
+/// The strafe lock-on icon (a target locked): the same sprite in retail's other reticle colour, 0xff0f0fff (red; the Blaster's
+/// first-person reticle word, OV:125878).
+const RETICLE_LOCKED: u32 = 0xff0f_0fff;
+/// The item in hand (inventory id, glove_prereq_inventory_input.md: equipped 0x140408).
+const EQUIPPED: u32 = 0x140408;
+
+/// Items that fire straight along the aim and so get the crosshair: the weapons retail holds out in its aimed fire stance
+/// (hero_weapon_stance FUN_0022e8d0, called by the held updaters of 9 Suck Cannon, 11 Devastator, 16 Pyrocitor, 19 Tesla
+/// Claw, 21 Morph-o-ray and 23 R.Y.N.O. and by the fire dispatcher's case 15 Blaster), plus 13 Visibomb Gun (the missile
+/// leaves straight ahead before it is steered). No crosshair for the fire dispatcher's thrown group (10 Bomb Glove, 17 Mine
+/// Glove, 20 Glove of Doom, 24 Drone Device, 25 Decoy Glove: hero throw state 0x23, lobbed or dropped), the melee items (8
+/// OmniWrench, 18 Walloper), 14 Taunter (no shot) and the gadgets. Only the reticle depends on this; the hooks below do not.
+fn aims_straight(item: u32) -> bool {
+	matches!(item, 9 | 11 | 13 | 15 | 16 | 19 | 21 | 23)
+}
 /// Retail's seg_collide finds nothing on a segment longer than about 40 units (measured: 40 hits the ground, 120 hits nothing), so the
 /// crosshair ray is cast in consecutive pieces of CHUNK units (nearest contact of the first piece that hits) up to RANGE units from
 /// the chest; no contact = the point RANGE out. RAC_AIM_FAR overrides the range (tests).
@@ -79,12 +98,19 @@ fn masks() -> &'static [u32] {
 	})
 }
 
-/// Registers the hooks (Retail::load); nothing when the strafe movement is off.
+/// Registers the hooks (Retail::load); nothing when both the strafe movement and the wide lock-on are off.
 pub fn register() {
 	// RAC_AIM_OFF=1 (tests): no hooks at all, the baseline of the released-button comparison.
-	if strafe::enabled() && std::env::var_os("RAC_AIM_OFF").is_none() {
+	if (strafe::enabled() || lockon_wide()) && std::env::var_os("RAC_AIM_OFF").is_none() {
 		register_hand(crate::retail::disc::hands(&HANDS));
 	}
+}
+
+/// Wide Blaster lock-on (PC extra, the Gladiator-like reach the user asked for): on unless RAC_LOCKON_CLASSIC=1 or the PC
+/// extensions are off (RAC_PC_EXT=0, USA with RAC_USA_EXTRAS=0). Off, the hook returns false and retail's own search runs.
+pub fn lockon_wide() -> bool {
+	static W: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+	*W.get_or_init(|| super::pcext::enabled() && !std::env::var("RAC_LOCKON_CLASSIC").is_ok_and(|v| v != "0" && !v.is_empty()))
 }
 
 // ---- the aim point ----------------------------------------------------------------------------------------------------
@@ -107,11 +133,15 @@ struct S {
 	/// The moby the aim picked when the followed shot was made (log only), and the last lock-on word logged.
 	victim: u32,
 	lock: u32,
+	/// Strafe lock-on: the reticle slot `pre_field` queued (field, address; 0 = none) and the target the Blaster search found
+	/// (moby, field).
+	slot: (u32, u32),
+	slock: Option<(u32, u32)>,
 	log: Option<std::fs::File>,
 	log_tried: bool,
 }
 
-static ST: Mutex<S> = Mutex::new(S { field: u32::MAX, aim: None, tick: 0, track: 0, track_left: 0, victim: 0, lock: u32::MAX, log: None, log_tried: false });
+static ST: Mutex<S> = Mutex::new(S { field: u32::MAX, aim: None, tick: 0, track: 0, track_left: 0, victim: 0, lock: u32::MAX, slot: (0, 0), slock: None, log: None, log_tried: false });
 
 /// Whether the log (RAC_AIM_LOG=path, tests) is on; opens it on the first call.
 fn log_on(s: &mut S) -> bool {
@@ -335,7 +365,7 @@ fn drawn_at(c: &mut Cpu, a: u32) -> [f32; 3] {
 
 fn trace(name: &str, line: String) {
 	if let Ok(mut s) = ST.lock() {
-		let l = format!("hook {name} field {} {line}", s.field);
+		let l = format!("hook {name} tick {} field {} {line}", s.tick, s.field);
 		log(&mut s, &l);
 	}
 }
@@ -367,7 +397,21 @@ fn debug_log(m: &mut ee_oracle::Machine) {
 			let (y, w, d48) = (f32::from_bits(m.rd32(HERO_YAW)), f32::from_bits(m.rd32(0x13f4d0)), f32::from_bits(m.rd32(h + 0x48)));
 			let (st, sx, sy) = (m.rd32(0x1413d4), f32::from_bits(m.rd32(0x141070)), f32::from_bits(m.rd32(0x141074)));
 			let c0 = [f32::from_bits(m.rd32(h + 0xc0)), f32::from_bits(m.rd32(h + 0xc4))];
-			log(&mut s, &format!("hero tick {tick} st {st:#x} yaw {y:.3} wish {w:.3} m48 {d48:.3} c0 {:.3} {:.3} stick {sx:.2} {sy:.2} pos {:.2} {:.2} {:.2}", c0[0], c0[1], p[0], p[1], p[2]));
+			// The equipped weapon id (0x140408), the held moby (0x1403e0) and its class (log only).
+			let (eq, hm) = (m.rd32(0x140408), m.rd32(0x1403e0) & PTR);
+			let hcls = if hm != 0 { m.rd16(hm + 0xa6) } else { 0 };
+			let cp = modcam::cam_pos_diag(m);
+			log(&mut s, &format!("hero tick {tick} st {st:#x} yaw {y:.3} wish {w:.3} m48 {d48:.3} c0 {:.3} {:.3} stick {sx:.2} {sy:.2} pos {:.2} {:.2} {:.2} eq {eq} held {hm:#x} class {hcls} suck {} {} cam {:.3} {:.3} {:.3}", c0[0], c0[1], p[0], p[1], p[2], m.rd32(0x1413c8), m.rd32(0x1413cc), cp[0], cp[1], cp[2]));
+			if hcls == 177 {
+				// Tesla Claw: the arc the updater left in its variables (pvar = *(held+0x78): start +0, end +0x10, target +0x20,
+				// secondary target +0x38, free length +0x24), as a direction from the start to the end.
+				let pv = m.rd32(hm + 0x78) & PTR;
+				let (a, b) = (m.rdv3(pv), m.rdv3(pv + 0x10));
+				let d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+				let (ayaw, aelev) = (d[1].atan2(d[0]), d[2].atan2((d[0] * d[0] + d[1] * d[1]).sqrt()));
+				let aim = modcam::aim_yaw().unwrap_or(f32::NAN);
+				log(&mut s, &format!("tesla arc tick {tick} start {:.2} {:.2} {:.2} end {:.2} {:.2} {:.2} yaw {ayaw:.3} elev {aelev:.3} aim_yaw {aim:.3} hero_yaw {y:.3} target {:#x} t2 {:#x} len {:.2}", a[0], a[1], a[2], b[0], b[1], b[2], m.rd32(pv + 0x20), m.rd32(pv + 0x38), f32::from_bits(m.rd32(pv + 0x24))));
+			}
 		}
 	}
 	if s.track != 0 && s.track_left > 0 {
@@ -449,7 +493,7 @@ pub fn pre_field(m: &mut ee_oracle::Machine, _fin: &super::FieldIn) {
 	let n = m.rd32(cnt);
 	let hero = m.rd32(HERO_MOBY);
 	trace("reticle", format!("mode {mode} form {form} queue {base:#x} count {n} hero {hero:#x} owner20 {:#x}", if hero != 0 { m.rd8(hero + 0x20) } else { 0 }));
-	if mode != 0 || form != 0 || n >= 3 || hero == 0 {
+	if mode != 0 || form != 0 || n >= 3 || hero == 0 || !aims_straight(m.rd32(EQUIPPED)) {
 		return;
 	}
 	let s = base + n * 0x30;
@@ -465,6 +509,10 @@ pub fn pre_field(m: &mut ee_oracle::Machine, _fin: &super::FieldIn) {
 	mem.wr32(s + 0x28, 0x3fc9_0fdb);
 	mem.wr32(s + 0x2c, 2);
 	mem.wr32(cnt, n + 1);
+	// The Blaster search (later in this field) moves this icon onto a locked target: remember the slot.
+	if let (Some(cam), Ok(mut st)) = (modcam::aim_cam(), ST.lock()) {
+		st.slot = (cam.field, s);
+	}
 }
 
 // ---- hooks ---------------------------------------------------------------------------------------------------------------
@@ -473,7 +521,7 @@ pub fn pre_field(m: &mut ee_oracle::Machine, _fin: &super::FieldIn) {
 struct Guard(&'static AtomicBool);
 impl Guard {
 	fn take(f: &'static AtomicBool) -> Option<Guard> {
-		(!f.swap(true, Ordering::SeqCst)).then_some(Guard(f))
+		(!f.swap(true, Ordering::SeqCst)).then(|| Guard(f))
 	}
 }
 impl Drop for Guard {
@@ -489,19 +537,311 @@ static G_MINEV: AtomicBool = AtomicBool::new(false);
 static G_RYNO: AtomicBool = AtomicBool::new(false);
 static G_MORPH: AtomicBool = AtomicBool::new(false);
 static G_PYRO: AtomicBool = AtomicBool::new(false);
+static G_TESLA: AtomicBool = AtomicBool::new(false);
+static G_SUCK: AtomicBool = AtomicBool::new(false);
+static G_LOCK: AtomicBool = AtomicBool::new(false);
 
 /// Blaster, target search `blaster_aim_search(held, muzzle, &yaw, &pitch)` (Eudora 0x2a6a50, called every tick from the held
-/// updater): returns 0 (no target) so retail neither snaps the shot to an enemy nor draws its lock-on reticle.
+/// updater): with the crosshair on it returns 0 to retail (so retail neither snaps the shot to an enemy nor draws its green lock-on
+/// icon); with the wide lock-on on, `strafe_lock` looks for the nearest target around the crosshair direction meanwhile, and the
+/// shot hook and the icon use it. Otherwise, with the wide lock-on on, `lockon_search` answers with the wider numbers and the
+/// nearest pick (RAC_LOCKON_AB=1 instead runs it with retail's constants next to retail's own function and logs differences, the
+/// exactness test); else retail runs untouched.
 fn blaster_search_any(c: &mut Cpu) -> bool {
-	if !active() {
+	if active() {
+		// The Lock-on row (pcext.rs camopts section): Off, or Auto with the keyboard, leaves the green crosshair centred and the
+		// shot flies to the aim point.
+		if lockon_wide() && super::pcext::lockon_on() {
+			strafe_lock(c);
+		} else if let Ok(mut s) = ST.lock() {
+			s.slock = None;
+		}
+		c.s(2, 0);
+		return true;
+	}
+	let ab = std::env::var_os("RAC_LOCKON_AB").is_some();
+	if !lockon_wide() && !ab {
 		return false;
 	}
-	c.s(2, 0);
+	let Some(_g) = Guard::take(&G_LOCK) else { return false };
+	let entry = c.pc;
+	let (mu_p, yp, pp) = (ptr(c.g(5)), ptr(c.g(6)), ptr(c.g(7)));
+	let (y0, p0) = (rf(c, yp), rf(c, pp));
+	let mu = rv(c, mu_p);
+	if ab {
+		// Test: retail's function and the port with retail's numbers on the real input and on 72 yaw turns of it (retail only writes
+		// the two floats, so the extra calls change nothing); one log line per field with the counts.
+		let args: Vec<u64> = (4..8).map(|r| c.g(r)).collect();
+		let (mut same, mut diff, mut hits) = (0, 0, 0);
+		let mut first = String::new();
+		for k in 0..72 {
+			let mut yin = if k == 0 { y0 } else { y0 + k as f32 * std::f32::consts::TAU / 72.0 };
+			if yin > std::f32::consts::PI {
+				yin -= std::f32::consts::TAU;
+			}
+			c.mem.wr32(yp, yin.to_bits());
+			c.mem.wr32(pp, p0.to_bits());
+			let (m, y, p) = lockon_search(c, mu, yin, p0, LockOn::RETAIL);
+			for (i, a) in args.iter().enumerate() {
+				c.s(4 + i, *a);
+			}
+			c.call(entry);
+			let (rm, ry, rp) = (c.g(2) as u32 & PTR, rf(c, yp), rf(c, pp));
+			if rm != 0 {
+				hits += 1;
+			}
+			if rm == m && (ry - y).abs() < 2e-3 && (rp - p).abs() < 2e-3 {
+				same += 1;
+			} else {
+				diff += 1;
+				if first.is_empty() {
+					first = format!(" first DIFF in {yin:.4} {p0:.4} retail {rm:#x} {ry:.4} {rp:.4} port {m:#x} {y:.4} {p:.4}");
+				}
+			}
+		}
+		c.mem.wr32(yp, y0.to_bits());
+		c.mem.wr32(pp, p0.to_bits());
+		for (i, a) in args.iter().enumerate() {
+			c.s(4 + i, *a);
+		}
+		c.call(entry);
+		trace("lockon_ab", format!("same {same} diff {diff} retail_hits {hits}{first}"));
+		return true;
+	}
+	let (m, y, p) = lockon_search(c, mu, y0, p0, LockOn::wide());
+	if m != 0 {
+		c.mem.wr32(yp, y.to_bits());
+		c.mem.wr32(pp, p.to_bits());
+	}
+	c.s(2, m as i32 as i64 as u64);
+	if m != 0 {
+		if ST.lock().map_or(false, |mut s| log_on(&mut s)) {
+			// Log only: distance and bearing off the shot of the pick, and the pick of retail's own numbers next to it.
+			let tp = rv(c, m + 0x10);
+			let dist = ((tp[0] - mu[0]).powi(2) + (tp[1] - mu[1]).powi(2) + (tp[2] - mu[2]).powi(2)).sqrt();
+			let off = ((tp[1] - mu[1]).atan2(tp[0] - mu[0]) - y0 + 3.0 * std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+			let (rm, _, _) = lockon_search(c, mu, y0, p0, LockOn::RETAIL);
+			trace("lockon", format!("target {m:#x} class {} dist {dist:.1} off {:.1} deg retail_pick {rm:#x} yaw {y:.3} pitch {p:.3}", c.mem.rd16(m + 0xa6), off.to_degrees()));
+		}
+	}
+	true
+}
+
+/// The numbers of the Blaster's lock-on search: reach, cone half angle about the shot direction, the yaw difference inside which
+/// the shot yaw snaps to the target, and how the pick is made.
+#[derive(Clone, Copy)]
+struct LockOn {
+	range: f32,
+	cone: f32,
+	snap: f32,
+	/// PC pick (`RAC_LOCKON_NEAREST=0` turns it off): of the candidates in range, inside the cone of the INPUT ray and not blocked,
+	/// the nearest one to the muzzle. A blocked candidate is skipped (retail's search ends at the first one), and a pick does not
+	/// turn the ray the remaining candidates are measured against (retail's follows the pick's bearing and elevation, so a
+	/// nearer actor found after a farther one is tested against the farther one's ray).
+	nearest: bool,
+}
+impl LockOn {
+	/// Retail's inline constants (20.0, 0.15707964 = 9 degrees, 0.17453292 = 10 degrees) and retail's loop.
+	const RETAIL: LockOn = LockOn { range: 20.0, cone: 0.157_079_64, snap: 0.174_532_92, nearest: false };
+	/// Wide: twice the reach and the cone, snap 20 degrees (RAC_LOCKON_RANGE / _CONE / _SNAP in radians, tests), nearest pick.
+	fn wide() -> LockOn {
+		LockOn {
+			range: envf("RAC_LOCKON_RANGE", 40.0),
+			cone: envf("RAC_LOCKON_CONE", 0.3491),
+			snap: envf("RAC_LOCKON_SNAP", 0.3491),
+			nearest: std::env::var("RAC_LOCKON_NEAREST").map_or(true, |v| v != "0"),
+		}
+	}
+}
+
+/// A segment test that works for long segments (retail's finds nothing on one longer than about 40 units): true = blocked.
+fn blocked(c: &mut Cpu, a: [f32; 3], b: [f32; 3]) -> bool {
+	let d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+	let len = dot(d, d).sqrt();
+	let n = (len / 30.0).ceil().max(1.0) as u32;
+	(0..n).any(|i| {
+		let (t0, t1) = (i as f32 / n as f32, (i + 1) as f32 / n as f32);
+		modcam::cast(c, at(a, d, t0), at(a, d, t1), 6).is_some()
+	})
+}
+
+/// The record of a lock-on actor (target record pointer, 0 = none; the point retail aims at is the moby position plus the record's
+/// height, 0.5 without one): `(record, height)`.
+fn lock_height(c: &mut Cpu, m: u32) -> (u32, f32) {
+	let rec = if c.mem.rd16(m + 0x34) & 0x20 != 0 {
+		let pr = c.mem.rd32(m + 0x78) & PTR;
+		c.mem.rd32(pr) & PTR
+	} else {
+		0
+	};
+	(rec, if rec != 0 { rf(c, rec + 0x10) } else { 0.5 })
+}
+
+/// The port of `blaster_aim_search` (Novalis 0x2c9c40, decomp overlay.elf.c:125579): the nearest registered actor (flag 0x1000, state
+/// byte >= 0) inside `k.range` whose centre lies within `k.cone` of the shot ray from the muzzle `mu` (yaw, floor-tilted pitch; the
+/// cone shrinks by the angular radius of a target with a component), clear of terrain from the camera and from the muzzle. Returns
+/// (actor, yaw, pitch): pitch is the negative elevation of the pick, yaw snaps to the bearing when within `k.snap` of the input; the
+/// input values when nothing is found. Retail's loop (`!k.nearest`): a blocked candidate ends the search with the best so far, and
+/// the ray follows each pick. `k.nearest`: see `LockOn`.
+fn lockon_search(c: &mut Cpu, mu: [f32; 3], yaw: f32, pitch: f32, k: LockOn) -> (u32, f32, f32) {
+	let level = c.mem.ram[0x15ed84] as u32;
+	let (ts, _) = super::table(level);
+	let Some((cam_at, _, _)) = super::camera_globals(level) else { return (0, yaw, pitch) };
+	let (cam, floor) = (rv(c, cam_at), rf(c, 0x13f634));
+	let (yaw0, pitch0) = (yaw, pitch);
+	let (mut yaw, mut pitch, mut best, mut best_d) = (yaw, pitch, 0u32, k.range);
+	// (gap, bearing, elevation) of the nearest pick (`k.nearest`); the log lists every candidate inside the cone.
+	let mut pick = (0.0f32, 0.0f32, 0.0f32);
+	let lg = k.nearest && ST.lock().map_or(false, |mut s| log_on(&mut s));
+	let mut cands = String::new();
+	let mut m = c.mem.rd32(ts + 0xc) & PTR;
+	let mut n = 0;
+	while m != 0 && n < 4096 {
+		n += 1;
+		let next = c.mem.rd32(m + 0x28) & PTR;
+		let (fl, st) = (c.mem.rd16(m + 0x34), c.mem.rd8(m + 0x20) as i8);
+		if st < 0 || fl & 0x1000 == 0 {
+			m = next;
+			continue;
+		}
+		let (rec, lift) = lock_height(c, m);
+		let p = rv(c, m + 0x10);
+		let t = [p[0], p[1], p[2] + lift];
+		let (dx, dy, dz) = (t[0] - mu[0], t[1] - mu[1], t[2] - mu[2]);
+		let bearing = dy.atan2(dx);
+		let elev = dz.atan2((dx * dx + dy * dy).sqrt());
+		let (ry, rp) = if k.nearest { (yaw0, pitch0) } else { (yaw, pitch) };
+		let mut gap = (ry - bearing).abs() % std::f32::consts::TAU;
+		if gap > std::f32::consts::PI {
+			gap = std::f32::consts::TAU - gap;
+		}
+		let d = (dx * dx + dy * dy + dz * dz).sqrt();
+		if d <= best_d {
+			let pa = rp + floor * 0.5;
+			let ray = [mu[0] + d * ry.cos() * pa.cos(), mu[1] + d * ry.sin() * pa.cos(), mu[2] + d * pa.sin()];
+			let chord = ((t[0] - ray[0]).powi(2) + (t[1] - ray[1]).powi(2) + (t[2] - ray[2]).powi(2)).sqrt();
+			let mut ang = if d > 1e-4 { 2.0 * (chord / (2.0 * d)).clamp(-1.0, 1.0).asin() } else { 0.0 };
+			if ang > k.cone && rec != 0 {
+				let r = c.mem.rd8(rec + 10) as f32 * 0.125;
+				if r < d {
+					ang = (ang - (r / d).clamp(-1.0, 1.0).asin()).max(0.0);
+				}
+			}
+			if ang < k.cone {
+				let hidden = blocked(c, cam, t) || blocked(c, mu, t);
+				if lg {
+					cands.push_str(&format!(" [{m:#x} class {} dist {d:.1} ang {:.1}{}]", c.mem.rd16(m + 0xa6), ang.to_degrees(), if hidden { " blocked" } else { "" }));
+				}
+				if hidden {
+					if k.nearest {
+						m = next;
+						continue;
+					}
+					return (best, yaw, pitch);
+				}
+				best_d = d;
+				best = m;
+				if k.nearest {
+					pick = (gap, bearing, elev);
+				} else {
+					pitch = -elev;
+					if gap < k.snap {
+						yaw = bearing;
+					}
+				}
+			}
+		}
+		m = next;
+	}
+	if k.nearest && best != 0 {
+		pitch = -pick.2;
+		if pick.0 < k.snap {
+			yaw = pick.1;
+		}
+	}
+	if lg && !cands.is_empty() {
+		trace("lockon_cands", format!("range {:.0} cone {:.1} deg candidates{cands} -> pick {best:#x} dist {best_d:.1}", k.range, k.cone.to_degrees()));
+	}
+	(best, yaw, pitch)
+}
+
+/// Strafe lock-on (PC extra, with the wide lock-on): the Blaster search of this field while the crosshair is on. The ray of the
+/// search is the camera's forward direction (the crosshair line) from the drawn muzzle; the pick is `lockon_search`'s nearest
+/// target (range 40, cone 20 degrees, not behind terrain). The target is kept for the shot (`blaster_spawn_any` aims at it and
+/// hands it to the shot creator, as retail's own lock-on does) and the icon moves onto it, red (`lock_icon`). Nothing found: the
+/// crosshair stays as it was, green at the screen centre, and the shot flies to the point under it.
+fn strafe_lock(c: &mut Cpu) {
+	let Some(cam) = modcam::aim_cam() else { return };
+	let mp = rv(c, ptr(c.g(5)));
+	let mu = drawn_point(c, mp);
+	let f = cam.fwd;
+	let (yaw, elev) = (f[1].atan2(f[0]), f[2].atan2((f[0] * f[0] + f[1] * f[1]).sqrt()));
+	// The search adds half the hero's floor tilt to the pitch it is given: take it off, so the ray is the camera's.
+	let floor = rf(c, 0x13f634);
+	let (m, _, _) = lockon_search(c, mu, yaw, elev - floor * 0.5, LockOn::wide());
+	if let Ok(mut s) = ST.lock() {
+		s.slock = (m != 0).then_some((m, cam.field));
+	}
+	if m != 0 {
+		let t = lock_point(c, m);
+		let dist = ((t[0] - mu[0]).powi(2) + (t[1] - mu[1]).powi(2) + (t[2] - mu[2]).powi(2)).sqrt();
+		let shown = lock_icon(c, m, &cam);
+		trace("strafe_lock", format!("target {m:#x} class {} dist {dist:.1} icon {shown}", c.mem.rd16(m + 0xa6)));
+	}
+}
+
+/// The point retail aims at on a lock-on actor: its position plus the height of its target record (0.5 without one).
+pub fn lock_point(c: &mut Cpu, m: u32) -> [f32; 3] {
+	let (_, lift) = lock_height(c, m);
+	let p = rv(c, m + 0x10);
+	[p[0], p[1], p[2] + lift]
+}
+
+/// The strafe lock this field (`strafe_lock` ran in it) if its actor is still a live target: (actor, lock-on point).
+pub fn strafe_locked(c: &mut Cpu) -> Option<(u32, [f32; 3])> {
+	let cam = modcam::aim_cam()?;
+	let (m, f) = ST.lock().ok()?.slock?;
+	if f != cam.field || c.mem.rd8(m + 0x20) as i8 == -1 || c.mem.rd16(m + 0x34) & 0x1000 == 0 {
+		return None;
+	}
+	Some((m, lock_point(c, m)))
+}
+
+/// The strafe lock for the Modern camera's framing (modcam.rs `dyn_frame`): the actor and its lock-on point, when `strafe_lock` found
+/// it in field `field` or the field before (the follow camera runs before or after the gun update within a field) and it is still a
+/// live target. Does not touch modcam's state (its caller holds modcam's lock).
+pub fn strafe_lock_for_cam(c: &mut Cpu, field: u32) -> Option<(u32, [f32; 3])> {
+	let (m, f) = ST.lock().ok()?.slock?;
+	if f > field || field - f > 1 || c.mem.rd8(m + 0x20) as i8 == -1 || c.mem.rd16(m + 0x34) & 0x1000 == 0 {
+		return None;
+	}
+	Some((m, lock_point(c, m)))
+}
+
+/// The lock-on icon on the target: the slot `pre_field` queued this field (the crosshair at the screen centre) becomes retail's
+/// target reticle of the same sprite, red: position = the lock-on point, scale abs(0.9 - 0.65 d / 50) with d the distance from the
+/// camera (retail's formula, OV:125928), has-position 1 so retail's consumer projects it. False = the slot is not ours any more.
+fn lock_icon(c: &mut Cpu, m: u32, cam: &modcam::AimCam) -> bool {
+	let (f, slot) = ST.lock().map_or((0, 0), |s| s.slot);
+	if slot == 0 || f != cam.field || c.mem.rd32(slot + 0x14) != RETICLE_COLOUR || c.mem.rd32(slot + 0x18) != RETICLE_TEX || c.mem.rd32(slot + 0x24) != 0 {
+		return false;
+	}
+	let t = lock_point(c, m);
+	let d = ((t[0] - cam.eye[0]).powi(2) + (t[1] - cam.eye[1]).powi(2) + (t[2] - cam.eye[2]).powi(2)).sqrt();
+	for (i, v) in t.iter().enumerate() {
+		c.mem.wr32(slot + 4 * i as u32, v.to_bits());
+	}
+	c.mem.wr32(slot + 12, 1.0f32.to_bits());
+	c.mem.wr32(slot + 0x10, (0.9 - d / 50.0 * 0.65).abs().to_bits());
+	c.mem.wr32(slot + 0x14, RETICLE_LOCKED);
+	c.mem.wr32(slot + 0x24, 1);
 	true
 }
 
 /// Blaster shot creator `blaster_ray_spawn(yaw, pitch, yaw, pitch, hero, &muzzle, target)` (Eudora 0x2c04b0; floats f12..f15 = yaw, -elevation, yaw,
-/// -elevation; ints a0 = hero, a1 = &muzzle, a2 = target): yaw and pitch from the muzzle toward the aim point, no target.
+/// -elevation; ints a0 = hero, a1 = &muzzle, a2 = target): yaw and pitch from the muzzle toward the aim point, no target; with a strafe
+/// lock (`strafe_lock` found one this field) toward its lock-on point, and the target is handed over (the shot then ends in the target,
+/// as in retail's own locked shot).
 fn blaster_spawn_any(c: &mut Cpu) -> bool {
 	if !active() {
 		return false;
@@ -511,19 +851,20 @@ fn blaster_spawn_any(c: &mut Cpu) -> bool {
 	let mp = ptr(c.g(5));
 	let Some(aim) = aim_point(c) else { return false };
 	let mu = drawn_at(c, mp);
-	let (yaw, elev) = dir_to(mu, aim.pos);
+	let lock = strafe_locked(c);
+	let (yaw, elev) = dir_to(mu, lock.map_or(aim.pos, |l| l.1));
 	let h = c.mem.rd32(HERO_MOBY) & PTR;
 	let hp = rv(c, h + 0x10);
 	let (hy, d48) = (rf(c, HERO_YAW), modcam::aim_yaw().unwrap_or(0.0));
 	let o = [mu[0] - hp[0], mu[1] - hp[1]];
 	let (fx, fy) = (hy.cos() * o[0] + hy.sin() * o[1], -hy.sin() * o[0] + hy.cos() * o[1]);
 	let (gx, gy) = (d48.cos() * o[0] + d48.sin() * o[1], -d48.sin() * o[0] + d48.cos() * o[1]);
-	trace("blaster_spawn", format!("muzzle {:.2} {:.2} {:.2} yaw {yaw:.3} elev {elev:.3} aim {:.2} {:.2} {:.2} hero {:.2} {:.2} {:.2} hyaw {hy:.3} m48 {d48:.3} off_logic {fx:.2} {fy:.2} off_drawn {gx:.2} {gy:.2} dz {:.2}", mu[0], mu[1], mu[2], aim.pos[0], aim.pos[1], aim.pos[2], hp[0], hp[1], hp[2], mu[2] - hp[2]));
+	trace("blaster_spawn", format!("muzzle {:.2} {:.2} {:.2} yaw {yaw:.3} elev {elev:.3} aim {:.2} {:.2} {:.2} hero {:.2} {:.2} {:.2} hyaw {hy:.3} m48 {d48:.3} off_logic {fx:.2} {fy:.2} off_drawn {gx:.2} {gy:.2} dz {:.2} lock {:#x}", mu[0], mu[1], mu[2], aim.pos[0], aim.pos[1], aim.pos[2], hp[0], hp[1], hp[2], mu[2] - hp[2], lock.map_or(0, |l| l.0)));
 	c.f[12] = yaw.to_bits();
 	c.f[13] = (-elev).to_bits();
 	c.f[14] = yaw.to_bits();
 	c.f[15] = (-elev).to_bits();
-	c.s(6, 0);
+	c.s(6, lock.map_or(0, |l| l.0 as i32 as i64 as u64));
 	c.call(entry);
 	follow(c, "blaster_spawn");
 	true
@@ -725,6 +1066,68 @@ fn pyro_held_any(c: &mut Cpu) -> bool {
 	true
 }
 
+/// Tesla Claw (class 177, Eudora 0x2aab88) and Suck Cannon (class 849, Eudora 0x2dc448) held updaters: retail aims both along the hero's
+/// logic frame (yaw 0x13f3e8 for the Tesla target cone and the 2.09 rad drop test, 0x13f9d8 for the Suck close-target cone, rows
+/// 0x13f990.. for the free arc end, the Suck launch and suction), which while strafing is the movement path. For the call the held
+/// pose and the frame rows are turned to the drawn Ratchet (`drawn_turn`), row 0x13f990 (forward) points from the held weapon to the
+/// aim point, and the yaw words are the aim yaw; every word written is put back unless retail rewrote it.
+fn weapon_held_any(c: &mut Cpu, g: &'static AtomicBool, name: &str, yaw_words: &[u32]) -> bool {
+	if !active() {
+		return false;
+	}
+	let Some(_g) = Guard::take(g) else { return false };
+	let entry = c.pc;
+	let held = ptr(c.g(4));
+	let (Some(aim), Some(ay)) = (aim_point(c), modcam::aim_yaw()) else { return false };
+	// (address, value before, value written) of every changed word.
+	let mut put: Vec<(u32, u32, u32)> = Vec::new();
+	let mut w: Vec<(u32, u32)> = Vec::new();
+	let mut mu = rv(c, held + 0x10);
+	if let Some((sn, cs, hp)) = drawn_turn(c) {
+		let (x, y) = (mu[0] - hp[0], mu[1] - hp[1]);
+		mu = [hp[0] + cs * x - sn * y, hp[1] + sn * x + cs * y, mu[2]];
+		w.push((held + 0x10, mu[0].to_bits()));
+		w.push((held + 0x14, mu[1].to_bits()));
+		for row in [held + 0xc0, held + 0xd0, held + 0xe0, 0x13f990, 0x13f9a0, 0x13f9b0] {
+			let r = rv(c, row);
+			w.push((row, (cs * r[0] - sn * r[1]).to_bits()));
+			w.push((row + 4, (sn * r[0] + cs * r[1]).to_bits()));
+		}
+	}
+	let (yaw, elev) = dir_to(mu, aim.pos);
+	for (i, x) in [elev.cos() * yaw.cos(), elev.cos() * yaw.sin(), elev.sin()].iter().enumerate() {
+		w.retain(|&(a, _)| a != 0x13f990 + 4 * i as u32);
+		w.push((0x13f990 + 4 * i as u32, x.to_bits()));
+	}
+	for &a in yaw_words {
+		w.push((a, ay.to_bits()));
+	}
+	for (a, v) in w {
+		put.push((a, c.mem.rd32(a), v));
+		c.mem.wr32(a, v);
+	}
+	if let Ok(mut s) = ST.lock() {
+		s.victim = aim.moby;
+		s.track_left = 3;
+	}
+	c.call(entry);
+	for &(a, old, new) in put.iter().rev() {
+		if c.mem.rd32(a) == new {
+			c.mem.wr32(a, old);
+		}
+	}
+	trace(name, format!("held {:.2} {:.2} {:.2} yaw {yaw:.3} elev {elev:.3} aim_yaw {ay:.3} state {} turned {}", mu[0], mu[1], mu[2], c.mem.rd8(held + 0x20), put.len() > 3));
+	true
+}
+
+fn tesla_held_any(c: &mut Cpu) -> bool {
+	weapon_held_any(c, &G_TESLA, "tesla_held", &[HERO_YAW])
+}
+
+fn suck_held_any(c: &mut Cpu) -> bool {
+	weapon_held_any(c, &G_SUCK, "suck_held", &[HERO_YAW, 0x13f9d8])
+}
+
 /// Joint 0 of the held moby in world space, by retail's own call (the `jal` at +0x4c of the Pyrocitor held updater: moby joint
 /// world position FUN_00242090 on Eudora). Registers, stack, scratchpad, VU0 and the moby table are put back.
 fn joint0(c: &mut Cpu, entry: u32, held: u32) -> Option<[f32; 3]> {
@@ -782,7 +1185,7 @@ fn mine_velocity_any(c: &mut Cpu) -> bool {
 }
 
 // Rows: scratch_aim/mkaim.py (Eudora entry -> its 18 twins, size from decomp/names, FNV-1a of the overlay.elf words).
-static HANDS: [Hand; 190] = [
+static HANDS: [Hand; 228] = [
 // blaster_search (eudora 0x2a6a50): 19 levels
 	Hand { entry: 0x2b4050, end: 0x2b4350, hash: 0x4a3ed2aedf0335e9, est: 0, f: blaster_search_any }, // 0 veldin
 	Hand { entry: 0x2c9c40, end: 0x2c9f40, hash: 0x6a0427d0080da2f3, est: 0, f: blaster_search_any }, // 1 novalis
@@ -983,4 +1386,44 @@ static HANDS: [Hand; 190] = [
 	Hand { entry: 0x2bbb48, end: 0x2bbcf0, hash: 0x7623f0879ca01646, est: 0, f: mine_velocity_any }, // 16 kalebo
 	Hand { entry: 0x2bef90, end: 0x2bf138, hash: 0x94ea5e4b47643536, est: 0, f: mine_velocity_any }, // 17 veldin_orbit
 	Hand { entry: 0x2c3ac0, end: 0x2c3c68, hash: 0x96e82e784515f066, est: 0, f: mine_velocity_any }, // 18 veldin_finale
+// tesla_held (eudora 0x2aab88): 19 levels
+	Hand { entry: 0x2b8188, end: 0x2b8cb8, hash: 0xaaf0bc5e1d1b3c8b, est: 0, f: tesla_held_any }, // 0 veldin
+	Hand { entry: 0x2cdd78, end: 0x2ce8a8, hash: 0x394b763367b9c5ac, est: 0, f: tesla_held_any }, // 1 novalis
+	Hand { entry: 0x2b7b20, end: 0x2b8650, hash: 0x2b46e9ce6f218f46, est: 0, f: tesla_held_any }, // 2 aridia
+	Hand { entry: 0x2a9b78, end: 0x2aa6a8, hash: 0x8c7886a254062979, est: 0, f: tesla_held_any }, // 3 kerwan
+	Hand { entry: 0x2aab88, end: 0x2ab6b8, hash: 0x81326046019d73eb, est: 0, f: tesla_held_any }, // 4 eudora
+	Hand { entry: 0x2e3df8, end: 0x2e4928, hash: 0x1e794e63bbea3ec4, est: 0, f: tesla_held_any }, // 5 rilgar
+	Hand { entry: 0x2c5310, end: 0x2c5e40, hash: 0x75aa14e27c72d36a, est: 0, f: tesla_held_any }, // 6 nebula
+	Hand { entry: 0x2e1218, end: 0x2e1d48, hash: 0x87d779d110e4e889, est: 0, f: tesla_held_any }, // 7 umbris
+	Hand { entry: 0x2c1118, end: 0x2c1c48, hash: 0x91cf0e1e13429656, est: 0, f: tesla_held_any }, // 8 batalia
+	Hand { entry: 0x2d75c8, end: 0x2d80f8, hash: 0x897f04c9b32c2191, est: 0, f: tesla_held_any }, // 9 gaspar
+	Hand { entry: 0x2a99c8, end: 0x2aa4f8, hash: 0xa462768586066023, est: 0, f: tesla_held_any }, // 10 orxon
+	Hand { entry: 0x2ddef8, end: 0x2dea28, hash: 0x00dcdadd9b39dd06, est: 0, f: tesla_held_any }, // 11 pokitaru
+	Hand { entry: 0x2cfea8, end: 0x2d09d8, hash: 0x4902cf34ce634dae, est: 0, f: tesla_held_any }, // 12 hoven
+	Hand { entry: 0x2d1f28, end: 0x2d2a58, hash: 0xa59205761b7eaee6, est: 0, f: tesla_held_any }, // 13 oltanis_orbit
+	Hand { entry: 0x2c6db0, end: 0x2c78e0, hash: 0xc98655d73a8af823, est: 0, f: tesla_held_any }, // 14 oltanis
+	Hand { entry: 0x2b1400, end: 0x2b1f30, hash: 0xd1527ffa305c7bab, est: 0, f: tesla_held_any }, // 15 quartu
+	Hand { entry: 0x2b2a00, end: 0x2b3530, hash: 0xec3e1563b5e7c549, est: 0, f: tesla_held_any }, // 16 kalebo
+	Hand { entry: 0x2b5e48, end: 0x2b6978, hash: 0x656a57d533c1f5db, est: 0, f: tesla_held_any }, // 17 veldin_orbit
+	Hand { entry: 0x2ba978, end: 0x2bb4a8, hash: 0x8126cea5d919ed53, est: 0, f: tesla_held_any }, // 18 veldin_finale
+// suck_held (eudora 0x2dc448): 19 levels
+	Hand { entry: 0x2da138, end: 0x2db1f0, hash: 0x5e09b5da8a1f7ea0, est: 0, f: suck_held_any }, // 0 veldin
+	Hand { entry: 0x302930, end: 0x3039e8, hash: 0x7081ae6ee747f508, est: 0, f: suck_held_any }, // 1 novalis
+	Hand { entry: 0x2e4d30, end: 0x2e5de8, hash: 0xb73d8e8634d8ec8e, est: 0, f: suck_held_any }, // 2 aridia
+	Hand { entry: 0x2d53f8, end: 0x2d64b0, hash: 0x109565bcf46e5fbc, est: 0, f: suck_held_any }, // 3 kerwan
+	Hand { entry: 0x2dc448, end: 0x2dd500, hash: 0x8fa06fcf4fca6c9f, est: 0, f: suck_held_any }, // 4 eudora
+	Hand { entry: 0x30fbf8, end: 0x310cb0, hash: 0xd474f4c3047dd0b0, est: 0, f: suck_held_any }, // 5 rilgar
+	Hand { entry: 0x2ead20, end: 0x2ebdd8, hash: 0x371bb8aa343c939e, est: 0, f: suck_held_any }, // 6 nebula
+	Hand { entry: 0x305c20, end: 0x306cd8, hash: 0xd971fbf90d0d046f, est: 0, f: suck_held_any }, // 7 umbris
+	Hand { entry: 0x2fbe40, end: 0x2fcef8, hash: 0xc7b945c932c07234, est: 0, f: suck_held_any }, // 8 batalia
+	Hand { entry: 0x2fb568, end: 0x2fc620, hash: 0x33bd469670c5ea76, est: 0, f: suck_held_any }, // 9 gaspar
+	Hand { entry: 0x2ced58, end: 0x2cfe10, hash: 0x79f4deec0e11635b, est: 0, f: suck_held_any }, // 10 orxon
+	Hand { entry: 0x303358, end: 0x304410, hash: 0xf7c82d20bde3eb56, est: 0, f: suck_held_any }, // 11 pokitaru
+	Hand { entry: 0x2fa520, end: 0x2fb5d8, hash: 0x8532cdc20fc69d6a, est: 0, f: suck_held_any }, // 12 hoven
+	Hand { entry: 0x2fd0f8, end: 0x2fe1b0, hash: 0x306997d55a5fd69b, est: 0, f: suck_held_any }, // 13 oltanis_orbit
+	Hand { entry: 0x2f66a0, end: 0x2f7758, hash: 0xe2db3062c7269476, est: 0, f: suck_held_any }, // 14 oltanis
+	Hand { entry: 0x2df068, end: 0x2e0120, hash: 0x2496ea4d716d42f8, est: 0, f: suck_held_any }, // 15 quartu
+	Hand { entry: 0x2d8aa0, end: 0x2d9b58, hash: 0xb688ce52c891890c, est: 0, f: suck_held_any }, // 16 kalebo
+	Hand { entry: 0x2dc900, end: 0x2dd9b8, hash: 0x6e56c355639e0fc1, est: 0, f: suck_held_any }, // 17 veldin_orbit
+	Hand { entry: 0x2e4450, end: 0x2e5508, hash: 0x95f4a7163477434d, est: 0, f: suck_held_any }, // 18 veldin_finale
 ];

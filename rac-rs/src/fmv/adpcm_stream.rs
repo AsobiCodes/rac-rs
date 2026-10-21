@@ -49,11 +49,13 @@ pub struct AdpcmDecoder {
 	pub interleave: usize,
 	hist: Vec<(i32, i32)>,
 	pending: Vec<u8>,
+	/// Per channel: an END-flagged frame (bit 0) has been decoded; the rest of that channel is silence.
+	ended: Vec<bool>,
 }
 
 impl AdpcmDecoder {
 	pub fn new(channels: usize, interleave: usize) -> Self {
-		AdpcmDecoder { channels, interleave, hist: vec![(0, 0); channels], pending: Vec::new() }
+		AdpcmDecoder { channels, interleave, hist: vec![(0, 0); channels], pending: Vec::new(), ended: vec![false; channels] }
 	}
 
 	pub fn push(&mut self, data: &[u8], out: &mut Vec<i16>) {
@@ -66,7 +68,16 @@ impl AdpcmDecoder {
 				per[c].clear();
 				let chunk = &self.pending[pos + c * self.interleave..pos + (c + 1) * self.interleave];
 				for f in chunk.chunks_exact(16) {
+					// [PC] The SPU stops a voice after the block flagged END (bit 0). The PSS audio tracks end with such a block, then a 00 07 77 77.. terminator
+					// frame: decoded as data that is a constant 0x7000 (+0.875 full scale) for 28 samples, then silence, a loud click at every movie end.
+					if self.ended[c] {
+						per[c].extend(std::iter::repeat(0i16).take(28));
+						continue;
+					}
 					decode_frame(f, &mut self.hist[c], &mut per[c]);
+					if f[1] & 1 != 0 {
+						self.ended[c] = true;
+					}
 				}
 			}
 			for i in 0..per[0].len() {
@@ -81,6 +92,7 @@ impl AdpcmDecoder {
 }
 
 /// Decode a whole track (e.g. `track_for_language(0)`) of a movie; returns (header, interleaved pcm).
+#[cfg(test)]
 pub fn decode_track<R: Read>(dm: &mut PssDemuxer<R>, track: u8) -> std::io::Result<Option<(AudioHeader, Vec<i16>)>> {
 	let mut dec: Option<(AudioHeader, AdpcmDecoder)> = None;
 	let mut pcm = Vec::new();

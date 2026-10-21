@@ -6,9 +6,7 @@
 
 use super::Player;
 use super::State;
-use crate::gameplay::{pal_ticks, GrindRail, PAL_DT, PAL_DT2};
 use crate::physics::{add, dot, length, scale, sub, vmul, MobySolid, World, V3};
-use crate::shadows::fast_atan2;
 
 
 

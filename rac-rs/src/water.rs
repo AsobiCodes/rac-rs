@@ -5,8 +5,7 @@
 //! The patch descriptors are read from the level's overlay image (`Level::sections[0]`); the addresses in
 //! `Layout` are Novalis's. Other planets' overlays are not mapped [P].
 
-use crate::gameplay::{Cuboid, PAL_DT, PAL_DT2};
-use crate::particles::{EffectMoby, Particles, Rng, WorldQuad};
+use crate::particles::{EffectMoby, WorldQuad};
 
 /// NOV-20.3: the falling water drop (class 787, FUN_002ff6f0) and the splash ring (class 775, FUN_002ff140).
 pub const DROP_CLASS: u32 = 787;

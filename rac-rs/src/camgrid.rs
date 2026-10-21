@@ -5,7 +5,7 @@
 //! Shape tables in the gameplay header: +0x60 cuboids, +0x64 spheres, +0x68 cylinders (0x80-byte
 //! records), +0x6c pills (0x90-byte records); count at the section start, records from +0x10.
 
-use crate::bytes::{f32_at, i32_at, span, u32_at, R};
+use crate::bytes::{f32_at, span, u32_at, R};
 use crate::physics::V3;
 
 const GRID: usize = 0x84;

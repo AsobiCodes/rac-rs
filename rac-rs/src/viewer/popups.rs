@@ -1,8 +1,5 @@
 use super::*;
 
-/// The Controls page: the game shows a pad picture; rac-rs lists its keyboard keys [PC] port choice.
-pub(super) const CONTROLS: [&str; 9] = ["WASD  Move", "Space  Jump", "F / LMB  Wrench", "G / MMB  Weapon", "Ctrl  Crouch", "Q E  Camera, R  Recenter", "Esc / Enter  Pause", "M  Map", "T  Dismiss help, hold: Quick Select"];
-
 /// The Quick Select fade counter (byte +0x70) runs 0..8 frames at 50 Hz while Triangle is held.
 pub(super) const WHEEL_FADE: f32 = 8.0 / 50.0;
 

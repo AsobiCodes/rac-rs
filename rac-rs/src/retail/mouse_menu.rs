@@ -4,7 +4,8 @@
 //! * `read` (worker thread, every field in mode 3) copies the menu's state out of RAM: the current page, its items with
 //!   their screen rectangles (512x448 PS2 pixels, the space the overlay is drawn in) and each item's own cursor.
 //! * `State` (main thread) turns the mouse into pad presses: hovering steers the game's own selection by D-pad / L1 / R1
-//!   pulses until the selection read from RAM is the hovered one, a left click adds Cross, a right click is the screen's
+//!   pulses until the selection read from RAM is the hovered one, a left click adds Cross (on no item: the screen's confirm
+//!   button, the one Enter presses, for the highlighted item), a right click is the screen's
 //!   back button, the wheel steps up / down (left / right over values, L1 / R1 over the ring), and the button-hint lines
 //!   press their button. See <dev>/scratch_play/handoff/mouse_lean.md for the RAM layout [C].
 
@@ -168,7 +169,7 @@ fn classify(rd: &dyn Fn(u32) -> u32, rd16: &dyn Fn(u32) -> u32, id: u32, slot: u
 	}
 	// The title's Graphics page (pcext.rs `title_options`): the front end's value item, 5-word rows, row cursor at +0x38.
 	if it == super::pcext::TGVAL {
-		let n = (0..8).take_while(|k| rd(rd(it + 0x34) + 20 * k) != 0).count() as u32;
+		let n = (0..16).take_while(|k| rd(rd(it + 0x34) + 20 * k) != 0).count() as u32;
 		return Kind::Value { n: n.max(1), cursor: rd(it + 0x38) };
 	}
 	if matches!(id, 0x13 | 0x1b | 0x1d | 0x20) && slot == 3 {
@@ -176,8 +177,9 @@ fn classify(rd: &dyn Fn(u32) -> u32, rd16: &dyn Fn(u32) -> u32, id: u32, slot: u
 			0x13 => 2,
 			0x1b => 1,
 			0x20 => 3,
-			// Camera Options (0x1d): the rows of the item's table (3 as retail, 5 with the PC options' two rows, retail/pcext.rs).
-			_ => match (0..8).take_while(|k| rd(rd(it + 0x34) + 24 * k) != 0).count() as u32 {
+			// Camera Options (0x1d): the rows of the item's table (3 as retail, 5 with the PC options' two rows, retail/pcext.rs;
+			// the Graphics page's copy has 13).
+			_ => match (0..16).take_while(|k| rd(rd(it + 0x34) + 24 * k) != 0).count() as u32 {
 				0 => 3,
 				n => n,
 			},
@@ -508,7 +510,12 @@ impl State {
 					return self.fire(b);
 				}
 				Some(t) => self.goal = Some(Goal { target: t, page: m.id, confirm: true, presses: 0, sig: (0, 0), stuck: 0 }),
-				None => {}
+				// A click on no item confirms the highlighted one: the screen's confirm button, the one Enter / Space press
+				// (`menu_keys::screen`: Cross on most pages).
+				None => {
+					self.goal = None;
+					return self.fire(super::menu_keys::screen(m).confirm);
+				}
 			}
 		} else if moved {
 			match under {
@@ -667,15 +674,15 @@ mod tests {
 		assert_eq!(presses.len(), 3);
 		assert!(presses.windows(2).all(|w| w[1] - w[0] == 3), "{presses:?}");
 		assert_eq!(crossed, 0);
-		// A click elsewhere does nothing; a click on an item selects it and presses Cross.
+		// A click on no item confirms the highlighted one (Cross, like Enter); a click on an item selects it and presses Cross.
 		st.cursor(10.0, 10.0);
 		st.click();
 		run(&mut st, &mut m, 20, &mut presses, &mut crossed);
-		assert_eq!((m.cur, crossed), (0x40, 0));
+		assert_eq!((m.cur, crossed), (0x40, 1));
 		st.cursor(200.0, 110.0);
 		st.click();
 		run(&mut st, &mut m, 80, &mut presses, &mut crossed);
-		assert_eq!((m.cur, crossed), (0x20, 1));
+		assert_eq!((m.cur, crossed), (0x20, 2));
 		// The keyboard takes over: a held menu button cancels a goal in progress.
 		st.cursor(200.0, 200.0);
 		let b = st.step(Some(&m), CROSS);

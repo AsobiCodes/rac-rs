@@ -100,7 +100,7 @@ impl FrameRec {
 		let mut spans = self.spans.clone();
 		spans.sort_by(|a, b| b.1.cmp(&a.1));
 		s += " |";
-		for &(name, d, c) in spans.iter().take(8) {
+		for &(name, d, c) in spans.iter().take(16) {
 			s += &format!(" {name} {:.0}us x{c}", d.as_secs_f32() * 1e6);
 		}
 		s
@@ -260,8 +260,75 @@ impl Drop for Span {
 	}
 }
 
+/// [PC] The on-screen meter (RAC_FPS_METER=1, test launchers; no retail counterpart): over half-second windows, the display
+/// frames per second, the average and worst time from one frame to the next, and the game steps per second as a share of the
+/// disc's field rate (100% = full speed). `frame_end` counts, `meter_draw` puts the two lines in the top right corner.
+struct Meter {
+	since: Instant,
+	last: Option<Instant>,
+	frames: u32,
+	ticks: u32,
+	sum: Duration,
+	worst: Duration,
+	lines: Option<(String, String, [f32; 4])>,
+}
+
+thread_local! {
+	static METER: RefCell<Option<Meter>> = const { RefCell::new(None) };
+}
+
+fn meter_on() -> bool {
+	static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+	*ON.get_or_init(|| std::env::var("RAC_FPS_METER").is_ok_and(|v| v == "1"))
+}
+
+fn meter_frame(ticks: u32) {
+	METER.with(|m| {
+		let now = Instant::now();
+		let mut b = m.borrow_mut();
+		let m = b.get_or_insert_with(|| Meter { since: now, last: None, frames: 0, ticks: 0, sum: Duration::ZERO, worst: Duration::ZERO, lines: None });
+		if let Some(l) = m.last {
+			m.sum += now - l;
+			m.worst = m.worst.max(now - l);
+		}
+		m.last = Some(now);
+		m.frames += 1;
+		m.ticks += ticks;
+		let secs = (now - m.since).as_secs_f32();
+		if secs >= 0.5 && m.frames > 1 {
+			let ms = |d: Duration| d.as_secs_f32() * 1000.0;
+			let steps = m.ticks as f32 / secs;
+			let pct = 100.0 * steps / ee_oracle::ver::field_hz() as f32;
+			let colour = if pct >= 98.0 { [0.55, 1.0, 0.55, 1.0] } else if pct >= 80.0 { [1.0, 0.9, 0.4, 1.0] } else { [1.0, 0.45, 0.4, 1.0] };
+			let a = format!("{:.0} FPS  {:.1} MS  MAX {:.1}", m.frames as f32 / secs, ms(m.sum) / (m.frames - 1).max(1) as f32, ms(m.worst));
+			let b = format!("GAME SPEED {pct:.0}%  {steps:.0} STEPS/S");
+			*m = Meter { since: now, last: Some(now), frames: 0, ticks: 0, sum: Duration::ZERO, worst: Duration::ZERO, lines: Some((a, b, colour)) };
+		}
+	});
+}
+
+/// Draws the meter's lines (window pixels) when RAC_FPS_METER=1.
+pub(super) fn meter_draw(out: &mut Vec<crate::overlay::Quad>, w: f32, h: f32) {
+	if !meter_on() {
+		return;
+	}
+	METER.with(|m| {
+		let Some((a, b, colour)) = m.borrow().as_ref().and_then(|m| m.lines.clone()) else { return };
+		let k = (h / 720.0).max(0.6);
+		let size = 14.0 * k;
+		let tw = crate::overlay::text_width(&a, size).max(crate::overlay::text_width(&b, size));
+		let x = w - tw - 14.0 * k;
+		crate::overlay::rect(out, [x - 6.0 * k, 6.0 * k, tw + 12.0 * k, 2.0 * size + 12.0 * k], [0.0, 0.0, 0.0, 0.55]);
+		crate::overlay::text(out, &a, x, 10.0 * k, size, [1.0, 1.0, 1.0, 1.0]);
+		crate::overlay::text(out, &b, x, 14.0 * k + size, size, colour);
+	});
+}
+
 /// End of a redraw that ran `ticks` game ticks; prints the window once a second.
 pub(super) fn frame_end(ticks: u32) {
+	if meter_on() {
+		meter_frame(ticks);
+	}
 	if !on() {
 		return;
 	}

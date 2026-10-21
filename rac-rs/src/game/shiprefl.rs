@@ -3,7 +3,6 @@
 //! camera is inside the 16 m box and blended back over 50 ticks when it leaves.
 
 use super::*;
-use crate::particles::WorldQuad;
 
 /// Veldin's overlay section holds the loaded image from virtual address 0x15ef70 (byte comparison of the table at
 /// 0x1de730 against the extracted overlay.elf; Novalis's image starts at 0x15ef38).

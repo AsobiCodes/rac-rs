@@ -136,9 +136,6 @@ const ITEMS: u32 = 0x4ee5;
 const HELP: u32 = 0x4ee6;
 const GOODIES: u32 = 0x4fc2;
 const GADGET_LISTS: [u32; 4] = [0x4ee8, 0x4ee9, 0x4eea, 0x4eeb];
-/// The equip category of each of those lists (inventory::category).
-const GADGET_CATEGORY: [usize; 4] = [0, 3, 2, 1];
-pub const GADGET_CATEGORIES: [usize; 4] = GADGET_CATEGORY;
 const EQUIP: u32 = 0x4eec;
 /// Button legends, labels and stats of the pause pages (all_text; layout from retail PCSX2 captures [I]).
 const EXIT: u32 = 0x4ee0;
@@ -193,10 +190,6 @@ const ON: u32 = 0x4f5a;
 const OFF: u32 = 0x4f5b;
 const SAVE_GAME: u32 = 0x4f29;
 const OVERWRITE: u32 = 0x4fb3;
-pub const SAVING: u32 = 0x4fb5;
-pub const LOAD_FAILED: u32 = 0x4fbb;
-/// Save failed + auto-save disabled.
-pub const SAVE_FAILED_OFF: u32 = 0x4fbd;
 const SOUND_OPTIONS: u32 = 0x4f43;
 const SOUND_ROWS: [u32; 3] = [0x5212, 0x5213, 0x5214];
 const MONO: u32 = 0x5215;
@@ -217,11 +210,6 @@ const PLANET: u32 = 0x4ecc;
 /// Galactic Map: title, location texts (+ planet id), cancel legend.
 const GALACTIC_MAP: u32 = 0x4ef0;
 const LOCATION: u32 = 0x4eb9;
-/// How long a notice ("Saving Data.", failures) stays up, seconds. The game has no fixed time: the notice stays
-/// while the card is busy (state > 2 or a command >= 0, FUN_00280568) and errors open their failure dialog.
-/// The port's save is synchronous, so 30 ticks stand in for the card time (ingame_save_quit.md s10) [PC].
-const NOTICE_TIME: f32 = 0.6;
-const FAIL_TIME: f32 = 2.5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
@@ -452,7 +440,6 @@ pub fn ss_picture(disc: &mut Disc, toc: &[u8], base: usize, i: usize) -> R<Textu
 
 /// ToC bases: the 19 planet pictures (PIF2 512x128) and the 6 per-language title-card plate sets.
 pub const PLANET_PICS: usize = 0x788;
-pub const SPACE_PLATES: usize = 0x1388;
 
 fn pif2(d: &[u8], at: usize, keep_alpha: bool) -> R<Texture> {
 	let e = d.get(at..).ok_or("PIF2 outside its file")?;
@@ -474,19 +461,6 @@ pub fn planet_picture(disc: &mut Disc, toc: &[u8], i: usize) -> R<Texture> {
 	let at = PLANET_PICS + i * 8;
 	let raw = disc.read_sectors(u32_at(toc, at)? as u64, u32_at(toc, at + 4)? as u64).map_err(|e| e.to_string())?;
 	pif2(&maybe_wad(raw)?, 0, false)
-}
-
-/// The travel title cards (space_plates, ToC 0x1388, one WAD per language): entry 0 is a 64x64 helper
-/// image, entries 1.. the 512x64 caption plates (level_transition.md "Title card").
-pub fn plates(disc: &mut Disc, lang: usize) -> R<Vec<Texture>> {
-	let toc = toc::read_toc(disc).map_err(|e| e.to_string())?;
-	let at = SPACE_PLATES + TEXT_SLOTS[lang.min(4)] * 8;
-	let raw = disc.read_sectors(u32_at(&toc, at)? as u64, u32_at(&toc, at + 4)? as u64).map_err(|e| e.to_string())?;
-	let d = maybe_wad(raw)?;
-	let n = u32_at(&d, 0)? as usize;
-	// Entry 0 is the blue texture shown through the plates; the plates are black masks, opaque around
-	// the lettering (FUN_002a5ab0 uploads both; level_transition.md "Title card").
-	(0..n).map(|k| pif2(&d, u32_at(&d, 4 + 4 * k)? as usize, true)).collect()
 }
 
 pub struct Menu {
@@ -659,6 +633,8 @@ fn slot_seqs(page: Page, in_game: bool) -> Option<([u8; 14], bool)> {
 		Page::HelpDesk | Page::Subtitles => (park(&[0x49, 0x4a, 0x4b, 0x4c, 0x4d]), false),
 		Page::Camera => (park(&[0x76, 0x77, 0x78, 0x79, 0x7a]), false),
 		Page::SaveGame | Page::LoadSaved => (park(&[0x7c, 0x7d, 0x7e, 0x7f, 0x80]), false),
+		// The front end's copy (page 0x1d4db8): slot 4 is the Yes / No label panel.
+		Page::Overwrite if !in_game => (park(&[0x81, 0x82, 0x83, 0x84, 0xd1]), false),
 		Page::Overwrite => (park(&[0x81, 0x82, 0x83, 0x84, 0x85]), false),
 		Page::Quit => (park(&[0x4e, 0x4f, 0x50, 0x51, 0x52]), false),
 		Page::Goodies => (park(&[0x8e, 0x8f, 0x90, 0x91, 0x92, 0x13, 0x14]), false),
@@ -815,39 +791,9 @@ impl Menu {
 		self.slots = slots;
 	}
 
-	/// The pause menu (FUN_00275b20(0)): the root page over the frozen game.
-	pub fn pause(lang: usize, settings: Settings, ingame: InGame) -> Menu {
-		let mut m = Menu::new(lang);
-		m.settings = settings;
-		m.ingame = ingame;
-		m.page = Page::Pause;
-		m.slots = crate::save::summaries();
-		m
-	}
-
-	/// The Galactic Map (FUN_00275b20(10)).
-	pub fn map(lang: usize, settings: Settings, ingame: InGame) -> Menu {
-		let mut m = Menu::pause(lang, settings, ingame);
-		m.page = Page::Map;
-		m
-	}
-
-	/// The ship's Galactic Map (page 0xf, FUN_0028b868): cursor on the current planet.
-	pub fn galactic(lang: usize, settings: Settings, ingame: InGame) -> Menu {
-		let mut m = Menu::pause(lang, settings, ingame);
-		m.page = Page::Galactic;
-		m.sel = m.ingame.travel.as_ref().and_then(|t| t.planets.iter().position(|&p| p == t.current)).unwrap_or(0);
-		m
-	}
-
 	/// The planet the Galactic Map cursor is on.
 	fn selected_planet(&self) -> Option<usize> {
 		self.ingame.travel.as_ref().and_then(|t| t.planets.get(self.sel).copied())
-	}
-
-	/// Shows a message box (text id) for a while, e.g. a save failure.
-	pub fn notify(&mut self, id: u32) {
-		self.notice = Some((id, if id == SAVING { NOTICE_TIME } else { FAIL_TIME }));
 	}
 
 	fn slot_rows(&self, text: &Text, empty_ok: bool) -> Vec<(String, bool)> {
@@ -919,30 +865,6 @@ impl Menu {
 			_ => return None,
 		};
 		(self.page_time * 50.0 >= MOVE_TICKS).then(|| (id, layout(self.page, 0, self.in_game()).panels[1]))
-	}
-
-	/// Items of the current page as (text, enabled).
-	/// Gadgets d-pad (FUN_00278e30): left / right wrap within the row; up / down step rows and, past the
-	/// first / last row, move to the neighbouring grid at the same column (clamped), entering its last /
-	/// first row. Returns the navigate cue when the cursor moved.
-	fn gadget_move(&mut self, key: Key) -> Option<Cue> {
-		let i = self.sel.min(3);
-		let (rows, cols, _, _) = GADGET_GRIDS[i];
-		let at = self.cell[i].min(rows * cols - 1);
-		let (row, col) = (at / cols, at % cols);
-		match key {
-			Key::Left => self.cell[i] = row * cols + (col + cols - 1) % cols,
-			Key::Right => self.cell[i] = row * cols + (col + 1) % cols,
-			Key::Up if row > 0 => self.cell[i] = at - cols,
-			Key::Down if row + 1 < rows => self.cell[i] = at + cols,
-			_ => {
-				let j = if key == Key::Up { (i + 3) % 4 } else { (i + 1) % 4 };
-				let (r2, c2, _, _) = GADGET_GRIDS[j];
-				self.cell[j] = if key == Key::Up { (r2 - 1) * c2 } else { 0 } + col.min(c2 - 1);
-				self.sel = j;
-			}
-		}
-		(self.sel != i || self.cell[i] != at).then_some(Cue::Navigate)
 	}
 
 	/// Pixels per world unit of the Gadgets grid in panel `r`: max(pixel w, h) / max(world w, h) of the
@@ -1057,285 +979,9 @@ impl Menu {
 
 	/// True on pages of the pause menu (Start closes them; Triangle at the root closes).
 	pub fn in_game(&self) -> bool {
-		!matches!(self.page, Page::Title | Page::Root | Page::NewGame | Page::LoadGame | Page::Options | Page::Language | Page::Video | Page::Graphics) && (self.page != Page::Sound || self.stack.first().is_some_and(|s| s.0 == Page::Pause))
-	}
-
-	pub fn press(&mut self, key: Key, text: &Text) -> (Option<Cue>, Option<Action>) {
-		if self.notice.is_some() {
-			return (None, None);
-		}
-		if self.page == Page::Title {
-			// Pad mask 0x840 (Start, X) leaves the title for the page menu.
-			if matches!(key, Key::Confirm | Key::Start) && self.time > 1.0 {
-				self.slots = crate::save::summaries();
-				self.enter(Page::Root, 0);
-				return (Some(Cue::Confirm), None);
-			}
-			return (None, None);
-		}
-		let in_game = self.in_game();
-		// Start / Select / R3 (0xd00) close the pause menu from any page.
-		if key == Key::Start && in_game && self.page != Page::GalacticInfo {
-			return (Some(Cue::Switch), Some(Action::Resume));
-		}
-		match (self.page, key) {
-			// Page 0xf: the list does not wrap. Details page 0x10: Start departs for the current planet
-			// (selection reverted), Cross for the picked one (level_transition.md "Input").
-			(Page::Galactic, Key::Up | Key::Down) => {
-				let n = self.items(text).len();
-				let to = if key == Key::Up { self.sel.saturating_sub(1) } else { (self.sel + 1).min(n.saturating_sub(1)) };
-				if to == self.sel {
-					return (None, None);
-				}
-				self.sel = to;
-				return (Some(Cue::Navigate), None);
-			}
-			(Page::GalacticInfo, Key::Start) => {
-				let cur = self.ingame.travel.as_ref().map(|t| t.current).unwrap_or(0);
-				return (Some(Cue::Confirm), Some(Action::Depart(cur)));
-			}
-			(Page::GalacticInfo, Key::Up | Key::Down) => return (None, None),
-			// Items: a display-only 3x3 grid; the d-pad moves in rows and columns, Cross does nothing.
-			(Page::Items, Key::Up | Key::Down | Key::Left | Key::Right) => {
-				let (r, c) = (self.sel.min(8) / 3, self.sel.min(8) % 3);
-				let (r, c) = match key {
-					Key::Up => ((r + 2) % 3, c),
-					Key::Down => ((r + 1) % 3, c),
-					Key::Left => (r, (c + 2) % 3),
-					_ => (r, (c + 1) % 3),
-				};
-				self.sel = r * 3 + c;
-				return (Some(Cue::Navigate), None);
-			}
-			(Page::Items, Key::Confirm) => return (None, None),
-			(Page::Gadgets, Key::Up | Key::Down | Key::Left | Key::Right) => return (self.gadget_move(key), None),
-			// Cross wears the cell's item if owned (FUN_00278e30, ov.c:92227); the worn one again comes off,
-			// except in the hand and back lists (categories 0 and 3). Empty or unowned cells deny.
-			(Page::Gadgets, Key::Confirm) => {
-				let i = self.sel.min(3);
-				let (_, _, cells, _) = GADGET_GRIDS[i];
-				let id = cells[self.cell[i].min(cells.len() - 1)];
-				let (opts, on) = &self.ingame.wear[i];
-				if !opts.iter().any(|o| o.0 == id) {
-					return (Some(Cue::Deny), None);
-				}
-				let cat = GADGET_CATEGORY[i];
-				let next = if *on == id && cat != 0 && cat != 3 { 0 } else { id };
-				self.ingame.wear[i].1 = next;
-				return (Some(Cue::Confirm), Some(Action::Wear(cat, next)));
-			}
-			// Quit Game (0x27bda0): Circle = Yes, Triangle = No. Overwrite (0x27f098): Circle overwrites.
-			(Page::Quit, Key::Circle) => return (Some(Cue::Confirm), Some(Action::Quit)),
-			(Page::Overwrite, Key::Circle) => {
-				self.back();
-				self.notify(SAVING);
-				return (Some(Cue::Confirm), Some(Action::Save(self.pending)));
-			}
-			(Page::Quit | Page::Overwrite, k) if k != Key::Back => return (None, None),
-			_ => {}
-		}
-		let n = self.items(text).len().max(1);
-		match key {
-			Key::Up | Key::Down => {
-				self.sel = if key == Key::Up { (self.sel + n - 1) % n } else { (self.sel + 1) % n };
-				(Some(Cue::Navigate), None)
-			}
-			Key::Back => {
-				if self.back() {
-					(Some(Cue::Switch), None)
-				} else if in_game {
-					// Triangle at the root page (parent 0) closes the menu.
-					(Some(Cue::Switch), Some(Action::Resume))
-				} else {
-					(None, None)
-				}
-			}
-			Key::Confirm => {
-				if !self.items(text).get(self.sel).is_some_and(|i| i.1) {
-					return (Some(Cue::Switch), None);
-				}
-				let from = self.page;
-				match (self.page, self.sel) {
-					(Page::Root, 0) => self.enter(Page::NewGame, 0),
-					(Page::Root, 1) => self.enter(Page::LoadGame, 0),
-					(Page::Root, _) => self.enter(Page::Options, 0),
-					(Page::Options, 0) => self.enter(Page::Language, self.lang),
-					(Page::Options, 1) => self.enter(Page::Video, 0),
-					(Page::Options, _) => self.enter(Page::Sound, 0),
-					(Page::NewGame, s) => return (Some(Cue::Confirm), Some(Action::NewGame((s < crate::save::SLOTS).then_some(s)))),
-					(Page::LoadGame | Page::LoadSaved, s) => return (Some(Cue::Confirm), Some(Action::Load(s))),
-					(Page::Language, l) => {
-						self.lang = l;
-						self.settings.lang = l as u8;
-						return (Some(Cue::Confirm), Some(Action::Language(l)));
-					}
-					// The game asks to keep the new mode (flag 1 confirm flow); the port switches at once [P].
-					(Page::Video, _) => {
-						self.settings.hz60 = !self.settings.hz60;
-						return (Some(Cue::Confirm), None);
-					}
-					(Page::Sound, 2) => {
-						self.settings.stereo = !self.settings.stereo;
-						return (Some(Cue::Confirm), None);
-					}
-					(Page::Galactic, s) => self.enter(Page::GalacticInfo, s),
-					(Page::GalacticInfo, _) => {
-							let Some(p) = self.selected_planet() else { return (None, None) };
-							return (Some(Cue::Confirm), Some(Action::Depart(p)));
-						}
-					(Page::Pause, i) => {
-						let p = [Page::Weapons, Page::Gadgets, Page::QuickSelect, Page::Items, Page::Help, Page::GameOptions, Page::Goodies][i.min(6)];
-						self.enter(p, 0);
-					}
-					(Page::Help, i) => self.enter([Page::HelpLog, Page::Controls, Page::Moves, Page::WeaponsHelp, Page::GadgetsHelp][i.min(4)], 0),
-					(Page::GameOptions, i) => {
-						let p = [Page::HelpDesk, Page::SaveGame, Page::LoadSaved, Page::Sound, Page::Camera, Page::Subtitles, Page::Quit][i.min(6)];
-						if matches!(p, Page::SaveGame | Page::LoadSaved) {
-							self.slots = crate::save::summaries();
-						}
-						self.enter(p, 0);
-					}
-					(Page::HelpDesk, 0) => self.settings.help_voice = !self.settings.help_voice,
-					(Page::HelpDesk, _) => self.settings.help_text = !self.settings.help_text,
-					(Page::Subtitles, _) => self.settings.subtitles = !self.settings.subtitles,
-					(Page::Camera, 0) => self.settings.cam_lr = !self.settings.cam_lr,
-					(Page::Camera, 1) => self.settings.cam_ud = !self.settings.cam_ud,
-					(Page::Camera, 2) => self.settings.cam_speed = (self.settings.cam_speed + 1) % 3,
-					(Page::Camera, 3) => self.settings.cam_modern = !self.settings.cam_modern,
-					(Page::Camera, _) => self.settings.smooth = !self.settings.smooth,
-					// An empty slot saves at once; a used one asks first (page 0x1b6678).
-					(Page::SaveGame, s) => {
-						if self.slots.get(s).is_some_and(|x| x.is_some()) {
-							self.pending = s;
-							self.enter(Page::Overwrite, 0);
-						} else {
-							self.notify(SAVING);
-							return (Some(Cue::Confirm), Some(Action::Save(s)));
-						}
-					}
-					(Page::Weapons, i) => {
-						let Some(&(id, _, _)) = self.grid_weapons().get(i).copied() else { return (None, None) };
-						self.ingame.equipped = id;
-						return (Some(Cue::Confirm), Some(Action::Equip(id)));
-					}
-					// Type 1 rows (Help Log, Moves, ...) have no Cross action; the Items page has only a
-					// draw routine (FUN_0027c0f8).
-					_ => return (None, None),
-				}
-				// Cross on a toggle / multi-choice row plays cue 0 (0x27e408, 0x27e898); a switch into those pages is cue 4.
-				let toggled = matches!(from, Page::HelpDesk | Page::Subtitles | Page::Camera);
-				(Some(if toggled { Cue::Confirm } else { Cue::Switch }), None)
-			}
-			_ => (None, None),
-		}
-	}
-
-	/// Left (-1) or Right (+1) held on the Sound page: volume moves 3 per 50 Hz frame (0x27a108).
-	pub fn hold(&mut self, dir: i32, dt: f32) {
-		if self.page != Page::Sound || dir == 0 || self.sel > 1 || self.notice.is_some() {
-			self.hold_t = 0.0;
-			return;
-		}
-		self.hold_t += dt * 50.0;
-		while self.hold_t >= 1.0 {
-			self.hold_t -= 1.0;
-			let v = if self.sel == 0 { &mut self.settings.sfx } else { &mut self.settings.music };
-			*v = crate::settings::step_volume(*v, dir);
-		}
-	}
-
-	/// Port extra (mouse control): what the pointer at window pixel (x, y) is over, using the same rects
-	/// the page draws with.
-	pub fn point(&self, x: f32, y: f32, w: f32, h: f32, text: &Text) -> Option<Point> {
-		if self.notice.is_some() || self.page_time * 50.0 < MOVE_TICKS {
-			return None;
-		}
-		if self.page == Page::Title {
-			return Some(Point::Row(0));
-		}
-		let k = h / SCREEN[1];
-		let (px, py) = ((x - (w - SCREEN[0] * k) / 2.0) / k, y / k);
-		let inside = |r: &[f32; 4]| px >= r[0] && px < r[0] + r[2] && py >= r[1] && py < r[1] + r[3];
-		let items = self.items(text);
-		let lay = layout(self.page, items.len(), self.in_game());
-		match self.page {
-			Page::Quit | Page::Overwrite => {
-				let r = lay.panels[if self.page == Page::Quit { 0 } else { 2 }];
-				let y0 = r[1] + r[3] - 30.0;
-				if inside(&[r[0] + 8.0, y0, r[2] / 2.0 - 12.0, 20.0]) {
-					return Some(Point::No);
-				}
-				return inside(&[r[0] + r[2] / 2.0 + 4.0, y0, r[2] / 2.0 - 12.0, 20.0]).then_some(Point::Yes);
-			}
-			Page::Weapons => {
-				let r = lay.panels[2];
-				let (c, row) = (((px - r[0] - 5.0) / CELL[0]).floor(), ((py - r[1] - 5.0) / CELL[1]).floor());
-				if !inside(&r) || !(0.0..5.0).contains(&c) || row < 0.0 {
-					return None;
-				}
-				let i = row as usize * 5 + c as usize;
-				return (i < self.grid_weapons().len()).then_some(Point::Row(i));
-			}
-			Page::Sound => {
-				let Rows::Column(p) = lay.rows else { return None };
-				let (pw, ph) = (p[2].floor(), p[3].floor());
-				let hw = (pw / 2.0).floor();
-				for i in 0..items.len().min(3) {
-					let ry = p[1] + (ph / 4.0).floor() * (i + 1) as f32;
-					if (py - ry).abs() > 10.0 || px < p[0] || px > p[0] + pw {
-						continue;
-					}
-					let span = pw - (hw + 74.0);
-					let bar = px - (p[0] + hw + 8.0);
-					if i < 2 && bar >= 0.0 && px <= p[0] + pw - 63.0 {
-						return Some(Point::Volume(i, (bar / span).clamp(0.0, 1.0)));
-					}
-					return Some(Point::Row(i));
-				}
-				return None;
-			}
-			_ => {}
-		}
-		match &lay.rows {
-			Rows::Each(rects) => rects.iter().take(items.len()).position(inside).map(Point::Row),
-			Rows::Column(r) if !items.is_empty() => {
-				let (first, rects) = column(*r, items.len(), self.sel);
-				rects.iter().position(inside).map(|j| Point::Row(first + j))
-			}
-			Rows::Slots(strip, more) => {
-				if let Some(i) = slot_rects(*strip, items.len()).iter().position(inside) {
-					return Some(Point::Row(i));
-				}
-				more.filter(|m| inside(m) && items.len() > crate::save::SLOTS).map(|_| Point::Row(crate::save::SLOTS))
-			}
-			_ => None,
-		}
-	}
-
-	/// Moves the selection to row `i` (mouse hover); true when it changed.
-	pub fn hover(&mut self, i: usize, text: &Text) -> bool {
-		if self.page == Page::Title || i == self.sel || i >= self.items(text).len().max(1) {
-			return false;
-		}
-		self.sel = i;
-		true
-	}
-
-	/// Sets the Sound page volume row `i` (0 sfx, 1 music) to a fraction of the bar (mouse).
-	pub fn set_volume(&mut self, i: usize, frac: f32) {
-		let v = (frac * crate::settings::VOLUME_MAX as f32).round() as u16;
-		if i == 0 {
-			self.settings.sfx = v;
-		} else {
-			self.settings.music = v;
-		}
-		self.sel = i;
-	}
-
-	/// Back to the title after an attract movie: the logo delay and Press Start fade start over (UI-11c).
-	pub fn restart_title(&mut self) {
-		self.time = 0.0;
-		self.logo_alpha = 0.0;
+		// The overwrite confirm entered from New Game is the front end's (retail page 0x1d4db8, viewer/front_mirror.rs).
+		let front_overwrite = self.page == Page::Overwrite && self.stack.last().is_some_and(|s| s.0 == Page::NewGame);
+		!front_overwrite && !matches!(self.page, Page::Title | Page::Root | Page::NewGame | Page::LoadGame | Page::Options | Page::Language | Page::Video | Page::Graphics) && (self.page != Page::Sound || self.stack.first().is_some_and(|s| s.0 == Page::Pause))
 	}
 
 	pub fn update(&mut self, dt: f32) {
@@ -1382,6 +1028,8 @@ impl Menu {
 	fn header(&self, text: &Text) -> Option<String> {
 		let id = match self.page {
 			Page::NewGame | Page::LoadGame => SELECT_FILE,
+			// The front end's confirm keeps New Game's title item (0x1d4c90).
+			Page::Overwrite if !self.in_game() => SELECT_FILE,
 			Page::Options => OPTIONS,
 			Page::Language => LANGUAGE,
 			Page::Video => VIDEO_OPTIONS,
@@ -1784,6 +1432,30 @@ impl Menu {
 				legend(out, &art.font, &rows, lay.panels[4], k, ox);
 			}
 			Page::Galactic | Page::GalacticInfo => galactic(self, out, art, text, &lay, k, ox),
+			// The front end's overwrite confirm (page 0x1d4db8): FUN_00221650 draws text 0x4fb3 centred in the body panel (colour
+			// 0x80ffa888), the label item lists Circle Yes 0x524f / Triangle No 0x524b, New Game's slot list stays up with its cursor.
+			Page::Overwrite if !self.in_game() => {
+				let r = lay.panels[2];
+				let lines = crate::help::wrap(&art.font, text.get(OVERWRITE), r[2] - 16.0);
+				let top = r[1] + ((r[3] - lines.len() as f32 * 16.0) / 2.0).max(4.0);
+				for (i, l) in lines.iter().enumerate() {
+					let tw = crate::help::width(&art.font, l).min(r[2] - 16.0);
+					fit_text(out, &art.font, l, [r[0] + (r[2] - tw) / 2.0, top + i as f32 * 16.0, tw, 16.0], k, ox, UNSELECTED);
+				}
+				legend(out, &art.font, &[text.get(YES), text.get(NO)], lay.panels[3], k, ox);
+				let rows = self.slot_rows(text, true);
+				for (i, rr) in slot_rects(SLOT_STRIP, crate::save::SLOTS).iter().enumerate() {
+					if i == self.sel {
+						let g = |c: u8| c as f32 / 255.0;
+						crate::overlay::rect(out, [ox + rr[0] * k, (rr[1] + 2.0) * k, rr[2] * k, rr[3] * k], [g(0x20), g(0xff), g(0xff), 0.35]);
+					}
+					let parts: Vec<&str> = rows[i].0.split("  ").collect();
+					let lh = (rr[3] - 8.0) / parts.len() as f32;
+					for (j, part) in parts.iter().enumerate() {
+						fit_text(out, &art.font, part, [rr[0] + 4.0, rr[1] + 4.0 + j as f32 * lh, rr[2] - 8.0, lh.min(16.0)], k, ox, colour(i, true));
+					}
+				}
+			}
 			Page::Quit | Page::Overwrite => {
 				let body = text.get(if self.page == Page::Quit { QUIT_BODY } else { OVERWRITE });
 				let r = lay.panels[if self.page == Page::Quit { 0 } else { 2 }];
@@ -1796,8 +1468,9 @@ impl Menu {
 				// Circle = Yes, Triangle = No (0x27bda0 / 0x27f098); the overwrite page draws no Yes/No
 				// itself (ingame_menu_leftovers.md P1-e), shown here like Quit [P].
 				let y = r[1] + r[3] - 30.0;
-				fit_text(out, &art.font, text.get(NO), [r[0] + 8.0, y, r[2] / 2.0 - 12.0, 20.0], k, ox, UNSELECTED);
-				fit_text(out, &art.font, text.get(YES), [r[0] + r[2] / 2.0 + 4.0, y, r[2] / 2.0 - 12.0, 20.0], k, ox, UNSELECTED);
+				let named = |id| crate::retail::prompts::for_text(text.get(id));
+				fit_text(out, &art.font, &named(NO), [r[0] + 8.0, y, r[2] / 2.0 - 12.0, 20.0], k, ox, UNSELECTED);
+				fit_text(out, &art.font, &named(YES), [r[0] + r[2] / 2.0 + 4.0, y, r[2] / 2.0 - 12.0, 20.0], k, ox, UNSELECTED);
 				if self.page == Page::Overwrite {
 					for (i, rr) in slot_rects(SLOT_STRIP, crate::save::SLOTS).iter().enumerate() {
 						let label = self.slot_rows(text, true)[i].0.clone();
@@ -1835,6 +1508,13 @@ struct DialogText {
 	yes: u32,
 	no: u32,
 	hint: u32,
+}
+
+/// The keys of the front end's message box (front mode 4) from the hints it shows (`menu_keys::front_dialog`); None when it
+/// shows none (worker, retail.rs `front_snap`).
+pub fn dialog_keys(d: &crate::retail::FrontDialog) -> Option<crate::retail::menu_keys::Screen> {
+	let s = dialog_text(d)?;
+	crate::retail::menu_keys::front_dialog(s.yes, s.no, s.hint)
 }
 
 /// The memory card states' messages (FUN_001fb780 kind 3 by the card state DAT_0015eeb0, flags DAT_0015eeb4 `b`, DAT_0015f5c8 `p`),
@@ -1959,7 +1639,9 @@ impl Menu {
 		let ox = (w - SCREEN[0] * k) / 2.0;
 		const FADE: f32 = 25.0;
 		let fade_in = (1.0 - d.fade_in as f32 / FADE).clamp(0.0, 1.0);
-		let body = [s.body[0], s.body[1]].iter().filter(|&&id| id != 0).map(|&id| text.get(id)).collect::<Vec<_>>().join("\u{1}\u{1}");
+		// Glyphs spelled out as key names while the keyboard is the device (prompts.rs; the hints name the box's keys,
+		// `dialog_keys`).
+		let body = [s.body[0], s.body[1]].iter().filter(|&&id| id != 0).map(|&id| crate::retail::prompts::for_text(text.get(id))).collect::<Vec<_>>().join("\u{1}\u{1}");
 		let lines = dialog_wrap(&art.font, &body, 320);
 		// Kind 6 has its own panel; kind 3 centres a box 40 px taller than the text on the screen height.
 		let (top, bottom, text_y) = if d.kind == 6 {
@@ -1990,7 +1672,7 @@ impl Menu {
 		let hc = [SELECTED[0], SELECTED[1], SELECTED[2], hint_a];
 		for (id, x) in [(s.yes, 202.0), (s.no, 309.0), (s.hint, 256.0)] {
 			if id != 0 {
-				line(out, text.get(id), x, hint_y, hc);
+				line(out, &crate::retail::prompts::for_text(text.get(id)), x, hint_y, hc);
 			}
 		}
 	}
@@ -2348,51 +2030,11 @@ pub struct Attract {
 }
 
 impl Attract {
-	pub const IDLE_TICKS: u32 = 1250;
-	pub const BLACK_BEFORE: u32 = 10;
-	pub const BLACK_AFTER: u32 = 4;
 
 	pub fn new(first: u32) -> Attract {
 		Attract { idle: 0, next: first & 3, black: 0, then_movie: false, playing: false }
 	}
 
-	/// One 50 Hz tick; `title` = the menu is on the title page.
-	pub fn tick(&mut self, title: bool) -> Option<AttractEvent> {
-		if self.black > 0 {
-			self.black -= 1;
-			if self.black > 0 {
-				return None;
-			}
-			if self.then_movie {
-				self.playing = true;
-				let id = 63 + self.next;
-				self.next = (self.next + 1) % 4;
-				return Some(AttractEvent::Movie(id));
-			}
-			return Some(AttractEvent::Title);
-		}
-		if self.playing {
-			return None;
-		}
-		if !title {
-			self.idle = 0;
-			return None;
-		}
-		self.idle += 1;
-		if self.idle >= Self::IDLE_TICKS {
-			self.idle = 0;
-			self.black = Self::BLACK_BEFORE;
-			self.then_movie = true;
-		}
-		None
-	}
-
-	/// The movie finished, was skipped or failed to start.
-	pub fn end_movie(&mut self) {
-		self.playing = false;
-		self.then_movie = false;
-		self.black = Self::BLACK_AFTER;
-	}
 }
 
 #[cfg(test)]
@@ -2414,34 +2056,7 @@ mod tests {
 		assert!((super::GOLD_TEXT[0] * super::TEXT_GAIN - 1.216).abs() < 1e-6);
 	}
 
-	// UI-11c tests 1-3: the idle clock, its reset by a page change and the movie rotation.
-	#[test]
-	fn attract_clock() {
-		use super::{Attract, AttractEvent};
-		let run = |a: &mut Attract, n: u32| (0..n).find_map(|_| a.tick(true));
-		let mut a = Attract::new(0);
-		assert_eq!(run(&mut a, 1249), None);
-		assert_eq!(a.black, 0);
-		a.tick(true);
-		assert_eq!(a.black, 10, "black phase begins on tick 1250");
-		assert_eq!(run(&mut a, 10), Some(AttractEvent::Movie(63)));
-		a.end_movie();
-		assert_eq!(run(&mut a, 4), Some(AttractEvent::Title));
-		let mut b = Attract::new(1);
-		for _ in 0..1000 {
-			b.tick(true);
-		}
-		b.tick(false);
-		assert_eq!(run(&mut b, 1249), None);
-		b.tick(true);
-		assert_eq!(b.black, 10);
-		let mut c = Attract::new(3);
-		assert_eq!(run(&mut c, 1260), Some(AttractEvent::Movie(66)));
-		c.end_movie();
-		run(&mut c, 4);
-		assert_eq!(run(&mut c, 1260), Some(AttractEvent::Movie(63)));
-	}
-
+	
 	#[test]
 	fn help_log_body_fade_counters_and_colours() {
 		let mut st = (0, -1);
@@ -2483,86 +2098,6 @@ mod tests {
 		for (id, s) in ids {
 			println!("{id:#x}	{s:?}");
 		}
-	}
-
-	/// Every layout panel is the rest rect of one of its page's class-0x472 slots, so the fly-in can pose it;
-	/// the root intro starts off-screen and Weapons slot 1 passes the decoded seq 0x1b frames.
-	/// Gadgets grids: rows wrap left / right, up / down chain Hand -> Back -> Head -> Foot -> Hand at the
-	/// clamped column; Cross denies unowned cells and toggles a worn head item off.
-	/// The Gadgets panel model follows the grid cursor and is drawn only for owned items; category 3 ids add the
-	/// class 601 pair.
-	#[test]
-	fn gadgets_panel_model_follows_cursor_and_ownership() {
-		let mut ig = InGame::default();
-		ig.wear[1].0 = vec![(2, "Heli".into())];
-		let mut m = Menu::pause(0, Settings::default(), ig);
-		m.page = Page::Gadgets;
-		m.page_time = 1.0;
-		m.sel = 1;
-		m.cell[1] = 0;
-		let (id, rect, _) = m.preview().unwrap();
-		assert_eq!((id, rect), (2, [264.0, 342.0, 90.0, 82.0]));
-		assert!(m.gadget_owned(2) && !m.gadget_owned(3));
-		assert_eq!((crate::inventory::panel_class(2), crate::inventory::category(2)), (Some(607), Some(3)));
-		assert_eq!(crate::inventory::panel_class(0x18), Some(0x1df));
-		m.cell[1] = 1;
-		assert!(!m.gadget_owned(m.preview().unwrap().0));
-	}
-
-	#[test]
-	fn gadgets_help_entries_texts_and_fade() {
-		let mut ig = InGame::default();
-		ig.gadget_help = vec![(26, 0), (2, 6), (29, 12)];
-		let mut m = Menu::pause(0, Settings::default(), ig);
-		m.page = Page::GadgetsHelp;
-		m.page_time = 1.0;
-		m.sel = 1;
-		assert_eq!(m.gadget_entry(), Some((2, 6)));
-		let t = GADGET_HELP_TEXT.iter().find(|e| e.0 == 2).unwrap();
-		assert_eq!((t.1, t.2), (0x4f8d, 0x4e87));
-		let (id, rect, _) = m.preview().unwrap();
-		assert_eq!((id, rect), (2, [101.0, 90.0, 134.0, 211.0]));
-		// Fade: first tick 8, then a changed entry 5, 2, 0 and the shown entry switches.
-		let mut f = help_fade_step((0, -1), 0);
-		assert_eq!(f, (0, 8));
-		let seq: Vec<(usize, i32)> = (0..3).map(|_| { f = help_fade_step(f, 1); f }).collect();
-		assert_eq!(seq, vec![(0, 5), (0, 2), (1, 0)]);
-		// Nothing owned: no entry, no preview.
-		let mut e = Menu::pause(0, Settings::default(), InGame::default());
-		e.page = Page::GadgetsHelp;
-		e.page_time = 1.0;
-		assert!(e.gadget_entry().is_none() && e.preview().is_none());
-		// Every cell id has text ids.
-		assert!(GADGET_GRID_IDS.iter().all(|id| GADGET_HELP_TEXT.iter().any(|e| e.0 == *id)));
-	}
-
-	#[test]
-	fn gadget_grids() {
-		let mut ig = InGame::default();
-		ig.wear[2].0 = vec![(6, "Helmet".into())];
-		let mut m = Menu::pause(0, Settings::default(), ig);
-		m.page = Page::Gadgets;
-		assert_eq!(m.gadget_move(Key::Left), Some(Cue::Navigate));
-		assert_eq!((m.sel, m.cell[0]), (0, 2));
-		m.gadget_move(Key::Down);
-		assert_eq!((m.sel, m.cell[0]), (0, 5));
-		m.gadget_move(Key::Down);
-		assert_eq!((m.sel, m.cell[1]), (1, 2));
-		m.gadget_move(Key::Up);
-		assert_eq!((m.sel, m.cell[0]), (0, 5));
-		m.gadget_move(Key::Down);
-		m.gadget_move(Key::Down);
-		m.gadget_move(Key::Down);
-		assert_eq!((m.sel, m.cell[3]), (3, 1));
-		m.gadget_move(Key::Down);
-		assert_eq!((m.sel, m.cell[0]), (0, 1));
-		let text = Text::default();
-		m.sel = 2;
-		m.cell[2] = 1;
-		assert_eq!(m.press(Key::Confirm, &text).0, Some(Cue::Deny));
-		m.cell[2] = 0;
-		assert_eq!(m.press(Key::Confirm, &text), (Some(Cue::Confirm), Some(Action::Wear(2, 6))));
-		assert_eq!(m.press(Key::Confirm, &text), (Some(Cue::Confirm), Some(Action::Wear(2, 0))));
 	}
 
 	#[test]
@@ -2614,107 +2149,6 @@ mod tests {
 		let logo = logo(&l).unwrap();
 		assert!(logo.rgba.iter().any(|p| p[3] == 255) && logo.rgba.iter().any(|p| p[3] == 0));
 		assert_eq!((press_start(&l, 0).unwrap().w, press_start(&l, 4).unwrap().h), (256, 128));
-		let mut m = Menu::new(0);
-		m.update(2.0);
-		assert_eq!(m.press(Key::Confirm, &t).0, Some(Cue::Confirm));
-		assert_eq!(m.page, Page::Root);
-		m.press(Key::Down, &t);
-		m.press(Key::Down, &t);
-		m.press(Key::Confirm, &t);
-		assert_eq!(m.page, Page::Options);
-		m.press(Key::Confirm, &t);
-		assert_eq!(m.page, Page::Language);
-		assert_eq!(m.press(Key::Down, &t).0, Some(Cue::Navigate));
-		assert_eq!(m.press(Key::Confirm, &t).1, Some(Action::Language(1)));
-		m.press(Key::Back, &t);
-		m.press(Key::Back, &t);
-		m.press(Key::Up, &t);
-		m.press(Key::Up, &t);
-		m.press(Key::Confirm, &t);
-		assert_eq!(m.page, Page::NewGame);
-		m.sel = 5;
-		assert_eq!(m.press(Key::Confirm, &t).1, Some(Action::NewGame(None)));
-
-		// Pause: 6 root items (Goodies hidden), Options -> Sound held volume, Quit confirm, Start closes.
-		let mut p = Menu::pause(0, Settings::default(), InGame::default());
-		assert_eq!(p.items(&t).len(), 6);
-		assert!(p.in_game());
-		p.sel = 5;
-		p.press(Key::Confirm, &t);
-		assert_eq!((p.page, p.items(&t).len()), (Page::GameOptions, 7));
-		p.sel = 3;
-		p.press(Key::Confirm, &t);
-		assert_eq!(p.page, Page::Sound);
-		p.hold(-1, 1.0);
-		assert_eq!(p.settings.sfx, 0x400 - 50 * 3);
-		p.press(Key::Down, &t);
-		p.press(Key::Down, &t);
-		p.press(Key::Confirm, &t);
-		assert!(!p.settings.stereo);
-		p.press(Key::Back, &t);
-		p.sel = 6;
-		p.press(Key::Confirm, &t);
-		assert_eq!(p.page, Page::Quit);
-		assert_eq!(p.press(Key::Confirm, &t).1, None);
-		assert_eq!(p.press(Key::Circle, &t).1, Some(Action::Quit));
-		p.press(Key::Back, &t);
-		assert_eq!(p.page, Page::GameOptions);
-		assert_eq!(p.press(Key::Start, &t).1, Some(Action::Resume));
-		let mut q = Menu::pause(0, Settings::default(), InGame { goodies: true, ..Default::default() });
-		assert_eq!(q.items(&t).len(), 7);
-		assert_eq!(q.press(Key::Back, &t).1, Some(Action::Resume));
 	}
 
-	/// Page-switch cues (FUN_00276560): every switch is cue 4, into a settings page and back out alike; cue 3 is
-	/// only the open (played by the viewer when the menu is created). Covers all four Options settings pages.
-	#[test]
-	fn page_switch_cues() {
-		assert_eq!((Cue::Open as usize, Cue::Switch as usize), (3, 4));
-		let t = Text(HashMap::new());
-		let mut p = Menu::pause(0, Settings::default(), InGame::default());
-		p.sel = 5;
-		assert_eq!(p.press(Key::Confirm, &t), (Some(Cue::Switch), None));
-		assert_eq!(p.page, Page::GameOptions);
-		for (row, page) in [(0, Page::HelpDesk), (3, Page::Sound), (4, Page::Camera), (5, Page::Subtitles)] {
-			p.sel = row;
-			assert_eq!(p.press(Key::Confirm, &t), (Some(Cue::Switch), None), "into {page:?}");
-			assert_eq!(p.page, page);
-			if page != Page::Sound {
-				// Cross on a toggle / multi-choice row stays cue 0.
-				p.sel = 0;
-				assert_eq!(p.press(Key::Confirm, &t).0, Some(Cue::Confirm), "toggle on {page:?}");
-			}
-			assert_eq!(p.press(Key::Back, &t), (Some(Cue::Switch), None), "back from {page:?}");
-			assert_eq!(p.page, Page::GameOptions);
-		}
-		assert_eq!(p.press(Key::Back, &t), (Some(Cue::Switch), None));
-		assert_eq!(p.page, Page::Pause);
-		// The title menu's Options pages switch the same way.
-		let mut m = Menu::new(0);
-		m.update(2.0);
-		m.press(Key::Confirm, &t);
-		m.sel = 2;
-		assert_eq!(m.press(Key::Confirm, &t), (Some(Cue::Switch), None));
-		assert_eq!(m.page, Page::Options);
-		m.sel = 2;
-		assert_eq!(m.press(Key::Confirm, &t), (Some(Cue::Switch), None));
-		assert_eq!(m.page, Page::Sound);
-		assert_eq!(m.press(Key::Back, &t), (Some(Cue::Switch), None));
-		assert_eq!(m.page, Page::Options);
-	}
-
-	/// Mouse: pause buttons sit at x 155..358 (PAL px), Gadgets is the second (y 97..136); a
-	/// 1536x896 window is k 2 with 256 px of side margin each way.
-	#[test]
-	fn pointer_hits_pause_rows() {
-		let t = Text(HashMap::new());
-		let mut m = Menu::pause(0, Settings::default(), InGame::default());
-		m.update(1.0);
-		let at = |x: f32, y: f32| (256.0 + x * 2.0, y * 2.0);
-		let (x, y) = at(250.0, 110.0);
-		assert_eq!(m.point(x, y, 1536.0, 896.0, &t), Some(Point::Row(1)));
-		let (x, y) = at(100.0, 110.0);
-		assert_eq!(m.point(x, y, 1536.0, 896.0, &t), None);
-		assert!(m.hover(1, &t) && m.sel == 1 && !m.hover(1, &t));
-	}
 }

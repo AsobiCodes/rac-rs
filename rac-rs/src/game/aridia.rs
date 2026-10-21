@@ -2,9 +2,7 @@
 //! whose class is neither here nor engine-wide (`levels::is_shared`) places as a static model at its authored
 //! transform. Built props keep their original instance index (`Prop.index`), as on Novalis.
 
-use super::{Event, Game, Kind};
-use crate::gameplay::MobyInstance;
-use crate::physics::{sub, V3};
+use crate::physics::V3;
 
 /// Aridia-specific classes with a ported actor. REN-13 (decomp/notes/aridia_environment.md): the skeletal scenery clocks
 /// (trackdrives 331 / 332, dump truck 662, liftcar 690, light 719, crane top 781, liftcar pole 789); ARI-22: elevator 651;

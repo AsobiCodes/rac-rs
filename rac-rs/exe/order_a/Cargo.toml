@@ -1,0 +1,8 @@
+[package]
+name = "rac-rs-order-a"
+version = "0.1.0"
+edition = "2024"
+
+# Build order only (empty crate, see ../Cargo.toml).
+[dependencies]
+rac-rs = { path = "../.." }

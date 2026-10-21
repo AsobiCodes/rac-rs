@@ -72,6 +72,75 @@ pub struct Overlay {
     /// 0x15f5b8 != 0): the last shown picture with that field's draws over it.
     pub disp: bool,
     pub px: Vec<[f32; 4]>,
+    /// The first `rows` rows as RGBA8, as the CPU capture hands them over (empty with the GPU capture: its `px` holds the
+    /// normalised floats and `retail.rs ov_px` converts them).
+    pub rgba: Vec<[u8; 4]>,
+    /// The sharp HUD (lane G, PC extra): the same picture drawn again at the window's resolution by the GPU capture
+    /// (`draw/gpu.rs` hd pass); `retail.rs ov_px` hands it over instead of `px` when it is present. None: the 512-wide picture.
+    pub hd: Option<Hd>,
+}
+
+/// An overlay drawn at the window's resolution (RGBA8, `w` x `rows`): the 4:3 frame fills the window height.
+pub struct Hd {
+    pub w: u32,
+    pub rows: u32,
+    pub rgba: Vec<[u8; 4]>,
+}
+
+/// The sharp HUD's scale, set by the main thread every frame (`set_hd_target`): the GS pixel is `kx / 256` by `ky / 256` window
+/// pixels, and the frame has `rows` rows; packed `kx | ky << 16 | rows << 32`; 0 = off (window too small, `hud=original`,
+/// RAC_PC_EXT=0).
+static HD_TARGET: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Rows of the last published frame (the main buffer's scissor height: 448 in play on both discs, other in some screens): the
+/// next frame's sharp scale assumes them (a frame with other rows has no sharp picture, then the scale follows).
+static HD_SEEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// The highest window height the sharp HUD draws at (the planes' size, `draw/gpu.rs` `HPS`); taller windows scale it up.
+pub const HD_MAX_H: u32 = 1536;
+
+/// (kx, ky, rows) of the sharp HUD, 0 = off.
+pub(crate) fn hd_target() -> (u32, u32, u32) {
+    let t = HD_TARGET.load(std::sync::atomic::Ordering::Relaxed);
+    ((t & 0xffff) as u32, ((t >> 16) & 0xffff) as u32, (t >> 32) as u32)
+}
+
+/// A frame of `rows` rows was published.
+pub(crate) fn hd_note_rows(rows: u32) {
+    HD_SEEN.store(rows, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Rows of the game's frame until the first one is published: 448 on the USA disc, 512 on PAL (`draw.rs disp_rows`).
+fn hd_rows() -> u32 {
+    if ee_oracle::ver::ntsc() {
+        448
+    } else {
+        512
+    }
+}
+
+/// The fewest output (window) pixels per GS row at which the sharp HUD is drawn; a smaller window gets the 512 picture as before.
+/// Below 2.0 the second picture adds little (a 1280 x 800 Steam Deck window has 1.79 per row of the 448-row frame, 1080p has 2.41),
+/// and its fill cost (the pause menu and the ring, 0.5 - 2.2 ms on a fast desktop GPU) is not worth it on a slow one.
+pub(crate) const HD_MIN_PX_PER_ROW: f32 = 2.0;
+
+/// The sharp HUD for a window `window_h` pixels high (`on`: the option and the extension allow it). Off below `HD_MIN_PX_PER_ROW`
+/// window pixels per GS row; above `HD_MAX_H` the picture is drawn there and scaled up.
+pub fn set_hd_target(window_h: u32, on: bool) {
+    let seen = HD_SEEN.load(std::sync::atomic::Ordering::Relaxed);
+    let rows = if (64..=512).contains(&seen) { seen } else { hd_rows() };
+    let t = if on && window_h as f32 >= rows as f32 * HD_MIN_PX_PER_ROW {
+        let h = window_h.min(HD_MAX_H);
+        (h * 2 / 3) as u64 | ((h * 256 / rows) as u64) << 16 | (rows as u64) << 32
+    } else {
+        0
+    };
+    HD_TARGET.store(t, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The size of the sharp HUD planes for a scale: width 512 GS pixels, `rows` rows.
+pub(crate) fn hd_dims(kx: u32, ky: u32, rows: u32) -> (u32, u32) {
+    (2 * kx, (rows * ky).div_ceil(256))
 }
 
 pub struct Gs {
@@ -102,15 +171,36 @@ pub struct Gs {
     pub cur: Overlay,
     /// The last finished overlay (published when the game starts drawing into the other display buffer).
     pub done: Option<Overlay>,
+    /// [PC] (speed) Lazy readback (`set_lazy`): the overlay being read back (tag = END jobs run + 1 when it was published) and the
+    /// finished ones, oldest first (`gpu_finish`); `ends_run` counts the END jobs run.
+    pend_o: Option<(u64, Overlay)>,
+    pub ready: std::collections::VecDeque<(u64, Overlay)>,
+    ends_run: u64,
+    lazy: bool,
     /// The last published overlay (unnormalised): what the display buffer shows until the next copy.
     held: Vec<[f32; 4]>,
     held_rows: u32,
+    /// CPU capture: the rows of `cur.px`, `held` and `dcur` that may differ from the blank pixel (`Rows`); every pass over those
+    /// buffers (blanking, the RGBA8 conversion) visits these rows only.
+    cur_dirty: draw::Rows,
+    held_dirty: draw::Rows,
+    dcur_dirty: draw::Rows,
+    /// The previous display picture's buffer, reused for the next `dcur` (no allocation per no-present field).
+    dspare: Vec<[f32; 4]>,
+    /// RAC_GSCAP_CHECK=1 (debug): every CPU overlay is converted again the old way (whole buffer) and compared, and the blank-row
+    /// invariant is checked; mismatches are counted and printed.
+    check: bool,
     /// This field's display-buffer picture while it is drawn, and whether the current prim draws into it.
     dcur: Option<Vec<[f32; 4]>>,
     to_disp: bool,
     /// A frame copy into the display buffer ran since the last field end.
     copied: bool,
     pend: Vec<Pend>,
+    /// [PC] (speed) A bit per block (16384 = the 4 MB of local memory) set for every block range in `pend`: the USA disc keeps
+    /// ~1500 uploads waiting (PAL ~50) and `flush` / `trx_start` scanned the whole list for each of ~22000 draw checks a field.
+    /// A range with no bit set overlaps no entry, so those checks skip the scan; a range that is empty or beyond the
+    /// memory is treated as overlapping everything. Rebuilt after `flush_work`, set by `trx_start`.
+    pbits: [u64; 256],
     deferring: bool,
     main_fbp: Option<u32>,
     last_copy: bool,
@@ -136,6 +226,9 @@ pub struct Gs {
     /// intro movies): every prim into the display buffer is drawn into the display picture (`draw`), prims into other
     /// buffers (the fade's main-buffer copies, never sampled) are skipped.
     full: bool,
+    /// The worker's `LOAD_ON` marker is in force (the front end's level-load loop, retail.rs `in_load_loop`): the loop's
+    /// main-to-display copy sprites are drawn untextured in the main buffer's clear colour (`draw_in`), not from stale VRAM.
+    load: bool,
     /// Field-end markers seen so far, and RAC_GSCAP_TRACE=FROM-TO (debug): the prims, transfers and jobs of those fields are logged.
     pub fields: u64,
     trace: Option<(u64, u64)>,
@@ -155,7 +248,19 @@ pub struct Gs {
     p1_only: bool,
     /// DIRECT qwords of the current VIF1 job fed so far (the anchor of the queued path-1 packets).
     p1_nd: u32,
+    /// RAC_GSCAP_GPU: the pixel work runs on the GPU (draw/gpu.rs), which then holds local memory and the overlay pictures.
+    gpu: Option<Box<draw::gpu::Gpu>>,
+    /// GPU capture: qwords of the current host -> local transfer so far (`trx` of the CPU path).
+    gq: u32,
+    /// The GPU capture takes over at the first field end from this field on once it is ready (`gpu_attach`); 0 none.
+    gpu_wait: u64,
+    /// [PC] (speed) The last block spans `draw_in` / `gpu_raster` asked for, keyed by the registers they derive from (tiny prims
+    /// repeat the same texture and scissor): TEX0 -> texture span, (FRAME, SCISSOR) -> scissor span, (TEX0, CLAMP) -> sampled span.
+    sp_t: Option<(u64, (u32, u32))>,
+    sp_f: Option<((u64, u64), (u32, u32))>,
+    sp_r: Option<((u64, u64), (u32, u32))>,
 }
+
 
 /// P1 mode: the menu page draws an actor (the post-game page's green robot, class 1957) through VU1 (path 1) into a
 /// render-to-texture panel; the capture draws only paths 2 and 3, so the panel stayed empty. While a page that does
@@ -185,12 +290,38 @@ pub const FULL_OFF: u64 = u64::MAX - 5;
 /// Worker markers: a menu page with a VU1-drawn render-to-texture actor is up (see `P1`) / is gone.
 pub const P1_ON: u64 = u64::MAX - 6;
 pub const P1_OFF: u64 = u64::MAX - 7;
+/// Worker markers: the front end runs its level-load loop (see `Gs::load`) / left it.
+pub const LOAD_ON: u64 = u64::MAX - 8;
+pub const LOAD_OFF: u64 = u64::MAX - 9;
 
 const W: u32 = 512;
 const H: u32 = 512;
 
+impl Drop for Gs {
+    fn drop(&mut self) {
+        if let Some(g) = self.gpu.take() {
+            draw::gpu::Gpu::recycle(g);
+        }
+    }
+}
+
+/// Starts opening the GPU capture in the background (draw/gpu.rs `Gpu::prestart`); `idle` marks its threads background work.
+pub fn gpu_prestart(idle: fn()) {
+    draw::gpu::Gpu::prestart(idle);
+}
+
+/// Opens a GPU capture and drops it (`rac-rs warm-gpu`): false without one.
+pub fn gpu_warm() -> bool {
+    matches!(draw::gpu::Gpu::take(&vec![0; 4 << 20]), draw::gpu::Take::Ready(_))
+}
+
 impl Gs {
     pub fn new(vram: Vec<u8>) -> Gs {
+        let (gpu, gpu_wait) = match draw::gpu::Gpu::take(&vram) {
+            draw::gpu::Take::Ready(g) => (Some(g), 0),
+            draw::gpu::Take::Later => (None, 1),
+            draw::gpu::Take::Never => (None, 0),
+        };
         Gs {
             vram,
             vif_skip: 0,
@@ -213,16 +344,26 @@ impl Gs {
             fog: 0,
             vq: Vec::new(),
             trx: Trx::default(),
-            cur: Overlay { w: W, h: H, rows: H, frozen: false, disp: false, px: vec![[0.0, 0.0, 0.0, 1.0]; (W * H) as usize] },
+            cur: Overlay { w: W, h: H, rows: H, frozen: false, disp: false, px: vec![[0.0, 0.0, 0.0, 1.0]; (W * H) as usize], rgba: Vec::new(), hd: None },
             done: None,
+            pend_o: None,
+            ready: Default::default(),
+            ends_run: 0,
+            lazy: false,
             held: vec![[0.0, 0.0, 0.0, 1.0]; (W * H) as usize],
             held_rows: H,
             dcur: None,
+            cur_dirty: Default::default(),
+            held_dirty: Default::default(),
+            dcur_dirty: Default::default(),
+            dspare: Vec::new(),
+            check: std::env::var_os("RAC_GSCAP_CHECK").is_some(),
             to_disp: false,
             copied: false,
             main_fbp: None,
             last_copy: false,
             pend: Vec::new(),
+            pbits: [0; 256],
             deferring: false,
             main_bw: 8,
             main_end: 0,
@@ -237,20 +378,37 @@ impl Gs {
             log: std::env::var("ORACLE_GSLOG").is_ok(),
             no_draw: false,
             full: false,
+            load: false,
             fields: 0,
             prof: std::env::var("RAC_GSCAP_PROF").is_ok().then(Default::default),
             ras_ns: 0,
-            pm: draw::pmemo::PMemo::new(),
+            pm: if gpu.is_some() { None } else { draw::pmemo::PMemo::new() },
             tcache: Vec::new(),
             tcr: (0, 0, 0, 0),
             p1: None,
             p1_dir: String::new(),
             p1_only: false,
             p1_nd: 0,
+            gpu,
+            gq: 0,
+            gpu_wait,
+            sp_t: None,
+            sp_f: None,
+            sp_r: None,
             trace: std::env::var("RAC_GSCAP_TRACE").ok().and_then(|v| {
                 let (a, b) = v.split_once('-')?;
                 Some((a.parse().ok()?, b.parse().ok()?))
             }),
+        }
+    }
+
+
+    /// [PC] (speed) Lazy readback: a published overlay is collected later (`gpu_finish`, `ready`) while the capture records the
+    /// next job; the caller must not let `ends` pass `pending_tag`.
+    pub fn set_lazy(&mut self, on: bool) {
+        self.lazy = on;
+        if let Some(g) = self.gpu.as_mut() {
+            g.lazy = on;
         }
     }
 
@@ -268,7 +426,17 @@ impl Gs {
     pub fn run(&mut self, job: Job) {
         let t0 = self.prof.is_some().then(std::time::Instant::now);
         let kind = match &job { Job::Vif1(..) => "job vif1", Job::Gif(q, _) if q.is_empty() => "job marker", _ => "job gif" };
+        let end = matches!(&job, Job::Gif(q, u64::MAX) if q.is_empty());
         self.run_job(job);
+        if end && self.gpu_wait != 0 && self.fields >= self.gpu_wait {
+            self.gpu_attach();
+        }
+        if self.gpu.is_some() {
+            self.gpu_end_job(end);
+        }
+        if end {
+            self.ends_run += 1;
+        }
         self.prof_add(kind, t0);
     }
 
@@ -298,6 +466,10 @@ impl Gs {
                 o += &format!(" [{k}: {:.2} ms x{:.1}]", *ns as f64 / 1e8, *n as f64 / 100.0);
             }
             eprintln!("{o}");
+            let g = self.gpu_stats();
+            if !g.is_empty() {
+                eprintln!("gscap gpu stats: {g}");
+            }
         }
     }
 
@@ -317,6 +489,8 @@ impl Gs {
                 self.vif1(&w, &marks);
                 self.p1_pump(true);
                 self.blocks.clear();
+                // [PC] (speed) the word buffer goes back to the machine's VIF1 kick (ee_oracle::gs::take_words).
+                ee_oracle::gs::recycle_words(w);
             }
             // The field's end (retail.rs worker, after each field): a display-buffer picture drawn this field shows now.
             Job::Gif(qs, u64::MAX) if qs.is_empty() => {
@@ -337,6 +511,8 @@ impl Gs {
             Job::Gif(qs, FULL_OFF) if qs.is_empty() => self.full_mode(false),
             Job::Gif(qs, P1_ON) if qs.is_empty() => self.p1_on(),
             Job::Gif(qs, P1_OFF) if qs.is_empty() => self.p1 = None,
+            Job::Gif(qs, LOAD_ON) if qs.is_empty() => self.load = true,
+            Job::Gif(qs, LOAD_OFF) if qs.is_empty() => self.load = false,
             Job::Gif(qs, d) => {
                 if self.tracing() {
                     eprintln!("gscap f{} gif {} qwords dispfb {d:x}", self.fields, qs.len());
@@ -353,8 +529,14 @@ impl Gs {
     /// state (main buffer, copy tracking) is forgotten. Off, the capture keeps only the VRAM traffic again (`no_draw`).
     fn full_mode(&mut self, on: bool) {
         self.full = on;
+        self.load = false;
         self.no_draw = !on;
-        self.held.fill([0.0, 0.0, 0.0, 1.0]);
+        if self.gpu.is_some() {
+            self.gpu_fill(draw::gpu::HELD);
+        } else {
+            self.held.fill([0.0, 0.0, 0.0, 1.0]);
+            self.held_dirty = Default::default();
+        }
         self.held_rows = H;
         self.dcur = None;
         self.done = None;
@@ -669,6 +851,7 @@ impl Gs {
                 }
                 self.r[0x53] = v;
                 self.trx = Trx::default();
+                self.gq = 0;
                 self.deferring = false;
                 match v & 3 {
                     0 => self.trx_start(),
@@ -713,7 +896,16 @@ impl Gs {
         if n < need {
             return;
         }
-        let vs: Vec<Vtx> = self.vq.clone();
+        // [PC] (speed) the prim's vertices on the stack (a Vec clone per prim: the P1 pages draw ~11,000 tiny prims a field).
+        let mut vbuf = [Vtx::default(); 3];
+        let vheap: Vec<Vtx>;
+        let vs: &[Vtx] = if n <= 3 {
+            vbuf[..n].copy_from_slice(&self.vq);
+            &vbuf[..n]
+        } else {
+            vheap = self.vq.clone();
+            &vheap
+        };
         match ty {
             2 => {
                 self.vq.remove(0);
@@ -749,7 +941,7 @@ impl Gs {
             );
         }
         if draw && !self.no_draw {
-            self.draw(ty as u32, &vs);
+            self.draw(ty as u32, vs);
         }
     }
 
@@ -789,6 +981,7 @@ impl Gs {
         let (x, y) = ((page % bw) * 64 + bx * 8 + cx, (page / bw) * 32 + by * 8 + cy);
         if x < self.cur.w && y < self.cur.h {
             self.cur.px[(y * self.cur.w + x) as usize] = [0.0, 0.0, 0.0, 1.0];
+            self.cur_dirty.mark(y as i32, y as i32);
         }
         // The restored frame stands in for the 3D phase: later draws are overlay.
         self.mscal = self.mscal.max(SKY_PROGRAMS);
@@ -907,6 +1100,11 @@ impl Gs {
                 return;
             }
         }
+        if self.gpu.is_some() {
+            self.gpu_xfer(self.r[0x50], self.r[0x51], self.r[0x52], self.gq, &[q]);
+            self.gq += 1;
+            return;
+        }
         let mut t = std::mem::take(&mut self.trx);
         self.put(self.r[0x50], self.r[0x51], self.r[0x52], &mut t, q);
         self.trx = t;
@@ -963,14 +1161,52 @@ impl Gs {
             self.flush(lo, hi);
             return;
         }
-        // The same upload again replaces the waiting one.
-        self.pend.retain(|p| !(p.bb == bb && p.pos == pos && p.rr == rr));
+        // The same upload again replaces the waiting one (it has the same block range, so with no bit set there is none).
+        if Self::pb_any(&self.pbits, lo, hi) {
+            self.pend.retain(|p| !(p.bb == bb && p.pos == pos && p.rr == rr));
+        }
         self.pend.push(Pend { bb, pos, rr, lo, hi, data: Vec::new() });
+        Self::pb_set(&mut self.pbits, lo, hi);
         self.deferring = true;
     }
 
-    /// Block range `[lo, hi)` a rectangle of a buffer touches.
+    /// Block range `[lo, hi)` a rectangle of a buffer touches. [PC] (speed) Memoized per thread (direct-mapped, a pure
+    /// function of its arguments): the P1 pages' thousands of tiny prims repeat the same texture and scissor spans,
+    /// each ~1000 address calculations (`span_calc`).
     fn span(psm: u32, bp: u32, bw: u32, x: u32, y: u32, w: u32, h: u32) -> (u32, u32) {
+        // A rectangle of at most one 8 x 8 block cell of a 32-bit format (a tiny prim's box): its four corners are all
+        // `span_calc` visits; cheaper to compute than to look up.
+        if matches!(psm, 0x00 | 0x01 | 0x1b | 0x24 | 0x2c) && (1..=8).contains(&w) && (1..=8).contains(&h) {
+            let (x1, y1) = (x + w - 1, y + h - 1);
+            let b = [Self::a32(bp, bw, x, y), Self::a32(bp, bw, x1, y), Self::a32(bp, bw, x, y1), Self::a32(bp, bw, x1, y1)];
+            let (lo, hi) = (b[0].min(b[1]).min(b[2]).min(b[3]), b[0].max(b[1]).max(b[2]).max(b[3]));
+            return ((lo / 256) as u32, (hi / 256) as u32 + 1);
+        }
+        type K = (u32, u32, u32, u32, u32, u32, u32);
+        thread_local! {
+            static MEMO: std::cell::RefCell<Vec<Option<(K, (u32, u32))>>> = std::cell::RefCell::new(vec![None; 1024]);
+        }
+        let k: K = (psm, bp, bw, x, y, w, h);
+        let mut hs = 0u64;
+        for v in [psm, bp, bw, x, y, w, h] {
+            hs = (hs ^ v as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            hs ^= hs >> 29;
+        }
+        let i = (hs >> 32) as usize & 1023;
+        MEMO.with(|m| {
+            let mut m = m.borrow_mut();
+            if let Some((kk, v)) = m[i] {
+                if kk == k {
+                    return v;
+                }
+            }
+            let v = Self::span_calc(psm, bp, bw, x, y, w, h);
+            m[i] = Some((k, v));
+            v
+        })
+    }
+
+    fn span_calc(psm: u32, bp: u32, bw: u32, x: u32, y: u32, w: u32, h: u32) -> (u32, u32) {
         let (sw, sh, f): (u32, u32, fn(u32, u32, u32, u32) -> usize) = match psm {
             0x00 | 0x01 | 0x1b | 0x24 | 0x2c => (8, 8, Self::a32),
             0x02 | 0x0a => (16, 8, Self::a16),
@@ -989,10 +1225,39 @@ impl Gs {
         (lo, hi)
     }
 
+    /// The words of `pbits` and their masks for blocks `[lo, hi)`, 0 < `hi` - `lo`, `hi` <= 16384.
+    fn pb_words(lo: u32, hi: u32) -> impl Iterator<Item = (usize, u64)> {
+        let (w0, w1) = ((lo >> 6) as usize, ((hi - 1) >> 6) as usize);
+        (w0..=w1).map(move |w| {
+            let a = if w == w0 { !0u64 << (lo & 63) } else { !0 };
+            let b = if w == w1 { !0u64 >> (63 - ((hi - 1) & 63)) } else { !0 };
+            (w, a & b)
+        })
+    }
+
+    /// Sets the blocks `[lo, hi)`; an empty or out-of-memory range sets every bit.
+    fn pb_set(bits: &mut [u64; 256], lo: u32, hi: u32) {
+        if hi <= lo || hi > 16384 {
+            *bits = [!0; 256];
+            return;
+        }
+        for (w, m) in Self::pb_words(lo, hi) {
+            bits[w] |= m;
+        }
+    }
+
+    /// False only when no block of `[lo, hi)` has a bit set (so no `pend` entry overlaps it).
+    fn pb_any(bits: &[u64; 256], lo: u32, hi: u32) -> bool {
+        if hi <= lo || hi > 16384 {
+            return true;
+        }
+        Self::pb_words(lo, hi).any(|(w, m)| bits[w] & m != 0)
+    }
+
     /// Writes the waiting transfers that touch blocks `[lo, hi)`, with every older one overlapping those, in order.
     fn flush(&mut self, lo: u32, hi: u32) {
         let hit = |p: &Pend, lo: u32, hi: u32| p.lo < hi && lo < p.hi;
-        if !self.pend.iter().any(|p| hit(p, lo, hi)) {
+        if !Self::pb_any(&self.pbits, lo, hi) || !self.pend.iter().any(|p| hit(p, lo, hi)) {
             return;
         }
         let t0 = self.prof.is_some().then(std::time::Instant::now);
@@ -1024,7 +1289,16 @@ impl Gs {
             }
         }
         self.pend = keep;
+        self.pbits = [0; 256];
+        for p in &self.pend {
+            Self::pb_set(&mut self.pbits, p.lo, p.hi);
+        }
         for p in &run {
+            if self.gpu.is_some() {
+                self.gpu_xfer(p.bb, p.pos, p.rr, 0, &p.data);
+                self.gq = p.data.len() as u32;
+                continue;
+            }
             let mut t = Trx::default();
             for &q in &p.data {
                 self.put(p.bb, p.pos, p.rr, &mut t, q);
@@ -1051,6 +1325,11 @@ impl Gs {
         let (sx, sy, dx, dy) = ((pos & 0x7ff) as u32, ((pos >> 16) & 0x7ff) as u32, ((pos >> 32) & 0x7ff) as u32, ((pos >> 48) & 0x7ff) as u32);
         let rr = self.r[0x52];
         let (rw, rh) = ((rr & 0xfff) as u32, ((rr >> 32) & 0xfff) as u32);
+        if self.gpu.is_some() {
+            self.gpu_copy();
+            self.stat(format!("local copy {rw}x{rh} psm {spsm:x}->{dpsm:x}"));
+            return;
+        }
         for y in 0..rh {
             for x in 0..rw {
                 let v = self.rd_px(spsm, sbp, sbw, sx + x, sy + y);

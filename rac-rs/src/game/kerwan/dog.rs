@@ -1,6 +1,5 @@
 //! KER-4: the robot dog 573. (decomp/notes/kerwan_*.md; moved from game/kerwan.rs.)
 
-use super::*;
 
 /// KER-4: the robot dog (updater FUN_002c54e8, 87 placements; decomp/notes/kerwan_enemies.md "KER-4 port spec").
 pub(in crate::game) const DOG: u32 = 573;

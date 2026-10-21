@@ -1,0 +1,33 @@
+[package]
+name = "rac-rs-exe"
+version = "0.1.0"
+edition = "2024"
+
+# The game exe: crate rac_game (..) + the recompiled retail code (ee-game).
+[[bin]]
+name = "rac-rs"
+path = "src/main.rs"
+
+[dependencies]
+rac-rs = { path = ".." }
+bytemuck = { version = "1.25.2", features = ["derive"] }
+cpal = "0.18.2"
+pollster = "1.0.1"
+rayon = "1.12.0"
+wgpu = "30.0.1"
+winit = "0.30.13"
+ee-oracle = { path = "../../oracle" }
+ee-game = { path = "../../oracle/game" }
+# Build order only: two empty crates that depend on the rac-rs library. Cargo starts the ready crate with the most crates waiting
+# behind it first; each of the ~460 generated crates has two (ee-game, this exe), so without these the library (one: this exe)
+# would always be picked last and compile alone after them (~80 s). With them it starts as soon as its dependencies are built.
+rac-rs-order-a = { path = "order_a" }
+rac-rs-order-b = { path = "order_b" }
+
+[build-dependencies]
+# Embeds rac-rs.manifest (the Windows segment heap, build.rs) with no external tools, for the MSVC and the GNU toolchain alike.
+embed-manifest = "1"
+
+[features]
+# Public build (set by setup.ps1): see the feature of the same name in ../Cargo.toml.
+windows_gui = ["rac-rs/windows_gui"]

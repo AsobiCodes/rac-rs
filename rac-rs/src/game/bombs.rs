@@ -1,5 +1,4 @@
 use super::*;
-use crate::physics::SolidPrim;
 
 impl Game {
 

@@ -264,7 +264,7 @@ fn ack(c: &mut Cpu, dmac: bool, cause: u32) {
     } else if cause < 16 {
         c.mem.wr32(INTC_STAT, 1 << cause);
     }
-    c.mem.irq_dirty = true;
+    c.mem.mark_dirty();
 }
 
 fn next_handler(c: &mut Cpu, k: &mut Kernel) {
@@ -294,7 +294,7 @@ fn next_handler(c: &mut Cpu, k: &mut Kernel) {
     c.cp0[12] &= !2;
     c.pc = s.epc;
     c.npc = s.epc.wrapping_add(4);
-    c.mem.irq_dirty = true;
+    c.mem.mark_dirty();
 }
 
 /// The cold-boot kernel: syscalls the oracle's own HLE (hle.rs) cannot do without the BIOS in RAM. Returns false to
@@ -346,7 +346,7 @@ pub fn syscall(c: &mut Cpu, k: &mut Kernel, pc: u32) -> bool {
             if cur != en {
                 c.mem.wr32(INTC_MASK, 1 << a0);
             }
-            c.mem.irq_dirty = true;
+            c.mem.mark_dirty();
             (cur != en) as i64
         }
         // EnableDmac/DisableDmac(channel): D_STAT mask bits 16.. toggle on write.
@@ -357,7 +357,7 @@ pub fn syscall(c: &mut Cpu, k: &mut Kernel, pc: u32) -> bool {
             if cur != en {
                 c.mem.wr32(D_STAT, 1 << (16 + a0));
             }
-            c.mem.irq_dirty = true;
+            c.mem.mark_dirty();
             (cur != en) as i64
         }
         // Semaphores with real counts: ee_sema {count, max_count, init_count, wait_threads, attr, option}.
@@ -646,7 +646,8 @@ pub fn install(c: &mut Cpu, full: bool) {
         idx.extend(k.hooked.iter().enumerate().filter(|(_, &b)| b).map(|(i, _)| i));
     }
     if full {
-        idx.extend([0x8000_0200u32, 0x8000_0204, TRAMP].iter().map(|&p| ((p & 0x01ff_ffff) >> 2) as usize));
+        // POLL_HEAD: the interpreter's idle skip of sceGsSyncV's poll (`Cpu::poll_ff`, level loads after the 60 Hz switch).
+        idx.extend([0x8000_0200u32, 0x8000_0204, TRAMP, crate::POLL_HEAD].iter().map(|&p| ((p & 0x01ff_ffff) >> 2) as usize));
         c.mem.rearm_tick(0);
     }
     for i in idx {

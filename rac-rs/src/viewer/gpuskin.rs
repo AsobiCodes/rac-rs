@@ -3,7 +3,6 @@
 //! tints, V scroll) and the slots' skinned poses (one copy per distinct pose, shared by every instance of a pose key) are
 //! uploaded. `emulate` is the CPU twin of the shader and of `SlotJob::fill` / the hidden, deferred and actor slot writes
 //! of `set_props`: the clipper (NOV-5.9c), the purchase prompt batch and the bench's determinism mirror use it.
-//! RAC_CPU_SKIN=1 keeps the CPU posing path (A/B comparison).
 
 use super::*;
 use super::gpu::HIDDEN_POS;
@@ -40,14 +39,8 @@ impl PropInst {
 /// A pose entry: model-space position and normal.
 pub(super) type PoseEntry = [f32; 6];
 
-/// RAC_CPU_SKIN=1: pose the props on the CPU (read once).
-pub(super) fn cpu_skin() -> bool {
-	static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-	*ON.get_or_init(|| std::env::var("RAC_CPU_SKIN").is_ok_and(|v| v == "1"))
-}
-
 /// The vertex `j` of a slot from its model vertex `m0`, exactly as the CPU path writes it (same operations in the same
-/// order as `SlotJob::fill`, `hide_slot`, the deferred-list overflow and the scene-actor write).
+/// order as `SlotJob::fill` (test oracle, since removed CPU path), the deferred-list overflow and the scene-actor write).
 pub(super) fn emulate(s: &PropInst, pose: &[PoseEntry], m0: &Vertex, j: usize) -> Vertex {
 	let posed = (j < s.k[3] as usize).then(|| &pose[s.k[2] as usize + j]);
 	let mut v = match s.k[0] & 0xff {
@@ -246,7 +239,7 @@ mod tests {
 		let m = [0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 10.0, 20.0, 30.0, 1.0];
 		let ps = [[0.5, 0.25, 2.0], [3.0, -1.0, 0.125]];
 		let ns = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
-		let job = SlotJob { range: 0..3, ps: &ps, ns: &ns, m, scale: 1.5, light: [0.25, 0.5, 0.75, 17.25], alpha_code: 3.0625, prop_tint: Some([0.5, 0.25, 2.0]), tint: Some(([0.1, 0.2, 0.3], 2)), alpha: 0x60, dv: 0.125, du: 0.0625 };
+		let job = SlotJob { ps: &ps, ns: &ns, m, scale: 1.5, light: [0.25, 0.5, 0.75, 17.25], alpha_code: 3.0625, prop_tint: Some([0.5, 0.25, 2.0]), tint: Some(([0.1, 0.2, 0.3], 2)), alpha: 0x60, dv: 0.125, du: 0.0625 };
 		let models = [model(); 3];
 		let mut cpu = [model(); 3];
 		job.fill(&mut cpu, &models, 0);

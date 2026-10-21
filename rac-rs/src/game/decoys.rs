@@ -2,7 +2,6 @@
 //! Nothing in the port throws a decoy yet (the decoy actor update is a separate piece), so this module is only reachable
 //! from its tests; the foes keep aiming at the hero until a producer fills the registry.
 
-use crate::physics::V3;
 
 
 

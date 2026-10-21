@@ -105,14 +105,12 @@ impl Player {
 /// record A (amplitude 0.2, fead0(40) ticks); later landed ticks only count.
 /// [P] the state 0x22 entry (air dispatcher), its movement body, velocity smoothing and the feet strike
 /// spheres are not ported, so nothing calls this yet.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Default, Debug)]
 pub struct StrikeLanding {
 	pub descending: bool,
 	pub land_count: u32,
 }
 
-#[allow(dead_code)]
 impl StrikeLanding {
 	/// One state-0x22 tick: `tick` the state tick, `vz` the smoothed local vertical velocity, `airborne` the
 	/// air counter != 0. Returns the shake write (amplitude, seconds) on the landing tick.

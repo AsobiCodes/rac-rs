@@ -5,9 +5,8 @@
 
 use super::*;
 use crate::anim::PropAnim;
-use crate::gameplay::{pal_ticks, PAL_DT};
 use crate::particles::WorldQuad;
-use crate::physics::{cross, vadd1, vmul};
+use crate::physics::cross;
 
 pub(super) const HELD: u32 = super::held::SWINGSHOT_HELD;
 pub(super) const HOOK: u32 = super::held::SWINGSHOT_HOOK;

@@ -281,6 +281,11 @@ impl Vu1 {
         self.micro_gen += 1;
     }
 
+    /// The micro memory image (2048 pairs).
+    pub fn micro_image(&self) -> &[u64] {
+        &self.micro
+    }
+
     pub(crate) fn micro_gen(&self) -> u64 {
         self.micro_gen
     }

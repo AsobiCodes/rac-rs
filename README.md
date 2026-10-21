@@ -12,7 +12,7 @@ Support the project (no pressure tho!): https://ko-fi.com/asobicodes
 
 - The whole game is playable from power-on to the end credits, including New Game+.
 - Gameplay follows the original PS2 game one to one. On top of that, the PC version has widescreen, keyboard and mouse controls, gamepad support, and an optional modern camera (mouse look and strafing).
-- Optional modern graphics on the Graphics page (Pause > Options > Graphics): enhanced lighting, ambient occlusion, dynamic shadows, clear reflective water, enhanced smoke, fire and explosions, and sun rays. The Classic settings keep the original PS2 look.
+- Optional modern graphics on the Graphics page (Pause > Options > Graphics): enhanced lighting, global illumination, ambient occlusion, dynamic shadows, clear reflective water with waves, vegetation, enhanced smoke, fire and explosions, sun rays, frame smoothing and a sharp HUD, each with quality levels. The Classic settings keep the original PS2 look.
 - Plays from the PAL / Europe disc and, since v0.2, from the USA disc.
 - Windows only for now.
 - Known issues are listed under [Known issues](#known-issues) below.
@@ -63,11 +63,11 @@ If you downloaded v0.1.0, it has no automatic updates. Download the new ZIP, unz
 
 ## Controls
 
-The game's own button prompts show the keyboard and mouse keys. You can change the camera style and language in the game's Options menu. Controllers work too: Xbox-style controllers (XInput) and PlayStation controllers (PS4 DualShock 4 and PS5 DualSense, over USB or Bluetooth), also when you switch one on or plug it in after the game has started. With the modern camera on, hold R2 to strafe.
+The game's own button prompts show the keyboard and mouse keys. You can change the camera style, the language and every button in the game's Options menu (Pause > Options > Controls for the buttons). Controllers work too: Xbox-style controllers (XInput) and PlayStation controllers (PS4 DualShock 4 and PS5 DualSense, over USB or Bluetooth), also when you switch one on or plug it in after the game has started. With the modern camera on, hold R2 to strafe.
 
 ## Known issues
 
-- Clank's jetpack can drift out of sync with Ratchet.
+- The faint afterimage trail behind Ratchet during Thruster-Pack flight is not drawn yet.
 - Some glass surfaces can flicker.
 
 ## Legal

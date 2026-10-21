@@ -3,7 +3,6 @@
 //! Same method as `queue_q2`: the callback's own code in RAM gives its data addresses (lui/addiu pairs, gp-relative loads), so
 //! twin levels share one port; code of another shape draws nothing.
 
-#![allow(dead_code)]
 
 use crate::particles::{WorldQuad, FX_CLAMP};
 use ee_oracle::Machine;
@@ -139,10 +138,6 @@ fn norm4(v: V4) -> V4 {
 /// FUN_00212580(out, a, b): out = b x a (VU opmula / opmsub), w left at 0.
 fn cross4(a: V4, b: V4) -> V4 {
 	[b[1] * a[2] - b[2] * a[1], b[2] * a[0] - b[0] * a[2], b[0] * a[1] - b[1] * a[0], 0.0]
-}
-/// FUN_002124c0 with f12 = -1: xyz negated, w kept.
-fn neg4(v: V4) -> V4 {
-	[-v[0], -v[1], -v[2], v[3]]
 }
 /// FUN_0025ff38(-1, 0, 1, 0, t): the cubic of the call, in the code's operation order.
 fn curve(t: f32) -> f32 {

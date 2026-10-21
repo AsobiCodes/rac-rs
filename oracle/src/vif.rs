@@ -27,6 +27,14 @@ impl Mem {
         let tte = chcr & 0x40 != 0;
         let mut words: Vec<u32> = Vec::new();
         let push = |m: &mut Mem, w: &mut Vec<u32>, addr: u32, qwc: u32| {
+            // [PC] (speed) Inside RAM, `rd32` of each word is a plain read of those bytes: copy them at once
+            // (the per-word path and the byte copy in `vif0_unpack` took ~17% of the EE thread with skinning).
+            let base = (addr & 0x01ff_fff0) as usize;
+            let n = qwc as usize * 16;
+            if base + n <= crate::mem::RAM {
+                w.extend(m.ram[base..base + n].chunks_exact(4).map(|b| u32::from_le_bytes(b.try_into().unwrap())));
+                return;
+            }
             for k in 0..qwc * 4 {
                 w.push(m.rd32((addr & 0x01ff_fff0).wrapping_add(k * 4)));
             }
@@ -162,23 +170,25 @@ impl Mem {
         let bits = if vl == 3 { 16 / elems } else { 32 >> vl };
         let bytes = (n * elems * bits).div_ceil(8);
         let words = bytes.div_ceil(4) as usize;
-        let src: Vec<u8> = w.iter().take(words).flat_map(|x| x.to_le_bytes()).collect();
+        // The packed input is the first `words` words (as little-endian bytes); bytes past the end read as zero.
+        let wn = words.min(w.len());
         let (cl, wl) = (self.vif0.cl.max(1), self.vif0.wl.max(1));
         if wl > cl && self.fault.is_none() {
             self.fault = Some(format!("VIF0 UNPACK fill mode cl {cl} wl {wl}"));
         }
         self.vif0.unpacks += 1;
         let base = imm & 0x3ff;
+        // `off` is a multiple of the element size (4, 2 or 1 bytes), so an element never spans two words.
         let rd = |off: usize, size: u32| -> u32 {
-            let b = |k: usize| src.get(off + k).copied().unwrap_or(0) as u32;
+            let x = if off >> 2 < wn { w[off >> 2] } else { 0 };
             match size {
-                32 => b(0) | b(1) << 8 | b(2) << 16 | b(3) << 24,
+                32 => x,
                 16 => {
-                    let v = b(0) | b(1) << 8;
+                    let v = (x >> ((off & 2) * 8)) & 0xffff;
                     if usn { v } else { v as u16 as i16 as i32 as u32 }
                 }
                 _ => {
-                    let v = b(0);
+                    let v = (x >> ((off & 3) * 8)) & 0xff;
                     if usn { v } else { v as u8 as i8 as i32 as u32 }
                 }
             }

@@ -4,8 +4,6 @@
 //! Velocities here are u/s (the notes' per-tick values are x60 [I]). The exit case of 613 (hero just
 //! left the water, groups 4/5) and the re-entry cap are ported (HERO-5).
 
-use crate::gameplay::{self, MobyInstance, Polygon};
-use crate::physics::{add, length, scale, sub, V3};
 
 
 

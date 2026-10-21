@@ -28,7 +28,21 @@ impl Cpu {
         let a0 = self.g(4) as u32;
         let a1 = self.g(5) as u32;
         let v: i64 = match n.unsigned_abs() {
-            0x02 | 0x71 => 0,
+            // SetGsCrt(interlace, omode, ffmd), from sceGsResetGraph 0x121878: at boot and at every switch of the PAL disc's
+            // 50/60 Hz option (PAL flag 0x15ed80 set from 0x16030c in FUN_001e9558 / the title loop FUN_001eb698). omode 2 =
+            // NTSC, 3 = PAL: the field clock (vblank period, T1 counts, sound ticks, rac-rs pacing) follows the mode.
+            0x02 => {
+                if a1 == 2 || a1 == 3 {
+                    let ntsc = a1 == 2;
+                    if ntsc != crate::ver::ntsc() {
+                        self.snd.video_mode(ntsc);
+                        crate::ver::set_ntsc(ntsc);
+                        eprintln!("oracle: video mode {} (SetGsCrt omode {a1}, icount {})", if ntsc { "NTSC 59.94 Hz" } else { "PAL 50 Hz" }, self.icount);
+                    }
+                }
+                0
+            }
+            0x71 => 0,
             0x70 => 0x7f00,
             0x20 => {
                 self.sema_next += 1;

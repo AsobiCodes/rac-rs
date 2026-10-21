@@ -652,16 +652,6 @@ pub fn class_cue(level: &Level, class_id: u32, idx: usize) -> R<Option<Cue>> {
 	Ok(Some(Cue { sound: sound as usize, volume, looped, fall, bend: bend_range(&bank, sound as usize) }))
 }
 
-/// Every bank sound's first-tone bend range (down, up), indexed by bank sound.
-pub fn bend_ranges(level: &Level) -> Vec<(i8, i8)> {
-	level_bank(level).map(|b| bank_bend_ranges(&b)).unwrap_or_default()
-}
-
-/// `bend_ranges` of any bank (the warp bundle's, retail/snd.rs).
-pub fn bank_bend_ranges(b: &Bank) -> Vec<(i8, i8)> {
-	(0..b.sounds.len()).map(|i| bend_range(b, i)).collect()
-}
-
 fn bend_range(bank: &Bank, sound: usize) -> (i8, i8) {
 	bank.sounds.get(sound).and_then(|s| s.tones().first().map(|t| (t.bend_down, t.bend_up))).unwrap_or((0, 0))
 }
@@ -851,6 +841,7 @@ impl std::fmt::Debug for OccScene {
 }
 
 impl OccScene {
+	#[cfg(test)]
 	pub fn set_world(&mut self, w: World) {
 		self.world = Some(Arc::new(w));
 	}

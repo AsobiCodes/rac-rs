@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use crate::retail::disc::va;
 
 mod gscap;
+pub mod hot;
 mod rec;
 #[path = "../../oracle/pcsx2rec/playfeed.rs"]
 mod playfeed;
@@ -17,6 +18,7 @@ pub mod queue_b;
 pub mod efx_own;
 pub mod efx_draw;
 pub mod efx_vu;
+pub mod snap_pipe;
 pub mod queue_q1;
 pub mod queue_q2;
 pub mod queue_fxa;
@@ -28,6 +30,8 @@ pub mod memcard;
 pub mod modcam;
 pub mod aim;
 pub mod pcext;
+pub mod binds;
+pub mod pcctl;
 pub mod prompts;
 pub mod pspad;
 pub mod vendor;
@@ -35,6 +39,7 @@ pub mod pcopts;
 pub mod strafe;
 pub mod shipmouse;
 pub mod debugkeys;
+pub mod devtools;
 pub mod oldsim;
 pub mod mouse_menu;
 pub mod menu_keys;
@@ -77,7 +82,7 @@ pub const SPAWN: u32 = 8;
 /// Trespasser), kerwan_enemies.md:573.
 pub const HELD_MOBY: u32 = 0x1403e0;
 /// Classes the viewer has a prop model for (non-empty faces), set by `load_level`: `sync` grows only their pools.
-static MODELLED: Mutex<Option<HashSet<u32>>> = Mutex::new(None);
+static MODELLED: Mutex<Option<HashMap<u32, u32>>> = Mutex::new(None);
 
 /// Moby table start / end pointers: Veldin, Rilgar, Oltanis and Gemlik keep them 0x40 higher (each overlay's code
 /// windows referencing them paired with Novalis's, as for `camera_globals`).
@@ -96,6 +101,13 @@ fn camera_globals(level: u32) -> Option<(u32, u32, u32)> {
 	let at = |a: u32| va(a.wrapping_add_signed(d));
 	Some((at(0x1671c0), at(0x1673d0), at(0x16cef0)))
 }
+
+/// [PC] The landing hint (`pools_hint`) takes a moby table only up to this many slots and with class ids below `HINT_CLASS`. Real
+/// tables (43 whole-game savestates) span 551-1789 slots and hold class ids up to 1973; on some trips the level byte already names the
+/// new level while the table pointers still hold other data (Rilgar -> Blarg: a "table" with 26,000+ classes, counted every field of
+/// a ~30 s landing, each new hint a whole prop slot order on the main thread: 15-19 fps).
+const HINT_SLOTS: u32 = 4096;
+const HINT_CLASS: u32 = 0x1000;
 
 /// (class, props) of a level's live moby table: the count per class plus half of it (at least `SPARE`).
 pub fn count_pools(level: u32, rd32: impl Fn(u32) -> u32, rd16: impl Fn(u32) -> u16) -> Vec<(u32, u32)> {
@@ -151,6 +163,12 @@ pub fn enable_cold(iso: &str) -> Result<(), String> {
 	let _ = STATE.set("cold:".to_string());
 	let _ = START_LEVEL.set(0);
 	Ok(())
+}
+
+/// `rac-rs warm-gpu` (setup, launchers): opens the GPU capture once so the driver builds and keeps its kernels; a first
+/// start of the game then has them at once instead of drawing on the CPU until they are built.
+pub fn warm_gpu() -> Result<(), String> {
+	if gscap::gpu_warm() { Ok(()) } else { Err("no GPU for the capture".into()) }
 }
 
 pub fn active() -> bool {
@@ -213,9 +231,9 @@ pub fn set_pools(p: Vec<(u32, u32)>) {
 /// rewrites a moby's class in place (+0xa6 / +0x22 / +0x24, e.g. the Eudora bridges 0x41c -> 0x1b0 when built and
 /// back on a reload, FUN_002c6180) and spawns classes the start state did not hold; without a pool `sync` finds no free
 /// prop and the moby is not drawn. Idempotent (a second call leaves the pools as they are).
-pub fn widen_pools(placed: &[crate::gameplay::MobyInstance], loaded: impl IntoIterator<Item = u32>) {
+pub fn widen_pools(placed: &[crate::gameplay::MobyInstance], loaded: impl IntoIterator<Item = (u32, u32)>) {
 	if deferring() {
-		let (k, loaded) = (placed_counts(placed), loaded.into_iter().collect::<Vec<u32>>());
+		let (k, loaded) = (placed_counts(placed), loaded.into_iter().collect::<Vec<(u32, u32)>>());
 		DEFER_WIDEN.with(|d| d.borrow_mut().push((k.clone(), loaded.clone())));
 		defer(Box::new(move || set_pools(widened_counts(pools(), k, loaded))));
 		return;
@@ -229,7 +247,7 @@ pub fn widen_pools(placed: &[crate::gameplay::MobyInstance], loaded: impl IntoIt
 pub type Effect = Box<dyn FnOnce() + Send>;
 
 /// One deferred `widen_pools`: the placement counts per class and the loaded classes.
-pub type Widen = (HashMap<u32, u32>, Vec<u32>);
+pub type Widen = (HashMap<u32, u32>, Vec<(u32, u32)>);
 
 thread_local! {
 	static DEFER: std::cell::RefCell<Option<Vec<Effect>>> = const { std::cell::RefCell::new(None) };
@@ -268,7 +286,7 @@ pub fn defer(f: Effect) {
 
 /// `widen_pools` as a pure function (the audit tool replays it): `pools` widened so each placed class holds at least its
 /// placement count + `SPARE` and every other loaded class `SPAWN`.
-pub fn widened(pools: Vec<(u32, u32)>, placed: &[crate::gameplay::MobyInstance], loaded: impl IntoIterator<Item = u32>) -> Vec<(u32, u32)> {
+pub fn widened(pools: Vec<(u32, u32)>, placed: &[crate::gameplay::MobyInstance], loaded: impl IntoIterator<Item = (u32, u32)>) -> Vec<(u32, u32)> {
 	widened_counts(pools, placed_counts(placed), loaded)
 }
 
@@ -280,15 +298,15 @@ fn placed_counts(placed: &[crate::gameplay::MobyInstance]) -> HashMap<u32, u32> 
 	k
 }
 
-fn widened_counts(pools: Vec<(u32, u32)>, k: HashMap<u32, u32>, loaded: impl IntoIterator<Item = u32>) -> Vec<(u32, u32)> {
+fn widened_counts(pools: Vec<(u32, u32)>, k: HashMap<u32, u32>, loaded: impl IntoIterator<Item = (u32, u32)>) -> Vec<(u32, u32)> {
 	let mut n: HashMap<u32, u32> = pools.into_iter().collect();
 	for (c, k) in k {
 		let e = n.entry(c).or_insert(0);
 		*e = (*e).max(k + SPARE);
 	}
-	for c in loaded.into_iter().filter(|&c| c != 0) {
+	for (c, verts) in loaded.into_iter().filter(|&(c, _)| c != 0) {
 		let e = n.entry(c).or_insert(0);
-		*e = (*e).max(SPAWN);
+		*e = (*e).max(spawn_pool(verts));
 	}
 	let mut p: Vec<(u32, u32)> = n.into_iter().collect();
 	p.sort();
@@ -296,20 +314,49 @@ fn widened_counts(pools: Vec<(u32, u32)>, k: HashMap<u32, u32>, loaded: impl Int
 }
 
 /// The classes the viewer built a prop model for (`load_level`, retail mode); `sync` grows only their pools.
-pub fn set_modelled(c: HashSet<u32>) {
+pub fn set_modelled(c: HashMap<u32, u32>) {
 	if let Ok(mut v) = MODELLED.lock() {
 		*v = Some(c);
 	}
 }
 
 fn modelled(c: u32) -> bool {
-	MODELLED.lock().is_ok_and(|v| v.as_ref().is_some_and(|s| s.contains(&c)))
+	MODELLED.lock().is_ok_and(|v| v.as_ref().is_some_and(|s| s.contains_key(&c)))
 }
+
+/// [PC] Vertices of the prop model of class `c` (`set_modelled`), 0 when unknown.
+fn model_verts(c: u32) -> u32 {
+	MODELLED.lock().ok().and_then(|v| v.as_ref().and_then(|s| s.get(&c).copied())).unwrap_or(0)
+}
+
+/// [PC] Pool size of a class the level loads but nothing holds (spawned mobys): `SPAWN`, more for a small model. Growing a
+/// pool at run time rebuilds the level's whole prop index (about 14 ms on a laptop, a visible hitch), the spawn bursts seen are
+/// 9-12 live of a 8-prop pool, and a spare prop of a 200-vertex model costs a few KB: a vertex budget decides, 8..=`SPAWN_MAX`.
+pub fn spawn_pool(verts: u32) -> u32 {
+	if no_room() {
+		return SPAWN;
+	}
+	(SPAWN_VERTS / verts.max(1)).clamp(SPAWN, SPAWN_MAX)
+}
+
+/// RAC_POOL_ROOM=0: the old pool sizes (SPAWN props, doubling), to compare the growth hitch.
+fn no_room() -> bool {
+	static V: OnceLock<bool> = OnceLock::new();
+	*V.get_or_init(|| std::env::var("RAC_POOL_ROOM").is_ok_and(|v| v == "0"))
+}
+
+/// Spare vertices a spawn-only class pool aims at, and the most props that gets (see `spawn_pool`).
+const SPAWN_VERTS: u32 = 6000;
+const SPAWN_MAX: u32 = 32;
+/// Vertices a grown pool leaves as spare room at least (`grown`), and the most props that gets.
+const GROW_VERTS: u32 = 24000;
+const GROW_MAX: u32 = 96;
 
 /// A pool that ran out in `sync`: `need` live mobys of the class this field. The new count leaves room for the next
 /// burst: `need` + `SPAWN`, and at least twice the old count and twice `need` so a growing class rebuilds the slots rarely.
-pub fn grown(old: u32, need: u32) -> u32 {
-	(need + SPAWN).max(old * 2).max(need * 2)
+pub fn grown(class: u32, old: u32, need: u32) -> u32 {
+	let room = if no_room() { 0 } else { (GROW_VERTS / model_verts(class).max(1)).clamp(SPAWN, GROW_MAX) };
+	(need + SPAWN).max(old * 2).max(need * 2).max(need + room)
 }
 
 /// A camera pose: position, yaw, pitch (rac-rs convention, up positive) and the retail tan half-FOV scalar.
@@ -350,12 +397,13 @@ pub struct Moby {
 	pub ovr: Option<u32>,
 }
 
-/// The inputs of the 4:3 side test of a moby that retail's draw rejected for that and nothing else: view-space x and
-/// depth of its bounding sphere, its radius (all 1/1024 m) and the vertical tangent rac-rs renders with (`tan_v`: the retail
+/// The inputs of the 4:3 side tests of a moby that retail's draw rejected for a side plane (x or y) and nothing else: view-space
+/// x, y and depth of its bounding sphere, its radius (all 1/1024 m) and the vertical tangent rac-rs renders with (`tan_v`: the retail
 /// horizontal scalar times `PROJ_Y_RATIO`, as `self.cam.tan_half`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SideOnly {
 	vx: f32,
+	vy: f32,
 	vz: f32,
 	w: f32,
 	tan_v: f32,
@@ -365,10 +413,32 @@ impl SideOnly {
 	/// Retail's horizontal reject (`tx * z - (|x| - sx * w)` with its sign bit set) with the plane of a window `aspect` wide:
 	/// the same vertical tangent, so the horizontal one is `tan_v * aspect`. REN-MOBY-DRAWN keeps the near / far / vertical tests.
 	pub fn inside(&self, aspect: f32) -> bool {
-		let tx = self.tan_v * aspect;
-		let sx = (1.0 + tx * tx).sqrt();
-		!(tx * self.vz - (self.vx.abs() - sx * self.w)).is_sign_negative()
+		self.inside_lag(aspect, ViewLag::NONE)
 	}
+
+	/// [PC] `inside` for a drawn view that trails the tick's: both side planes turned out by `lag.ang` radians and the sphere
+	/// grown by `lag.grow` (1/1024 m). A smoothed frame's camera lies between the last two ticks (`Retail::camera`) while
+	/// retail's verdict is the newest tick's, so without it a moby at the trailing screen edge vanishes while still on screen.
+	pub fn inside_lag(&self, aspect: f32, lag: ViewLag) -> bool {
+		let turn = |t: f32| if lag.ang > 0.0 { (t.atan() + lag.ang).min(1.45).tan() } else { t };
+		let (tx, ty) = (turn(self.tan_v * aspect), turn(self.tan_v));
+		let (sx, sy) = ((1.0 + tx * tx).sqrt(), (1.0 + ty * ty).sqrt());
+		let w = self.w + lag.grow;
+		!(tx * self.vz - (self.vx.abs() - sx * w)).is_sign_negative() && !(ty * self.vz - (self.vy.abs() - sy * w)).is_sign_negative()
+	}
+}
+
+/// [PC] How far the drawn view can trail the newest tick's (`SideOnly::inside_lag`, `Retail::view_lag`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ViewLag {
+	/// Radians the side planes turn out.
+	pub ang: f32,
+	/// Growth of the sphere radius, 1/1024 m.
+	pub grow: f32,
+}
+
+impl ViewLag {
+	pub const NONE: ViewLag = ViewLag { ang: 0.0, grow: 0.0 };
 }
 
 /// What the retail moby draw (`moby_draw_build` FUN_0026a338 and its overlay twins, REN-MOBY-DRAWN in decomp/notes) tests, one
@@ -389,9 +459,9 @@ impl Culls {
 		self.occ || self.hidden || self.dist || self.near || self.side_x || self.side_y
 	}
 
-	/// Rejected by the horizontal side plane and by nothing else.
-	fn side_x_only(&self) -> bool {
-		self.side_x && !(self.occ || self.hidden || self.dist || self.near || self.side_y)
+	/// Rejected by a side plane (horizontal or vertical) and by nothing else.
+	fn side_only(&self) -> bool {
+		(self.side_x || self.side_y) && !(self.occ || self.hidden || self.dist || self.near)
 	}
 }
 
@@ -449,7 +519,7 @@ impl DrawView {
 			side_x: (tx * vz - (vx.abs() - sx * w)).is_sign_negative(),
 			side_y: (ty * vz - (vy.abs() - sy * w)).is_sign_negative(),
 		};
-		(culls, SideOnly { vx, vz, w, tan_v: tx * crate::viewer::PROJ_Y_RATIO })
+		(culls, SideOnly { vx, vy, vz, w, tan_v: tx * crate::viewer::PROJ_Y_RATIO })
 	}
 }
 
@@ -649,7 +719,22 @@ pub struct OvLate(Box<dyn FnOnce() -> Option<(u32, u32, Vec<[u8; 4]>, bool)> + S
 
 /// The effects layer of one field, still being built on the VU1 thread (`efx_vu::Shadow::submit`): `Retail::tick` waits for it
 /// after the next field's pad is out and appends it to `fx.qa` / `fx.pools` (what `efx_draw::build` appended on the worker).
-pub struct FxLate(std::sync::mpsc::Receiver<efx_vu::FxOut>);
+pub enum FxLate {
+	/// The VU1 thread's answer (the inline path).
+	Now(std::sync::mpsc::Receiver<efx_vu::FxOut>),
+	/// The picture thread hands the receiver of the VU1 thread's answer over once it has walked the field (`snap_pipe`).
+	Later(snap_pipe::Late),
+}
+
+impl FxLate {
+	/// Waits for the field's effects layer.
+	fn get(self) -> Option<efx_vu::FxOut> {
+		match self {
+			FxLate::Now(r) => r.recv().ok(),
+			FxLate::Later(l) => l.recv().ok().flatten().and_then(|r| r.recv().ok()),
+		}
+	}
+}
 
 /// What the main thread needs of one field: live mobys, the hero moby (pos, yaw) and the camera.
 #[derive(Default)]
@@ -664,7 +749,8 @@ pub struct Snap {
 	/// Retail's own occlusion mask of this field (128 bytes at 0x174100 + the level shift; None while loading / outside a level).
 	pub occ_mask: Option<[u8; 128]>,
 	pub front: bool,
-	/// The front end is inside the level-load loop of FUN_00231b00 (`in_load_loop`): the main thread runs its fields unthrottled.
+	/// The front end is inside the level-load loop of FUN_00231b00 or its frontbin copy (`in_load_loop`): the main thread runs its
+	/// fields unthrottled.
 	pub turbo: bool,
 	/// The front end's own state out of RAM, for the mirror's picture of it (`FrontRam`; Some in the front end only).
 	pub front_ram: Option<FrontRam>,
@@ -739,6 +825,9 @@ pub struct Snap {
 	hero_tilt: [f32; 2],
 	/// M3a shadows: the shadow-volume records of the drawn frame and the deferred draw path; None while frozen (keep the last).
 	pub shadows: Option<RetailShadows>,
+	/// [PC] Frame smoothing (viewer/interp.rs): `fx`, `shadows` and `orbs` blended toward the field before, drawn in their place
+	/// between two fields. A new snap starts without (None), so each field draws its own lists until the viewer blends again.
+	pub smooth: Option<Box<SmoothDraw>>,
 	/// Screen words of the world draw FUN_001eae20 (debug, RAC_SCENE_LOG): skip 0x15f5b8, draw mask 0x15f3f4, black fade
 	/// 0x15f3fc, white fade 0x15f400, fade gate 0x16a134.
 	screen: (u32, u32, f32, f32, u32),
@@ -774,7 +863,7 @@ pub fn frozen_mode(mode: u32) -> bool {
 /// held / frozen field, or one under a full black or white fade; 25 fields after gameplay wants 0 with no such field, one
 /// snap per field is dropped anyway (`RAC_SCENE_LOG` prints `native delay`).
 /// RAC_RETAIL_NATIVE_DELAY=d forces a fixed d (0 = the old undelayed draw).
-fn native_delay(mut s: Snap) -> Snap {
+fn native_delay(s: Snap) -> Snap {
 	static FORCED: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
 	let forced = *FORCED.get_or_init(|| std::env::var("RAC_RETAIL_NATIVE_DELAY").ok().and_then(|v| v.parse().ok()));
 	NATIVE_Q.with(|q| {
@@ -990,19 +1079,24 @@ const GS_WAIT_MS: u128 = 500;
 /// whatever overlay the capture thread had finished last: one field early or late by thread timing, and an overlay
 /// replaced before a snap took it never showed (the one-field HUD fade-out frames were lost).
 const OV_DELAY: u64 = 0;
-/// The front end's load loop runs without the GS picture work (the turbo) only after this many equal overlays in a row, and is
-/// probed (two fields drawn and compared) every `TURBO_PROBE` turbo fields.
+/// The front end's load loop runs unpaced (the turbo) once this many of its fields in a row were drawn as usual (the fade-in).
 const TURBO_STABLE: u32 = 8;
-const TURBO_PROBE: u32 = 64;
+/// In the turbo two fields are drawn every this many ms of wall time (the first draws the loop's picture into the main buffer,
+/// the second copies it to the display buffer), the others not: the loading starfield moves on a few times a second.
+const TURBO_SHOW_MS: u128 = 100;
 /// Every this many fields the worker has the game thread unwind its recompiled frames at the vblank wait
 /// (`Cpu::rec_unwind`, the same path as a table rebuild; the game goes on interpreting from the wait, RAM unchanged).
 /// Compiled code nests a Rust frame per retail call and some retail paths never return through them: on Novalis the
 /// 'ee' thread grew ~9.5 KB a field and overflowed its 256 MB stack at field ~28000 (2026-10-12). Before the O2 probe
 /// fix the frequent table rebuilds unwound those frames as a side effect; now nothing else does.
-const UNWIND_FIELDS: u32 = 250;
+/// [PC] (speed) 10, was 250: fights leak ~17-25 KB of frames a field and the unwinder walks the whole stack (~0.43 ms a MB
+/// on Windows), so every 250th field took a 1.6-5.5 ms extra step (a hitch every 5 s); every 10th field it is ~0.15 ms.
+const UNWIND_FIELDS: u32 = 10;
 
 /// The GS-full picture last handed to the window: its field counted from 1 (`Frame::field` + 1), for RAC_SHOT_FIELD.
 static GSF_SHOWN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// [PC] DEV: RAC_SHOT_SEQ shots (viewer/handler.rs) let the game run one more field past RAC_SHOT_FIELD per saved frame.
+pub static SHOT_ALLOW: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// RAC_RETAIL_SMOKE=N (tools/smoke.ps1, the speed check before an exe goes out): every 100 fields one `smoke:` line
 /// on stderr with the EE thread's `Machine::frame` time per field and the wall-clock fields/s of the worker; after N
@@ -1046,8 +1140,40 @@ impl Smoke {
 	}
 }
 
+/// The size of the picture `ov_px` hands over: the sharp HUD's (lane G: the GPU capture drew the overlay again at the window's
+/// resolution) or the 512-wide overlay's. Asked before `ov_px`, which takes the pixels.
+fn ov_dims(o: &gscap::Overlay) -> (u32, u32) {
+	o.hd.as_ref().map_or((o.w, o.rows), |h| (h.w, h.rows))
+}
+
+/// The sharp HUD for the window the viewer draws in (`window_h` pixels high), every frame from the render thread: on while the
+/// Graphics row HUD is Sharp (`pcext::hud_sharp_now`, pc_options.txt `hud=`), off with RAC_HUD=original or RAC_PC_EXT=0. The GPU
+/// capture then draws the overlay a second time at the window's resolution (gscap/draw/gpu.rs, gpu.wgsl k_hd); the 512 picture
+/// stays what the game's retail picture is.
+pub fn set_hud_target(window_h: u32) {
+	static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+	let off = *OFF.get_or_init(|| !pcext::enabled() || std::env::var("RAC_HUD").is_ok_and(|v| v.eq_ignore_ascii_case("original")));
+	gscap::set_hd_target(window_h, !off && pcext::hud_sharp_now());
+}
+
+/// The sharp title / main menu (viewer/hudsharp.rs) for a window `window_h` pixels high: the front end's art quads take the edge-aware
+/// sampler. The same switches as `set_hud_target` (Graphics row HUD Sharp; off with RAC_HUD=original or RAC_PC_EXT=0), and the window
+/// at least `HD_MIN_PX_PER_ROW` pixels per row of the 448-row menu screen (896 px; below it the nearest picture is as before).
+pub fn ui_sharp(window_h: u32) -> bool {
+	static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+	let off = *OFF.get_or_init(|| !pcext::enabled() || std::env::var("RAC_HUD").is_ok_and(|v| v.eq_ignore_ascii_case("original")));
+	!off && pcext::hud_sharp_now() && window_h as f32 >= 448.0 * gscap::HD_MIN_PX_PER_ROW
+}
+
 /// An overlay's pixels as RGBA8.
-fn ov_px(o: &gscap::Overlay) -> Vec<[u8; 4]> {
+fn ov_px(o: &mut gscap::Overlay) -> Vec<[u8; 4]> {
+	if let Some(h) = o.hd.take() {
+		return h.rgba;
+	}
+	if !o.rgba.is_empty() {
+		// The CPU capture converted the picture itself (gscap `Gs::publish`).
+		return std::mem::take(&mut o.rgba);
+	}
 	o.px[..(o.w * o.rows) as usize].iter().map(|p| p.map(|c| (c * 255.0 + 0.5) as u8)).collect()
 }
 
@@ -1217,21 +1343,27 @@ pub struct FrontDialog {
 const LOAD_LOOP_RA: [u32; 3] = [0x2321b8, 0x232208, 0x232248];
 /// `LOAD_LOOP_RA` on the USA disc (tools/racrs_va.py: every address mapped in its level; generated, do not edit).
 const LOAD_LOOP_RA_USA: [u32; 3] = [0x2326a8, 0x2326f8, 0x232738];
+/// `LOAD_LOOP_RA` of frontbin's copy of the loops (FUN_002314b8, the same code 0x648 lower): the front end after a Quit Game runs
+/// from frontbin, the boot ELF's copy only carries the cold-boot title [C].
+const LOAD_LOOP_RA_FRONTBIN: [u32; 3] = [0x231b70, 0x231bc0, 0x231c00];
+/// `LOAD_LOOP_RA_FRONTBIN` on the USA disc (disc_map `FRONT`: one aligned run there, USA = PAL + 0x4f0).
+const LOAD_LOOP_RA_FRONTBIN_USA: [u32; 3] = [0x232060, 0x2320b0, 0x2320f0];
 
 /// The front end's game thread is parked inside one of the load loops (see `LOAD_LOOP_RA`): its stack above `sp` (and `ra`) holds a
-/// return address into FUN_00231b00's wait calls.
-fn in_load_loop(m: &ee_oracle::Machine) -> bool {
+/// return address into FUN_00231b00's wait calls (`frontbin`: into FUN_002314b8's, the front end after a Quit Game).
+fn in_load_loop(m: &ee_oracle::Machine, frontbin: bool) -> bool {
 	if m.rd32(title_boot::front_mode()) != 6 {
 		return false;
 	}
+	let ras = if frontbin { crate::retail::disc::pick(&LOAD_LOOP_RA_FRONTBIN, &LOAD_LOOP_RA_FRONTBIN_USA) } else { crate::retail::disc::pick(&LOAD_LOOP_RA, &LOAD_LOOP_RA_USA) };
 	let ra = m.cpu.g(31) as u32;
-	if (*crate::retail::disc::pick(&LOAD_LOOP_RA, &LOAD_LOOP_RA_USA)).contains(&ra) {
+	if ras.contains(&ra) {
 		return true;
 	}
 	let sp = m.cpu.g(29) as u32;
 	(0..0x100u32).any(|k| {
 		let a = sp.wrapping_add(k * 8);
-		a < 0x200_0000 - 8 && m.rd32(a + 4) == 0 && (*crate::retail::disc::pick(&LOAD_LOOP_RA, &LOAD_LOOP_RA_USA)).contains(&m.rd32(a))
+		a < 0x200_0000 - 8 && m.rd32(a + 4) == 0 && ras.contains(&m.rd32(a))
 	})
 }
 
@@ -1248,17 +1380,28 @@ fn front_snap(m: &ee_oracle::Machine) -> Snap {
 	let menu = title_boot::front_menu(m, mode);
 	prompts::set_menu(menu.is_some());
 	menu_keys::publish(menu.as_ref().map(menu_keys::screen));
-	Snap { front: true, hold: true, mode, level: u32::MAX, menu, front_ram: Some(front_ram), pad: [m.rd32(0x13cae0), m.rd32(0x13cae4), 0, 0], ..Snap::default() }
+	// The front end's message box (mode 4: memory card, 60 Hz) is no page menu, but its keys and prompts work the menu way
+	// (menu_keys::front_dialog: Enter / Space / left click = Yes / Continue, Esc = No), like the in-level mode-4 dialogs.
+	let dialog = if menu.is_none() && mode == 4 { crate::frontend::dialog_keys(&front_ram.dialog) } else { None };
+	if dialog.is_some() {
+		prompts::set_menu(true);
+		menu_keys::publish(dialog);
+	}
+	Snap { front: true, hold: true, mode, level: u32::MAX, menu, dialog, front_ram: Some(front_ram), pad: [m.rd32(0x13cae0), m.rd32(0x13cae4), 0, 0], ..Snap::default() }
 }
 
 fn capture_gs(m: &mut ee_oracle::Machine, dir: &str) -> Option<Capture> {
 	capture_gs_vram(m, ee_oracle::gs::Gs::load_vram(&format!("{dir}/GS.bin"))?, dir)
 }
 
-/// Pages of the page-menu engine (level overlay) whose render-to-texture panel holds an actor drawn through VU1 (path 1),
-/// which the capture draws only in P1 mode (gscap `P1`): the post-game page (id 0x22) with the green robot (class 1957).
+/// Pages of the page-menu engine (level overlay) whose render-to-texture panels hold actors drawn through VU1 (path 1),
+/// which the capture draws only in P1 mode (gscap `P1`): the post-game page (id 0x22) with the green robot (class 1957), and
+/// the pause pages with 3D previews (decomp/notes/ingame_pause_menu.md "Item previews"): Weapons 3 (Ratchet with the weapon,
+/// the weapon, its ammo), Gadgets 4 (Ratchet), Quick Select 5 (the selected weapon), Items 6 (the gold bolt), Weapons help
+/// 0x18 (weapon, ammo) and Gadgets help 0x19. Checked against --gsfull; the other pages draw no model (their pictures are
+/// plain textures the capture already shows).
 fn rtt_page(s: &Snap) -> bool {
-	s.menu.as_ref().is_some_and(|m| !m.front && m.id == 0x22)
+	s.menu.as_ref().is_some_and(|m| !m.front && matches!(m.id, 3 | 4 | 5 | 6 | 0x18 | 0x19 | 0x22))
 }
 
 /// The capture thread on a given 4 MB VRAM (a cold boot has no GS.bin: empty VRAM, attached from the first field).
@@ -1290,22 +1433,80 @@ fn capture_gs_vram(m: &mut ee_oracle::Machine, vram: Vec<u8>, vu_dir: &str) -> O
 				}
 			}
 			let _flag = Flag(dead2);
+			hot::thread();
 			// rac-rs's multi-threaded copy of the oracle capture (retail/gscap.rs): same pixels, menus 4x faster.
 			let mut g = gscap::Gs::new(vram);
 			g.set_vu1_dir(&vu_dir);
-			while let Ok(j) = rx2.recv() {
-				let end = matches!(&j, ee_oracle::gs::Job::Gif(q, u64::MAX) if q.is_empty());
-				g.run_oracle(j);
-				if let Some(o) = g.done.take() {
-					if let Ok(mut s) = out.lock() {
-						s.push_back((ends.load(Ordering::SeqCst) + 1, o));
+			// RAC_GSCAP_OVHASH=1 (debug): one line per published overlay with an FNV hash of its pixels (GPU against CPU path, old against new kernels).
+			let ovhash = std::env::var_os("RAC_GSCAP_OVHASH").is_some();
+			// RAC_GSCAP_OVHASH8=1 (debug): one line per published overlay with an FNV hash of the RGBA8 picture the main thread gets.
+			let ovhash8 = std::env::var_os("RAC_GSCAP_OVHASH8").is_some();
+			let mut ovn = 0u64;
+			// [PC] (speed) Lazy readback (gscap `set_lazy`): a published overlay is collected while the next job records, and `ends`
+			// (END jobs whose overlays are all out) waits for it. RAC_GS_ASYNC=0 switches it off.
+			let lazy = std::env::var("RAC_GS_ASYNC").map(|v| v != "0").unwrap_or(true);
+			g.set_lazy(lazy);
+			let mut ends_seen = 0u64;
+			let mut put = |tag: u64, mut o: gscap::Overlay| {
+				if ovhash {
+					let h = o.px.iter().flatten().fold(0xcbf2_9ce4_8422_2325u64, |h, v| (h ^ v.to_bits() as u64).wrapping_mul(0x0100_0000_01b3));
+					eprintln!("ovhash {ovn} {h:016x} rows {} frozen {}", o.rows, o.frozen);
+				}
+				if ovhash8 {
+					// The sharp HUD (lane G) keeps its own picture: the hash is of the 512 picture then, and `hd` stays for the viewer.
+					let hd = o.hd.take();
+					let px8 = ov_px(&mut o);
+					let h = px8.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, p| (h ^ u32::from_le_bytes(*p) as u64).wrapping_mul(0x0100_0000_01b3));
+					eprintln!("ovhash8 {ovn} {h:016x} rows {} frozen {} disp {}", o.rows, o.frozen, o.disp);
+					o.rgba = px8;
+					o.hd = hd;
+				}
+				if ovhash || ovhash8 {
+					ovn += 1;
+				}
+				if let Ok(mut s) = out.lock() {
+					s.push_back((tag, o));
+				}
+			};
+			loop {
+				let j = match rx2.try_recv() {
+					Ok(j) => j,
+					Err(std::sync::mpsc::TryRecvError::Empty) => {
+						// Nothing queued: the picture in flight is collected now (the main thread may be waiting for it).
+						g.gpu_finish(true);
+						while let Some((tag, o)) = g.ready.pop_front() {
+							put(tag, o);
+						}
+						ends.store(g.pending_tag().map_or(ends_seen, |t| (t - 1).min(ends_seen)), Ordering::SeqCst);
+						match rx2.recv() {
+							Ok(j) => j,
+							Err(_) => break,
+						}
 					}
-				}
+					Err(_) => break,
+				};
+				let end = matches!(&j, ee_oracle::gs::Job::Gif(q, u64::MAX) if q.is_empty());
+				let tag0 = ends_seen + 1;
+				g.run_oracle(j);
 				if end {
-					ends.fetch_add(1, Ordering::SeqCst);
+					ends_seen += 1;
 				}
+				g.gpu_finish(false);
+				while let Some((tag, o)) = g.ready.pop_front() {
+					put(tag, o);
+				}
+				if let Some(o) = g.done.take() {
+					put(tag0, o);
+				}
+				ends.store(g.pending_tag().map_or(ends_seen, |t| (t - 1).min(ends_seen)), Ordering::SeqCst);
 				ran.fetch_add(1, Ordering::SeqCst);
 			}
+			// The stream ended: the last picture still being read back goes out first.
+			g.gpu_finish(true);
+			while let Some((tag, o)) = g.ready.pop_front() {
+				put(tag, o);
+			}
+			ends.store(ends_seen, Ordering::SeqCst);
 		})
 		.ok()?;
 	c.tx = Some(tx.clone());
@@ -1518,6 +1719,9 @@ pub struct RetailFx {
 	pub blobs: Vec<([f32; 3], f32, [f32; 3])>,
 	/// The hero's position (0x13f3d0, as retail/strafe.rs `HERO_POS`): the water pass's contact rings (viewer/waterfx.rs `Rings`).
 	pub hero: Option<[f32; 3]>,
+	/// [PC] The drawn mobys (address, position, bounding sphere radius) for the water pass's wakes (viewer/waterfx.rs
+	/// `Wakes`); set by `snap`.
+	pub movers: Vec<(u32, [f32; 3], f32)>,
 	/// The 8 dynamic light slots (`dyn_lights`), index = slot.
 	pub lights: [Option<crate::particles::PointLight>; 8],
 	/// Level-light slots 12..15 as retail RAM holds them (`reserved_lights`); None when the table is not found.
@@ -1725,16 +1929,35 @@ pub struct SwapWords {
 	pub fog: [f32; 4],
 	/// The pool particle far clamp in metres (raw / 4096, as `water::PART_FAR`).
 	pub part_far: f32,
+	/// [PC] The camera water flag itself (0x167414 at the level shift: the camera is below a water face, or the hero swims
+	/// underwater): what picks the underwater words above. The PC underwater look reads it (viewer/underwater.rs).
+	pub under: bool,
+	/// [PC] The hero's water surface height (boot word 0x13f640, the water face under the hero) while the hero swims (group
+	/// word 0x1413dc = 0x11 underwater or 0x12 at the surface): the surface the underwater look measures its depth from.
+	pub surf: Option<f32>,
+}
+
+/// [PC] Dev aid: RAC_UNDER_LOG=1 prints the camera water flag and its proof words every field.
+fn under_log() -> bool {
+	static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+	*ON.get_or_init(|| std::env::var_os("RAC_UNDER_LOG").is_some())
 }
 
 impl SwapWords {
 	fn read(m: &ee_oracle::Machine, level: u32) -> Option<SwapWords> {
 		let b = va(0x16d058u32.wrapping_add_signed(*LEVEL_SHIFT.get(level as usize)?));
 		let small = if matches!(level, 0 | 5 | 14 | 16) { 0x40 } else { 0 };
+		let part_far = m.rd32(va(0x1600fc + small)) as i32 as f32 / 4096.0;
+		if under_log() {
+			let flag = m.rd32(va(0x167414u32.wrapping_add_signed(*LEVEL_SHIFT.get(level as usize)?)));
+			eprintln!("UNDER_LOG level {level} flag {flag:#x} part_far {part_far} fog_far {} grp {:#x} f640 {}", m.rdf(b + 4) / 1024.0, m.rd32(0x1413dc), m.rdf(0x13f640));
+		}
 		Some(SwapWords {
 			fog_rgb: [m.rd32(b + 0x18) as u8, m.rd32(b + 0x1c) as u8, m.rd32(b + 0x20) as u8],
 			fog: [m.rdf(b) / 1024.0, m.rdf(b + 4) / 1024.0, m.rdf(b + 0x10), m.rdf(b + 0x14)],
-			part_far: m.rd32(va(0x1600fc + small)) as i32 as f32 / 4096.0,
+			part_far,
+			under: m.rd32(va(0x167414u32.wrapping_add_signed(*LEVEL_SHIFT.get(level as usize)?))) & 0xff != 0 && (part_far - 64.0).abs() < 0.5,
+			surf: matches!(m.rd32(0x1413dc), 0x11 | 0x12).then(|| m.rdf(0x13f640)).filter(|z| z.is_finite()),
 		})
 	}
 }
@@ -1818,6 +2041,11 @@ const RETICLE_FN_USA: [[u32; 2]; 19] = [
 	[0x2a9a80, 0x2c6530],
 	[0x2af458, 0x2ca660],
 ];
+
+/// Clank's bulb glow in the list `hero_glows` makes (the slot-3 item light: size bits 0x3d6978d5, colour 0x280000c0).
+pub fn is_bulb_glow(g: &([f32; 3], f32, f32, u32)) -> bool {
+	g.1.to_bits() == 0x3d69_78d5 && g.3 == 0x2800_00c0
+}
 
 /// The hero glow callback (Eudora FUN_001fade8, OV:21972-22057) in gameplay modes (not 2 / 6), by the back-slot kind
 /// byte 0x1413f4: 3 = three glows at 0x1410a0.. (size 0.2, rgba 0x141634); 0 = the slot-3 item light
@@ -2364,7 +2592,12 @@ pub fn snap(m: &ee_oracle::Machine) -> Snap {
 			if class == 0 {
 				// A scene spawns its own class-0 Ratchet and hides the placed one (+0x34 bit 0): the drawn one wins.
 				let shown = m.rd8(a + 0x31) != 0;
-				if !(out.hero_shown && !shown) {
+				// The hero's afterimage copies (FUN_00276fc0, the only writer of flags 0x80a: a copy of the hero class with +0x34 = 0x80a and
+				// a translucent alpha +0x23, one per trail entry, 2 / 4 / 6 fields behind in Thruster-Pack flight, state 0x10) are class-0
+				// mobys of their own and sit after the hero in the table: taking them for the hero drew Ratchet (pose, joints, position)
+				// up to 6 fields behind the true place while Clank and the packs stayed there.
+				let afterimage = m.rd16(a + 0x34) == 0x80a && a != m.rd32(0x1413d0) & 0x01ff_ffff;
+				if !afterimage && !(out.hero_shown && !shown) {
 					out.hero = Some((m.rdv3(a + 0x10), m.rdf(a + 0x48), Clock::read(m, a)));
 					out.hero_hidden = m.rd16(a + 0x34) & 1 != 0;
 					out.parts.hero_fx = joint_records(m, a);
@@ -2380,7 +2613,7 @@ pub fn snap(m: &ee_oracle::Machine) -> Snap {
 				let shown = m.rd8(a + 0x31) != 0;
 				let side_only = view.as_ref().filter(|_| !shown && walked && (slot as i8) >= 0).and_then(|v| {
 					let (culls, side) = v.culls(m, a);
-					culls.side_x_only().then_some(side)
+					culls.side_only().then_some(side)
 				});
 				let (rot, mirror) = basis_pose(m, a, true);
 				out.mobys.push(Moby {
@@ -2474,9 +2707,18 @@ pub fn snap(m: &ee_oracle::Machine) -> Snap {
 		.collect();
 	// Modern camera: Clank, the back object and the bomb in the glove follow the drawn yaw (strafe.rs `turn_parts`, draw only).
 	if hero_addr != 0 && modcam::enabled() {
-		strafe::turn_parts(m, hero_addr, hp, &mut out.mobys);
+		let mut glows = out.fx.as_mut().map(|fx| std::mem::take(&mut fx.glows)).unwrap_or_default();
+		strafe::turn_parts(m, hero_addr, hp, &mut out.mobys, &mut glows);
+		if let Some(fx) = out.fx.as_mut() {
+			fx.glows = glows;
+		}
 	}
 	out.shadows = Some(shadow_snap(m, level));
+	// [PC] Water Enhanced wakes (viewer/waterfx.rs `Wakes`): where the drawn mobys stand this field.
+	if let Some(fx) = out.fx.as_mut() {
+		// The bounding sphere is moby +0x00..0x0c, x1024 (decomp/notes MOBY-FADE): its radius at +0x0c.
+		fx.movers = out.mobys.iter().filter(|mb| mb.shown).map(|mb| (mb.addr, mb.pos, m.rdf(mb.addr + 0xc) / 1024.0)).collect();
+	}
 	out
 }
 
@@ -2489,6 +2731,15 @@ pub struct RetailShadows {
 	pub deferred: Vec<u32>,
 	/// The hero moby is on the deferred list (a caster, or +0x34 & 0x800).
 	pub hero_deferred: bool,
+}
+
+/// [PC] Frame smoothing (viewer/interp.rs): the draw lists of a display frame between two fields (`Snap::smooth`); None = the
+/// field's own.
+#[derive(Default)]
+pub struct SmoothDraw {
+	pub fx: Option<RetailFx>,
+	pub shadows: Option<RetailShadows>,
+	pub orbs: Option<Vec<crate::particles::OrbDraw>>,
 }
 
 impl RetailShadows {
@@ -2643,7 +2894,20 @@ pub struct Retail {
 	replay: Option<Arc<rec::Replay>>,
 	replay_ended: bool,
 	rx: std::sync::mpsc::Receiver<Snap>,
-	pending: bool,
+	/// Fields handed to the thread whose snapshot is not taken yet (1 = lockstep, more while `ahead` lets it run ahead).
+	inflight: u32,
+	/// Snapshots taken (`Snap::field`).
+	taken: u32,
+	/// [PC] How many fields the thread may hold (`depth`): 1, or up to 3 in gameplay and scenes while the window's frames
+	/// take longer than a field, so the thread keeps working while a slow frame draws instead of waiting for the next tick.
+	/// The pad of each field is still the one of its own tick (`fields` indexes it), only one or two fields later.
+	ahead: u32,
+	/// [PC] The window's frame interval in ms, averaged (`set_frame_ms`).
+	frame_avg: f32,
+	/// [PC] Milliseconds the last tick waited for the thread's field (the viewer's per-frame wait budget).
+	pub waited: f32,
+	/// [PC] A field the thread already finished, taken off `rx` by `field_ready` and used by the next tick.
+	early: Option<Snap>,
 	/// A movie the game thread waits for (fmv_bridge), until the viewer takes it (`take_movie`).
 	movie_req: Option<fmv_bridge::Request>,
 	/// Buttons held when a movie ended: kept from the game until released (the skip press must not reach it).
@@ -2686,6 +2950,9 @@ pub struct Retail {
 	/// Keys (and the left / middle mouse buttons, `mouse_taps`: Circle / Triangle) pressed since the keyboard was last sampled, with the fields
 	/// each still counts as held (`press_key`, `tick_keys`).
 	taps: HashMap<winit::keyboard::KeyCode, u8>,
+	/// The keys and controller buttons that ended a Controls-page capture (bound, or Esc): the game sees a neutral pad until they
+	/// are released, else the bound key would act as the button it now is (Confirm) and the page would start a capture again.
+	cap_hold: (Vec<winit::keyboard::KeyCode>, u32),
 	mouse_taps: MouseTaps,
 	/// Buttons the game's pad update read since `take_pad_seen`.
 	pad_seen: u32,
@@ -2729,9 +2996,17 @@ fn stubs_path() -> String {
 impl Retail {
 	pub fn load() -> Option<Retail> {
 		let dir = STATE.get()?;
+		// The window's main loop runs here; the worker and the GS capture mark their own threads.
+		hot::process();
+		hot::thread();
+		gscap::gpu_prestart(hot::idle);
 		let cold = COLD.get();
 		pcext::init(cold.is_some());
 		prompts::init();
+		// The picture thread's mirror (snap_pipe.rs) copies only the RAM pages written since its last sync: the live RAM is write-watched.
+		if snap_pipe::enabled() {
+			ee_oracle::mem::watch::watch_next();
+		}
 		let mut m = match cold {
 			Some(iso) => {
 				let stubs = std::env::var("ORACLE_STUBS").unwrap_or_else(|_| stubs_path());
@@ -2758,10 +3033,6 @@ impl Retail {
 		fmv_bridge::register();
 		if cold.is_some() {
 			title_boot::hook_boot_movies(&mut m);
-		}
-		// Exact ownership of the draw-queue callbacks' packets (retail/efx_own.rs); RAC_EFX_OWN=0 leaves it out.
-		if !disc::extras_off() {
-			efx_own::register();
 		}
 		// --wide (GS-full only): the wrapping hands of the field-of-view function (gsfull/wide.rs).
 		if crate::gsfull::wide::enabled() && !disc::extras_off() {
@@ -2815,7 +3086,12 @@ impl Retail {
 		let gs_dir = if cold.is_some() { std::env::var("RAC_GSFULL_STATE").unwrap_or_default() } else { dir.clone() };
 		let gsf = if gsfull_on() { crate::gsfull::pipe::start(&gs_dir) } else { None };
 		// EFFECTS LAYER, VU1 owners (retail/efx_vu.rs): the VIF1 + VU1 model the field's jobs pass through.
-		let mut vush = efx_vu::Shadow::new(&gs_dir);
+		let mut vush = efx_vu::Shadow::new();
+		// The picture half (capture + chain walk) lives on its own thread (snap_pipe.rs) or, RAC_SNAP_PIPE=0, inline on the worker.
+		let mut pipe = if snap_pipe::enabled() { snap_pipe::Pipe::new(efx_vu::Picker::new(&gs_dir), snap_pipe::check().then(|| efx_vu::Picker::new(&gs_dir))) } else { None };
+		let mut picker = if pipe.is_none() { Some(efx_vu::Picker::new(&gs_dir)) } else { None };
+		// Without the ghost pipe: capture + walk run on a helper thread beside `snap()` when that is faster (snap_pipe.rs `Par`).
+		let mut par = if pipe.is_none() { snap_pipe::Par::new(snap_pipe::check().then(|| efx_vu::Picker::new(&gs_dir))) } else { None };
 		let jobs_rx = gsf.as_ref().map(|_| {
 			let (jtx, jrx) = std::sync::mpsc::channel::<ee_oracle::gs::Job>();
 			m.cpu.mem.gsq = Some(jtx);
@@ -2869,6 +3145,7 @@ impl Retail {
 			// Recompiled retail code nests a Rust frame per retail call.
 			.stack_size(256 << 20)
 			.spawn(move || {
+				hot::thread();
 				// Level travel: the level whose pools were counted, and whether a non-gameplay field (the travel
 				// sequence and loader, game mode 6) ran since the level byte changed.
 				let (mut pooled, mut transit) = (level, false);
@@ -2900,11 +3177,11 @@ impl Retail {
 				// RAC_FRONT_GS=1: the front end shows the GS's own picture (debug / -GsFull references); else the mirror draws it.
 				let gs_front = title_boot::gs_picture();
 				let (mut front_n, mut front_ns) = (0u32, 0u64);
-				let (mut last_turbo, turbo_on) = (false, std::env::var_os("RAC_NO_TURBO").is_none());
-				// The turbo starts only once the front end's picture has been the same for `TURBO_STABLE` overlays in a row (`ov_same`), and
-				// every `TURBO_PROBE` turbo fields two fields are drawn and compared again (`probe_n`), so a loop whose picture changes is
-				// never skipped for long: the changed picture draws as at 50 Hz.
-				let (mut ov_prev, mut ov_same, mut probe_n) = (0u64, 0u32, 0u32);
+				let mut last_turbo = false;
+				// The turbo starts once the load loop has run `TURBO_STABLE` fields in a row (`loop_n`); in it the capture draws a pair of
+				// fields every `TURBO_SHOW_MS` (`show_t`, `show_n`: fields of the pair still to draw) and skips the prims of the others
+				// (`draw_on`: the capture's DRAW_ON / DRAW_OFF state in full mode, which FULL_ON resets to drawing).
+				let (mut loop_n, mut show_n, mut draw_on, mut show_t) = (0u32, 0u32, true, std::time::Instant::now());
 				// RAC_LOAD_LOG (loadlog.rs): per 50 fields the average of the EE time, the rest of the worker's field and the time it
 				// waited for the next field to be handed to it; and the mode changes of the front end / the level.
 				let (mut ll_last, mut ll_idle, mut ll_ee, mut ll_post, mut ll_n) = (std::time::Instant::now(), 0u64, 0u64, 0u64, 0u32);
@@ -2912,6 +3189,7 @@ impl Retail {
 				// RAC_LOAD_STOP=N (tests): exit N fields after the first gameplay field, with the RAM hash.
 				let ll_stop: Option<u32> = std::env::var("RAC_LOAD_STOP").ok().and_then(|v| v.parse().ok());
 				while let Ok(fin) = prx.recv() {
+					fmv_bridge::hold_field();
 					let t = std::time::Instant::now();
 					ll_idle += t.duration_since(ll_last).as_nanos() as u64;
 					wperf.lap(0);
@@ -2969,6 +3247,10 @@ impl Retail {
 					wperf.icd = m.cpu.icount.wrapping_sub(ic0);
 					vush.end(&mut m.cpu.mem.gsq);
 					let frame_ns = t_frame.elapsed().as_nanos() as u64;
+					// RAC_TEST_SLOW_EE=F (tests): the worker idles (F - 1) times its field after it, as a CPU F times slower would be busy.
+					if let Some(f) = test_slow_ee() {
+						std::thread::sleep(std::time::Duration::from_nanos((frame_ns as f64 * (f - 1.0)) as u64));
+					}
 					wperf.lap(2);
 					// The title boot over without a front end (it failed): the card is the game's again.
 					if card.is_held() && !title_boot::holding() {
@@ -3039,7 +3321,7 @@ impl Retail {
 						if let Some(q) = cap.as_ref().and_then(|c| c.tx.as_ref()) {
 							let _ = q.send(ee_oracle::gs::Job::Gif(Vec::new(), if want_full { gscap::FULL_ON } else { gscap::FULL_OFF }));
 							full_on = want_full;
-							(ov_same, probe_n) = (0, 0);
+							(loop_n, show_n, draw_on) = (0, 0, true);
 						}
 					}
 					if front && title_trace {
@@ -3057,27 +3339,39 @@ impl Retail {
 						}
 					}
 					card.after_field(&m);
-					// The level-load loop of the front end (`in_load_loop`): no GS picture work and no pacing while it runs; the main
-					// thread hands the next field at once (`Retail::turbo`). RAC_NO_TURBO=1 keeps the 50 Hz pace (comparison runs).
-					let mut turbo = in_front && !booting && turbo_on && full_on && ov_same >= TURBO_STABLE && in_load_loop(&m);
-					if turbo {
-						probe_n += 1;
-						if probe_n > TURBO_PROBE && probe_n <= TURBO_PROBE + 2 {
-							turbo = false;
-						} else if probe_n > TURBO_PROBE + 2 {
-							probe_n = 0;
+					// The level-load loop of the front end (`in_load_loop`): no pacing while it runs, the main thread hands the next field
+					// at once (`Retail::turbo`), and the GS picture work only for a pair of fields every `TURBO_SHOW_MS`. The loop only
+					// waits for the level data (it reads no pad); its picture, a slowly moving starfield, just moves on faster.
+					let was_load = loop_n > 0;
+					loop_n = if in_front && !booting && full_on && in_load_loop(&m, !cold_front) { loop_n.saturating_add(1) } else { 0 };
+					// While the loop runs the capture draws its main-to-display copies as a clean picture (gscap `LOAD_ON`, `Gs::load`):
+					// full mode keeps no main buffer, the copy would show stale VRAM. FULL_ON / FULL_OFF clear it on both sides.
+					if (loop_n > 0) != was_load {
+						if let Some(q) = cap.as_ref().and_then(|c| c.tx.as_ref()) {
+							let _ = q.send(ee_oracle::gs::Job::Gif(Vec::new(), if loop_n > 0 { gscap::LOAD_ON } else { gscap::LOAD_OFF }));
 						}
-					} else {
-						probe_n = 0;
 					}
+					let turbo = loop_n > TURBO_STABLE;
 					if turbo != last_turbo {
 						crate::loadlog::say(|| format!("field {field}: load loop turbo {}", if turbo { "ON" } else { "off" }));
-						if full_on {
-							if let Some(q) = cap.as_ref().and_then(|c| c.tx.as_ref()) {
-								let _ = q.send(ee_oracle::gs::Job::Gif(Vec::new(), if turbo { gscap::DRAW_OFF } else { gscap::DRAW_ON }));
-							}
+						(show_n, show_t, last_turbo) = (0, std::time::Instant::now(), turbo);
+					}
+					// The marker takes effect from the next field's prims: the pair's second field copies the main buffer its first drew.
+					let draw = !turbo
+						|| if show_n > 0 {
+							show_n -= 1;
+							true
+						} else if show_t.elapsed().as_millis() >= TURBO_SHOW_MS {
+							(show_n, show_t) = (1, std::time::Instant::now());
+							true
+						} else {
+							false
+						};
+					if full_on && draw != draw_on {
+						if let Some(q) = cap.as_ref().and_then(|c| c.tx.as_ref()) {
+							let _ = q.send(ee_oracle::gs::Job::Gif(Vec::new(), if draw { gscap::DRAW_ON } else { gscap::DRAW_OFF }));
+							draw_on = draw;
 						}
-						last_turbo = turbo;
 					}
 					if field % 100 == 0 && std::env::var_os("RAC_TITLE_TRACE").is_some() {
 						let rw = |a: usize| i32::from_le_bytes(m.cpu.mem.ram[a..a + 4].try_into().unwrap());
@@ -3131,13 +3425,32 @@ impl Retail {
 						}
 					}
 					wperf.lap(4);
+					let t_l4 = std::time::Instant::now();
 					// EFFECTS LAYER, VU1 owners: the chain walk reads RAM here; the VIF1 / VU1 feed runs on its own thread while
 					// the snapshot is built (retail/efx_vu.rs `prep` / `run`).
 					let lv = m.cpu.mem.ram[LEVEL as usize] as u32;
 					let efx_on = !front && !booting && efx_draw::enabled();
 					let t_prep = std::time::Instant::now();
-					let bi = efx_on.then(|| efx_draw::capture(&m, lv, &own));
-					let work = bi.as_ref().map(|b| vush.prep(&m, &own, b));
+					let (mut bi, mut work, mut hand) = (None, None, None);
+					let mut par_on = false;
+					if efx_on {
+						if let Some(p) = pipe.as_mut() {
+							// The ghost machine gets the RAM the walk reads now; capture + walk run on the picture thread.
+							hand = p.hand(&m, &own, lv, field, vush.take_pending());
+						} else if let Some(pk) = picker.as_mut() {
+							if par.as_mut().is_some_and(|p| p.want()) {
+								// Capture + walk run on the helper while snap() below builds the snapshot; both only read the machine.
+								par_on = par.as_mut().is_some_and(|p| p.start(&m, &own, lv, pk, vush.take_pending()));
+								if !par_on {
+									par = None;
+								}
+							} else {
+								let b = efx_draw::capture(&m, lv, &own);
+								work = Some(pk.prep(&m, &own, &b, vush.take_pending()));
+								bi = Some(b);
+							}
+						}
+					}
 					wperf.extra(0, t_prep.elapsed().as_nanos() as u64);
 					let t_snap = std::time::Instant::now();
 					let mut s = if front || booting { front_snap(&m) } else { snap(&m) };
@@ -3152,11 +3465,30 @@ impl Retail {
 					// EFFECTS LAYER: the VU1 feed and the owned DIRECT-GIF callbacks this field drew (retail/efx_draw.rs, after the
 					// ported ones) are built on the VU1 thread while the EE runs the next field; `Retail::tick` appends them.
 					let t_join = std::time::Instant::now();
-					if let (Some(w), Some(b)) = (work, bi) {
-						s.fx_late = vush.submit(w, b, field, s.fx.is_some()).map(FxLate);
+					if par_on {
+						if let Some((b, w)) = par.as_mut().and_then(|p| p.join(&m, field)) {
+							bi = Some(b);
+							work = Some(w);
+						}
+					}
+					let t_sub = std::time::Instant::now();
+					if let Some(h) = hand {
+						s.fx_late = Some(FxLate::Later(h.finish(s.fx.is_some())));
+					} else if let (Some(w), Some(b), Some(pk)) = (work, bi, picker.as_mut()) {
+						s.fx_late = pk.submit(w, b, field, s.fx.is_some()).map(FxLate::Now);
+					}
+					if efx_on {
+						if let Some(p) = par.as_mut() {
+							p.done(t_prep.elapsed().as_nanos() as u64);
+						}
 					}
 					wperf.extra(2, t_join.elapsed().as_nanos() as u64);
 					wperf.lap(5);
+					// After the section timer: the print itself takes ms when stderr is a file.
+					if wperf.on && t_l4.elapsed().as_micros() > 2000 {
+						let hs = |i: usize| snap_pipe::HS[i].load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6;
+						eprintln!("perf: snap spike field {field}: total {:.2} ms = before {:.2} dispatch {:.2} snap() {:.2} join {:.2} submit {:.2} | par {par_on} | helper wake {:.2} capture {:.2} walk {:.2} | fresh buffers {} KB", t_l4.elapsed().as_secs_f64() * 1e3, t_prep.duration_since(t_l4).as_secs_f64() * 1e3, t_snap.duration_since(t_prep).as_secs_f64() * 1e3, t_join.duration_since(t_snap).as_secs_f64() * 1e3, t_sub.duration_since(t_join).as_secs_f64() * 1e3, t_sub.elapsed().as_secs_f64() * 1e3, hs(0), hs(1), hs(2), efx_vu::FRESH.swap(0, std::sync::atomic::Ordering::Relaxed) / 1024);
+					}
 					s.turbo = turbo;
 					if !front && !booting {
 						lag_layers(&mut s, &mut layers_used);
@@ -3172,9 +3504,12 @@ impl Retail {
 						if !arrived(&s, &m) {
 							transit = true;
 							// [PC] The pools as the moby table holds them now (it fills during the last fields of the landing): the level
-							// prefetch builds the prop slots for them ahead of the arrival (`pools_hint`). Read only.
-							let p = count_pools(s.level, |a| m.rd32(a), |a| m.rd16(a));
-							if !p.is_empty() {
+							// prefetch builds the prop slots for them ahead of the arrival (`pools_hint`). Read only. Only a table that looks
+							// real (`HINT_SLOTS`, `HINT_CLASS`).
+							let (ts, te) = table(s.level);
+							let (lo, hi) = (m.rd32(ts) & 0x01ff_ffff, m.rd32(te) & 0x01ff_ffff);
+							let p = if lo <= hi && hi - lo <= HINT_SLOTS * 0x100 { count_pools(s.level, |a| m.rd32(a), |a| m.rd16(a)) } else { Vec::new() };
+							if p.last().is_some_and(|c| c.0 < HINT_CLASS) {
 								if let Ok(mut h) = POOLS_HINT.lock() {
 									*h = Some((s.level, p));
 								}
@@ -3191,39 +3526,39 @@ impl Retail {
 					s.sound = take_sound_of(&mut m);
 					wperf.lap(6);
 					// In-game the overlay is taken later, on the main thread (`OvLate`): the worker goes on to the next field while the
-					// capture thread finishes this one. The front end (its overlay decides the turbo) and the debug dumps take it here.
+					// capture thread finishes this one. The front end and the debug dumps take it here.
 					let late = !front && !booting && !ov_sync;
 					if let (true, Some(c)) = (late, cap.as_ref()) {
 						let (h, f) = (c.handle(), field as u64);
-						s.ov_late = Some(OvLate(Box::new(move || h.take(f, ov_delay).map(|o| (o.w, o.rows, ov_px(&o), o.disp)))));
+						s.ov_late = Some(OvLate(Box::new(move || h.take(f, ov_delay).map(|mut o| {
+							let (w, rows) = ov_dims(&o);
+							(w, rows, ov_px(&mut o), o.disp)
+						}))));
 					}
 					let taken = if late { None } else { cap.as_ref().and_then(|c| c.take(field as u64, ov_delay)) };
 					wperf.lap(7);
-					if let Some(o) = taken.filter(|_| (!front && !booting) || full_on) {
-						let px = ov_px(&o);
+					if let Some(mut o) = taken.filter(|_| (!front && !booting) || full_on) {
+						let (ow, orows) = ov_dims(&o);
+						let px = ov_px(&mut o);
 						// RAC_RETAIL_OVLOG=1: one line per overlay (the field it arrived in, FNV of its pixels): does the menu change?
-						let h = if ov_log || (front && full_on && turbo_on) {
+						let h = if ov_log {
 							px.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, p| (h ^ u32::from_le_bytes(*p) as u64).wrapping_mul(0x0100_0000_01b3))
 						} else {
 							0
 						};
-						if front && full_on {
-							ov_same = if h == ov_prev { ov_same + 1 } else { 0 };
-							ov_prev = h;
-						}
 						if ov_log {
 							eprintln!("retail: overlay field {field} frozen {} hash {h:016x}", o.frozen);
 						}
 						if let Ok(path) = std::env::var("RAC_RETAIL_OVDUMP") {
 							let mut f = format!("P6 {} {} 255
-", o.w, o.rows).into_bytes();
+", ow, orows).into_bytes();
 							for p in &px {
 								let p: &[u8; 4] = p;
 								f.extend(p[..3].iter().zip([0.25f32, 0.25, 0.25]).map(|(c, _)| (*c as f32 + p[3] as f32 * 0.3) as u8));
 							}
 							let _ = std::fs::write(&path, f);
 						}
-						s.ov = Some((o.w, o.rows, px));
+						s.ov = Some((ow, orows, px));
 						s.ov_disp = o.disp;
 					}
 					s.ms = t.elapsed().as_secs_f32() * 1000.0;
@@ -3259,6 +3594,9 @@ impl Retail {
 					}
 					wperf.lap(8);
 					wperf.field(field);
+					// RAC_PERF_LOG=1 only: after the section timers (its eprintln takes up to 3.5 ms when stderr is a file or pipe, which
+					// showed up as a 100-field `snap` max spike when it ran inside the snap section).
+					snap_pipe::report(field);
 					ll_last = std::time::Instant::now();
 					s.err = r.err();
 					let stop = s.err.is_some();
@@ -3270,7 +3608,7 @@ impl Retail {
 			})
 			.ok()?;
 		let cam = first.cam.unwrap_or(([0.0; 3], 0.0, 0.0, 0.63));
-		Some(Retail { tx, worker: Some(worker), replay, replay_ended: false, rx, pending: false, movie_req: None, movie_mask: 0, movie_rule: fmv_bridge::Skip::Start, movie_prev: 0, pad_last: 0, snap: first, free: HashMap::new(), order: None, held: HashMap::new(), prop_fx: HashMap::new(), bound: false, level, travel, cam, cam_prev: cam, cam_up: [0.0, 0.0, 1.0], cam_up_prev: [0.0, 0.0, 1.0], failed: false, stop: None, fields: 0, script: pad_script(), keytap: keytap_script(), movies: 0, taps: HashMap::new(), mouse_taps: MouseTaps::default(), pad_seen: 0, ms: 0.0, ms_avg: 0.0, gs, gsfull: gshared, aspect: 4.0 / 3.0, mm: mouse_menu::State::default(), mk: menu_keys::Layer::default(), grow: None, tb })
+		Some(Retail { tx, worker: Some(worker), replay, replay_ended: false, rx, inflight: 0, taken: 0, ahead: 1, frame_avg: 0.0, waited: 0.0, early: None, movie_req: None, movie_mask: 0, movie_rule: fmv_bridge::Skip::Start, movie_prev: 0, pad_last: 0, snap: first, free: HashMap::new(), order: None, held: HashMap::new(), prop_fx: HashMap::new(), bound: false, level, travel, cam, cam_prev: cam, cam_up: [0.0, 0.0, 1.0], cam_up_prev: [0.0, 0.0, 1.0], failed: false, stop: None, fields: 0, script: pad_script(), keytap: keytap_script(), movies: 0, taps: HashMap::new(), cap_hold: (Vec::new(), 0), mouse_taps: MouseTaps::default(), pad_seen: 0, ms: 0.0, ms_avg: 0.0, gs, gsfull: gshared, aspect: 4.0 / 3.0, mm: mouse_menu::State::default(), mk: menu_keys::Layer::default(), grow: None, tb })
 	}
 
 	/// One PAL field: takes the field the thread finished, then hands it this tick's pad.
@@ -3335,7 +3673,11 @@ impl Retail {
 		let (mut b, mut s) = match keys_screen {
 			Some(sc) => {
 				let (b, s) = menu_keys::menu_pad(&sc, &live);
-				(b | if middle { mouse_menu::TRIANGLE } else { 0 }, s)
+				// A dialog or the vendor (no page menu, whose clicks `mouse_menu` takes): a left click is the screen's confirm, as
+				// Enter. Only a click made there (the tap latch, not a button held since play, where it fired).
+				let click = menu.is_none() && self.mouse_taps.0[0] > 0;
+				let extra = (if middle { mouse_menu::TRIANGLE } else { 0 }) | (if click { sc.confirm } else { 0 });
+				(b | extra, s)
 			}
 			// A ship fight (shipmouse.rs): the left mouse button fires with Cross, the ship's fire button; elsewhere it is Circle.
 			None => {
@@ -3362,6 +3704,29 @@ impl Retail {
 			if let Some(tb) = self.tb.as_mut() {
 				b |= tb.pilot(self.snap.menu.as_ref(), mode, front, &mut self.mm);
 			}
+		}
+		// The Controls page waits for a key or button (binds.rs): the keys that went down this field (a tap counts TAP_FIELDS at
+		// its first poll, so the Confirm that started the capture never binds) and the controller's new buttons go to it, and
+		// the game sees a neutral pad meanwhile.
+		if binds::capturing() {
+			let fresh: Vec<winit::keyboard::KeyCode> = taps.iter().filter(|(_, n)| **n == TAP_FIELDS).map(|(k, _)| *k).collect();
+			binds::capture_poll(&fresh, prompts::phys_fresh());
+			self.cap_hold = (fresh, prompts::phys_now());
+			(b, s) = (0, [0x80; 4]);
+		} else if !self.cap_hold.0.is_empty() || self.cap_hold.1 != 0 {
+			// The key or button that ended the capture is still down: it is not a press on the menu (it may be Confirm or Back now).
+			self.cap_hold.0.retain(|k| down(*k));
+			self.cap_hold.1 &= prompts::phys_now();
+			if !self.cap_hold.0.is_empty() || self.cap_hold.1 != 0 {
+				(b, s) = (0, [0x80; 4]);
+			}
+		}
+		// [PC] DEV ONLY (RAC_DEV_TOOLS=1, devtools.rs): the free camera hands the game a neutral pad; the stick clicks that turned
+		// it off stay away from the game until released. Off: no change.
+		if devtools::free_on() {
+			(b, s) = (0, [0x80; 4]);
+		} else {
+			b &= !devtools::pad_mask();
 		}
 		self.taps.retain(|_, n| {
 			*n -= 1;
@@ -3405,6 +3770,11 @@ impl Retail {
 		self.snap.mode == 0 && !self.snap.front && !self.failed
 	}
 
+	/// The vendor screen is up (game mode 5): the world behind it stands still.
+	pub fn vendor(&self) -> bool {
+		self.snap.mode == 5 && !self.snap.front
+	}
+
 
 
 	pub fn tick(&mut self, buttons: u16, sticks: [u8; 4]) {
@@ -3418,7 +3788,10 @@ impl Retail {
 		}
 		// The effects layer of the field just taken (built on the VU1 thread meanwhile): the quads follow the ported ones.
 		if let Some(l) = self.snap.fx_late.take() {
-			if let (Ok((qa, pools)), Some(fx)) = (l.0.recv(), self.snap.fx.as_mut()) {
+			let t_w = std::time::Instant::now();
+			let got = l.get();
+			efx_vu::prof_wait(t_w.elapsed().as_nanos() as u64);
+			if let (Some((qa, pools)), Some(fx)) = (got, self.snap.fx.as_mut()) {
 				fx.qa.extend(qa);
 				fx.pools.extend(pools);
 			}
@@ -3429,10 +3802,15 @@ impl Retail {
 		if self.failed {
 			return;
 		}
-		if self.pending {
+		self.waited = 0.0;
+		if self.inflight > 0 {
+			let t_wait = std::time::Instant::now();
 			// The game thread can park in the movie hook (fmv_bridge) in the middle of a field: wait for the field in
 			// 2 ms steps and hand a movie request to the viewer instead of blocking; while the movie plays, return at once.
 			let got = loop {
+				if let Some(s) = self.early.take() {
+					break Ok(s);
+				}
 				match self.rx.try_recv() {
 					Ok(s) => break Ok(s),
 					Err(std::sync::mpsc::TryRecvError::Disconnected) => break Err(()),
@@ -3451,6 +3829,7 @@ impl Retail {
 					Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break Err(()),
 				}
 			};
+			self.waited = t_wait.elapsed().as_secs_f32() * 1000.0;
 			match got {
 				Ok(mut s) => {
 					// Several ticks can run per frame: the travel pools wait for `switch`, the overlay for `take_overlay`.
@@ -3468,7 +3847,8 @@ impl Retail {
 					self.ms = s.ms;
 					self.ms_avg += (s.ms - self.ms_avg) * 0.125;
 					self.pad_seen |= s.pad.iter().fold(0, |a, p| a | p);
-					s.field = self.fields;
+					self.taken += 1;
+					s.field = self.taken;
 					// "Keep the last" (orbs / fx / shadows are None while frozen) is decided on the SHOWN snap: `native_delay` queues
 					// 2 fields in modes != 0, so handing the old shown snap's pieces to the newest queued snap (as before) left the
 					// shown one without them for 2 of every 3 fields (pause menu: the sea / water flickered every third field).
@@ -3491,7 +3871,7 @@ impl Retail {
 				}
 				Err(_) => self.failed = true,
 			}
-			self.pending = false;
+			self.inflight -= 1;
 		}
 		// The game thread is in the movie hook (its field already ended through the vblank callback): hold the next
 		// field until the movie ends, so no `Machine::frame` waits on its 20 s watchdog meanwhile.
@@ -3511,43 +3891,99 @@ impl Retail {
 			self.cam = c;
 			self.cam_up = self.snap.cam_up;
 		}
-		// RAC_RETAIL_HOLD=N (shots): run no field past N, so a normal and a --gsfull shot show the same retail field.
-		if std::env::var("RAC_RETAIL_HOLD").ok().and_then(|v| v.parse::<u64>().ok()).is_some_and(|n| self.fields as u64 >= n) {
-			return;
-		}
-		// Debug shots (RAC_SHOT_FIELD = N): the game stops after field N, so the shot shows exactly that field.
-		if std::env::var("RAC_SHOT_FIELD").ok().and_then(|v| v.parse::<u32>().ok()).is_some_and(|f| self.fields >= f) {
-			return;
-		}
-		// The field's final input: a replayed file, or the keys with the RAC_RETAIL_PAD script ORed in. The worker
-		// records exactly this (rec.rs), so a replay is field-exact whatever the window's frame timing was.
-		let fin = if let Some(r) = &self.replay {
-			r.fields.get(self.fields as usize).copied().unwrap_or_else(|| {
-				if !std::mem::replace(&mut self.replay_ended, true) {
-					eprintln!("retail: replay ended at field {} (neutral pad from here)", self.fields);
-				}
-				FieldIn { buttons: 0, sticks: [0x80; 4], travel: None, mc: modcam::Input::default() }
-			})
-		} else {
-			let (mut buttons, mut sticks) = (buttons, sticks);
-			// The keys that skipped a movie stay away from the game until released.
-			self.movie_mask &= buttons;
-			buttons &= !self.movie_mask;
-			for &(a, b, bt, st, rs) in &self.script {
-				if (a..b).contains(&self.fields) {
-					buttons |= bt;
-					(sticks[2], sticks[3]) = (st[0], st[1]);
-					if let Some(r) = rs {
-						(sticks[0], sticks[1]) = (r[0], r[1]);
+		// [PC] Run-ahead (`ahead`): hand the thread fields until it holds `depth` of them (one in lockstep).
+		let want = self.depth();
+		while self.inflight < want && !self.failed {
+			// RAC_RETAIL_HOLD=N (shots): run no field past N, so a normal and a --gsfull shot show the same retail field.
+			if std::env::var("RAC_RETAIL_HOLD").ok().and_then(|v| v.parse::<u64>().ok()).is_some_and(|n| self.fields as u64 >= n) {
+				return;
+			}
+			// Debug shots (RAC_SHOT_FIELD = N): the game stops after field N, so the shot shows exactly that field.
+			if std::env::var("RAC_SHOT_FIELD").ok().and_then(|v| v.parse::<u32>().ok()).is_some_and(|f| self.fields >= f + SHOT_ALLOW.load(std::sync::atomic::Ordering::Relaxed)) {
+				return;
+			}
+			// [PC] DEV ONLY: the dev tools' planet warp (devtools.rs, RAC_DEV_TOOLS=1) is the same travel request, in gameplay only.
+			devtools::feed_field(self.fields);
+			let warp_ok = self.gameplay() && !self.snap.hold && self.snap.level == self.level;
+			// The field's final input: a replayed file, or the keys with the RAC_RETAIL_PAD script ORed in. The worker
+			// records exactly this (rec.rs), so a replay is field-exact whatever the window's frame timing was.
+			let fin = if let Some(r) = &self.replay {
+				r.fields.get(self.fields as usize).copied().unwrap_or_else(|| {
+					if !std::mem::replace(&mut self.replay_ended, true) {
+						eprintln!("retail: replay ended at field {} (neutral pad from here)", self.fields);
+					}
+					FieldIn { buttons: 0, sticks: [0x80; 4], travel: None, mc: modcam::Input::default() }
+				})
+			} else {
+				let (mut buttons, mut sticks) = (buttons, sticks);
+				// The keys that skipped a movie stay away from the game until released.
+				self.movie_mask &= buttons;
+				buttons &= !self.movie_mask;
+				for &(a, b, bt, st, rs) in &self.script {
+					if (a..b).contains(&self.fields) {
+						buttons |= bt;
+						(sticks[2], sticks[3]) = (st[0], st[1]);
+						if let Some(r) = rs {
+							(sticks[0], sticks[1]) = (r[0], r[1]);
+						}
 					}
 				}
+				let travel = self.travel.filter(|&(_, f)| f == self.fields).map(|(l, _)| l).or_else(|| devtools::take_warp(warp_ok, self.level));
+				FieldIn { buttons, sticks, travel, mc: modcam::take_ui(self.fields) }
+			};
+			// [PC] DEV ONLY: under a replay (tests) the warp joins the replayed field; with the tools off a replay is untouched.
+			let fin = if self.replay.is_some() && fin.travel.is_none() && devtools::enabled() { FieldIn { travel: devtools::take_warp(warp_ok, self.level), ..fin } } else { fin };
+			self.fields += 1;
+			if self.tx.send(fin).is_err() {
+				break;
 			}
-			FieldIn { buttons, sticks, travel: self.travel.filter(|&(_, f)| f == self.fields).map(|(l, _)| l), mc: modcam::take_ui(self.fields) }
-		};
-		self.fields += 1;
-		if !self.failed {
-			self.pending = self.tx.send(fin).is_ok();
+			self.inflight += 1;
 		}
+	}
+
+	/// [PC] The next tick takes its field without waiting: the thread already finished it (kept in `early`), or the tick
+	/// waits for nothing (no field handed out, a movie, a stopped game).
+	pub fn field_ready(&mut self) -> bool {
+		if self.failed || self.inflight == 0 || self.early.is_some() || fmv_bridge::waiting() {
+			return true;
+		}
+		match self.rx.try_recv() {
+			Ok(s) => {
+				self.early = Some(s);
+				true
+			}
+			Err(std::sync::mpsc::TryRecvError::Disconnected) => true,
+			Err(std::sync::mpsc::TryRecvError::Empty) => false,
+		}
+	}
+
+	/// [PC] The run-ahead depth for this tick (`ahead`). 1 outside gameplay and scenes (the front end, menus, movies, level
+	/// loads and travel, the title boot) and with RAC_RUN_AHEAD=0; else the fields that end while one frame draws, up to 3:
+	/// 1 while frames come at least once a field (a fast PC is in lockstep as before), raised at once when frames slow
+	/// down, lowered when they are fast again.
+	fn depth(&mut self) -> u32 {
+		static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+		let off = *OFF.get_or_init(|| std::env::var("RAC_RUN_AHEAD").is_ok_and(|v| v == "0"));
+		let s = &self.snap;
+		let free = !off && (s.mode == 0 || s.mode == 2) && !s.front && !s.frozen && !s.turbo && s.level == self.level
+			&& self.movie_req.is_none() && !fmv_bridge::waiting() && !self.tb.as_ref().is_some_and(|t| t.active());
+		if !free {
+			self.ahead = 1;
+			return 1;
+		}
+		let f = disc::field_dt() * 1000.0;
+		let up = ((self.frame_avg / f).ceil() as u32).clamp(1, 3);
+		if up > self.ahead {
+			self.ahead = up;
+		} else if self.ahead > 1 && self.frame_avg < (self.ahead - 1) as f32 * f * 0.8 {
+			self.ahead -= 1;
+		}
+		self.ahead
+	}
+
+	/// [PC] The window's frame interval of this redraw (ms), for the run-ahead depth.
+	pub fn set_frame_ms(&mut self, ms: f32) {
+		self.frame_avg += (ms.min(100.0) - self.frame_avg) * 0.1;
 	}
 
 	/// A movie the game asked for (once): the viewer plays it and calls `end_movie` when it ended or was skipped.
@@ -3633,6 +4069,21 @@ impl Retail {
 		if l > 1e-4 { [v[0] / l, v[1] / l, v[2] / l] } else { [0.0, 0.0, 1.0] }
 	}
 
+	/// [PC] How far a smoothed frame's camera (`camera(alpha)`, between the last two ticks) can trail the newest tick's view that
+	/// retail's moby verdict uses: the turn and zoom between the ticks plus 0.03 rad, the camera's move plus 0.25 m (the mobys'
+	/// own smoothed motion); capped at 0.35 rad and 4 m so a camera cut does not draw every side-culled moby.
+	pub fn view_lag(&self) -> ViewLag {
+		let (a, b) = (self.cam_prev, self.cam);
+		let mut dy = (b.1 - a.1).abs() % std::f32::consts::TAU;
+		if dy > std::f32::consts::PI {
+			dy = std::f32::consts::TAU - dy;
+		}
+		let zoom = (a.3.atan() - b.3.atan()).max(0.0);
+		let d = [b.0[0] - a.0[0], b.0[1] - a.0[1], b.0[2] - a.0[2]];
+		let mv = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+		ViewLag { ang: (dy + (b.2 - a.2).abs() + zoom + 0.03).min(0.35), grow: (mv + 0.25).min(4.0) * 1024.0 }
+	}
+
 	/// The camera between the last two ticks (`alpha` 0 = previous, 1 = newest).
 	pub fn camera(&self, alpha: f32) -> Cam {
 		let (a, b) = (self.cam_prev, self.cam);
@@ -3708,7 +4159,7 @@ impl Retail {
 	/// Debug shots: RAC_SHOT_FIELD = N holds the capture until N retail fields were sent (same field in normal and gsfull).
 	pub fn shot_field_wait(&self) -> bool {
 		// Field N = the snap of the Nth field is shown (and in --gsfull the frame of that field is rasterised).
-		std::env::var("RAC_SHOT_FIELD").ok().and_then(|v| v.parse::<u32>().ok()).is_some_and(|f| self.snap.field < f || self.gsfull.is_some() && GSF_SHOWN.load(std::sync::atomic::Ordering::Relaxed) < f as u64)
+		std::env::var("RAC_SHOT_FIELD").ok().and_then(|v| v.parse::<u32>().ok()).is_some_and(|f| { let f = f + SHOT_ALLOW.load(std::sync::atomic::Ordering::Relaxed); self.snap.field < f || self.gsfull.is_some() && GSF_SHOWN.load(std::sync::atomic::Ordering::Relaxed) < f as u64 })
 	}
 
 	/// RAC_RETAIL_TRAVEL is set and rac-rs has not reached its level yet (shots wait for it).
@@ -3866,7 +4317,8 @@ impl Retail {
 		}
 		let wide = !cfg!(test) || std::env::var_os("RAC_WIDE_OFF").is_none();
 		let mut p = self.snap.parts.clone();
-		p.loose.retain(|l| l.shown || (wide && l.side_only.is_some_and(|s| s.inside(self.aspect))));
+		let lag = self.view_lag();
+		p.loose.retain(|l| l.shown || (wide && l.side_only.is_some_and(|s| s.inside_lag(self.aspect, lag))));
 		Some(p)
 	}
 
@@ -3876,7 +4328,7 @@ impl Retail {
 		if self.snap.level != self.level {
 			return None;
 		}
-		let s = self.snap.shadows.as_ref()?;
+		let s = self.snap.smooth.as_ref().and_then(|d| d.shadows.as_ref()).or(self.snap.shadows.as_ref())?;
 		let late = s.deferred.iter().filter_map(|a| self.held.get(a).copied()).collect();
 		Some((s.casters.iter().map(|c| c.1.clone()).collect(), late, s.hero_deferred))
 	}
@@ -3885,7 +4337,7 @@ impl Retail {
 	/// The nanotech orbs retail queued for drawing in the last gameplay field (`orb_draws`); empty while the level
 	/// rac-rs shows is not retail's (travel).
 	pub fn orb_draws(&self) -> &[crate::particles::OrbDraw] {
-		match &self.snap.orbs {
+		match self.snap.smooth.as_ref().and_then(|d| d.orbs.as_ref()).or(self.snap.orbs.as_ref()) {
 			Some(o) if self.snap.level == self.level => o,
 			_ => &[],
 		}
@@ -3898,11 +4350,33 @@ impl Retail {
 		self.snap.shop.as_ref().filter(|_| self.snap.level == self.level)
 	}
 
+	/// [PC] PREVIEW (viewer/vegfx.rs touch): the mobys of the last field, empty while the level rac-rs shows is not retail's.
+	pub fn live_mobys(&self) -> &[Moby] {
+		if self.snap.level == self.level { &self.snap.mobys } else { &[] }
+	}
+
+	/// [PC] The shown field's own effect lists as the game ticked them, before Smoothing blends them with the field before (`fx`).
+	pub fn fx_tick(&self) -> Option<&RetailFx> {
+		self.snap.fx.as_ref().filter(|_| self.snap.level == self.level)
+	}
+
 	pub fn fx(&self) -> Option<&RetailFx> {
-		match &self.snap.fx {
+		match self.snap.smooth.as_ref().and_then(|d| d.fx.as_ref()).or(self.snap.fx.as_ref()) {
 			Some(f) if self.snap.level == self.level => Some(f),
 			_ => None,
 		}
+	}
+
+	/// [PC] Frame smoothing (viewer/interp.rs): the shown field's own lists (fx, shadow records, orbs) while rac-rs shows retail's
+	/// level, and (level, game mode, scene view, frozen or held) of the shown field.
+	pub fn smooth_src(&self) -> (Option<&RetailFx>, Option<&RetailShadows>, Option<&[crate::particles::OrbDraw]>, (u32, u32, bool, bool)) {
+		let mine = self.snap.level == self.level;
+		(self.snap.fx.as_ref().filter(|_| mine), self.snap.shadows.as_ref().filter(|_| mine), self.snap.orbs.as_deref().filter(|_| mine), (self.snap.level, self.snap.mode, self.snap.scene, self.snap.frozen || self.snap.hold || self.snap.front))
+	}
+
+	/// [PC] Frame smoothing: the blended lists this display frame draws (None = the field's own).
+	pub fn set_smooth(&mut self, d: Option<SmoothDraw>) {
+		self.snap.smooth = d.map(Box::new);
 	}
 
 	pub fn sync(&mut self, g: &mut Game) {
@@ -3959,6 +4433,7 @@ impl Retail {
 		let mut short: HashMap<u32, u32> = HashMap::new();
 		// Tests only: RAC_WIDE_OFF=1 draws retail's 4:3 verdict as it was (the before pictures of scratch_widecull).
 		let wide = !cfg!(test) || std::env::var_os("RAC_WIDE_OFF").is_none();
+		let lag = self.view_lag();
 		for mb in self.snap.mobys.iter().filter(|mb| Some(mb.addr) != held_addr) {
 			let held = self.held.get(&mb.addr).copied().filter(|&i| g.props[i].class_id == mb.class);
 			if held.is_none() {
@@ -3976,7 +4451,7 @@ impl Retail {
 				p.scale = mb.scale;
 				// Retail's verdict stays as it is in RAM (gameplay reads it); rac-rs's wide window also shows what retail culled only
 			// at its 4:3 side plane.
-			p.shown = mb.shown || (wide && mb.side_only.is_some_and(|s| s.inside(self.aspect)));
+			p.shown = mb.shown || (wide && mb.side_only.is_some_and(|s| s.inside_lag(self.aspect, lag)));
 				p.light = Some((mb.rgb, mb.light));
 				p.set_retail_draw(mb.alpha, mb.ovr, mb.draw);
 				if dbg_class() == Some(mb.class as u32) {
@@ -3999,8 +4474,8 @@ impl Retail {
 			let mut p: HashMap<u32, u32> = pools().into_iter().collect();
 			for (&c, &need) in &short {
 				let e = p.entry(c).or_insert(0);
-				eprintln!("retail: pool of class {c} full ({} props, {need} live): rebuilding the prop slots", *e);
-				*e = grown(*e, need);
+				crate::loadlog::later(format!("retail: pool of class {c} full ({} props, {need} live): rebuilding the prop slots", *e));
+				*e = grown(c, *e, need);
 			}
 			let mut p: Vec<(u32, u32)> = p.into_iter().collect();
 			p.sort();
@@ -4081,7 +4556,8 @@ fn keytap_script() -> Vec<KeyTap> {
 				"T" => K::KeyT,
 				// A right mouse click (tests of the menus' mouse back).
 				"RMB" => K::F24,
-				_ => return None,
+				// Any key the Controls page can bind, by its options-file name (KeyK, Digit5, ...): remap tests.
+				_ => binds::key_from_name(k)?,
 			};
 			Some(KeyTap { key, when: when.to_string(), n: n.parse().ok()?, seen: 0, fired: false })
 		})
@@ -4120,41 +4596,12 @@ pub fn skip_feed(mode: u32, ship: u32, skip_key: bool) -> u16 {
 	}
 }
 
-/// rac-rs's keyboard and mouse as a DualShock report: (buttons pressed, [rx, ry, lx, ly]). WASD = left stick, Q/E Z/X =
-/// right stick, Space = Cross, F = Square (wrench), G or the left mouse button (`circle`) = Circle (fire the weapon), T
-/// or the middle mouse button (`triangle`) = Triangle (Quick Select), Ctrl = R1, C = L1, V = L2, B = R2, Esc/Enter =
-/// Start, M = Select, Left Shift = L3, R = R3, arrows = d-pad.
+/// rac-rs's keyboard and mouse as a DualShock report: (buttons pressed, [rx, ry, lx, ly]). By default WASD = left stick, Q/E Z/X =
+/// right stick, Space = Cross, F = Square, G or the left mouse button (`circle`) = Circle (fire the weapon), T or the middle
+/// mouse button (`triangle`) = Triangle (Quick Select), Ctrl = R1, C = L1, V = L2, B = R2, Esc/Enter = Start, M = Select, Left
+/// Shift = L3, R = R3, arrows = d-pad; Pause -> Options -> Controls remaps them (`binds::kb`, the defaults with the extension off).
 pub fn pad_from_keys(held: impl Fn(winit::keyboard::KeyCode) -> bool, circle: bool, triangle: bool) -> (u16, [u8; 4]) {
-	use winit::keyboard::KeyCode as K;
-	let map = [
-		(K::Space, 0x40u16),
-		(K::ControlLeft, 8),
-		(K::KeyC, 4),
-		(K::KeyV, 1),
-		(K::KeyB, 2),
-		(K::Escape, 0x800),
-		(K::Enter, 0x800),
-		(K::NumpadEnter, 0x800),
-		(K::KeyM, 0x100),
-		(K::ShiftLeft, 0x200),
-		(K::KeyR, 0x400),
-		(K::ArrowUp, 0x1000),
-		(K::ArrowRight, 0x2000),
-		(K::ArrowDown, 0x4000),
-		(K::ArrowLeft, 0x8000),
-	];
-	let mut b = map.iter().filter(|(k, _)| held(*k)).fold(0, |b, (_, m)| b | m);
-	if held(K::KeyF) {
-		b |= 0x80;
-	}
-	if circle || held(K::KeyG) {
-		b |= 0x20;
-	}
-	if triangle || held(K::KeyT) {
-		b |= 0x10;
-	}
-	let axis = |neg: K, pos: K| (0x80 + (held(pos) as i32 - held(neg) as i32) * 0x7f).clamp(0, 0xff) as u8;
-	(b, [axis(K::KeyE, K::KeyQ), axis(K::KeyX, K::KeyZ), axis(K::KeyA, K::KeyD), axis(K::KeyW, K::KeyS)])
+	binds::kb().pad(held, circle, triangle)
 }
 
 #[cfg(test)]
@@ -4596,7 +5043,7 @@ mod tests {
 	/// A field draws with the previous field's swap words; the first field with its own.
 	#[test]
 	fn swap_words_lag_one_field() {
-		let w = |far: f32| SwapWords { fog_rgb: [0x72, 0xbe, 0xc8], fog: [50.0, far, 249.9, 63.75], part_far: 500.0 };
+		let w = |far: f32| SwapWords { fog_rgb: [0x72, 0xbe, 0xc8], fog: [50.0, far, 249.9, 63.75], part_far: 500.0, under: false, surf: None };
 		let fx = |far: f32| RetailFx { swap: Some(w(far)), ..RetailFx::default() };
 		let mut lag = None;
 		let (mut a, mut b, mut c) = (fx(250.0), fx(128.0), fx(250.0));
@@ -4742,7 +5189,7 @@ mod tests {
 				let (flags, draw, cap) = mb.raw;
 					caps.insert(cap);
 				let dist_ok = (draw as i32).min(cap) << 10;
-				if flags & 0x81 != 0 || s.vz - s.w > dist_ok as f32 || mb.shown || c.any() && !c.side_x_only() {
+				if flags & 0x81 != 0 || s.vz - s.w > dist_ok as f32 || mb.shown || c.any() && !c.side_only() {
 					bad += 1;
 				}
 				// Pixels the centre lies outside the 4:3 band (negative = inside it, only possible for a small far sphere: rac-rs's
@@ -5075,4 +5522,16 @@ mod tests {
 			}
 		}
 	}
+}
+
+/// RAC_TEST_SLOW_EE=F (F > 1, tests only): imitates a CPU F times slower for the game thread (see the worker loop).
+pub fn test_slow_ee() -> Option<f64> {
+	static V: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
+	*V.get_or_init(|| std::env::var("RAC_TEST_SLOW_EE").ok().and_then(|v| v.parse().ok()).filter(|&f: &f64| f > 1.0))
+}
+
+/// RAC_TEST_SLOW_RENDER=MS (tests only): every redraw takes MS longer, as a slow GPU would (viewer/handler.rs).
+pub fn test_slow_render() -> Option<std::time::Duration> {
+	static V: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
+	V.get_or_init(|| std::env::var("RAC_TEST_SLOW_RENDER").ok().and_then(|v| v.parse().ok()).filter(|&m: &f64| m > 0.0)).map(|m| std::time::Duration::from_secs_f64(m / 1000.0))
 }

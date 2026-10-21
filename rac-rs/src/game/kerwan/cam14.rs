@@ -4,7 +4,6 @@
 //! (decomp/notes/kerwan_gadgets.md "KER-64a port spec", "KER-64b port spec"). The camera-record driver
 //! (`CameraRig::drive`, decomp/notes/camera.md "SHR-CAMDRVa port spec") runs `exit` -> `select_record` with
 //! `class14_pred` -> `setup` on a switch -> `update` each camera frame.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use super::super::aridia::set_len;
 use crate::camera::{CamBlendRegs, CamRec};

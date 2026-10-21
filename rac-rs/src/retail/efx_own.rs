@@ -550,13 +550,6 @@ fn level_of(cpu: &Cpu) -> Option<&'static Level> {
 	(*crate::retail::disc::pick(&LEVELS, &LEVELS_USA)).iter().find(|l| l.level == lv)
 }
 
-/// Startup (before `Machine::enable_rec`): RAC_EFX_OWN=0 leaves the probes out. Probes are made per level at field end.
-pub fn register() {
-	if std::env::var("RAC_EFX_OWN").is_ok_and(|v| v == "0") {
-		ON.store(false, Ordering::Relaxed);
-	}
-}
-
 pub fn enabled() -> bool {
 	ON.load(Ordering::Relaxed)
 }
@@ -812,7 +805,6 @@ fn assemble(evs: &[Ev]) -> Vec<Own> {
 /// through cnt / ref / refs / next tags only and landed exactly on the callback's end cursor.
 #[derive(Clone, Debug, Default)]
 pub struct Pkt {
-	pub own: Option<Own>,
 	pub words: Vec<u32>,
 	pub marks: Vec<(usize, u32)>,
 	/// (word index of the block's data, source address, qword count, tag id) per block.
@@ -833,7 +825,7 @@ fn qw(cpu: &Cpu, a: u32) -> u128 {
 
 /// Walks one callback's range [c0, c1) of the packet buffer (at field end, before the kick reads it).
 pub fn walk(cpu: &Cpu, o: &Own) -> Pkt {
-	let mut p = Pkt { own: Some(*o), ..Default::default() };
+	let mut p = Pkt { ..Default::default() };
 	if !o.ok || o.c1 < o.c0 || o.c1 - o.c0 > 0x10_0000 {
 		return p;
 	}
@@ -930,7 +922,7 @@ pub fn gif_census(words: &[u32]) -> GifSum {
 	let qw = |i: usize| -> u128 { (0..4).fold(0u128, |a, k| a | (words.get(i + k).copied().unwrap_or(0) as u128) << (32 * k)) };
 	let mut i = 0usize;
 	let mut q = 1.0f32;
-	let mut vert = |g: &mut GifSum, x: u32, y: u32, z: u32, q: f32| {
+	let vert = |g: &mut GifSum, x: u32, y: u32, z: u32, q: f32| {
 		g.kicks += 1;
 		let (x, y) = (x as f32 / 16.0, y as f32 / 16.0);
 		g.xy = [g.xy[0].min(x), g.xy[1].min(y), g.xy[2].max(x), g.xy[3].max(y)];

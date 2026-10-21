@@ -44,9 +44,15 @@ pub const STREAM_COUNT: usize = 4;
 pub const SLOT_LBAS: u32 = 0x13a628;
 pub const STREAM_BUFFER: u32 = 0xf000;
 
-/// tick(vb) = floor(vb * 240 / 50); NTSC (the USA disc, 59.94 fields a second): floor(vb * 240 * 1001 / 60000).
+/// tick(vb) = floor(vb * 240 / 50); NTSC (the USA disc, or the PAL disc in its 60 Hz mode: 59.94 fields a second):
+/// floor(vb * 240 * 1001 / 60000).
 pub fn tick_of(vb: u32) -> u32 {
-    if crate::ver::ntsc() {
+    tick_in(vb, crate::ver::ntsc())
+}
+
+/// `tick_of` in the given video mode.
+fn tick_in(vb: u32, ntsc: bool) -> u32 {
+    if ntsc {
         return (vb as u64 * 240 * 1001 / 60000) as u32;
     }
     (vb as u64 * 240 / 50) as u32
@@ -749,6 +755,15 @@ impl Snd989 {
     pub fn field(&mut self) {
         if let Some(i) = &mut self.inner {
             i.vb = i.vb.wrapping_add(1);
+        }
+    }
+
+    /// The game switches its video mode (`ver::set_ntsc`, called after this): the IOP timer keeps its 240 Hz, so the tick
+    /// goes on from where it is at the new number of ticks per field.
+    pub fn video_mode(&mut self, ntsc: bool) {
+        let old = crate::ver::ntsc();
+        if let Some(i) = &mut self.inner {
+            i.tick_off = i.tick_off.wrapping_add(tick_in(i.vb, old)).wrapping_sub(tick_in(i.vb, ntsc));
         }
     }
 

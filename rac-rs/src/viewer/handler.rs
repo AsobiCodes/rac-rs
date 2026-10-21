@@ -3,6 +3,11 @@ use super::*;
 /// A retail movie ended while retail presents no picture yet (`Retail::holds`): its last picture stays on screen.
 static MOVIE_HOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+use super::herocache::{hero_cache_key, hero_check_compare, hero_check_on, hero_check_frame, next_gen, HeroCache};
+
+/// Most frames the world stays black after a level switch (`App::arrival_black`).
+const ARRIVAL_BLACK_MAX: u32 = 30;
+
 impl ApplicationHandler for App {
 	fn resumed(&mut self, el: &ActiveEventLoop) {
 		if self.gpu.is_some() {
@@ -17,6 +22,10 @@ impl ApplicationHandler for App {
 		// it never shows on the user's desktop while the swapchain keeps presenting. Without those variables the window is the normal one.
 		if test_window() {
 			attrs = attrs.with_active(false).with_position(winit::dpi::PhysicalPosition::new(-32000, -32000));
+			// RAC_TEST_SIZE=WIDTHxHEIGHT (pixels): the test window's size (proof shots at other resolutions than 1280x720).
+			if let Some((w, h)) = std::env::var("RAC_TEST_SIZE").ok().and_then(|v| v.split_once('x').and_then(|(a, b)| Some((a.trim().parse::<u32>().ok()?, b.trim().parse::<u32>().ok()?)))) {
+				attrs = attrs.with_inner_size(winit::dpi::PhysicalSize::new(w, h));
+			}
 			#[cfg(windows)]
 			{
 				use winit::platform::windows::WindowAttributesExtWindows;
@@ -40,6 +49,10 @@ impl ApplicationHandler for App {
 	fn device_event(&mut self, _: &ActiveEventLoop, _: DeviceId, event: DeviceEvent) {
 		if let DeviceEvent::MouseMotion { delta } = event {
 			crate::retail::prompts::note_mouse_motion(delta.0, delta.1);
+			// [PC] DEV ONLY (RAC_DEV_TOOLS=1, retail/devtools.rs): the free camera takes the mouse while the window has the focus.
+			if self.focused && self.retail.is_some() && crate::retail::devtools::ui_mouse(delta.0 as f32, delta.1 as f32) {
+				return;
+			}
 			if self.grabbed {
 				if self.retail.is_some() {
 					crate::retail::modcam::ui_mouse(delta.0 as f32, delta.1 as f32);
@@ -82,25 +95,6 @@ impl ApplicationHandler for App {
 				if let (Some(r), Some(g)) = (self.retail.as_mut(), self.gpu.as_ref()) {
 					r.mouse_cursor(position.x as f32 / g.config.width.max(1) as f32, position.y as f32 / g.config.height.max(1) as f32);
 				}
-				self.menu_pointer(false);
-			}
-			// Menus: the wheel steps Up / Down, right click is Triangle.
-			WindowEvent::MouseWheel { delta, .. } if self.pause.is_some() || self.old_front() => {
-				use winit::event::MouseScrollDelta;
-				let y = match delta {
-					MouseScrollDelta::LineDelta(_, y) => y,
-					MouseScrollDelta::PixelDelta(p) => p.y as f32,
-				};
-				if y != 0.0 {
-					self.menu_key(if y > 0.0 { frontend::Key::Up } else { frontend::Key::Down });
-				}
-			}
-			WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Right, .. } if self.pause.is_some() || self.old_front() => self.menu_key(frontend::Key::Back),
-			WindowEvent::MouseInput { state, button: MouseButton::Left, .. } if self.pause.is_some() || self.old_front() || self.menu_drag => {
-				self.menu_drag = state == ElementState::Pressed;
-				if self.menu_drag {
-					self.menu_pointer(true);
-				}
 			}
 			// Retail page menus: the wheel steps the list (retail/mouse_menu.rs).
 			WindowEvent::MouseWheel { delta, .. } if self.retail.as_ref().is_some_and(|r| r.mouse_menu_active()) => {
@@ -119,6 +113,10 @@ impl ApplicationHandler for App {
 					MouseScrollDelta::LineDelta(_, y) => y,
 					MouseScrollDelta::PixelDelta(p) => p.y as f32 / 80.0,
 				};
+				// [PC] DEV ONLY: the free camera's speed (retail/devtools.rs).
+				if self.retail.is_some() && crate::retail::devtools::ui_wheel(lines) {
+					return;
+				}
 				self.zoom_acc -= lines * 0.75;
 				if self.retail.is_some() && self.grabbed {
 					crate::retail::modcam::ui_zoom(lines);
@@ -137,160 +135,48 @@ impl ApplicationHandler for App {
 				}
 			}
 			// Retail + modern camera (retail/modcam.rs): RMB held aims.
-			WindowEvent::MouseInput { state, button: MouseButton::Right, .. } if self.retail.is_some() && crate::retail::modcam::on() => crate::retail::modcam::ui_aim(state == ElementState::Pressed),
+			WindowEvent::MouseInput { state, button: MouseButton::Right, .. } if self.retail.is_some() && crate::retail::modcam::on() && !crate::retail::devtools::free_on() => crate::retail::modcam::ui_aim(state == ElementState::Pressed),
 			WindowEvent::MouseInput { state, button: MouseButton::Right, .. } => self.looking = state == ElementState::Pressed,
 			// Play: left / middle click (see `App::play_mouse`); in retail a click shorter than a frame still reaches the game.
 			WindowEvent::MouseInput { state, button: b @ (MouseButton::Left | MouseButton::Middle), .. } => self.play_mouse((b == MouseButton::Middle) as usize, state == ElementState::Pressed, true),
 			WindowEvent::KeyboardInput { event, .. } => {
 				let PhysicalKey::Code(k) = event.physical_key else { return };
+				// [PC] DEV ONLY (RAC_DEV_TOOLS=1, retail/devtools.rs): F1 planet list (its keys go nowhere else while it is open),
+				// F2 free camera and its own keys. Off: nothing is taken.
+				if self.retail.is_some() && crate::retail::devtools::ui_key(k, event.state == ElementState::Pressed, event.repeat) {
+					return;
+				}
 				// Held keys are tracked everywhere (the Sound page steps volume while Left/Right is held).
 				self.key_change(k, event.state == ElementState::Pressed, event.repeat);
 				// Retail + modern camera: F7 toggles it (retail/modcam.rs).
 				if k == KeyCode::F7 && event.state == ElementState::Pressed && !event.repeat && self.retail.is_some() && crate::retail::modcam::enabled() {
 					crate::retail::modcam::ui_toggle();
 				}
+				// [PC] PREVIEW (viewer/vegfx.rs): F4 hides / shows the extra plants while RAC_VEG is on.
+				if k == KeyCode::F4 && event.state == ElementState::Pressed && !event.repeat && super::vegfx::cfg().env.is_some_and(|v| v > 0) {
+					super::vegfx::toggle();
+				}
+				// [PC] Frame smoothing test key (RAC_SMOOTH_KEY=1, test launchers only): F9 flips it for this session (interp.rs).
+				if event.state == ElementState::Pressed && !event.repeat && self.retail.is_some() {
+					super::interp::key(k, crate::retail::pcext::graphics().smoothing);
+				}
 				// Dev debug keys (RAC_DEBUG_KEYS=1, retail/debugkeys.rs): F5 immortality, F6 infinite ammo, F8 +10000 bolts.
 				if event.state == ElementState::Pressed && !event.repeat && self.retail.is_some() && crate::retail::debugkeys::enabled() {
+					// [PC] F3: draw distance Low / the Graphics row's level (viewer/fardraw.rs), for before / after.
+					if k == KeyCode::F3 {
+						super::fardraw::toggle();
+					}
 					crate::retail::debugkeys::ui_key(k);
-				}
-				if self.pause.is_some() {
-					if event.state == ElementState::Pressed && !event.repeat {
-						// The pause-menu code scanner (L1 = C and R2 = V held); the menu sees the same press.
-						let combo = self.keys.contains(&KeyCode::KeyC) && self.keys.contains(&KeyCode::KeyV);
-						if let (true, Some(v), Some(g)) = (combo, code_value(k), self.game.as_mut()) {
-							g.code_press(v);
-						}
-						if let Some(key) = menu_key(k) {
-							self.pause_press(key);
-						}
-					}
-					return;
-				}
-				// The vendor's shop (vendor.rs): D-pad, Cross (Enter / Space), Triangle (T / Esc / Backspace).
-				if let Some(g) = self.game.as_mut().filter(|g| g.shop.is_some()) {
-					if event.state == ElementState::Pressed && !event.repeat {
-						use game::vendor::ShopKey;
-						match k {
-							KeyCode::ArrowLeft | KeyCode::KeyA => g.shop_press(ShopKey::Left),
-							KeyCode::ArrowRight | KeyCode::KeyD => g.shop_press(ShopKey::Right),
-							KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space => g.shop_press(ShopKey::Buy),
-							KeyCode::KeyT | KeyCode::Escape | KeyCode::Backspace => g.shop_press(ShopKey::Exit),
-							_ => {}
-						}
-						return;
-					}
-				}
-				// BRIDGE-71: the d-pad new-press bits the Trespasser pad reads (ARI-42a); [I] no auto-repeat re-presses.
-				if let Some(g) = self.game.as_mut().filter(|_| event.state == ElementState::Pressed && !event.repeat) {
-					g.pad_press |= match k {
-						KeyCode::ArrowUp | KeyCode::KeyW => 0x1000,
-						KeyCode::ArrowRight | KeyCode::KeyD => 0x2000,
-						KeyCode::ArrowDown | KeyCode::KeyS => 0x4000,
-						KeyCode::ArrowLeft | KeyCode::KeyA => 0x8000,
-						_ => 0,
-					};
-				}
-				if self.game.is_some() && self.retail.is_none() && event.state == ElementState::Pressed && !event.repeat {
-					match k {
-						// Start: Esc / Enter; Select: M (decomp/notes/ingame_pause_menu.md s1).
-						KeyCode::Escape | KeyCode::Enter | KeyCode::NumpadEnter => return self.open_pause(false),
-						KeyCode::KeyM => return self.open_pause(true),
-						// [PC] debug (user request 2026-10-06, not a retail feature): F8 adds 10000 bolts.
-						KeyCode::F8 => {
-							if let Some(g) = &mut self.game {
-								g.bolts = g.bolts.saturating_add(10_000);
-							}
-						}
-						// WPN-6.8 [PC]: F9 grants the seven new weapons (ownership, ammo, quick-select slots); Shift+F9 toggles their gold.
-						KeyCode::F9 => {
-							let shift = self.keys.contains(&KeyCode::ShiftLeft) || self.keys.contains(&KeyCode::ShiftRight);
-							if let Some(g) = &mut self.game {
-								g.debug_grant_weapons(shift);
-							}
-						}
-						// Triangle: dismisses the HelpDesk box; held, it opens the Quick Select wheel.
-						KeyCode::KeyT => {
-							if let Some(f) = &mut self.flow {
-								f.triangle = true;
-							}
-							if let Some(g) = &mut self.game {
-								g.interact = true;
-							}
-							self.tri_held = Some(0.0);
-							return;
-						}
-						_ => {}
-					}
-				}
-				if k == KeyCode::KeyT && event.state == ElementState::Released {
-					self.tri_held = None;
-					if let (Some(sel), Some(g)) = (self.wheel.take(), &mut self.game) {
-						let id = g.inv.quick[sel];
-						if id != 0 {
-							g.inv.equipped = id;
-							g.inv.last = id;
-						}
-					}
-				}
-				if self.old_front() {
-					// UI-11c: no menu presses during the attract movie or its black ticks.
-					let attract = self.front.as_ref().is_some_and(|f| f.attract_movie.is_some() || f.att.black > 0);
-					if event.state == ElementState::Pressed && !event.repeat && !attract {
-						if k == KeyCode::Escape && self.front.as_ref().is_some_and(|f| f.menu.page == frontend::Page::Title) {
-							el.exit();
-						} else if let Some(key) = menu_key(k) {
-							self.menu_press(key);
-						}
-					}
-					return;
-				}
-				// Retail play: Esc is Start (retail::pad_from_keys), so the viewer's debug keys below (Esc quits, P leaves play,
-				// digits / PageUp / PageDown switch level) stay out of the way of a run that is being played or recorded.
-				if event.state == ElementState::Pressed && !crate::retail::active() {
-					let digit = [KeyCode::Digit0, KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3, KeyCode::Digit4, KeyCode::Digit5, KeyCode::Digit6, KeyCode::Digit7, KeyCode::Digit8, KeyCode::Digit9]
-						.iter()
-						.position(|&d| d == k);
-					let next = match k {
-						KeyCode::Escape => {
-							el.exit();
-							None
-						}
-						KeyCode::KeyP if !event.repeat => {
-							self.toggle_play();
-							None
-						}
-						KeyCode::PageUp => Some((self.level + 1) % toc::LEVEL_COUNT),
-						KeyCode::PageDown => Some((self.level + toc::LEVEL_COUNT - 1) % toc::LEVEL_COUNT),
-						_ => digit,
-					};
-					if let Some(n) = next.filter(|&n| n != self.level || event.repeat) {
-						if !event.repeat {
-							self.level = n;
-							self.load_level();
-						}
-					}
 				}
 			}
 			WindowEvent::RedrawRequested => {
 				profile::frame_start();
+				if let Some(d) = crate::retail::test_slow_render() {
+					std::thread::sleep(d);
+				}
 				let dt = self.last.elapsed().as_secs_f32().min(0.1);
 				self.last = Instant::now();
 				self.pause_frame(dt);
-				// Select map: the right stick Y (Z/X here) zooms by 1 - y*0.02 per tick, the left stick (arrows) pans.
-				if let (Some(mv), Some(m)) = (&mut self.map, &self.pause) {
-					if m.page == frontend::Page::Map {
-						let key = |k| self.keys.contains(&k) as i32 as f32;
-						let ticks = dt * 50.0;
-						let y = key(KeyCode::KeyX) - key(KeyCode::KeyZ);
-						mv.zoom = (mv.zoom * (1.0 - y * 0.02).powf(ticks)).clamp(MAP_ZOOM.0, MAP_ZOOM.1);
-						// Pan speed: 4 map pixels per tick at the default zoom [I].
-						let s = 4.0 * ticks * MAP_ZOOM.0 / mv.zoom;
-						mv.pan[0] += (key(KeyCode::ArrowRight) - key(KeyCode::ArrowLeft)) * s;
-						mv.pan[1] += (key(KeyCode::ArrowDown) - key(KeyCode::ArrowUp)) * s;
-						let half = 256.0 * MAP_ZOOM.0 / mv.zoom;
-						mv.pan = mv.pan.map(|v| v.clamp(half, 512.0 - half));
-					}
-				}
 				// The pause menu and the Quick Select wheel freeze the world.
 				let paused = self.pause.is_some() || self.wheel.is_some() || self.travel.is_some();
 				// World-side clocks (hero animation, camera rig, particles) stop with it; the HUD clock runs on.
@@ -302,6 +188,8 @@ impl ApplicationHandler for App {
 					Some(r) if crate::retail::modcam::enabled() => crate::retail::modcam::on() && self.shot.is_none() && self.focused && !paused && self.movie.is_none() && r.gameplay(),
 					_ => grab,
 				};
+				// [PC] DEV ONLY: the free camera (retail/devtools.rs) captures the cursor too.
+				let grab = grab || (self.retail.is_some() && crate::retail::devtools::free_on() && self.shot.is_none() && self.focused && self.movie.is_none());
 				if !grab && self.grabbed && self.retail.is_some() {
 					crate::retail::modcam::ui_release();
 				}
@@ -369,22 +257,41 @@ impl ApplicationHandler for App {
 						// Circle: the weapon in hand (G or the middle mouse button).
 					};
 					// Fixed 50 Hz steps, as the PAL game runs.
-					self.accum = if paused { 0.0 } else { (self.accum + dt).min(0.25) };
+					self.accum = if paused {
+						0.0
+					} else if let Some(a) = crate::retail::devtools::field_hold(crate::retail::disc::field_dt()) {
+						// [PC] DEV ONLY: the free camera's freeze / single step (retail/devtools.rs).
+						a
+					} else {
+						(self.accum + dt).min(0.25)
+					};
+					// [PC] The frame interval sets how far the worker may run ahead (retail.rs `Retail::ahead`).
+					if let Some(r) = &mut self.retail {
+						r.set_frame_ms(dt * 1000.0);
+					}
+					// The time this frame's ticks may wait for the worker in all (ms) before the rest waits for the next frame.
+					let mut tick_wait_max = f32::MAX;
+					// One field's time in ms (PAL 20, USA 16.7): the worker is busy when its field takes longer than that.
+					let field_ms = crate::retail::disc::field_dt() * 1000.0;
 					// Retail menus (the pause menu and other frozen game modes): the GS capture paces the interpreter at
 					// ~35 ms a field there, slower than real time, so catching up only stacked five blocking fields into each
 					// frame (5 fps, keys sampled every ~200 ms). One field per frame there.
 					if self.retail.as_ref().is_some_and(|r| r.paused() && r.ms > 20.0) {
 						self.accum = self.accum.min(crate::retail::disc::field_dt());
-					} else if self.retail.as_ref().is_some_and(|r| r.ms_avg > 20.0) {
-						// The worker is the bottleneck all along (its field takes over 20 ms on average): every tick blocks until the
-						// worker's field is done, so a second tick per frame only halves the frames shown (17 fps at 27 ms a field)
-						// and adds no field: one field per frame, the game runs at the worker's pace either way.
-						self.accum = self.accum.min(crate::retail::disc::field_dt());
-					} else if self.retail.as_ref().is_some_and(|r| r.ms > 20.0) {
-						// Gameplay on a busy host (the EE field over 20 ms): the 0.25 s catch-up stacked five blocking fields
-						// into every frame (8 fps at 24 ms a field, 2026-10-12). At most two fields a frame: the game runs at
-						// the interpreter's pace either way, the window stays responsive.
-						self.accum = self.accum.min(crate::retail::disc::field_dt2());
+					} else if self.retail.as_ref().is_some_and(|r| r.ms_avg > field_ms) {
+						// The worker is the bottleneck all along (its field takes longer than a field on average: 20 ms PAL, 16.7 ms
+						// USA): every tick blocks until the worker's field is done, so a second blocking tick per frame only halves the
+						// frames shown (17 fps at 27 ms a field) and adds no field. The frame stops ticking after its first tick that waited (`tick_wait`), but the
+						// time owed stays (up to 4 fields): capping it to one field per frame ran the game at the frame rate, slow
+						// motion on a slow GPU (31 fields/s at 31 fps, 2026-10-17 slow-PC imitation), and lost the worker's spare time.
+						self.accum = self.accum.min(4.0 * crate::retail::disc::field_dt());
+						tick_wait_max = 1.0;
+					} else if self.retail.as_ref().is_some_and(|r| r.ms > field_ms) {
+						// Gameplay on a busy host (the EE field over a field's time): the 0.25 s catch-up stacked five blocking fields
+						// into every frame (8 fps at 24 ms a field, 2026-10-12). A frame waits at most one field's time for the
+						// worker; the time owed stays (up to 4 fields), so a heavy field is caught up over the next frames.
+						self.accum = self.accum.min(4.0 * crate::retail::disc::field_dt());
+						tick_wait_max = field_ms;
 					}
 					let skip = input.jump || input.attack;
 					// RAC_SHOT_SKIP: a long --shot skips cutscenes so the capture shows play.
@@ -442,7 +349,7 @@ impl ApplicationHandler for App {
 					}
 					// A grant nobody started last frame is dropped (the voice was refused or its clip is missing).
 					self.voices.pending.clear();
-					let mut sstage = SoundStage {   ..Default::default() };
+					let sstage = SoundStage {   ..Default::default() };
 					// FRAME-1c: the camera's per-frame input (keys / mouse, PC modes); the rig steps once per sim tick below.
 					let mouse = std::mem::take(&mut self.mouse_dx);
 					let mouse_y = std::mem::take(&mut self.mouse_dy);
@@ -468,7 +375,17 @@ impl ApplicationHandler for App {
 					self.tick_cam_live = false;
 					self.smooth.ticks = 0;
 					profile::lap(profile::Phase::Input);
+					let mut tick_wait = 0.0f32;
+					let mut frame_ticks = 0u32;
 					while self.accum >= crate::retail::disc::field_dt() {
+						// [PC] Only the frame's first tick may wait for the game thread; a later one runs only when its field is already
+						// done, else it waits for the next frame (the time stays owed). Waiting for every owed field drew a picture every
+						// second field when the thread is slower than real time (laptop Kerwan, 22 ms a field: 23 fps; now one picture per
+						// field). Shots keep the old catch-up so their fields stay the same.
+						if frame_ticks > 0 && self.shot.is_none() && self.retail.as_mut().is_some_and(|r| !r.field_ready()) {
+							break;
+						}
+						frame_ticks += 1;
 						self.accum -= crate::retail::disc::field_dt();
 						self.smooth.begin_tick(game);
 						// Retail mode: the interpreter runs this tick and its moby table / camera are mirrored (retail.rs).
@@ -488,12 +405,19 @@ impl ApplicationHandler for App {
 								if let Some(a) = &mut self.audio {
 									a.pause_all(true);
 								}
+								// A movie that follows another one at once (Veldin's ending: the flagship movie right after the
+								// short one) ends the held last picture's hold: the old fade no longer tints the presenter (its
+								// first frame resets the tint, `Presenter::upload`), else the new movie played all black.
+								MOVIE_HOLD.store(false, std::sync::atomic::Ordering::Relaxed);
 								self.movie = Some(fmv::player::Player::start(&self.iso_path, &m, lang, self.audio.as_mut()));
 							}
 							if let Some(g) = &self.gpu {
 								r.aspect = g.config.width as f32 / g.config.height.max(1) as f32;
 							}
 							r.sync(game);
+							// [PC] Frame smoothing (interp.rs): this field's draw lists and its cut verdict (nothing kept while it is Off).
+							let smooth_menu = if crate::retail::pcext::enabled() { super::interp::wanted(crate::retail::pcext::graphics().smoothing) } else { self.settings.smooth };
+							super::interp::field(r, smooth_menu);
 							if (!r.holds() || r.overlay_covers() || r.menu_presents() || r.gs_front_drops_movie()) && MOVIE_HOLD.swap(false, std::sync::atomic::Ordering::Relaxed) {
 								if let Some(g) = &mut self.gpu {
 									g.movie.clear();
@@ -536,7 +460,10 @@ impl ApplicationHandler for App {
 								self.hero_rig.hero.layers = parts.layers.clone();
 								// Modern controls: the run / walk cycle plays backwards for a backpedal (retail/strafe.rs); a fade that
 								// started from the reversed pose fades from the rig's own snapshot of it, not from retail's forward one.
-								let n = self.hero_rig.hero.frame_count_of(self.hero_rig.hero.clock.new_seq as usize);
+								// The frame count of the hero's own clip (the rig clock carries no sequences: `frame_count_of` there
+								// answered the 30-frame fallback, so the 23-frame run reversed past its end and held its last frame).
+								let seq = self.hero_rig.hero.clock.new_seq as usize;
+								let n = self.hero_anim.as_ref().and_then(|(_, a)| a.sequences.get(seq)).map_or(0, |s| s.frames.len());
 								let from_rev = crate::retail::strafe::draw_clock(&mut self.hero_rig.hero.clock, n, parts.strafe.rev);
 								// Retail's snapshot FROM frame (hero +0x68) while the hero clock fades.
 								let joints = self.hero_anim.as_ref().map_or(0, |(_, a)| a.skeleton.parents.len());
@@ -549,6 +476,12 @@ impl ApplicationHandler for App {
 								}
 								if let Some(c) = parts.d4 {
 									c.apply(&mut self.hero_rig.hand);
+								}
+								// Modern controls: the run clip flipped forward <-> reversed (its phase mirrors, the legs swap) or the leg
+								// twist jumped past strafe.rs's rate limit (Strafe aiming switched off mid-twist): this tick's pose is drawn
+								// unblended (frame smoothing, smooth.rs `hero_cut`).
+								if self.retail_parts.as_ref().is_some_and(|o| o.strafe.rev != parts.strafe.rev || (o.strafe.twist - parts.strafe.twist).abs() > 0.6) {
+									self.smooth.hero_cut = true;
 								}
 								self.loose_anims.retain(|a, _| parts.loose.iter().any(|l| l.addr == *a));
 								for l in &parts.loose {
@@ -581,15 +514,21 @@ impl ApplicationHandler for App {
 							}
 							tick_render_state(&mut self.gpu, game, (c.0, c.1, c.2, c.3 * PROJ_Y_RATIO), r.camera_up(1.0));
 							self.play_ticks += 1;
+							tick_wait += r.waited;
+							if tick_wait > tick_wait_max {
+								break;
+							}
 							continue;
 						}
 					}
 					profile::lap(profile::Phase::Ticks);
 					// PC-FPS-1: draw between the last two ticks (off, paused or capturing: the newest tick as is).
-					self.smooth.frame(self.settings.smooth && !paused && self.shot.is_none(), self.accum);
-					if let Some(n) = self.flow.as_ref().and_then(|f| f.next_level) {
-						self.pending_level = Some(n);
-					}
+					// [PC] Frame smoothing: retail mode follows Graphics -> Frame smoothing (interp.rs; settings.txt `smooth` with RAC_PC_EXT=0),
+					// and blends nothing on a cut field.
+					let menu = if self.retail.is_some() && crate::retail::pcext::enabled() { super::interp::wanted(crate::retail::pcext::graphics().smoothing) } else { self.settings.smooth };
+					let want = menu && !paused && (self.shot.is_none() || { static S: std::sync::OnceLock<bool> = std::sync::OnceLock::new(); *S.get_or_init(|| std::env::var_os("RAC_SMOOTH_SHOT").is_some()) });
+					let on = super::interp::frame(self.retail.as_mut(), want, (self.accum / crate::retail::disc::field_dt()).clamp(0.0, 1.0));
+					self.smooth.frame(on, self.accum);
 					// Blob shadows (decomp/notes/shadows.md); the hero's is off while a cutscene poses him.
 					let in_scene = self.flow.as_ref().is_some_and(|f| f.cutscene.is_some());
 					// Retail mode: retail's own blob queue (retail.rs `blob_queue`), not the casters of the mirrored props.
@@ -878,6 +817,10 @@ impl ApplicationHandler for App {
 						self.glint_cam = Some(c);
 						self.glint_up = if warp_cam { [0.0, 0.0, 1.0] } else { r.camera_up(1.0) };
 					}
+					// [PC] lane scratch_veg debug: RAC_VEG_CAM="x y z yaw pitch" an absolute world camera (vegetation checks).
+					if let Some(v) = std::env::var("RAC_VEG_CAM").ok().map(|v| v.split_whitespace().filter_map(|x| x.parse::<f32>().ok()).collect::<Vec<_>>()).filter(|v| v.len() == 5) {
+						(self.cam.pos, self.cam.yaw, self.cam.pitch, self.cam.up) = ([v[0], v[1], v[2]], v[3], v[4], [0.0, 0.0, 1.0]);
+					}
 					// Camera shake (retail and modern alike): the offset is added to the final render position only.
 					let so = self.shake.offset(self.cam.yaw, self.cam.pitch);
 					self.cam.pos = [self.cam.pos[0] + so[0], self.cam.pos[1] + so[1], self.cam.pos[2] + so[2]];
@@ -912,26 +855,49 @@ impl ApplicationHandler for App {
 					let mut held_joint0_model = None;
 					let mut held_rows = None;
 					let mut muzzle_model = None;
-					let wrench_now = self.wrench_rig.as_ref().map(|r| anim::skin(&r.class, &self.hero_rig.wrench.pose(&r.anim, &[])));
+					// PC perf (speed lane A, B1): everything below up to `skinned` is a function of the game state, which only changes in
+					// a tick. A display frame with no tick and an equal key reuses the last frame's posed bundle (hero, glove, held items,
+					// back objects, wrench, ghosts) and the side values derived with it; the per-frame blend stays in `smooth.hero`.
+					// RAC_HERO_CHECK=1: always computes fresh, and compares it with what would have been reused.
+					let hero_key = hero_cache_key(self.hero_anim.as_ref().map_or(0, |x| x as *const _ as usize), self.level, self.play_ticks, self.retail.as_ref().map(|r| r.field_count()), [self.hero_rig.hero.layers.len(), self.loose_anims.len(), self.held_rigs.len()], self.retail_parts.is_some() as u64 | (self.wrench_rig.is_some() as u64) << 1, game);
+					let hero_cand = self.smooth.ticks == 0 && self.hero_cache.as_ref().is_some_and(|c| c.key == hero_key);
+					let hero_check = hero_check_on();
+					hero_check_frame();
+					let hero_hit = hero_cand && !hero_check;
+					let wrench_now = self.wrench_rig.as_ref().filter(|_| !hero_hit).map(|r| anim::skin(&r.class, &self.hero_rig.wrench.pose(&r.anim, &[])));
 					// M3a, retail mode: retail's own parts. The hand wrench shows only while retail's held wrench is attached; slot 0
 					// then draws the thrown (detached) held wrench and the two ghost slots the other loose class-71 mobys (afterimages),
 					// each posed by its own clock at its retail +0x10 / rows.
 					let rparts = self.retail.as_ref().and(self.retail_parts.as_ref());
+					let rparts_fresh = rparts.filter(|_| !hero_hit);
 					let r_hand = rparts.map(|q| q.wrench.is_some_and(|w| w.attached));
 					let r_held = rparts.and_then(|q| q.wrench.map(|w| w.addr));
 					let loose_skin = |l: &crate::retail::LooseWrench| {
 						self.wrench_rig.as_ref().zip(self.loose_anims.get(&l.addr)).map(|(r, pa)| (*l, anim::skin(&r.class, &pa.pose(&r.anim, &[]))))
 					};
-					let r_thrown = rparts.filter(|_| r_hand == Some(false)).and_then(|q| q.loose.iter().find(|l| Some(l.addr) == r_held)).and_then(|l| loose_skin(l));
-					let r_ghosts: Vec<_> = rparts.map_or(Vec::new(), |q| q.loose.iter().filter(|l| Some(l.addr) != r_held).take(2).filter_map(|l| loose_skin(l)).collect());
+					let r_thrown = rparts_fresh.filter(|_| r_hand == Some(false)).and_then(|q| q.loose.iter().find(|l| Some(l.addr) == r_held)).and_then(|l| loose_skin(l));
+					let r_ghosts: Vec<_> = rparts_fresh.map_or(Vec::new(), |q| q.loose.iter().filter(|l| Some(l.addr) != r_held).take(2).filter_map(|l| loose_skin(l)).collect());
 					// A thrown wrench holds its flight pose, sequence 6 (OV:30778).
-					let wrench_fly = self.wrench_rig.as_ref().filter(|r| r.anim.sequences.get(6).is_some_and(|s| !s.frames.is_empty())).map(|r| anim::skin(&r.class, &r.anim.pose_frame(6, 0)));
+					let wrench_fly = self.wrench_rig.as_ref().filter(|_| !hero_hit).filter(|r| r.anim.sequences.get(6).is_some_and(|s| !s.frames.is_empty())).map(|r| anim::skin(&r.class, &r.anim.pose_frame(6, 0)));
 					// The two translucent wrench afterimages in `skinned`, then the three hero afterimages (BRIDGE-40):
 					// (first vertex, end, alpha byte) (BRIDGE-28).
 					let mut ghost_ranges: [Option<(usize, usize, u8)>; 5] = [None; 5];
 					let mut bomb_range: Option<(usize, usize)> = None;
 					let mut light_at: Option<[f32; 3]> = None;
-					let skinned = self.hero_anim.as_ref().map(|(class, a)| {
+					let mut hero_gen = 0u64;
+					let skinned = if hero_hit {
+						let c = self.hero_cache.as_ref().expect("hero_hit needs the cache");
+						hero_gen = c.pose_gen;
+						ghost_ranges = c.ghost_ranges;
+						bomb_range = c.bomb_range;
+						light_at = c.light_at;
+						held_rows = c.held_rows;
+						muzzle_model = c.muzzle_model;
+						held_muzzle_model = c.held_muzzle_model;
+						held_joint0_model = c.held_joint0_model;
+						held_xform_model = c.held_xform_model;
+						c.skinned.clone()
+					} else { self.hero_anim.as_ref().map(|(class, a)| {
 						let (hero_fx, throw_pose, layer1_pose, hold_poses) = hero_layers(rparts, &game.player, &a.slot_map);
 						let mut mats = self.hero_rig.hero.pose_held(a, &hero_fx, throw_pose.as_ref(), layer1_pose.as_ref(), &hold_poses);
 						// Modern controls (retail/strafe.rs): the legs twist toward the ground path while aiming; off = zero twist.
@@ -1226,7 +1192,15 @@ impl ApplicationHandler for App {
 							ghost_ranges[2 + gi] = Some((base, ps.len(), alpha));
 						}
 						(ps, ns)
-					});
+					}) };
+					if !hero_hit {
+						hero_gen = next_gen();
+						let fresh = HeroCache { key: hero_key, pose_gen: hero_gen, skinned: skinned.clone(), ghost_ranges, bomb_range, light_at, held_rows, muzzle_model, held_muzzle_model, held_joint0_model, held_xform_model };
+						if hero_cand {
+							hero_check_compare(self.hero_cache.as_ref().expect("hero_cand needs the cache"), &fresh);
+						}
+						self.hero_cache = Some(fresh);
+					}
 					// The muzzle in the world: the hero's position plus his yaw (the ship pad frame is not used while armed).
 					self.suck_matrix = held_rows;
 					self.pyro_muzzle = muzzle_model.map(|m: [f32; 3]| {
@@ -1246,8 +1220,11 @@ impl ApplicationHandler for App {
 						let l = hero_to_world(&hero_rows(p), m);
 						[p.pos[0] + l[0], p.pos[1] + l[1], p.pos[2] + l[2]]
 					});
-					let (at, skinned, tilt) = self.smooth.hero(game, at, skinned);
+					let (at, skinned, tilt) = { let _s = profile::span("sm_hero"); self.smooth.hero(game, at, skinned, hero_gen) };
 					let (mut at, mut skinned, mut tilt) = (at, skinned, tilt);
+					// [PC] perf (lane R2): the GPU hero blends on the GPU; scenes and ship seats below replace the pose, so no blend.
+					let mut hero_blend_t = self.smooth.hero_blend().map(|b| b.1);
+					let mut hero_gens = self.smooth.hero_gens();
 					// A ship stream plays like a scene, in the frame of the ship pad (FUN_002a39b0: positions through
 					// the ship's matrix and position, camera yaw plus the ship's).
 					let ship_play = self.ship_play.as_ref().and_then(|p| Some((p.id, self.scenes.get(&p.id)?, p.tick / scene::TICKS_PER_SECOND)));
@@ -1313,6 +1290,8 @@ impl ApplicationHandler for App {
 								+ hero_ghost_len(class);
 								hide(&mut ps, &mut ns, held);
 								skinned = Some((ps, ns));
+								hero_blend_t = None;
+								hero_gens = (0, 0);
 								ghost_ranges = [None; 5];
 								at = Some((place_at(pos), pad_yaw));
 								// BRIDGE-75 [I]: the scene frame poses the hero, untilted.
@@ -1379,6 +1358,8 @@ impl ApplicationHandler for App {
 								+ hero_ghost_len(class);
 							hide(&mut ps, &mut ns, held);
 							skinned = Some(turn((ps, ns)));
+							hero_blend_t = None;
+							hero_gens = (0, 0);
 							ghost_ranges = [None; 5];
 							at = Some((game::transit::seat_pos(fp.pos, fp.rot_prev, game::transit::RATCHET_SEAT[fp.ship_type.min(2)]), 0.0));
 							// BRIDGE-75 [I]: the seat frame poses the hero, untilted.
@@ -1468,9 +1449,19 @@ impl ApplicationHandler for App {
 								hide(&mut ps, &mut ns, back_tail(&self.back_rig, &self.clank_rig, &self.light_rig));
 								hide(&mut ps, &mut ns, hero_ghost_len(class));
 								skinned = Some((ps, ns));
+								hero_blend_t = None;
+								hero_gens = (0, 0);
 								ghost_ranges = [None; 5];
 								at = Some((p.pos, p.yaw));
 							}
+						}
+					}
+					// [PC] DEV ONLY (RAC_DEV_TOOLS=1, retail/devtools.rs): the free camera replaces the drawn view only; retail's camera
+					// RAM and the mirror's tick camera (glint culling, sound) stay retail's.
+					if self.retail.is_some() {
+						let held = &self.keys;
+						if let Some(c) = crate::retail::devtools::frame(dt, |k| held.contains(&k), (self.cam.pos, self.cam.yaw, self.cam.pitch, self.cam.tan_half)) {
+							(self.cam.pos, self.cam.yaw, self.cam.pitch, self.cam.tan_half, self.cam.up) = (c.0, c.1, c.2, c.3, [0.0, 0.0, 1.0]);
 						}
 					}
 					// Retail mode: the orbs retail's draw queue holds (retail.rs `orb_draws`); rac-rs's own particle step does not run.
@@ -1485,12 +1476,17 @@ impl ApplicationHandler for App {
 					self.particles.sprites_keyed(&mut self.sprites, Some(&mut sprite_keys));
 					self.smooth.sprites(&mut self.sprites, &sprite_keys);
 					game.pyro_sprites(&mut self.sprites);
+					// [PC] The props on the hero (Clank, back pack, head items, bulb mesh) ride his drawn placement (smooth.rs `attach`).
+					self.smooth.attach(&game.props, at, tilt);
 					// Retail mode: retail's whole effect pool and the hero glow callback (retail.rs `queue_fx`).
 					if let Some(fx) = self.retail.as_ref().and_then(|r| r.fx()) {
 						// The pool's lines and ribbons join the pool sprites' depth walk in `set_particles` (queue_b.rs `pool_walk`).
 						self.sprites.extend_from_slice(&fx.sprites);
-						for &(at, size, bias, w) in &fx.glows {
-							particles::glow(&mut self.sprites, self.cam.pos, at, size, bias, w);
+						// [PC] Clank's bulb glow (retail's slot-3 item light) rides the bulb mesh as `attach` draws it (strafe turn, Smoothing).
+						let bulb = self.retail.as_ref().and_then(|r| r.fx_tick()).and_then(|t| t.glows.iter().find(|g| crate::retail::is_bulb_glow(g))).and_then(|g| self.smooth.bulb_glow(&game.props, g.0));
+						for g in &fx.glows {
+							let g_at = if crate::retail::is_bulb_glow(g) { bulb.unwrap_or(g.0) } else { g.0 };
+							particles::glow(&mut self.sprites, self.cam.pos, g_at, g.1, g.2, g.3);
 						}
 					}
 					self.particles.arc_glows(&mut self.sprites);
@@ -1595,9 +1591,9 @@ impl ApplicationHandler for App {
 						}
 					}
 					// PC-FPS-1: blended poses join `fx_posed`, blended placements go to `smooth::PROP_XF`.
-					self.smooth.props(&game.props, posed, &mut fx_posed);
+					{ let _s = profile::span("sm_props"); self.smooth.props(&game.props, posed, &mut fx_posed); }
 					profile::lap(profile::Phase::Props);
-					let title = format!("{} - {} - bolts {} - health {}/4{}", crate::app_name(), toc::LEVEL_NAMES[self.level], game.bolts, game.health.max(0), crate::retail::debugkeys::title_suffix());
+					let title = format!("{} - {} - bolts {} - health {}/4{}", crate::app_name(), toc::LEVEL_NAMES[self.level], game.bolts, game.health.max(0), crate::retail::debugkeys::title_suffix()) + &crate::retail::devtools::title_suffix(self.level, game.player.pos);
 					self.shown_bolts = if (game.bolts as f32) < self.shown_bolts { game.bolts as f32 } else { (self.shown_bolts + dt * 60.0f32.max((game.bolts as f32 - self.shown_bolts) * 4.0)).min(game.bolts as f32) };
 					// NOV-30f nano request latch (compares against the previous frame's health before `hud_seen` updates).
 					hud::nano_request(&mut self.nano_live, &mut self.nano_hud, game.shop.is_some(), game.health, self.hud_seen.1);
@@ -1996,7 +1992,8 @@ match (m.hero_preview(), &self.hero_anim, self.menu_clip_base) {
 							s.occ.mode = game.vis_render.occ_mode;
 						}
 						g.set_clip_view(Some((&self.cam, g.config.width as f32 / g.config.height.max(1) as f32)));
-						g.set_marker(if game.hero_hidden && !passenger_shown { None } else { at }, skinned.as_ref());
+						g.hero_gens = hero_gens;
+						g.set_marker(if game.hero_hidden && !passenger_shown { None } else { at }, skinned.as_ref(), hero_blend_t.and_then(|t| self.smooth.hero_before().map(|b| (b, t))));
 						// NOV-10.5a-draw: the teleporter rings as debris-batch instances, the beams as additive fx quads.
 						let rings: Vec<particles::WorldInst> = Vec::new();
 						g.scene_actor_start(actors.iter().any(|a| a.is_some()), game.player.pos);
@@ -2123,7 +2120,31 @@ match (m.hero_preview(), &self.hero_anim, self.menu_clip_base) {
 						g.strip_draws = game.strip_out.clone(); // BRIDGE-23 / NOV-15.1b, NOV-26 per-tick list
 						// Retail mode: the Novalis strip-surface callbacks of queue A (retail/queue_q1.rs).
 						// Retail mode, Hoven: the queue-C water pools, drawn in their own slot before the shrubs.
-						g.pool_draws.clear();
+						// [PC] Water hold (lane X pass 2): a field whose effect lists come up empty (the efx job's reply late, hold / lag fields, the
+						// vendor screen) keeps the last non-empty pool strips and RAM oceans of the SAME level for `WATER_HOLD` fields, so the sea does
+						// not vanish for a few display frames; a level change or a longer absence clears them. While the vendor screen is up the
+						// hold has no time limit: retail stops sending the Hoven sea pools there after a few seconds (user's water_hoven_1.log,
+						// 2026-10-20: 71 / 605 / 162 display frames with 0 water draws, all inside game mode 5), the world behind stands still.
+						let rfield = self.retail.as_ref().map_or(0, |r| r.field_count());
+						let vendor = self.retail.as_ref().is_some_and(|r| r.vendor());
+						let (has_pools, has_oceans) = self.retail.as_ref().and_then(|r| r.fx()).map_or((false, false), |fx| (!fx.pools.is_empty(), !fx.oceans.is_empty()));
+						let (hold_pools, hold_oceans) = WATER_KEEP.with(|k| {
+							let mut k = k.borrow_mut();
+							if k.0 != g.level {
+								*k = (g.level, 0, 0);
+							}
+							if has_pools {
+								k.1 = rfield.max(1);
+							}
+							if has_oceans {
+								k.2 = rfield.max(1);
+							}
+							let fresh = |t: u32| t != 0 && (vendor || rfield.wrapping_sub(t) <= WATER_HOLD);
+							(!has_pools && fresh(k.1), !has_oceans && fresh(k.2))
+						});
+						if !hold_pools {
+							g.pool_draws.clear();
+						}
 						if let Some(fx) = self.retail.as_ref().and_then(|r| r.fx()) {
 							g.strip_draws.extend(fx.strips.iter().cloned());
 							g.pool_draws.extend(fx.pools.iter().cloned());
@@ -2135,7 +2156,9 @@ match (m.hero_preview(), &self.hero_anim, self.menu_clip_base) {
 						let ram_ocean = self.retail.as_ref().and_then(|r| r.fx()).and_then(|f| f.ocean.as_deref());
 						g.set_ocean(ram_ocean.or(self.ocean.as_ref().filter(|o| o.shown(game.frames))), self.cam.pos, &self.cuboids, game.vis_render.occ_mode != 0, game.frames, game.visibomb.is_some());
 						// Retail mode: the oceans of Rilgar / Umbris / Gaspar from RAM (retail/oldsim.rs `oceans`; never the levels of `queue_q1::ocean`).
-						g.set_ocean_ram(self.retail.as_ref().and_then(|r| r.fx()).map_or(&[][..], |fx| &fx.oceans[..]), self.cam.pos);
+						if !hold_oceans {
+							g.set_ocean_ram(self.retail.as_ref().and_then(|r| r.fx()).map_or(&[][..], |fx| &fx.oceans[..]), self.cam.pos);
+						}
 						g.set_sky_spin(self.level, game.frames); // NOV-31: the Novalis sky shells turn per game frame
 						// ARI-4: the held sky sprites of the newest tick (no rand() here); [PC] x cull with the port's horizontal tangent.
 						let tan_x = gcam.tan_half * g.config.width as f32 / g.config.height.max(1) as f32;
@@ -2146,6 +2169,10 @@ match (m.hero_preview(), &self.hero_anim, self.menu_clip_base) {
 						};
 						g.set_sky_sprites(sprites, [right, up, f], right, up, tan_x);
 						g.set_particles(&self.sprites, &self.ribbons, &self.lines, &self.effect_mobys, &self.cam, self.retail.as_ref().and_then(|r| r.fx()));
+						// [PC] PREVIEW (vegfx.rs): the hero and the drawn mobys bend the extra plants.
+						g.veg.actors(self.retail.as_ref().and_then(|r| r.fx()).and_then(|f| f.hero), self.retail.as_ref().map_or(&[][..], |r| r.live_mobys()).iter());
+						// [PC] A Moderate <-> Lush change of the Vegetation row replans the plants on a thread (vegfx.rs).
+						g.veg_follow(self.world.as_ref());
 						if title != self.title {
 							g.window.set_title(&title);
 							self.title = title;
@@ -2699,55 +2726,17 @@ match (m.hero_preview(), &self.hero_anim, self.menu_clip_base) {
 					if self.front.is_some() && self.game.is_none() {
 						self.front_mirror_tick(dt);
 						self.front_mirror_frame(dt);
+					} else {
+						// [PC] Not in the front end: the sharp title state is off (viewer/hudsharp.rs).
+						super::hudsharp::set(false, [usize::MAX; 2]);
 					}
-				} else if self.front.is_some() {
-					self.front_frame(dt);
-				}
-				if let Some(g) = &self.game {
-					// A3 steps once per 50 Hz frame, paused or not; the frame after the pause menu closes is skipped.
-					let menu = self.pause.is_some();
-					if self.a3_menu && !menu {
-						self.a3_skip = true;
-					}
-					self.a3_menu = menu;
-					self.a3_acc += dt;
-					while self.a3_acc >= crate::gameplay::PAL_DT {
-						self.a3_acc -= crate::gameplay::PAL_DT;
-						if std::mem::take(&mut self.a3_skip) {
-							continue;
-						}
-						self.a3_ticks = save::tick_play(self.a3_ticks);
-					}
-					// Autosave once Ratchet is back after a death (the death-retry Cross; rac-rs restarts by itself).
-					let dead = g.dead.is_some();
-					let ckpt_serial = g.ckpt_serial;
-					let scene = self.flow.as_ref().is_some_and(|f| f.cutscene.is_some());
-					if self.was_dead && !dead {
-						self.respawned();
-						self.autosave(save::Trigger::DeathRetry);
-					}
-					if self.was_scene && !scene && self.pending_level.is_none() {
-						self.autosave(save::Trigger::SceneEnd);
-					}
-					self.was_dead = dead;
-					if ckpt_serial != self.ckpt_seen {
-						self.ckpt_seen = ckpt_serial;
-						if let (Some(gpu), Some(mp)) = (&self.gpu, &self.music_player) {
-							self.ckpt_env = Some(CkptEnv { hero_env: gpu.hero_env, reverb: self.reverb, track: mp.track_word() });
-						}
-					}
-					self.was_scene = scene;
-				}
-				self.save_icon = (self.save_icon - dt).max(0.0);
-				if self.game.as_mut().is_some_and(|g| std::mem::take(&mut g.save_request)) {
-					self.autosave(save::Trigger::Request);
 				}
 				// Retail mode: the game travelled by itself (its own travel sequence and loader ran in the interpreter);
 				// rac-rs loads the new level's assets and starts a game with the same running `Retail`.
 				// [PC] The host side of the new level is parsed on a background thread as soon as retail starts travelling to it
-				// (the landing stream takes seconds), so the switch below only uploads (RAC_NO_PREFETCH=1: parse at the switch).
+				// (the landing stream takes seconds), so the switch below only uploads .
 				if let Some(n) = self.retail.as_ref().and_then(|r| r.travel_target()) {
-					if self.game.is_some() && !self.want_front && n < self.levels.len() && self.prefetch_tried != Some(n) && std::env::var_os("RAC_NO_PREFETCH").is_none() {
+					if self.game.is_some() && !self.want_front && n < self.levels.len() && self.prefetch_tried != Some(n) {
 						self.prefetch_tried = Some(n);
 						crate::loadlog::say(|| format!("main: prefetch level {n}"));
 						self.prefetch_level(n);
@@ -2762,6 +2751,12 @@ match (m.hero_preview(), &self.hero_anim, self.menu_clip_base) {
 					crate::retail::set_pools(pools);
 					self.retail_carry = self.retail.take();
 					self.level = n;
+					self.arrival_black = ARRIVAL_BLACK_MAX;
+					// A held movie picture (MOVIE_HOLD) must not outlive the level it was shown over: it would cover the new level.
+					MOVIE_HOLD.store(false, std::sync::atomic::Ordering::Relaxed);
+					if let Some(g) = &mut self.gpu {
+						g.movie.clear();
+					}
 					self.load_level();
 					crate::loadlog::say(|| "main: load_level returned, toggle_play".into());
 					self.toggle_play();
@@ -2773,14 +2768,19 @@ match (m.hero_preview(), &self.hero_anim, self.menu_clip_base) {
 				// and bound in a rebuilt game's order; the level, its audio and particles stay. Without room there the prop slots are rebuilt in the
 				// scene (`regrow_props`) with a new game; only a slot the scene cannot build there reloads the level.
 				if let Some(pools) = self.retail.as_mut().and_then(|r| r.take_grow_kept()) {
+					let _pg = profile::span("pg_all");
 					let t0 = std::time::Instant::now();
 					let slots: u32 = pools.iter().map(|p| p.1).sum();
 					let order = self.retail.as_ref().and_then(|r| r.bind_order().map(<[usize]>::to_vec));
+					let _pa = profile::span("pg_append");
 					let how = if let Some(order) = self.append_pools(&crate::retail::pools(), &pools, order.as_deref()) {
+						drop(_pa);
 						crate::retail::set_pools(pools);
+						let _pr = profile::span("pg_rebind");
 						if let Some(r) = self.retail.as_mut() {
 							r.rebind(order);
 						}
+						drop(_pr);
 						// PC-FPS-1: the props are bound anew; their first ticks draw unblended (as after a rebuild).
 						self.smooth = Default::default();
 						"appended in place"
@@ -2801,42 +2801,9 @@ match (m.hero_preview(), &self.hero_anim, self.menu_clip_base) {
 						self.toggle_play();
 						if in_place { "regrown in place" } else { "rebuilt by a level reload" }
 					};
+					let _pl = profile::span("pg_log");
 					let (verts, cap) = self.gpu.as_ref().and_then(|g| g.scene.as_ref()).map_or((0, 0), |s| (s.props_model.len(), s.props.vbuf.size() as usize / std::mem::size_of::<Vertex>()));
-					eprintln!("retail: prop slots {how} ({slots} pool props, {verts} prop vertices of {cap}) in {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
-				}
-				if let Some(n) = self.pending_level {
-					if self.begin_travel(n) {
-						self.pending_level = None;
-					}
-				}
-				if let Some(n) = self.pending_level.take() {
-					let carry = self.game.as_ref().map(|g| g.carry_out());
-					if let Some(g) = &self.game {
-						let (record, seen) = self.flow.as_ref().map_or((None, Vec::new()), |f| f.progress());
-						self.visited.insert(self.level, (record, seen, g.saved_bits()));
-						// Keep this level's exploration in the image before the next level's map replaces it.
-						if let (Some((_, sv)), Some(m)) = (&mut self.save, &self.map) {
-							sv.set_explored(self.level, &m.explored.0, &m.spans);
-						}
-					}
-					let source = self.level;
-					self.level = n;
-					self.load_level();
-					self.toggle_play();
-					if let Some(g) = &mut self.game {
-						if let Some(c) = &carry {
-							g.carry_in(c);
-							g.arrive(n);
-						}
-						if let Some((record, seen, bits)) = self.visited.get(&n) {
-							g.restore_saved(bits);
-							if let Some(f) = &mut self.flow {
-								f.restore(*record, seen);
-							}
-						}
-					}
-					self.autosave_from(save::Trigger::LevelChange, source);
-					self.messages.push((format!("LEVEL COMPLETE: ON TO {}", toc::LEVEL_NAMES[n].to_uppercase()), 4.0));
+					crate::loadlog::later(format!("retail: prop slots {how} ({slots} pool props, {verts} prop vertices of {cap}) in {:.1} ms", t0.elapsed().as_secs_f64() * 1e3));
 				}
 				for m in &mut self.messages {
 					m.1 -= dt;
@@ -2871,6 +2838,8 @@ match (m.hero_preview(), &self.hero_anim, self.menu_clip_base) {
 						// GS-full (--gsfull / RAC_GSFULL=1): the game's whole picture (gsfull/pipe.rs) instead of the overlay.
 						let full = r.gsfull_view().is_some();
 						g.modern_ok = !full;
+						// Sharp HUD (lane G): the GPU capture draws the overlay again at this window's resolution (0: off).
+						crate::retail::set_hud_target(if full { 0 } else { g.config.height });
 						g.ship_fight = r.ship_fight();
 						g.level = self.level;
 						if full {
@@ -3016,6 +2985,13 @@ match (m.hero_preview(), &self.hero_anim, self.menu_clip_base) {
 							}
 						}
 					}
+					// [PC] DEV ONLY: the dev tools' readout and planet list over everything (retail/devtools.rs; nothing with RAC_DEV_TOOLS off).
+					if self.retail.is_some() {
+						let hero = self.game.as_ref().map_or([0.0; 3], |gm| gm.player.pos);
+						crate::retail::devtools::draw(&mut g.hud, g.config.width as f32, g.config.height as f32, self.level, hero);
+					}
+					// [PC] RAC_FPS_METER=1: fps, frame time and game speed in the top right corner (viewer/profile.rs `meter_draw`).
+					profile::meter_draw(&mut g.hud, g.config.width as f32, g.config.height as f32);
 					// --title boot (retail/title_boot.rs): plain black over the display (and no sound) while the game steers itself to its title.
 					let cover = self.retail.as_ref().is_some_and(|r| r.title_cover());
 					if let Some(a) = &mut self.audio {
@@ -3033,20 +3009,44 @@ match (m.hero_preview(), &self.hero_anim, self.menu_clip_base) {
 						if let Some(w) = fx.swap {
 							g.fog_live = Some((w.fog_rgb, w.fog));
 							g.part_far = w.part_far;
+							g.under_flag = w.under;
+							g.under_surf = w.surf;
 						}
 						if let Some(c) = fx.shrub_cap {
 							g.shrub_cap = c;
 						}
 					}
+					// [PC] The world is black while retail is on another level than the one loaded here (its load is over, no frozen load screen, and its
+					// landing has begun, the switch is still to come: the old level's picture showed for a few frames) and until it presents
+					// its first picture of the new level (`arrival_black`). Retail draws that landing on black (its fade-in).
+					let ahead = self.retail.as_ref().is_some_and(|r| r.front_ram().is_none() && !r.paused() && r.travel_target().is_some_and(|t| t < self.levels.len()));
+					if self.arrival_black > 0 {
+						self.arrival_black = if ahead || self.retail.as_ref().is_none_or(|r| !r.holds()) { 0 } else { self.arrival_black - 1 };
+					}
+					if ahead || self.arrival_black > 0 {
+						let mut b = Vec::new();
+						crate::overlay::rect(&mut b, [0.0, 0.0, g.config.width as f32, g.config.height as f32], [0.0, 0.0, 0.0, 1.0]);
+						g.hud.splice(0..0, b);
+						g.hud_split = g.hud_split.map(|s| s + 1);
+					}
 					// --shot: let a few frames settle, save one, quit.
 					let capture = self.shot.as_ref().is_some_and(|s| s.1 == 0);
-					if let Some(img) = if self.switch_hold { None } else { g.draw(drawn_cam.as_ref().unwrap_or(&self.cam), capture) } {
+					// While the switch waits for the prefetch (`switch_hold`) the frame still draws: the world is black then (above), no stale picture stays up.
+					let ly_img = g.draw(drawn_cam.as_ref().unwrap_or(&self.cam), capture);
+					if let Some(img) = ly_img.filter(|_| capture) {
 						let path = &self.shot.as_ref().unwrap().0;
-						match std::fs::write(path, crate::render::png(&img)) {
-							Ok(()) => eprintln!("saved {path} at play tick {}", self.play_ticks),
+						// RAC_SHOT_SEQ=N (dev): N consecutive captured frames, path_00.png .. (flicker checks); then quit.
+						static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+						let seq = std::env::var("RAC_SHOT_SEQ").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(1);
+						let k = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed); if seq > 1 && std::env::var("RAC_SHOT_STEP").is_ok() { crate::retail::SHOT_ALLOW.store(k + 1, std::sync::atomic::Ordering::Relaxed); }
+						let path = if seq > 1 { path.replace(".png", &format!("_{k:02}.png")) } else { path.clone() };
+						match std::fs::write(&path, crate::render::png(&img)) {
+							Ok(()) => eprintln!("saved {path} at play tick {} field {}", self.play_ticks, self.retail.as_ref().map_or(0, |r| r.field_count())),
 							Err(e) => eprintln!("{path}: {e}"),
 						}
-						el.exit();
+						if k + 1 >= seq {
+							el.exit();
+						}
 					}
 					// RAC_SHOT_TICK: hold the capture until that many play ticks have run.
 					let wait = std::env::var("RAC_SHOT_TICK").ok().and_then(|v| v.parse::<u32>().ok()).is_some_and(|t| self.play_ticks < t) && !paused // play ticks stop while paused
@@ -3329,7 +3329,12 @@ fn hero_rows(p: &crate::player::Player) -> [[f32; 3]; 3] {
 /// retail mode, else the port's player state.
 fn hero_layers(parts: Option<&crate::retail::HeroParts>, p: &crate::player::Player, map: &[Option<usize>]) -> (Vec<anim::JointFx>, Option<anim::LayerPose>, Option<anim::LayerPose>, [Option<anim::LayerPose>; 2]) {
 	match parts {
-		Some(q) => (q.hero_fx.clone(), None, None, [None, None]),
+		Some(q) => {
+			// Modern controls: a backpedal fades out retail's leg bends, made for the legs facing the path (retail/strafe.rs).
+			let mut fx = q.hero_fx.clone();
+			crate::retail::strafe::leg_fx(&mut fx, q.strafe);
+			(fx, None, None, [None, None])
+		}
 		None => (p.hero_joint_fx(0, map), p.throw_layer.map(|l| l.pose()), p.weapon_layer1.map(|l| l.pose()), p.hold_poses()),
 	}
 }
@@ -3389,4 +3394,10 @@ mod display_tests {
 		assert_eq!(display_change(true, false), Some(Some(Fullscreen::Borderless(None))));
 		assert_eq!(display_change(false, true), Some(None));
 	}
+}
+
+/// [PC] Water hold: (level, last field with pool strips, last field with RAM oceans) and how many fields an empty list is bridged.
+const WATER_HOLD: u32 = 4;
+thread_local! {
+	static WATER_KEEP: std::cell::RefCell<(usize, u32, u32)> = const { std::cell::RefCell::new((usize::MAX, 0, 0)) };
 }

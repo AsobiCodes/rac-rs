@@ -4,6 +4,82 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::{Arc, Mutex};
 
+/// [PC] Diagnostics counters (RAC_AUDIO_STATS, `Probe`), read by the probe thread; plain relaxed atomics.
+pub static ST_STREAM_UNDER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static ST_STREAM_OPEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static ST_SPU_PUSH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static ST_SPU_REANCHOR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static ST_SPU_LATE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Stream declick fades started (gain left 1.0), by cause, and output frames mixed with a gain below 1.0.
+pub static ST_FADE_UNDER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static ST_FADE_PAUSE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static ST_FADE_CLOSE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static ST_FADE_IDLE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static ST_FADE_FRAMES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// [PC] RAC_AUDIO_STATS=<prefix>: records every device callback (time, size, mix time, the device's own callback and playback
+/// timestamps, the counters above) to <prefix>.csv and the exact samples handed to the device to <prefix>.f32 (interleaved f32
+/// LE, before the test mute), written by a side thread. Off unless the variable is set.
+struct Probe {
+	tx: std::sync::mpsc::Sender<(String, Vec<f32>)>,
+	t0: std::time::Instant,
+	epoch: Option<cpal::StreamInstant>,
+	n: u64,
+}
+
+impl Probe {
+	fn from_env(rate: f64, channels: usize) -> Option<Probe> {
+		use std::io::Write;
+		let prefix = std::env::var("RAC_AUDIO_STATS").ok()?;
+		let (tx, rx) = std::sync::mpsc::channel::<(String, Vec<f32>)>();
+		std::thread::spawn(move || {
+			let (Ok(csv), Ok(raw)) = (std::fs::File::create(format!("{prefix}.csv")), std::fs::File::create(format!("{prefix}.f32"))) else { return };
+			let (mut csv, mut raw) = (std::io::BufWriter::new(csv), std::io::BufWriter::new(raw));
+			let _ = writeln!(csv, "# rate {rate} channels {channels}");
+			let _ = writeln!(csv, "n,t_ns,frames,mix_ns,cb_ns,play_ns,stream_under,stream_open,spu_push,spu_reanchor,spu_late,fade_under,fade_pause,fade_close,fade_idle,fade_frames");
+			let mut k = 0u64;
+			for (line, pcm) in rx {
+				let _ = writeln!(csv, "{line}");
+				let _ = raw.write_all(&pcm.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>());
+				k += 1;
+				if k % 50 == 0 {
+					let _ = csv.flush();
+					let _ = raw.flush();
+				}
+			}
+		});
+		Some(Probe { tx, t0: std::time::Instant::now(), epoch: None, n: 0 })
+	}
+
+	fn record(&mut self, data: &[f32], channels: usize, start: std::time::Instant, mix_ns: u64, info: &cpal::OutputCallbackInfo) {
+		use std::sync::atomic::Ordering::Relaxed;
+		let ts = info.timestamp();
+		let epoch = *self.epoch.get_or_insert(ts.callback);
+		let ns = |t: cpal::StreamInstant| (t.as_nanos() as i128 - epoch.as_nanos() as i128) as i64;
+		let line = format!(
+			"{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+			self.n,
+			start.duration_since(self.t0).as_nanos(),
+			data.len() / channels.max(1),
+			mix_ns,
+			ns(ts.callback),
+			ns(ts.playback),
+			ST_STREAM_UNDER.load(Relaxed),
+			ST_STREAM_OPEN.load(Relaxed),
+			ST_SPU_PUSH.load(Relaxed),
+			ST_SPU_REANCHOR.load(Relaxed),
+			ST_SPU_LATE.load(Relaxed),
+			ST_FADE_UNDER.load(Relaxed),
+			ST_FADE_PAUSE.load(Relaxed),
+			ST_FADE_CLOSE.load(Relaxed),
+			ST_FADE_IDLE.load(Relaxed),
+			ST_FADE_FRAMES.load(Relaxed)
+		);
+		self.n += 1;
+		let _ = self.tx.send((line, data.to_vec()));
+	}
+}
+
 #[derive(Clone)]
 pub struct Clip {
 	pub rate: u32,
@@ -199,7 +275,14 @@ struct StreamState {
 	/// Silent and not consuming until set (priming) or while paused.
 	playing: bool,
 	paused: bool,
+	/// [PC] Declick: gain 0..1 that ramps down over `FADE_FRAMES` when the queue runs dry, the stream pauses or closes (the last
+	/// frame is held and faded instead of cutting to zero) and back up when data plays again. 1.0 = untouched samples.
+	gain: f32,
+	hold: [f32; 2],
 }
+
+/// Length of the stream declick ramp in output frames (2 ms at 48 kHz).
+const FADE_FRAMES: f32 = 96.0;
 
 impl StreamSource {
 	/// Appends interleaved L,R samples.
@@ -222,12 +305,6 @@ impl StreamSource {
 	pub fn set_playing(&self, playing: bool) {
 		if let Ok(mut s) = self.state.lock() {
 			s.playing = playing;
-		}
-	}
-
-	pub fn set_paused(&self, paused: bool) {
-		if let Ok(mut s) = self.state.lock() {
-			s.paused = paused;
 		}
 	}
 
@@ -356,35 +433,59 @@ fn mixer(
 			}
 		}
 		if let Ok(mut streams) = smix.lock() {
-			streams.retain(|s| !s.closed.load(std::sync::atomic::Ordering::Relaxed));
+			// A closed stream stays until its fade-out has run (a skipped movie must not cut off in mid-wave).
+			streams.retain(|s| !s.closed.load(std::sync::atomic::Ordering::Relaxed) || s.state.lock().is_ok_and(|st| st.gain > 0.0));
 			for src in streams.iter() {
 				let Ok(mut st) = src.state.lock() else { continue };
-				if !st.playing || st.paused {
-					continue;
-				}
 				let step = src.rate as f64 / rate;
 				let vol = st.volume;
+				let closed = src.closed.load(std::sync::atomic::Ordering::Relaxed);
+				let wants = st.playing && !st.paused && !closed;
 				for frame in data.chunks_exact_mut(channels) {
-					if st.queue.len() < 4 {
-						break; // underrun: silence, clock holds
+					let (l, r);
+					if wants && st.queue.len() >= 4 {
+						let f = st.phase as f32;
+						let mix = |c: usize| {
+							let (a, b) = (st.queue[c] as f32, st.queue[2 + c] as f32);
+							(a + (b - a) * f) / 32768.0 * vol
+						};
+						(l, r) = (mix(0), mix(1));
+						st.hold = [l, r];
+						st.phase += step;
+						while st.phase >= 1.0 && st.queue.len() >= 4 {
+							st.queue.drain(..2);
+							st.phase -= 1.0;
+							st.played += 1;
+						}
+						// Back up after a fade (not before: gain 1.0 leaves the samples exactly as they were).
+						if st.gain < 1.0 {
+							st.gain = (st.gain + 1.0 / FADE_FRAMES).min(1.0);
+						}
+					} else {
+						if wants {
+							ST_STREAM_UNDER.fetch_add(1, std::sync::atomic::Ordering::Relaxed); // underrun: the clock holds
+						}
+						if st.gain <= 0.0 {
+							break;
+						}
+						// No data (or paused / closed): hold the last frame and fade it out, no step to zero.
+						if st.gain >= 1.0 {
+							let c = if closed { &ST_FADE_CLOSE } else if wants { &ST_FADE_UNDER } else if st.paused { &ST_FADE_PAUSE } else { &ST_FADE_IDLE };
+							c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+						}
+						st.gain = (st.gain - 1.0 / FADE_FRAMES).max(0.0);
+						(l, r) = (st.hold[0], st.hold[1]);
 					}
-					let f = st.phase as f32;
-					let mix = |c: usize| {
-						let (a, b) = (st.queue[c] as f32, st.queue[2 + c] as f32);
-						(a + (b - a) * f) / 32768.0 * vol
-					};
-					let (l, r) = (mix(0), mix(1));
+					let g = st.gain;
+					if g < 1.0 {
+						ST_FADE_FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+					}
+					let (l, r) = (l * g, r * g);
 					if channels > 1 {
 						frame[0] += l;
 						frame[1] += r;
 					} else {
 						frame[0] += (l + r) * 0.5;
-					}
-					st.phase += step;
-					while st.phase >= 1.0 && st.queue.len() >= 4 {
-						st.queue.drain(..2);
-						st.phase -= 1.0;
-						st.played += 1;
 					}
 				}
 			}
@@ -393,6 +494,49 @@ fn mixer(
 			*x = x.clamp(-1.0, 1.0);
 		}
 	}
+}
+
+/// [PC] Puts the calling thread (the device callback) in the Windows multimedia scheduler class "Pro Audio" (MMCSS), else at
+/// time-critical priority. A normal-priority callback thread loses the CPU to the busy game threads (above normal, `retail/hot.rs`)
+/// for longer than the 10 ms device period on a loaded or weak PC, and the device then plays a gap: crackle. cpal's own `realtime`
+/// feature would do the same but is not built in. Returns what was set (for the log). RAC_AUDIO_NO_PROMOTE=1 skips it (A/B runs).
+#[cfg(windows)]
+fn promote_audio_thread() -> &'static str {
+	use std::ffi::c_void;
+	if std::env::var_os("RAC_AUDIO_NO_PROMOTE").is_some() {
+		return "normal (RAC_AUDIO_NO_PROMOTE)";
+	}
+	#[link(name = "kernel32")]
+	unsafe extern "system" {
+		fn LoadLibraryA(name: *const u8) -> *mut c_void;
+		fn GetProcAddress(module: *mut c_void, name: *const u8) -> *mut c_void;
+		fn GetCurrentThread() -> *mut c_void;
+		fn SetThreadPriority(thread: *mut c_void, priority: i32) -> i32;
+	}
+	// SAFETY: plain Win32 calls on the current thread; avrt.dll is a system library and the export has this signature.
+	unsafe {
+		let m = LoadLibraryA(c"avrt.dll".as_ptr().cast());
+		let f = if m.is_null() { std::ptr::null_mut() } else { GetProcAddress(m, c"AvSetMmThreadCharacteristicsW".as_ptr().cast()) };
+		if !f.is_null() {
+			type SetCharacteristics = unsafe extern "system" fn(*const u16, *mut u32) -> *mut c_void;
+			let f = std::mem::transmute::<*mut c_void, SetCharacteristics>(f);
+			let task: Vec<u16> = "Pro Audio\0".encode_utf16().collect();
+			let mut index = 0u32;
+			if !f(task.as_ptr(), &mut index).is_null() {
+				return "MMCSS Pro Audio";
+			}
+		}
+		// THREAD_PRIORITY_TIME_CRITICAL
+		if SetThreadPriority(GetCurrentThread(), 15) != 0 {
+			return "time critical";
+		}
+	}
+	"normal (could not raise)"
+}
+
+#[cfg(not(windows))]
+fn promote_audio_thread() -> &'static str {
+	"normal"
 }
 
 /// Agent test runs play silent so the user does not hear them: RAC_MUTE, the hidden test window (RAC_TEST_WINDOW=hidden) or
@@ -419,11 +563,21 @@ impl Audio {
 		let mut mix = mixer(a.voices.clone(), a.streams.clone(), a.reverb.clone(), a.underwater.clone(), a.scene.clone(), a.spu.clone(), rate, channels);
 		// Agent test runs are silent: the mixer runs as usual (same voice state), the device gets zeros.
 		let mute = test_mute();
+		let mut probe = Probe::from_env(rate, channels);
+		let mut promoted = false;
 		let stream = device
 			.build_output_stream(
 				config,
-				move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+				move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
+					if !promoted {
+						promoted = true;
+						eprintln!("audio: device callback thread priority: {}", promote_audio_thread());
+					}
+					let t = std::time::Instant::now();
 					mix(data);
+					if let Some(p) = probe.as_mut() {
+						p.record(data, channels, t, t.elapsed().as_nanos() as u64, info);
+					}
 					if mute {
 						data.fill(0.0);
 					}
@@ -496,9 +650,10 @@ impl Audio {
 	/// A stereo streaming source at `rate` Hz (scaled by the master volume); feed it with `push`,
 	/// start it with `set_playing`, drop it with `close`.
 	pub fn open_stream(&mut self, rate: u32) -> Arc<StreamSource> {
+		ST_STREAM_OPEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 		let s = Arc::new(StreamSource {
 			rate,
-			state: Mutex::new(StreamState { queue: Default::default(), phase: 0.0, played: 0, volume: self.master, playing: false, paused: false }),
+			state: Mutex::new(StreamState { queue: Default::default(), phase: 0.0, played: 0, volume: self.master, playing: false, paused: false, gain: 1.0, hold: [0.0; 2] }),
 			closed: Default::default(),
 		});
 		if let Ok(mut v) = self.streams.lock() {
@@ -608,11 +763,6 @@ impl Audio {
 	}
 
 
-	/// Every live voice: (id, looped, music) (retail/snd.rs voice ledger).
-	pub fn live(&self) -> Vec<(u64, bool, bool)> {
-		self.voices.lock().map(|v| v.iter().map(|x| (x.id, x.clip.loop_start.is_some(), x.music)).collect()).unwrap_or_default()
-	}
-
 	pub fn playing(&self, id: u64) -> bool {
 		self.voices.lock().is_ok_and(|v| v.iter().any(|v| v.id == id))
 	}
@@ -676,4 +826,59 @@ mod tests {
 		assert!(late < e_on, "tail does not decay");
 	}
 
+	/// Left channel of `n` mixed frames, appended to `out`.
+	fn pull(mix: &mut impl FnMut(&mut [f32]), n: usize, out: &mut Vec<f32>) {
+		let mut b = vec![0.0f32; n * 2];
+		mix(&mut b);
+		out.extend(b.chunks_exact(2).map(|f| f[0]));
+	}
+
+	/// [PC] Stream declick (FMV audio): gain 1.0 leaves the samples exactly as they were; an underrun, `set_playing(false)` (the player's
+	/// pause) and `close` fade the held frame to 0 over `FADE_FRAMES` frames instead of cutting to zero; data again fades back in;
+	/// a closed stream leaves the list once its fade has ended.
+	#[test]
+	fn stream_declick() {
+		let (mut a, mut mix) = Audio::offline(48000.0, 2);
+		let s = a.open_stream(48000);
+		let tone = |frames: usize| -> Vec<i16> { (0..frames).flat_map(|_| [16384i16, -16384]).collect() };
+		let step = 0.5 / FADE_FRAMES + 1e-6;
+		let falls = |x: &[f32]| x.windows(2).all(|w| w[0] >= w[1] && w[0] - w[1] <= step);
+		let rises = |x: &[f32]| x.windows(2).all(|w| w[1] >= w[0] && w[1] - w[0] <= step);
+		let mut out = Vec::new();
+		s.push(&tone(1000));
+		s.set_playing(true);
+		pull(&mut mix, 500, &mut out);
+		assert!(out.iter().all(|&v| v == 0.5), "gain 1.0 must leave the samples untouched");
+		// Underrun: 999 frames play (the last one stays as the interpolation partner), then the held frame fades to 0.
+		pull(&mut mix, 700, &mut out);
+		assert!(out[..999].iter().all(|&v| v == 0.5));
+		assert!(falls(&out[998..1100]), "underrun: fade, no step to zero");
+		assert!(out[1100..].iter().all(|&v| v == 0.0));
+		// Data again: fades back in over FADE_FRAMES, then untouched.
+		let n = out.len();
+		s.push(&tone(1000));
+		pull(&mut mix, 400, &mut out);
+		assert!(rises(&out[n - 1..n + 97]), "fade-in");
+		assert!(out[n + 100..].iter().all(|&v| v == 0.5));
+		// Pause (set_playing(false)) and resume.
+		let n = out.len();
+		s.set_playing(false);
+		pull(&mut mix, 200, &mut out);
+		assert!(falls(&out[n - 1..n + 100]), "pause: fade, no step to zero");
+		assert!(out[n + 100..].iter().all(|&v| v == 0.0));
+		let n = out.len();
+		s.set_playing(true);
+		pull(&mut mix, 200, &mut out);
+		assert!(rises(&out[n - 1..n + 97]), "resume: fade-in");
+		assert!(out[n + 100..].iter().all(|&v| v == 0.5));
+		// Close: the held frame fades out, then the stream is dropped.
+		let n = out.len();
+		s.close();
+		pull(&mut mix, 200, &mut out);
+		assert!(falls(&out[n - 1..n + 100]), "close: fade, no step to zero");
+		assert!(out[n + 100..].iter().all(|&v| v == 0.0));
+		assert_eq!(a.streams.lock().unwrap().len(), 1, "the stream stays until its fade has run");
+		pull(&mut mix, 10, &mut out);
+		assert!(a.streams.lock().unwrap().is_empty(), "the faded-out closed stream leaves the list");
+	}
 }

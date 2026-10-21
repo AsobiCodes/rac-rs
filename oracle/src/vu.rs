@@ -6,20 +6,10 @@
 //! flags visible 4 cycles after issue. Upper and lower read the pre-pair state;
 //! upper wins a same-register write; LOI's I is seen from the next pair.
 
-use crate::cpu::{Cpu, BC_KIND, FULL, MAX, MIN, MADD, MSUB, QI};
+use crate::cpu::Cpu;
+use ee_core::vu::{lane, Up, ACC, NONE};
 use crate::fpu::{self, CSR_CHOP};
 
-const ACC: usize = 32;
-const NONE: usize = 99;
-
-pub struct Up {
-    pub dst: usize,
-    pub val: [u32; 4],
-    pub mask: u32,
-    pub mac: Option<u32>,
-    pub clip: Option<u32>,
-    pub reads: [(usize, u32); 3],
-}
 
 /// A VU0 microprogram that waits for the EE (a wait loop on VI registers, see `vu0_exec`) is parked in VPU_STAT
 /// (vi29), as on the hardware: bit 0 is the busy flag, bits 16..27 the micro address it waits at. A parked program
@@ -28,151 +18,11 @@ pub struct Up {
 /// leaves VPU_STAT at 0.
 const VPU_BUSY: u32 = 1;
 
-pub(crate) fn mac_of(v: [u32; 4], dest: u32) -> u32 {
-    let mut m = 0;
-    for l in 0..4 {
-        if dest & (8 >> l) != 0 {
-            let b = 3 - l;
-            if v[l] & 0x7fff_ffff == 0 {
-                m |= 1 << b;
-            }
-            if v[l] >> 31 != 0 {
-                m |= 1 << (b + 4);
-            }
-        }
-    }
-    m
-}
-fn lane(l: usize) -> u32 {
-    8 >> l
-}
-
 impl Cpu {
-    /// Compute an upper instruction against the current state, no writes. Inlined: in recompiled code `op` is a
-    /// constant and the decode folds away.
-    #[inline(always)]
-    pub fn vu_upper(&self, op: u32, clip_prev: u32) -> Result<Up, String> {
-        self.vu_upper_g::<false>(op, clip_prev)
-    }
+    // The upper ops live in ee-core (vu.rs there), where the generated code inlines them.
+    #[inline(always)] pub fn vu_upper(&self, op: u32, clip_prev: u32) -> Result<Up, String> { self.core().vu_upper(op, clip_prev) }
+    #[inline(always)] pub fn vu_upper_g<const FAST: bool>(&self, op: u32, clip_prev: u32) -> Result<Up, String> { self.core().vu_upper_g::<FAST>(op, clip_prev) }
 
-    /// `vu_upper`; FAST = true skips the MXCSR switching of every float op (a `fpu::ChopGuard` must be alive).
-    #[inline(always)]
-    pub fn vu_upper_g<const FAST: bool>(&self, op: u32, clip_prev: u32) -> Result<Up, String> {
-        let dest = (op >> 21) & 15;
-        let ft = ((op >> 16) & 31) as usize;
-        let fs = ((op >> 11) & 31) as usize;
-        let fd = ((op >> 6) & 31) as usize;
-        let s = self.vf[fs];
-        let t = self.vf[ft];
-        let bc = (op & 3) as usize;
-        let (q, i) = (self.vi[22], self.vi[21]);
-        let mut u = Up { dst: NONE, val: [0; 4], mask: dest, mac: None, clip: None, reads: [(NONE, 0); 3] };
-        let f = (op & 0x3f) as usize;
-        let acc_read = |k: u8| if k == MADD || k == MSUB { (ACC, dest) } else { (NONE, 0) };
-        if f < 0x3c {
-            let (k, tv, tr) = match f {
-                0..=27 => (BC_KIND[f >> 2], [t[bc]; 4], (ft, lane(bc))),
-                28..=39 => {
-                    let (k, isi) = QI[f - 28];
-                    (k, [if isi { i } else { q }; 4], (NONE, 0))
-                }
-                46 => {
-                    let p = fpu::vmul_g::<FAST>([s[1], s[2], s[0], 0], [t[2], t[0], t[1], 0]);
-                    u.val = fpu::vsub_g::<FAST>(self.vacc, p);
-                    u.mask = dest & 0xe;
-                    u.dst = fd;
-                    u.mac = Some(mac_of(u.val, u.mask));
-                    u.reads = [(fs, 0xe), (ft, 0xe), (ACC, 0xe)];
-                    return Ok(u);
-                }
-                40..=47 => (FULL[f - 40], t, (ft, dest)),
-                _ => return Err(format!("unknown VU upper {op:08x}")),
-            };
-            u.val = self.fmac_g::<FAST>(k, s, tv);
-            u.dst = fd;
-            u.reads = [(fs, dest), tr, acc_read(k)];
-            if k != MAX && k != MIN {
-                u.mac = Some(mac_of(u.val, dest));
-            }
-            return Ok(u);
-        }
-        let x = ((op & 3) | ((op >> 4) & 0x7c)) as usize;
-        match x {
-            0..=15 | 24..=27 => {
-                let k = BC_KIND[x >> 2];
-                u.val = self.fmac_g::<FAST>(k, s, [t[bc]; 4]);
-                u.dst = ACC;
-                u.reads = [(fs, dest), (ft, lane(bc)), acc_read(k)];
-                u.mac = Some(mac_of(u.val, dest));
-            }
-            16..=19 => {
-                let sc = [1.0f32, 0.0625, 1.0 / 4096.0, 1.0 / 32768.0][x - 16];
-                for l in 0..4 {
-                    let m = if FAST {
-                        fpu::mulss_nc(fpu::cvtsi2ss_nc(s[l] as i32), sc)
-                    } else {
-                        fpu::mulss(fpu::cvtsi2ss(s[l] as i32, CSR_CHOP), sc, CSR_CHOP)
-                    };
-                    u.val[l] = fpu::fout(m);
-                }
-                u.dst = ft;
-                u.reads[0] = (fs, dest);
-            }
-            20..=23 => {
-                let sc = [1.0f32, 16.0, 4096.0, 32768.0][x - 20];
-                for l in 0..4 {
-                    let v = fpu::fout(if FAST { fpu::mulss_nc(fpu::fin(s[l]), sc) } else { fpu::mulss(fpu::fin(s[l]), sc, CSR_CHOP) });
-                    u.val[l] = fpu::cvt_w(v);
-                }
-                u.dst = ft;
-                u.reads[0] = (fs, dest);
-            }
-            29 => {
-                u.val = [s[0] & 0x7fff_ffff, s[1] & 0x7fff_ffff, s[2] & 0x7fff_ffff, s[3] & 0x7fff_ffff];
-                u.dst = ft;
-                u.reads[0] = (fs, dest);
-            }
-            31 => {
-                let w = fpu::fz(t[3]).abs();
-                let mut c = (clip_prev << 6) & 0xff_ffff;
-                for l in 0..3 {
-                    let v = fpu::fz(s[l]);
-                    if v > w {
-                        c |= 1 << (2 * l);
-                    }
-                    if v < -w {
-                        c |= 2 << (2 * l);
-                    }
-                }
-                u.clip = Some(c);
-                u.reads = [(fs, 0xe), (ft, 1), (NONE, 0)];
-            }
-            28 | 30 | 32..=39 => {
-                let (k, isi) = QI[x - 28];
-                u.val = self.fmac_g::<FAST>(k, s, [if isi { i } else { q }; 4]);
-                u.dst = ACC;
-                u.reads = [(fs, dest), (NONE, 0), acc_read(k)];
-                u.mac = Some(mac_of(u.val, dest));
-            }
-            40..=42 | 44 | 45 => {
-                let k = FULL[x - 40];
-                u.val = self.fmac_g::<FAST>(k, s, t);
-                u.dst = ACC;
-                u.reads = [(fs, dest), (ft, dest), acc_read(k)];
-                u.mac = Some(mac_of(u.val, dest));
-            }
-            46 => {
-                u.val = fpu::vmul_g::<FAST>([s[1], s[2], s[0], 0], [t[2], t[0], t[1], 0]);
-                u.mask = dest & 0xe;
-                u.dst = ACC;
-                u.reads = [(fs, 0xe), (ft, 0xe), (NONE, 0)];
-                u.mac = Some(mac_of(u.val, u.mask));
-            }
-            47 => {}
-            _ => return Err(format!("unknown VU upper {op:08x}")),
-        }
-        Ok(u)
-    }
 
     /// VCALLMS / VCALLMSR: starts the microprogram at `start` and runs it to its E bit, or to the point where it
     /// waits for the EE (a wait loop on VI registers; see `vu0_exec`). In the second case the program stays

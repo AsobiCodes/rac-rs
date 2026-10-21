@@ -3,18 +3,14 @@
 //! the note itself marks the meaning as inferred.
 
 use crate::physics::add;
-use crate::physics::dot;
 use crate::physics::length;
-use crate::physics::qmask;
 use crate::physics::scale;
 use crate::physics::sub;
 use crate::physics::MobySolid;
-use crate::physics::Scene;
 use crate::physics::World;
 use crate::physics::V3;
 mod edges;
 mod headpose;
-pub use headpose::block_quat;
 pub use headpose::pulse_item;
 // PARKED HERO-18b: 0x21/0x7a and glide (8) are unavailable on current planets; see owner spec. State 0x20 (Walloper,
 // reachable through the [PC] WPN-6.8 grant) is `State::Wallop` (player/wallop.rs, WPN-6.6a).

@@ -113,7 +113,7 @@ impl Gpu {
 	pub(super) fn write_warp_uniforms(&self, cam: &Camera, aspect: f32) {
 		let Some(w) = &self.warp_fx else { return };
 		let fan_eye = Camera { pos: [0.0; 3], yaw: cam.yaw, pitch: cam.pitch, tan_half: w.fan_tan * PROJ_Y_RATIO, up: cam.up };
-		let u = self.uniforms(cam, &fan_eye, aspect, (RETAIL_NEAR, RETAIL_FAR));
+		let u = self.uniforms(cam, &fan_eye, aspect, (RETAIL_NEAR, self.world_far()));
 		self.queue.write_buffer(&self.pbuf[3], 0, bytemuck::bytes_of(&u));
 	}
 }

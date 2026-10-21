@@ -2,9 +2,6 @@
 //! a world-static camera cut with the hero frozen (state 0x72), released by re-placing the follow
 //! camera behind the hero. FUN_002faee0.
 
-use super::Game;
-use crate::gameplay::MobyInstance;
-use crate::physics::V3;
 
 
 

@@ -121,20 +121,6 @@ impl Player {
 		Player { shared, audio: stream, worker: Some(worker), started: false, paused: false, wall: None, first_pts: None, current: None, finished: false, moved: None }
 	}
 
-	pub fn set_paused(&mut self, paused: bool) {
-		if paused == self.paused {
-			return;
-		}
-		let c = self.clock(); // read with the old state, then freeze or restart from it
-		self.paused = paused;
-		if let Some(a) = &self.audio {
-			a.set_paused(paused);
-		}
-		if self.wall.is_some() {
-			self.wall = Some((Instant::now(), c));
-		}
-	}
-
 	/// Clock in 90 kHz ticks of the stream's PTS timeline.
 	fn clock(&self) -> u64 {
 		if let Some(a) = &self.audio {
@@ -215,10 +201,6 @@ impl Player {
 		out
 	}
 
-	/// Display aspect ratio (width / height) of the last frame from aspect_ratio_information.
-	pub fn display_aspect(&self) -> Option<f32> {
-		self.current.as_ref().map(|f| display_aspect(f.aspect_ratio_information, f.width, f.height))
-	}
 }
 
 /// MPEG-2 aspect_ratio_information: 1 square pixels, 2 4:3, 3 16:9, 4 2.21:1 (display aspect).

@@ -18,14 +18,10 @@
 //!
 //! KER-8: the mine class 627 the class 578 layer drops (decomp/notes/kerwan_enemies.md "KER-8 port spec").
 
-use super::{sched, Event, Game, Kind};
-use crate::gameplay::{pal_ticks, MobyInstance, PAL_DT};
+use super::Game;
 // SHR-FP2: the EE-truncating f32 ops live in gameplay.rs; the kerwan submodules reach them through `use super::*`.
 #[allow(unused_imports)]
 use crate::gameplay::ee_add;
-use crate::gameplay::ee_mul;
-use crate::gameplay::ee_trunc;
-use crate::physics::{add, length, sub, World};
 
 mod breakable;
 pub(crate) mod cam1;
@@ -66,7 +62,6 @@ pub(super) use heli::*;
 pub(super) use infobot::*;
 pub(super) use layer::*;
 pub(super) use lift::*;
-pub(super) use mine::*;
 pub(super) use npc909::*;
 pub(super) use npc914::*;
 pub(super) use ride::*;

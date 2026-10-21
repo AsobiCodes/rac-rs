@@ -7,16 +7,9 @@
 //! the same run either way. A function that finds the PC outside its own labels (the vblank wait, a handler that did
 //! not come back) returns, and so do its callers, down to the dispatcher.
 use crate::cpu::Cpu;
-use crate::mem::{Mem, RAM};
+use crate::mem::Mem;
 
-/// One recompiled function: its code range (validated against RAM by `hash`), block labels and body.
-pub struct Fn {
-    pub entry: u32,
-    pub end: u32,
-    pub hash: u64,
-    pub labels: &'static [u32],
-    pub f: fn(&mut Cpu),
-}
+pub use ee_core::rec::Fn;
 
 /// The generated sets (crates under oracle/rec, registered by ee-game), each with the level whose overlay it
 /// compiles (`None`: boot code or unknown, always probed). Each is used only when all its functions match RAM,
@@ -42,7 +35,7 @@ fn register_at(tag: Option<u32>, set: &'static [Fn]) {
     }
 }
 
-/// A hand-written Rust function that replaces a retail one (crate ee-hand). It runs when the retail code at
+/// A Rust function that replaces a retail one (a PC hook registered by rac-rs; the Eudora rewrites, crate ee-hand, are gone). It runs when the retail code at
 /// `entry..end` matches `hash` and the function is entered at `entry` (from compiled code or the dispatcher), with
 /// the arguments in the registers as retail passes them. It returns false to leave the call to the retail code
 /// (state untouched). After it, the PC is the caller's return address and the instruction count advances by `est`
@@ -82,10 +75,14 @@ const CALL_RET: u32 = 0x10;
 pub const LOADER: u32 = 0x15ee48;
 
 /// PC -> recompiled function, for the functions whose code matches RAM.
+/// `#[repr(C)]`: `lo` and `hand_bits` first, ee-core's `rec::RecHot` (the `has_hand` test the generated code inlines).
+#[repr(C)]
 pub struct Table {
     lo: u32,
+    /// Entries with a hand-written function (bit per word from `lo`), and the functions.
+    hand_bits: Vec<u64>,
     map: Vec<u32>,
-    fns: Vec<fn(&mut Cpu)>,
+    fns: Vec<fn(&mut ee_core::cpu::Cpu)>,
     pub level: u32,
     /// Level loader state (0x15ee48) at build time: states 1..=6 replace the overlay, so no set is used then.
     pub loader: u16,
@@ -94,8 +91,6 @@ pub struct Table {
     /// RAM words at every registered function's entry when built (address, word): a FlushCache that finds one
     /// changed rebuilds the table (`Cpu::rec_flushed`).
     probe: Vec<(u32, u32)>,
-    /// Entries with a hand-written function (bit per word from `lo`), and the functions.
-    hand_bits: Vec<u64>,
     hand: std::collections::HashMap<u32, (fn(&mut Cpu) -> bool, u64)>,
     /// (entry, end) of every function in the sets used, by entry (`gap_frame`).
     spans: Vec<(u32, u32)>,
@@ -201,7 +196,7 @@ impl Table {
     }
 
     #[inline(always)]
-    pub fn get(&self, pc: u32) -> Option<fn(&mut Cpu)> {
+    pub fn get(&self, pc: u32) -> Option<fn(&mut ee_core::cpu::Cpu)> {
         let i = (pc.wrapping_sub(self.lo) / 4) as usize;
         match self.map.get(i) {
             Some(&k) if k != 0 && pc & 3 == 0 => Some(self.fns[k as usize - 1]),
@@ -259,6 +254,19 @@ impl Cpu {
     /// One dispatch: a recompiled function from the current PC, else one interpreter step.
     #[inline]
     pub fn step_rec(&mut self) {
+        self.step_rec_impl::<false>()
+    }
+
+    /// `n` dispatches in one loop with the interpreter's decoder inlined (no call per interpreted instruction).
+    #[inline(never)]
+    pub fn run_rec(&mut self, n: u32) {
+        for _ in 0..n {
+            self.step_rec_impl::<true>();
+        }
+    }
+
+    #[inline(always)]
+    fn step_rec_impl<const INL: bool>(&mut self) {
         if self.pc == crate::VBLANK_WAIT && self.vsync_armed && self.vblank_cb.is_some() {
             self.vblank_hook();
         }
@@ -271,13 +279,13 @@ impl Cpu {
             let i = (((self.pc & 0x01ff_ffff) >> 2)) as usize;
             if self.stub_bits[i >> 6] >> (i & 63) & 1 == 0 {
                 let (pc, n) = (self.pc, self.icount);
-                f(self);
+                f(self.core_mut());
                 if self.pc != pc || self.icount != n {
                     return;
                 }
             }
         }
-        self.step();
+        self.step_impl::<INL>();
         if self.rec_flush {
             self.rec_flushed();
         }
@@ -393,7 +401,7 @@ impl Cpu {
     #[inline(always)]
     #[doc(hidden)]
     pub fn poll(&mut self, n: u64) -> bool {
-        if !self.mem.irq_dirty && self.icount + n <= self.mem.due {
+        if self.icount + n <= self.mem.limit {
             return true;
         }
         self.poll_slow(n)
@@ -436,13 +444,24 @@ impl Cpu {
         self.pc = next;
         self.npc = next.wrapping_add(4);
         self.exec(op, pc);
+        // [PC] (speed) An access that marked the interrupt lines dirty (every DMA kick sets its D_STAT bit) sent the rest
+        // of the block to the interpreter, whose next step only re-tests the lines (`try_irq`: both low -> Cause IP
+        // bits clear, dirty off). Done here when both are low, the block goes on compiled. A stop that matures or a
+        // tick before that step marks the lines dirty again itself, and `try_irq` rewrites the IP bits before any use.
+        if self.mem.irq_dirty {
+            let (i0, i1) = self.mem.irq_lines();
+            if !i0 && !i1 {
+                self.cp0[13] &= !0xc00;
+                self.mem.clear_dirty();
+            }
+        }
     }
 
     /// After a hardware access inside a block: whether the `n` instructions left still run without checks.
     #[inline(always)]
     #[doc(hidden)]
     pub fn go(&self, n: u64) -> bool {
-        !self.mem.irq_dirty && self.icount + n <= self.mem.due
+        self.icount + n <= self.mem.limit
     }
 
     /// Interprets from the current state until the instruction at `last` has run (or the likely branch at `brl`
@@ -456,7 +475,7 @@ impl Cpu {
             }
             let p = self.pc;
             let n = self.irqs[0] + self.irqs[1];
-            self.step();
+            self.step_impl::<true>();
             if self.rec_flush {
                 self.rec_flushed();
             }
@@ -479,7 +498,7 @@ impl Cpu {
             if self.stop.is_some() || self.unwind_wait() {
                 return false;
             }
-            self.step_rec();
+            self.step_rec_impl::<true>();
         }
         true
     }
@@ -500,7 +519,7 @@ impl Cpu {
         if let Some(f) = self.rec.as_ref().and_then(|r| r.get(t)) {
             let i = ((t & 0x01ff_ffff) >> 2) as usize;
             if self.stub_bits[i >> 6] >> (i & 63) & 1 == 0 {
-                f(self);
+                f(self.core_mut());
                 return;
             }
         }
@@ -510,7 +529,7 @@ impl Cpu {
             if self.stop.is_some() || self.unwind_wait() {
                 return;
             }
-            self.step_rec();
+            self.step_rec_impl::<true>();
         }
     }
 
@@ -535,87 +554,144 @@ impl Cpu {
         let frame = self.rec.as_ref().and_then(|t| t.gap_frame(pc, &self.mem)).unwrap_or(0);
         self.call_dyn_frame(pc, ra, frame);
     }
+
+    /// At the head of a vblank-start poll, `lw rt, off(rs)`; `andi rt, rt, 4`; 3 nops; `beq rt, zero, head`; nop: sceGsSyncV
+    /// FUN_00118bd0 +0x40 (`crate::POLL_HEAD`), which spins there while no vsync callback is registered: after the PAL 50/60
+    /// Hz switch on the title menu, in level loads and in levels whose start does not register it again (e.g. Load Game).
+    /// Called by compiled code (loop hook kind 1, recgen_iso.py `poll_head`) and by the interpreter (`Cpu::stub`: during a
+    /// level load no compiled set is in use).
+    /// [PC] (speed) Every iteration that starts at least 7 instructions before the next event (`mem.due`: a VIF1 stop or
+    /// the cold-boot field tick) loads the same INTC_STAT (it changes only at events, in interrupts and by EE stores) and
+    /// does nothing else, so all but the last of them are skipped: the count advances 7 per iteration and rt keeps what
+    /// each one leaves (stat & 4 = 0). The last one runs as before (it sets `mem.now` / `mem.pc` itself), so the loop leaves
+    /// at the same instruction count. With the lines marked dirty (a line held up but masked) every iteration re-tests them
+    /// (`try_irq`: the same Cause IP bits each time) and takes nothing while Status, which the loop does not change, masks
+    /// them. Not in savestate runs (no field timer: their vblank comes from the host, not from `due`).
+    pub fn poll_ff(&mut self, pc: u32) {
+        const N: u64 = 7;
+        if self.mem.tick == u64::MAX || self.npc != pc.wrapping_add(4) {
+            return;
+        }
+        if self.mem.irq_dirty {
+            let (i0, i1) = self.mem.irq_lines();
+            if Self::irq_taken(self.cp0[12], i0, i1) {
+                return;
+            }
+        }
+        let k = self.mem.due.saturating_sub(self.icount) / N;
+        if k < 2 {
+            return;
+        }
+        let w = rd(&self.mem, pc);
+        let (rs, rt) = ((w >> 21 & 31) as usize, (w >> 16 & 31) as usize);
+        let at = |i: u32| rd(&self.mem, pc + 4 * i);
+        if w >> 26 != 0x23 || rt == 0 || rs == rt || at(1) != 0x3000_0004 | (rt as u32) << 21 | (rt as u32) << 16
+            || at(2) | at(3) | at(4) | at(6) != 0 || at(5) != 0x1000_fffa | (rt as u32) << 21
+        {
+            return;
+        }
+        let a = (self.g(rs) as u32).wrapping_add(w as i16 as i32 as u32);
+        if a != crate::mem::INTC_STAT || self.mem.hw32(crate::mem::INTC_STAT) & 4 != 0 {
+            return;
+        }
+        self.icount += (k - 1) * N;
+        self.s(rt, 0);
+    }
 }
 
 impl Mem {
-    /// The RAM or scratchpad bytes at `a..a+n`, when the address is plain memory (no side effects).
+    // The plain-memory fast path lives in ee-core (mem.rs there), where the generated code inlines it.
     #[inline(always)]
-    fn fbuf(&mut self, a: u32, n: usize) -> Option<&mut [u8]> {
-        if a >> 28 == 7 {
-            let i = (a & 0x0fff_ffff) as usize;
-            return if i + n <= 0x4000 { Some(&mut self.spr[i..i + n]) } else { None };
-        }
-        let p = if (0x8000_0000..0xc000_0000).contains(&a) { a & 0x1fff_ffff } else { a };
-        // [PC] (speed) VU0 data memory (0x1100_4000 and its mirrors to 0x1100_7fff, `map`'s Loc::Vu(1)) is plain bytes
-        // too: the EE's direct stores into it (Blarg's skinning, skinned_vertex_stream) took the hardware path per
-        // word and ~10% of the EE thread. Not while COLD_WATCH_VU0D logs every write there (`Mem::wr`).
-        if p >> 14 == 0x1100_4000 >> 14 && !self.watch_vu {
-            let i = (p & 0xfff) as usize;
-            return if i + n <= 0x1000 { self.vu0d.get_mut(i..i + n) } else { None };
-        }
-        let hi = p >> 28;
-        if (hi == 0 || hi == 2 || hi == 3) && p & 0x0e00_0000 == 0 {
-            let i = (p & 0x01ff_ffff) as usize;
-            if i + n <= RAM {
-                return Some(&mut self.ram[i..i + n]);
-            }
-        }
-        None
+    fn core_mem(&mut self) -> &mut ee_core::mem::Mem {
+        unsafe { &mut *(self as *mut Mem as *mut ee_core::mem::Mem) }
     }
+    #[inline(always)] #[doc(hidden)] pub fn fast(&mut self, a: u32, n: usize) -> bool { self.core_mem().fast(a, n) }
+    #[inline(always)] #[doc(hidden)] pub fn frd8(&mut self, a: u32) -> Option<u8> { self.core_mem().frd8(a) }
+    #[inline(always)] #[doc(hidden)] pub fn frd16(&mut self, a: u32) -> Option<u16> { self.core_mem().frd16(a) }
+    #[inline(always)] #[doc(hidden)] pub fn frd32(&mut self, a: u32) -> Option<u32> { self.core_mem().frd32(a) }
+    #[inline(always)] #[doc(hidden)] pub fn frd64(&mut self, a: u32) -> Option<u64> { self.core_mem().frd64(a) }
+    #[inline(always)] #[doc(hidden)] pub fn frd128(&mut self, a: u32) -> Option<u128> { self.core_mem().frd128(a) }
+    #[inline(always)] #[doc(hidden)] pub fn fwr8(&mut self, a: u32, v: u8) -> bool { self.core_mem().fwr8(a, v) }
+    #[inline(always)] #[doc(hidden)] pub fn fwr16(&mut self, a: u32, v: u16) -> bool { self.core_mem().fwr16(a, v) }
+    #[inline(always)] #[doc(hidden)] pub fn fwr32(&mut self, a: u32, v: u32) -> bool { self.core_mem().fwr32(a, v) }
+    #[inline(always)] #[doc(hidden)] pub fn fwr64(&mut self, a: u32, v: u64) -> bool { self.core_mem().fwr64(a, v) }
+    #[inline(always)] #[doc(hidden)] pub fn fwr128(&mut self, a: u32, v: u128) -> bool { self.core_mem().fwr128(a, v) }
+}
 
-    #[inline(always)]
-    #[doc(hidden)]
-    pub fn fast(&mut self, a: u32, n: usize) -> bool {
-        self.fbuf(a, n).is_some()
+// ---------------- the interface (ee-core declares these; the generated code calls them through its `Cpu` view) ----------------
+
+const _: () = {
+    use std::mem::offset_of;
+    type C = ee_core::cpu::Cpu;
+    type M = ee_core::mem::Mem;
+    type H = ee_core::rec::RecHot;
+    assert!(offset_of!(Cpu, r) == offset_of!(C, r));
+    assert!(offset_of!(Cpu, hi) == offset_of!(C, hi));
+    assert!(offset_of!(Cpu, lo) == offset_of!(C, lo));
+    assert!(offset_of!(Cpu, sa) == offset_of!(C, sa));
+    assert!(offset_of!(Cpu, pc) == offset_of!(C, pc));
+    assert!(offset_of!(Cpu, npc) == offset_of!(C, npc));
+    assert!(offset_of!(Cpu, f) == offset_of!(C, f));
+    assert!(offset_of!(Cpu, facc) == offset_of!(C, facc));
+    assert!(offset_of!(Cpu, fcr31) == offset_of!(C, fcr31));
+    assert!(offset_of!(Cpu, vf) == offset_of!(C, vf));
+    assert!(offset_of!(Cpu, vacc) == offset_of!(C, vacc));
+    assert!(offset_of!(Cpu, vi) == offset_of!(C, vi));
+    assert!(offset_of!(Cpu, icount) == offset_of!(C, icount));
+    assert!(offset_of!(Cpu, div_csr) == offset_of!(C, div_csr));
+    assert!(offset_of!(Cpu, vsync_armed) == offset_of!(C, vsync_armed));
+    assert!(offset_of!(Cpu, stop) == offset_of!(C, stop));
+    assert!(offset_of!(Cpu, cold) == offset_of!(C, cold));
+    assert!(offset_of!(Cpu, rec) == offset_of!(C, rec));
+    assert!(offset_of!(Cpu, stub_bits) == offset_of!(C, stub_bits));
+    assert!(offset_of!(Cpu, mem) == offset_of!(C, mem));
+    assert!(offset_of!(Mem, ram) == offset_of!(M, ram));
+    assert!(offset_of!(Mem, spr) == offset_of!(M, spr));
+    assert!(offset_of!(Mem, vu0d) == offset_of!(M, vu0d));
+    assert!(offset_of!(Mem, watch_vu) == offset_of!(M, watch_vu));
+    assert!(offset_of!(Mem, irq_dirty) == offset_of!(M, irq_dirty));
+    assert!(offset_of!(Mem, due) == offset_of!(M, due));
+    assert!(offset_of!(Mem, limit) == offset_of!(M, limit));
+    assert!(offset_of!(Table, lo) == offset_of!(H, lo));
+    assert!(offset_of!(Table, hand_bits) == offset_of!(H, hand_bits));
+    assert!(std::mem::size_of::<Option<Box<crate::cold::Kernel>>>() == std::mem::size_of::<Option<std::ptr::NonNull<u8>>>());
+    assert!(std::mem::size_of::<Option<Box<Table>>>() == std::mem::size_of::<Option<std::ptr::NonNull<H>>>());
+    assert!(std::mem::size_of::<C>() <= std::mem::size_of::<Cpu>() && std::mem::size_of::<M>() <= std::mem::size_of::<Mem>());
+};
+
+#[no_mangle] #[doc(hidden)] pub fn ee_core_cold_entry(c: &mut ee_core::cpu::Cpu, entry: u32) -> bool { Cpu::full(c).cold_entry(entry) }
+#[no_mangle] #[doc(hidden)] pub fn ee_core_run_hand(c: &mut ee_core::cpu::Cpu, entry: u32) -> bool { Cpu::full(c).run_hand(entry) }
+#[no_mangle] #[doc(hidden)] pub fn ee_core_poll_slow(c: &mut ee_core::cpu::Cpu, n: u64) -> bool { Cpu::full(c).poll_slow(n) }
+#[no_mangle] #[doc(hidden)] pub fn ee_core_hw(c: &mut ee_core::cpu::Cpu, op: u32, pc: u32, n: u64, next: u32) { Cpu::full(c).hw(op, pc, n, next) }
+#[no_mangle] #[doc(hidden)] pub fn ee_core_slow(c: &mut ee_core::cpu::Cpu, last: u32, brl: u32) -> bool { Cpu::full(c).slow(last, brl) }
+#[no_mangle] #[doc(hidden)] pub fn ee_core_call_dyn(c: &mut ee_core::cpu::Cpu, t: u32, ret: u32) { Cpu::full(c).call_dyn(t, ret) }
+#[no_mangle] #[doc(hidden)] pub fn ee_core_tail(c: &mut ee_core::cpu::Cpu) { Cpu::full(c).tail() }
+#[no_mangle] #[doc(hidden)] pub fn ee_core_vblank_hook(c: &mut ee_core::cpu::Cpu) -> bool { Cpu::full(c).vblank_hook() }
+#[no_mangle] #[doc(hidden)] pub fn ee_core_exec(c: &mut ee_core::cpu::Cpu, op: u32, pc: u32) { Cpu::full(c).exec(op, pc) }
+/// Loop fast paths from compiled code (ee-core `ff`): kind 0 the one-joint skinning loop (true: ran), kind 1 the vblank-start
+/// poll (`Cpu::poll_ff`; false: the compiled loop goes on).
+#[no_mangle]
+#[doc(hidden)]
+pub fn ee_core_ff(c: &mut ee_core::cpu::Cpu, kind: u32, pc: u32) -> bool {
+    match kind {
+        0 => Cpu::full(c).skin_ff(pc),
+        1 => {
+            Cpu::full(c).poll_ff(pc);
+            false
+        }
+        _ => false,
     }
-    #[inline(always)]
-    #[doc(hidden)]
-    pub fn frd8(&mut self, a: u32) -> Option<u8> {
-        self.fbuf(a, 1).map(|b| b[0])
+}
+#[no_mangle] #[doc(hidden)] pub fn ee_core_cop2(c: &mut ee_core::cpu::Cpu, op: u32, pc: u32, rs: usize, rt: usize, rd: usize) { Cpu::full(c).cop2(op, pc, rs, rt, rd) }
+/// VCALLMS / VCALLMSR from compiled code (ee-core `vu_special1`).
+#[no_mangle]
+#[doc(hidden)]
+pub fn ee_core_vcallms(c: &mut ee_core::cpu::Cpu, a: u32, pc: u32) {
+    let c = Cpu::full(c);
+    if crate::mem::stats() {
+        *c.vu_calls.entry(a * 8).or_insert(0) += 1;
     }
-    #[inline(always)]
-    #[doc(hidden)]
-    pub fn frd16(&mut self, a: u32) -> Option<u16> {
-        self.fbuf(a, 2).map(|b| u16::from_le_bytes(b.try_into().unwrap()))
-    }
-    #[inline(always)]
-    #[doc(hidden)]
-    pub fn frd32(&mut self, a: u32) -> Option<u32> {
-        self.fbuf(a, 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()))
-    }
-    #[inline(always)]
-    #[doc(hidden)]
-    pub fn frd64(&mut self, a: u32) -> Option<u64> {
-        self.fbuf(a, 8).map(|b| u64::from_le_bytes(b.try_into().unwrap()))
-    }
-    #[inline(always)]
-    #[doc(hidden)]
-    pub fn frd128(&mut self, a: u32) -> Option<u128> {
-        self.fbuf(a, 16).map(|b| u128::from_le_bytes(b.try_into().unwrap()))
-    }
-    #[inline(always)]
-    #[doc(hidden)]
-    pub fn fwr8(&mut self, a: u32, v: u8) -> bool {
-        self.fbuf(a, 1).map(|b| b[0] = v).is_some()
-    }
-    #[inline(always)]
-    #[doc(hidden)]
-    pub fn fwr16(&mut self, a: u32, v: u16) -> bool {
-        self.fbuf(a, 2).map(|b| b.copy_from_slice(&v.to_le_bytes())).is_some()
-    }
-    #[inline(always)]
-    #[doc(hidden)]
-    pub fn fwr32(&mut self, a: u32, v: u32) -> bool {
-        self.fbuf(a, 4).map(|b| b.copy_from_slice(&v.to_le_bytes())).is_some()
-    }
-    #[inline(always)]
-    #[doc(hidden)]
-    pub fn fwr64(&mut self, a: u32, v: u64) -> bool {
-        self.fbuf(a, 8).map(|b| b.copy_from_slice(&v.to_le_bytes())).is_some()
-    }
-    #[inline(always)]
-    #[doc(hidden)]
-    pub fn fwr128(&mut self, a: u32, v: u128) -> bool {
-        self.fbuf(a, 16).map(|b| b.copy_from_slice(&v.to_le_bytes())).is_some()
+    if let Err(e) = c.vu0_micro(a * 8) {
+        c.halt(format!("{e} (VCALLMS from {pc:08x})"));
     }
 }

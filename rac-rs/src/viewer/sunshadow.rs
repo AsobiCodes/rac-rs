@@ -1,37 +1,68 @@
 //! [PC] Dynamic shadows (Pause -> Options -> Graphics -> Dynamic shadows On, with Lighting Enhanced; retail/pcext.rs
 //! `graphics`; no retail counterpart). Off, or with Lighting Classic, nothing here runs.
 //!
-//! - The light: the hero's own directional light pair this frame (`Gpu::hero_env` slots a / b blended by t, the level's light
-//!   rows with retail RAM's reserved slots 12..15, as `slot_blend` lights the hero), its brighter direction. So the shadows fall
-//!   the way each planet and each light zone already lights Ratchet. The direction eases towards a new zone's (no snap) and the
-//!   strength follows the light's brightness: a level or zone without a real key light (space, ship scenes, dark interiors
-//!   lit by fill only) gets weak or no shadows. A light from below the horizon casts none.
+//! - The light: the level's own outdoor light, light row 0 (the pair a hero or moby outside every light zone takes; on all 19
+//!   planets that is the sun), its brighter direction. One light for the whole level: following the hero's zone light (a
+//!   hangar's lamp is 90 degrees off Veldin's sun) turned every shadow round as he walked through a doorway. Should the row
+//!   change while the level runs, the light turns over about three quarters of a second (time based; a big turn also softens
+//!   the shadows while it lasts); a new level starts at its light. It is raised to at least `MIN_RISE` above the horizon (a low
+//!   key light, Veldin's 20 degrees, threw shadows almost three times an object's height across the whole view). The strength
+//!   follows the light's brightness: a level without a real key light (space, ship scenes) gets weak or no shadows. A light
+//!   from below the horizon casts none.
 //! - Three cascades (view depth up to 12, 36 and 110 world units), 2048 x 2048 each, every one fitted to the bounding sphere of
 //!   its slice of the view (the same size whatever way the camera turns) and moved in whole texels (no shimmer while the camera
 //!   moves). Each reaches 200 units towards the light, so buildings behind the camera still shade the ground in front of it.
-//! - Casters: the static world (terrain fragments at the cascade's LOD, ties, the merged world) culled per cascade by their
+//! - Casters: the static world (terrain fragments and ties with the LOD mesh the frame drew them with, so a surface never
+//!   shadows itself through a coarser copy of its own mesh; undrawn ones with the full mesh; the merged world) culled per cascade by their
 //!   bounding spheres, and every moby of this frame (the props batch as `vs_props` poses it, the hero, debris and the clipped
-//!   props; not see-through shells such as blast domes and glows, nor a moby faded below alpha 0x60). Depth only, both faces,
-//!   slope-scaled depth bias; one multi-draw per batch per cascade.
-//! - Receivers (viewer.rs SHADER `sun_occ`): every opaque world, shrub, terrain and moby fragment, 3x3 hardware PCF, the light's
-//!   offset by 1.5 texels against acne. Baked world colours already hold 2002's painted shadows, so a fragment darkens by
+//!   props; not see-through shells such as blast domes and glows, nor a moby faded below alpha 0x60). Depth, cut by texel alpha
+//!   where the main pass cuts (shrubs, terrain below 96/128, ties below 64/128: a see-through overlay casts nothing), both
+//!   faces, slope-scaled depth bias; one multi-draw per batch per cascade.
+//! - Receivers (viewer.rs SHADER `sun_occ`): every opaque world, shrub, terrain and moby fragment, 4x4 hardware PCF, the light's
+//!   offset by 2 texels against acne. Baked world colours already hold 2002's painted shadows, so a fragment darkens by
 //!   STRENGTH x how lit its baked colour is (a painted shadow takes no second one); a moby keeps its ambient and loses its
 //!   directional light. The retail shadow volumes (shadowvol.rs) are not drawn while this runs (no double shadows).
 
 use super::*;
 
 pub(super) const CASCADES: usize = 3;
-/// Map layers: cascades 0..3 hold every caster, layers 3..6 the same cascades with the moving casters only (mobies, the hero,
-/// debris): under a roof, whose far shadow fades out (`sun_occ`), Ratchet still casts along the light that lights him.
-const LAYERS: usize = 2 * CASCADES;
-/// Shadow map size per cascade.
+/// Shadow map size per cascade (the allocation; Low and Medium draw into the corner of it, see `Quality`).
 pub(super) const RES: u32 = 2048;
-/// Far end of each cascade (view depth, world units).
+/// Far end of each cascade (view depth, world units) at High.
 const SPLITS: [f32; CASCADES] = [12.0, 36.0, 110.0];
+
+/// Graphics -> Dynamic shadows Low / Medium / High: what the level costs the GPU. High is the whole map (`RES`, three cascades
+/// out to `SPLITS`, 4x4 hardware PCF taps) = the picture before the levels existed. Low and Medium render into the corner
+/// `res` x `res` of the same map (the receivers scale their map uv by `res / RES`, `write_uniforms`), so a change of level
+/// needs no new texture or bind group; a smaller map also means fewer casters (the cascades reach less far), fewer cascades
+/// (Low: two, the third is not drawn or read) and a smaller PCF kernel (`pcf` x `pcf` compare taps per receiver pixel).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Quality {
+	/// Texels per cascade side actually drawn and read.
+	pub res: u32,
+	/// Cascades drawn and read (the last one fades out at its rim).
+	pub cascades: usize,
+	pub splits: [f32; CASCADES],
+	/// PCF kernel side (taps = pcf^2).
+	pub pcf: u32,
+}
+
+/// The shadow settings of a Graphics level (`Graphics::shadows_q`: 1 Low, 2 Medium, anything else High).
+pub(super) const fn quality(level: u8) -> Quality {
+	match level {
+		1 => Quality { res: 1024, cascades: 2, splits: [16.0, 56.0, 56.0], pcf: 2 },
+		2 => Quality { res: 1536, cascades: 3, splits: [12.0, 36.0, 80.0], pcf: 3 },
+		_ => Quality { res: RES, cascades: CASCADES, splits: SPLITS, pcf: 4 },
+	}
+}
 /// How far each cascade reaches towards the light beyond its sphere (world units).
 const REACH: f32 = 200.0;
 /// The darkest a fully lit surface gets in a shadow (fraction of its light removed).
 const STRENGTH: f32 = 0.6;
+/// The lowest the light may stand (sine of its elevation, 35 degrees): a lower key light keeps its compass heading but is raised.
+const MIN_RISE: f32 = 0.5736;
+/// Time constant of the light's turn towards a new zone's (seconds).
+const TURN_TAU: f32 = 0.25;
 
 const SUN_SHADER: &str = r#"
 struct SU { vp: mat4x4<f32> };
@@ -69,8 +100,11 @@ struct PropInst { m0: vec4<f32>, m1: vec4<f32>, m2: vec4<f32>, m3: vec4<f32>, li
 }
 "#;
 
-/// Shrub meshes cast with their texel alpha (the leaves' holes): the bindless texture array (bindless.rs), slot in the low 16
-/// bits of the first instance (`bindless::first_instance`), texels below alpha 0x30 / 0x80 cast nothing.
+/// Shrubs, terrain and ties cast with their texel alpha: the bindless texture array (bindless.rs), slot in the low 16 bits of
+/// the first instance (`bindless::first_instance`). A shrub texel below alpha 0x30 / 0x80 casts nothing (the leaves' holes); a
+/// terrain texel below 0x60 and a tie texel below 0x40 neither, the alphas from which the main pass writes depth (`fs_tfrag`,
+/// `fs_tie`): a see-through overlay (a sand patch laid over the ground, its outside clear) shadowed the ground right under it
+/// in a fine ripple and cut other shadows off at its invisible edge.
 fn shrub_shader() -> String {
 	format!(
 		r#"enable wgpu_binding_array;
@@ -90,6 +124,14 @@ struct SOut {{ @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, @l
 
 @fragment fn fs_sh_shrub(i: SOut) {{
 	if (textureSampleLevel(texs[i.ti], samp, i.uv, 0.0).a < 0.375) {{ discard; }}
+}}
+
+@fragment fn fs_sh_tfrag(i: SOut) {{
+	if (textureSampleLevel(texs[i.ti], samp, i.uv, 0.0).a * 128.0 < 95.5) {{ discard; }}
+}}
+
+@fragment fn fs_sh_tie(i: SOut) {{
+	if (textureSampleLevel(texs[i.ti], samp, i.uv, 0.0).a * 128.0 < 63.5) {{ discard; }}
 }}
 "#,
 		super::bindless::TEX_CAP
@@ -161,6 +203,7 @@ pub(super) struct SunFrame {
 	pub dir: [f32; 3],
 	pub strength: f32,
 	pub cascades: [Cascade; CASCADES],
+	pub q: Quality,
 }
 
 /// Writes this frame's shadow uniforms (`Uniforms::sun_*`): cascade matrices, (dir, strength), per cascade the receiver depth
@@ -173,6 +216,8 @@ pub(super) fn write_uniforms(u: &mut Uniforms, f: Option<&SunFrame>) {
 	let bias = |k: usize| c[k].texel / (c[k].z[1] - c[k].z[0]);
 	u.sun_bias = [bias(0), bias(1), bias(2), RES as f32];
 	u.sun_texel = [c[0].texel, c[1].texel, c[2].texel, 0.0];
+	// Receivers: PCF kernel side, map uv scale (the drawn corner of the map; 1.0 at High), cascades read.
+	u.sun_q = [f.q.pcf as f32, f.q.res as f32 / RES as f32, f.q.cascades as f32, 0.0];
 }
 
 /// The key light of a blended light pair: rows as `Gpu::light_rows` gives them (colour A + wrap, to-light A, colour B + wrap,
@@ -197,6 +242,34 @@ pub(super) fn strength(dir: [f32; 3], luma: f32) -> f32 {
 	STRENGTH * lit * (down / 0.15).min(1.0)
 }
 
+/// A light travelling along `d` raised to at least `MIN_RISE` above the horizon, compass heading kept (a light from below the
+/// horizon, or straight down, is left as it is).
+pub(super) fn raise(d: [f32; 3]) -> [f32; 3] {
+	let down = -d[2];
+	let h = (d[0] * d[0] + d[1] * d[1]).sqrt();
+	if down <= 0.0 || down >= MIN_RISE || h < 1e-6 {
+		return d;
+	}
+	let k = (1.0 - MIN_RISE * MIN_RISE).sqrt() / h;
+	[d[0] * k, d[1] * k, -MIN_RISE]
+}
+
+/// Turns unit vector `a` towards unit vector `b` by the fraction `k` of the angle between them (along the great circle; through
+/// straight down when they are opposite).
+pub(super) fn turn(a: [f32; 3], b: [f32; 3], k: f32) -> [f32; 3] {
+	let c = dot3(a, b).clamp(-1.0, 1.0);
+	if c > 0.99999 {
+		return b;
+	}
+	if c < -0.999 {
+		let mid = turn(a, [0.0, 0.0, -1.0], 0.999);
+		return turn(mid, b, (2.0 * k - 1.0).max(0.0));
+	}
+	let th = c.acos();
+	let (wa, wb) = (((1.0 - k) * th).sin(), (k * th).sin());
+	norm3([0, 1, 2].map(|i| a[i] * wa + b[i] * wb))
+}
+
 /// A batch the shadow pass draws: which buffers, which pipeline.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Src {
@@ -212,7 +285,7 @@ enum Src {
 
 pub(super) struct SunShadow {
 	tex: wgpu::Texture,
-	layers: [wgpu::TextureView; LAYERS],
+	layers: [wgpu::TextureView; CASCADES],
 	/// The whole array, sampled by the world shaders (bound in the level's group 0 with `cmp`).
 	pub array: wgpu::TextureView,
 	pub cmp: wgpu::Sampler,
@@ -220,21 +293,26 @@ pub(super) struct SunShadow {
 	ubind: [wgpu::BindGroup; CASCADES],
 	pipeline: wgpu::RenderPipeline,
 	pipeline_props: Option<wgpu::RenderPipeline>,
+	/// Texel-alpha casters (`shrub_shader`): shrubs, terrain, ties.
 	pipeline_shrub: Option<wgpu::RenderPipeline>,
+	pipeline_tfrag: Option<wgpu::RenderPipeline>,
+	pipeline_tie: Option<wgpu::RenderPipeline>,
 	indirect: Option<wgpu::Buffer>,
 	cap: usize,
-	/// The eased light direction and the scene it belongs to (a new level snaps).
-	dir: Option<[f32; 3]>,
+	/// The eased key light (direction before `raise`, strength) and the scene it belongs to (a new level snaps), and when it
+	/// was last eased.
+	dir: Option<([f32; 3], f32)>,
 	scene_id: usize,
+	last: Option<std::time::Instant>,
 }
 
 impl SunShadow {
 	/// `skin_layout`: the GPU-posed props' storage group (None: CPU posing); `array_layout`: the bindless texture array's
-	/// layout when draws can carry their slot in the first instance (None: shrubs cast nothing).
+	/// layout when draws can carry their slot in the first instance (None: shrubs cast nothing, terrain and ties cast whole).
 	pub(super) fn new(device: &wgpu::Device, skin_layout: Option<&wgpu::BindGroupLayout>, array_layout: Option<&wgpu::BindGroupLayout>) -> SunShadow {
 		let tex = device.create_texture(&wgpu::TextureDescriptor {
 			label: Some("sun shadow map"),
-			size: wgpu::Extent3d { width: RES, height: RES, depth_or_array_layers: LAYERS as u32 },
+			size: wgpu::Extent3d { width: RES, height: RES, depth_or_array_layers: CASCADES as u32 },
 			mip_level_count: 1,
 			sample_count: 1,
 			dimension: wgpu::TextureDimension::D2,
@@ -257,7 +335,7 @@ impl SunShadow {
 		});
 		let ubuf: [wgpu::Buffer; CASCADES] = std::array::from_fn(|_| device.create_buffer(&wgpu::BufferDescriptor { label: Some("sun shadow cascade"), size: 64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
 		let ubind = std::array::from_fn(|k| device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("sun shadow cascade"), layout: &ulayout, entries: &[wgpu::BindGroupEntry { binding: 0, resource: ubuf[k].as_entire_binding() }] }));
-		let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("sun shadow"), source: wgpu::ShaderSource::Wgsl(SUN_SHADER.into()) });
+		let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("sun shadow"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("sun shadow", SUN_SHADER.into())) });
 		let vertex = wgpu::VertexBufferLayout { array_stride: std::mem::size_of::<Vertex>() as u64, step_mode: wgpu::VertexStepMode::Vertex, attributes: &wgpu::vertex_attr_array![0 => Float32x3] };
 		let sj = wgpu::VertexBufferLayout { array_stride: 8, step_mode: wgpu::VertexStepMode::Vertex, attributes: &wgpu::vertex_attr_array![5 => Uint32x2] };
 		let make = |layouts: &[Option<&wgpu::BindGroupLayout>], entry: &str, buffers: &[Option<wgpu::VertexBufferLayout>]| {
@@ -282,15 +360,18 @@ impl SunShadow {
 		};
 		let pipeline = make(&[Some(&ulayout)], "vs_sh", &[Some(vertex.clone())]);
 		let pipeline_props = skin_layout.map(|sl| make(&[Some(&ulayout), Some(sl)], "vs_sh_props", &[Some(vertex.clone()), Some(sj)]));
-		let pipeline_shrub = array_layout.map(|al| {
-			let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("sun shadow shrubs"), source: wgpu::ShaderSource::Wgsl(shrub_shader().into()) });
-			let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("sun shadow shrubs"), bind_group_layouts: &[Some(&ulayout), Some(al)], immediate_size: 0 });
+		let cut = array_layout.map(|al| {
+			let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("sun shadow texel alpha"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("sun shadow texel alpha", shrub_shader().into())) });
+			let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("sun shadow texel alpha"), bind_group_layouts: &[Some(&ulayout), Some(al)], immediate_size: 0 });
+			(module, pl)
+		});
+		let make_cut = |fs: &str| cut.as_ref().map(|(module, pl)| {
 			let vu = wgpu::VertexBufferLayout { array_stride: std::mem::size_of::<Vertex>() as u64, step_mode: wgpu::VertexStepMode::Vertex, attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2] };
 			device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-				label: Some("vs_sh_shrub"),
-				layout: Some(&pl),
-				vertex: wgpu::VertexState { module: &module, entry_point: Some("vs_sh_shrub"), compilation_options: Default::default(), buffers: &[Some(vu)] },
-				fragment: Some(wgpu::FragmentState { module: &module, entry_point: Some("fs_sh_shrub"), compilation_options: Default::default(), targets: &[] }),
+				label: Some(fs),
+				layout: Some(pl),
+				vertex: wgpu::VertexState { module, entry_point: Some("vs_sh_shrub"), compilation_options: Default::default(), buffers: &[Some(vu)] },
+				fragment: Some(wgpu::FragmentState { module, entry_point: Some(fs), compilation_options: Default::default(), targets: &[] }),
 				primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
 				depth_stencil: Some(wgpu::DepthStencilState {
 					format: wgpu::TextureFormat::Depth32Float,
@@ -304,7 +385,8 @@ impl SunShadow {
 				cache: None,
 			})
 		});
-		SunShadow { tex, layers, array, cmp, ubuf, ubind, pipeline, pipeline_props, pipeline_shrub, indirect: None, cap: 0, dir: None, scene_id: 0 }
+		let (pipeline_shrub, pipeline_tfrag, pipeline_tie) = (make_cut("fs_sh_shrub"), make_cut("fs_sh_tfrag"), make_cut("fs_sh_tie"));
+		SunShadow { tex, layers, array, cmp, ubuf, ubind, pipeline, pipeline_props, pipeline_shrub, pipeline_tfrag, pipeline_tie, indirect: None, cap: 0, dir: None, scene_id: 0, last: None }
 	}
 
 	/// The level's group-0 entries: `ubuf` at binding 0, the cascades and their compare sampler at 1 and 2.
@@ -316,36 +398,53 @@ impl SunShadow {
 		]
 	}
 
-	/// This frame's light and cascades, or None when nothing casts (no lit key light). `rows` / `pair` are the level's light
-	/// rows and the hero's blended pair (a, b, t); `scene_id` tells a new level (the light snaps instead of easing).
-	pub(super) fn frame(&mut self, cam: &Camera, aspect: f32, rows: &[[[f32; 4]; 4]; 16], pair: (usize, usize, f32), scene_id: usize) -> Option<SunFrame> {
-		let (target, luma) = key_light(rows, pair.0, pair.1, pair.2)?;
-		let dir = match self.dir.filter(|_| self.scene_id == scene_id) {
-			// Eases a zone change in over about half a second (at 60 fps) instead of snapping every shadow at once.
-			Some(d) if dot3(d, target) > 0.5 => norm3([0, 1, 2].map(|k| d[k] + (target[k] - d[k]) * 0.08)),
-			_ => target,
+	/// This frame's light and cascades, or None when nothing casts (no lit key light). `rows` are the level's light rows;
+	/// `scene_id` tells a new level (the light snaps instead of easing).
+	pub(super) fn frame(&mut self, cam: &Camera, aspect: f32, rows: &[[[f32; 4]; 4]; 16], scene_id: usize, q: Quality) -> Option<SunFrame> {
+		let now = std::time::Instant::now();
+		let dt = self.last.map_or(0.0, |t| now.duration_since(t).as_secs_f32()).min(0.1);
+		self.last = Some(now);
+		let (target, luma) = match key_light(rows, 0, 0, 0.0) {
+			Some(k) => k,
+			// No lit key light: the shadows fade out along the last direction (none at all in a new level).
+			None => match self.dir.filter(|_| self.scene_id == scene_id) {
+				Some((d, _)) => (d, 0.0),
+				None => return None,
+			},
 		};
-		self.dir = Some(dir);
+		let want = strength(target, luma);
+		// A changed light row turns the light over about three quarters of a second (time based, whatever the frame rate) instead
+		// of snapping every shadow at once; a new level starts at its light.
+		let (key, st) = match self.dir.filter(|_| self.scene_id == scene_id) {
+			Some((d, s)) => {
+				let k = 1.0 - (-dt / TURN_TAU).exp();
+				(turn(d, target, k), s + (want - s) * k)
+			}
+			None => (target, want),
+		};
+		self.dir = Some((key, st));
 		self.scene_id = scene_id;
-		let s = strength(dir, luma);
+		let dir = raise(key);
+		// While a big turn is under way the shadows soften (half strength at a right angle).
+		let s = st * (0.5 + 0.5 * dot3(key, target).clamp(0.0, 1.0));
 		if s <= 0.0 {
 			return None;
 		}
 		let fwd = forward(cam);
 		let mut near = RETAIL_NEAR;
-		let cascades = SPLITS.map(|far| {
-			let c = Cascade::fit(cam.pos, fwd, cam.tan_half, aspect, near, far, dir, RES);
+		let cascades = q.splits.map(|far| {
+			let c = Cascade::fit(cam.pos, fwd, cam.tan_half, aspect, near, far, dir, q.res);
 			near = far;
 			c
 		});
-		Some(SunFrame { dir, strength: s, cascades })
+		Some(SunFrame { dir, strength: s, cascades, q })
 	}
 
 	/// Renders the three cascades of `f` from the scene's casters.
 	/// `skin` is the GPU-posed props batch's bind group and slot attribute (None: the CPU poses the props in world space).
 	pub(super) fn encode(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, enc: &mut wgpu::CommandEncoder, scene: &Scene, f: &SunFrame, skin: Option<(&wgpu::BindGroup, Option<&wgpu::Buffer>)>) {
 		let _s = super::profile::span("sun_shadow");
-		for (k, c) in f.cascades.iter().enumerate() {
+		for (k, c) in f.cascades.iter().enumerate().take(f.q.cascades) {
 			queue.write_buffer(&self.ubuf[k], 0, bytemuck::bytes_of(&c.vp));
 		}
 		// Draw lists: per cascade, per batch, the merged index ranges of the casters.
@@ -354,7 +453,7 @@ impl SunShadow {
 		let push = |args: &mut Vec<[u32; 5]>, runs: &mut Vec<(usize, Src, u64, u32)>, k: usize, src: Src, draws: &mut dyn Iterator<Item = (u32, u32, u32)>| {
 			let first = args.len();
 			for (start, count, fi) in draws {
-				// Adjacent ranges (texture runs of one mesh) merge: depth only, the texture does not matter (shrubs: same slot).
+				// Adjacent ranges (texture runs of one mesh) merge when they cast alike: depth only, or the same slot for texel alpha.
 				let n = args.len();
 				match args.last_mut().filter(|a| n > first && a[2] + a[0] == start && a[4] == fi) {
 					Some(a) => a[0] += count,
@@ -363,18 +462,33 @@ impl SunShadow {
 			}
 			if args.len() > first {
 				runs.push((k, src, (first * 20) as u64, (args.len() - first) as u32));
-				// Moving casters also go to the cascade's moving-only layer (the same draw arguments).
-				if matches!(src, Src::Props | Src::Clip | Src::Debris | Src::Marker) {
-					runs.push((k + CASCADES, src, (first * 20) as u64, (args.len() - first) as u32));
-				}
 			}
 		};
-		for (k, c) in f.cascades.iter().enumerate() {
-			// tfrag_ranges[i]: 0 far, 1 mid, 2 near (`Gpu::cull_tfrags`); the near cascade takes the near mesh.
-			let lod = 2 - k.min(2);
-			let tf = scene.tfrag_set.iter().enumerate().filter(|(_, t)| c.touches(t.cull.centre, t.cull.radius)).flat_map(|(i, _)| scene.tfrag_draws[scene.tfrag_ranges[i][lod].start as usize..scene.tfrag_ranges[i][lod].end as usize].iter().map(|d| (d.start, d.count, 0)));
+		// Terrain and ties carry their texture slot when they cast by texel alpha (`shrub_shader`).
+		let cut = self.pipeline_tfrag.is_some() && scene.tex_array.is_some();
+		let fi = |d: &Draw| if cut { super::bindless::first_instance(d) } else { 0 };
+		for (k, c) in f.cascades.iter().enumerate().take(f.q.cascades) {
+			// tfrag_ranges[i]: 0 far, 1 mid, 2 near. A fragment casts with the LOD `Gpu::cull_tfrags` drew it with this frame (its
+			// receiving surface: a coarser mesh lying above the drawn one shadowed it in dots and jagged bands that came and went as
+			// the camera moved); an undrawn one (off screen) with the near mesh.
+			let tlod = |i: usize| match scene.tfrag_lod.get(i).copied() {
+				Some(l) if l < 3 => l as usize,
+				_ => 2,
+			};
+			let tf = scene.tfrag_set.iter().enumerate().filter(|(_, t)| c.touches(t.cull.centre, t.cull.radius)).flat_map(|(i, _)| {
+				let lod = tlod(i);
+				scene.tfrag_draws[scene.tfrag_ranges[i][lod].start as usize..scene.tfrag_ranges[i][lod].end as usize].iter().map(|d| (d.start, d.count, fi(d)))
+			});
 			push(&mut args, &mut runs, k, Src::Tfrags, &mut tf.collect::<Vec<_>>().into_iter());
-			let ties = scene.tie_cull.iter().enumerate().filter(|(_, t)| c.touches(t.centre, t.radius)).flat_map(|(i, _)| scene.tie_draws[scene.tie_ranges[i][0].start as usize..scene.tie_ranges[i][0].end as usize].iter().map(|d| (d.start, d.count, 0)));
+			// Ties likewise: the LOD `Gpu::cull_ties` drew, LOD 0 when undrawn.
+			let ilod = |i: usize| match scene.tie_lod.get(i).copied() {
+				Some(l) if l < 3 => l as usize,
+				_ => 0,
+			};
+			let ties = scene.tie_cull.iter().enumerate().filter(|(_, t)| c.touches(t.centre, t.radius)).flat_map(|(i, _)| {
+				let lod = ilod(i);
+				scene.tie_draws[scene.tie_ranges[i][lod].start as usize..scene.tie_ranges[i][lod].end as usize].iter().map(|d| (d.start, d.count, fi(d)))
+			});
 			push(&mut args, &mut runs, k, Src::Ties, &mut ties.collect::<Vec<_>>().into_iter());
 			push(&mut args, &mut runs, k, Src::World, &mut scene.world.draws.iter().map(|d| (d.start, d.count, 0)));
 			if self.pipeline_shrub.is_some() && scene.tex_array.is_some() {
@@ -402,7 +516,7 @@ impl SunShadow {
 		if !args.is_empty() {
 			queue.write_buffer(ind, 0, bytemuck::cast_slice(&args));
 		}
-		for k in 0..LAYERS {
+		for k in 0..f.q.cascades {
 			let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
 				label: Some("sun shadow"),
 				color_attachments: &[],
@@ -411,7 +525,11 @@ impl SunShadow {
 				occlusion_query_set: None,
 				multiview_mask: None,
 			});
-			pass.set_bind_group(0, &self.ubind[k % CASCADES], &[]);
+			if f.q.res < RES {
+				// Low / Medium: the corner of the map (the receivers read it scaled, `write_uniforms`).
+				pass.set_viewport(0.0, 0.0, f.q.res as f32, f.q.res as f32, 0.0, 1.0);
+			}
+			pass.set_bind_group(0, &self.ubind[k], &[]);
 			for &(_, src, off, n) in runs.iter().filter(|r| r.0 == k) {
 				let batch = match src {
 					Src::World => &scene.world,
@@ -441,6 +559,13 @@ impl SunShadow {
 						}
 						_ => continue,
 					},
+					(Src::Tfrags | Src::Ties, _, _) if cut => {
+						let p = if matches!(src, Src::Tfrags) { &self.pipeline_tfrag } else { &self.pipeline_tie };
+						if let (Some(p), Some(arr)) = (p, &scene.tex_array) {
+							pass.set_pipeline(p);
+							pass.set_bind_group(1, arr, &[]);
+						}
+					}
 					_ => pass.set_pipeline(&self.pipeline),
 				}
 				pass.set_vertex_buffer(0, batch.vbuf.slice(..));
@@ -502,5 +627,30 @@ mod tests {
 		assert_eq!(strength(d3, l3), 0.0, "a dim sideways light casts nothing");
 		assert!(key_light(&[[[0.0; 4]; 4]; 16], 0, 0, 0.0).is_none(), "no light, no shadows");
 		assert_eq!(strength([0.0, 0.0, 1.0], 1.0), 0.0, "from below the horizon");
+	}
+
+	#[test]
+	fn low_light_is_raised_and_turns_smoothly() {
+		// Veldin's key light (20 degrees up) keeps its heading at 35 degrees; a high one is left alone.
+		let low = norm3([-0.39713123, 0.8516507, -0.3420202]);
+		let r = raise(low);
+		assert!((r[2] + MIN_RISE).abs() < 1e-6 && (dot3(r, r) - 1.0).abs() < 1e-5);
+		assert!((r[1] / r[0] - low[1] / low[0]).abs() < 1e-4, "heading kept");
+		assert_eq!(raise([0.0, 0.6, -0.8]), [0.0, 0.6, -0.8]);
+		assert_eq!(raise([0.0, 0.9, 0.1]), [0.0, 0.9, 0.1], "below the horizon: left for `strength`");
+		// The hangar's light (+x) from the outdoor one: each step is a small turn, the end is the target, never a jump.
+		let inside = norm3([0.8838404, 0.35856837, -0.30042458]);
+		let mut d = low;
+		let mut biggest = 0.0f32;
+		for _ in 0..60 {
+			let n = turn(d, inside, 1.0 - (-1.0f32 / 60.0 / TURN_TAU).exp());
+			biggest = biggest.max(dot3(d, n).clamp(-1.0, 1.0).acos());
+			d = n;
+		}
+		assert!(dot3(d, inside) > 0.999, "arrives within a second");
+		assert!(biggest < 0.2, "largest step {biggest} rad");
+		// Opposite directions turn through straight down.
+		let m = turn([1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], 0.5);
+		assert!(m[2] < -0.9, "{m:?}");
 	}
 }

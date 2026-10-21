@@ -11,7 +11,7 @@ use crate::bytes::{f32_at, i16_at, i32_at, span, u32_at, R};
 use crate::level::{texture_key, Level, TextureGroup};
 use crate::mesh::{Lit, LitKind, Mesh};
 use crate::gameplay::{baked_raw, select_light, DirLight, TIE_CAP};
-use crate::ties::{instance_sphere, placement, transformed, unit, Instance};
+use crate::ties::{instance_sphere, placement, transformed, unit};
 use std::collections::HashMap;
 
 const STCYCL: u8 = 0x01;
@@ -359,6 +359,8 @@ pub struct ShrubInstance {
 	pub cull: ShrubCull,
 	pub bb: Option<ShrubBillboard>,
 	pub class_slot: u32,
+	/// [PC] vegfx preview: the shrub class id.
+	pub class_id: u32,
 }
 
 /// World-space shrub instances with baked vertex colours (decomp/notes/vertex_colours.md): base
@@ -423,7 +425,7 @@ pub fn lit_instances(level: &Level, lights: &[DirLight]) -> R<Vec<ShrubInstance>
 					.collect();
 				ShrubBillboard { origin: [matrix[12], matrix[13], matrix[14]], half_w: 0.5 * b.y * hs * s / 1024.0, h: b.z * vs * s / 1024.0, z0: b.w * vs * s / 1024.0, colour: average_colour(&cols), class_id, lod_k: b.lod_k }
 			});
-			Ok(ShrubInstance { mesh: m, cull, bb, class_slot: *class_slot })
+			Ok(ShrubInstance { mesh: m, cull, bb, class_slot: *class_slot, class_id })
 		})
 		.collect()
 }

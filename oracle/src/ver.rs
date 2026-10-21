@@ -2,7 +2,8 @@
 //! v1.00 (SCUS-97199, boot ELF SCUS_971.99). Both are the same program; the USA build only moves the level code and data
 //! (address maps: tools/vermap.py) and changes a few functions. The game picks 50 or 60 Hz itself: its engine init reads
 //! SYSTEM.CNF (sector 0x121) and sets the PAL flag 0x15ed80 when byte 0x33 is not 'N' (VMODE = PAL / NTSC); see
-//! decomp/notes/region_versions.md. Defaults are PAL, so nothing changes for the PAL disc.
+//! decomp/notes/region_versions.md. Defaults are PAL, so nothing changes for the PAL disc. The PAL disc's 50/60 Hz option
+//! switches it at run time: every switch resets the GS through SetGsCrt (hle.rs syscall 0x02), which sets the mode here.
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -4,21 +4,8 @@
 //! landing preview), its impact and removal tail (WPN-6.4c; the effects visuals WPN-6.4c-fx are not mapped) and the mine
 //! registry 0x1b0bb0 (WPN-6.4d). The water coupling of the updater is NOV-20.2 (decomp/notes/water.md).
 
-#![allow(dead_code)]
 
 use super::*;
-use crate::camera::{fast_cos, fast_sin};
-use crate::gameplay::{pal_ticks, PAL_DT, PAL_DT2};
-use crate::particles::euler_m;
-use crate::particles::polar;
-use crate::particles::Blast;
-use crate::particles::Rng;
-use crate::particles::Spawn;
-use crate::inventory::MINE_GLOVE;
-use crate::physics::{Hit, Scene};
-use crate::shadows::fast_atan2;
-use super::bolt::set_len;
-use super::mouse::wrap_angle;
 
 /// The drawn lift: subtracted at the head of the update, added back with the bob (OV:120128, OV:120675).
 const LIFT: f32 = 0.4;

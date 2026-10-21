@@ -5,7 +5,6 @@
 //! The mirror snapshot is taken after the field drew, so the RAM state the callback consumed (colour word, pvar fields)
 //! is its draw-time value.
 
-#![allow(dead_code)]
 
 use crate::particles::{WorldQuad, FX_CLAMP};
 use ee_oracle::Machine;
@@ -33,8 +32,6 @@ pub fn static_tint_start(class: u32) -> Option<usize> {
 	STATIC_TINT.lock().ok()?.as_ref()?.get(&class).copied()
 }
 
-/// fx textures the callbacks of this module bind that the viewer's fx table lacked (none: 0xb is loaded already).
-pub const FX_TEXTURES: [usize; 0] = [];
 /// fx textures bound with GS CLAMP_1 = 5 here (`particles::FX_CLAMP` key variants): the lamp glow's 0xb [C: Rilgar
 /// 0x31c918 `ori a2,zero,5; sd a2,0x70(sp)`; the other ported contexts send CLAMP_1 = 0].
 pub const FX_CLAMPED: [usize; 1] = [0x0b];

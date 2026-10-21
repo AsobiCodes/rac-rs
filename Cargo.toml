@@ -1,0 +1,8 @@
+# The build root of the game (cargo workspace). It sits here, above rac-rs\ and oracle\, so that every crate of the game,
+# including the code that setup generates from your disc in oracle\rec and oracle\game, lies inside it. Cargo then names the
+# compiled functions the same way on every PC, whatever folder the game is installed in, and the speed profile in pgo\ (made by
+# the developers) fits your build. setup.ps1 builds with this file; rac-rs\Cargo.toml is the game itself.
+[workspace]
+members = ["rac-rs", "rac-rs/exe"]
+default-members = ["rac-rs", "rac-rs/exe"]
+resolver = "3"

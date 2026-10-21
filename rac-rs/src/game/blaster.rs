@@ -6,16 +6,6 @@
 //! ignore nothing; the target component (height, radius byte) has no Rust carrier and takes its authored Novalis
 //! values (height 0.5, radius byte 0); the latch counter 0x13f50c lives here (`BlasterHeld.latch_t`).
 
-use super::*;
-use crate::camera::{fast_cos, fast_sin};
-use crate::gameplay::{pal_ticks, PAL_DT, PAL_DT2};
-use crate::particles::PointLight;
-use crate::particles::PoolSlot;
-use crate::particles::Rng;
-use crate::particles::Spawn;
-use crate::physics::cross;
-use crate::shadows::fast_atan2;
-use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
 /// The held class.
 pub const HELD: u32 = 168;

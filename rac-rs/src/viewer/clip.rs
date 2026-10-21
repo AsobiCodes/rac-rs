@@ -9,9 +9,12 @@ use crate::mobies::{clip_strip, guard_clip_weights, GuardBand};
 
 /// One clippable face of a props / marker slot: the position of its first index in the batch's index buffer, the
 /// stored indices, the strip phase and what its draw run needs (texture slot, cull mode).
+/// [PC] perf (lane A7): `run` = u32::MAX: `slot` is that position; else `slot` counts from the start of the slot's run
+/// `run` (`Scene::slot_runs`, the props batch), so a pool growth that moves the runs (`Gpu::append_props`) leaves the faces.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct PropFace {
 	pub slot: u32,
+	pub run: u32,
 	pub idx: [u32; 3],
 	pub phase: u8,
 	pub tex: usize,
@@ -35,6 +38,9 @@ pub(super) struct ClipView {
 	pub f: [f32; 3],
 	pub tx: f32,
 	pub ty: f32,
+	/// The guard band's and viewport's far plane (m): `RETAIL_FAR`, or the world far plane of Draw distance High
+	/// (fardraw.rs, `with_far`).
+	pub far: f32,
 }
 
 fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
@@ -58,7 +64,13 @@ impl ClipView {
 		let l = dot(c, c).sqrt().max(1e-9);
 		let s = [c[0] / l, c[1] / l, c[2] / l];
 		let u = cross(s, f);
-		ClipView { e: cam.pos, s, u, f, tx: cam.tan_half * aspect, ty: cam.tan_half }
+		ClipView { e: cam.pos, s, u, f, tx: cam.tan_half * aspect, ty: cam.tan_half, far: super::RETAIL_FAR }
+	}
+
+	/// [PC] The view with the world far plane `far` (m, `Gpu::world_far`): Draw distance High clips and culls at its own far plane
+	/// instead of retail's (Low and Medium pass `RETAIL_FAR`: unchanged).
+	pub(super) fn with_far(self, far: f32) -> ClipView {
+		ClipView { far, ..self }
 	}
 
 	/// View-space (vx, vy, vz) of a world point.
@@ -88,12 +100,14 @@ impl ClipView {
 		let tx = self.ty / super::PROJ_Y_RATIO;
 		let ty = tx * super::PROJ_Y_RATIO;
 		let (sx, sy) = ((1.0 + tx * tx).sqrt(), (1.0 + ty * ty).sqrt());
-		p[2] + r - 745472.0 < 0.0 && p[2] - r - 32.0 >= 0.0 && tx * p[2] - (p[0].abs() + r * sx) >= 0.0 && ty * p[2] - (p[1].abs() + r * sy) >= 0.0
+		// [PC] Draw distance High (`far` past retail's): its own far plane.
+		let far = if self.far > super::RETAIL_FAR { self.far * 1024.0 } else { 745472.0 };
+		p[2] + r - far < 0.0 && p[2] - r - 32.0 >= 0.0 && tx * p[2] - (p[0].abs() + r * sx) >= 0.0 && ty * p[2] - (p[1].abs() + r * sy) >= 0.0
 	}
 
-	/// The retail guard band (4 x the tangents).
+	/// The retail guard band (4 x the tangents; far = `far`, retail's 728.1632 m but with Draw distance High).
 	pub(super) fn band(&self) -> GuardBand {
-		GuardBand::retail(self.tx, self.ty)
+		GuardBand { far: self.far, ..GuardBand::retail(self.tx, self.ty) }
 	}
 
 	/// The real viewport planes (1 x the tangents, same near / far): a face wholly outside one is drawn by nothing.
@@ -129,7 +143,7 @@ pub(super) fn replay_faces(meshes: &[&Mesh], slots: &HashMap<u32, usize>) -> Vec
 				*next.get_mut(&key).unwrap() += 3;
 				if phased && m.strip_phase[i] != crate::mesh::NO_PHASE {
 					let tex = slots.get(&(key & crate::mobies::SLOT_MASK)).copied().unwrap_or(0);
-					out.push(PropFace { slot, idx: f.map(|x| x + base), phase: m.strip_phase[i], tex, cull: ((key >> 24) & 3) as u8 });
+					out.push(PropFace { slot, run: u32::MAX, idx: f.map(|x| x + base), phase: m.strip_phase[i], tex, cull: ((key >> 24) & 3) as u8 });
 				}
 			}
 			base += m.positions.len() as u32;

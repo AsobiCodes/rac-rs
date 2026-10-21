@@ -163,11 +163,14 @@ struct Gs {
 	lines: u32,
 	/// The stream's writes to XYOFFSET, SCISSOR, FRAME or ZBUF (either context): (register, value), distinct.
 	target: Vec<(u8, u64)>,
+	/// The triangles the stream queued with ADC set (not drawn), kept with `keep_adc` (`widescreen_refill`).
+	adc: Vec<Prim>,
+	keep_adc: bool,
 }
 
 impl Gs {
 	fn new() -> Gs {
-		Gs { prim: 0, prmode: 0, prmodecont: true, rgba: [0x80; 4], q: 1.0, st: [0.0; 2], uv: [0.0; 2], tex0: [0; 2], clamp: [0; 2], alpha: [0; 2], test: [None; 2], zbuf: [None; 2], tex1: [None; 2], fogcol: None, vq: [V::default(); 3], n: 0, lines: 0, target: Vec::new() }
+		Gs { prim: 0, prmode: 0, prmodecont: true, rgba: [0x80; 4], q: 1.0, st: [0.0; 2], uv: [0.0; 2], tex0: [0; 2], clamp: [0; 2], alpha: [0; 2], test: [None; 2], zbuf: [None; 2], tex1: [None; 2], fogcol: None, vq: [V::default(); 3], n: 0, lines: 0, target: Vec::new(), adc: Vec::new(), keep_adc: false }
 	}
 
 	fn set_prim(&mut self, v: u64) {
@@ -231,6 +234,8 @@ impl Gs {
 				3..=6 => out.push(Prim { sprite: ty == 6, v: self.vq, attr, tex0: self.tex0[ctx], clamp: self.clamp[ctx], alpha: self.alpha[ctx], test: self.test[ctx], zbuf: self.zbuf[ctx], tex1: self.tex1[ctx], fogcol: self.fogcol }),
 				_ => self.lines += 1,
 			}
+		} else if (3..=5).contains(&ty) && self.keep_adc {
+			self.adc.push(Prim { sprite: false, v: self.vq, attr, tex0: self.tex0[ctx], clamp: self.clamp[ctx], alpha: self.alpha[ctx], test: self.test[ctx], zbuf: self.zbuf[ctx], tex1: self.tex1[ctx], fogcol: self.fogcol });
 		}
 		match ty {
 			2 => {
@@ -434,6 +439,28 @@ fn dump_fn() -> Option<u32> {
 	*F.get_or_init(|| std::env::var("RAC_EFX_DUMP").ok().and_then(|v| u32::from_str_radix(v.trim_start_matches("0x"), 16).ok()))
 }
 
+/// [PC] Widescreen: Pokitaru's waterfall sheets (fx texture 42, level 11) whole where the wider view shows more than retail's 4:3
+/// screen. Their owner 0x31e260 queues the triangles its VU1 clip test rejects with ADC set (not drawn); those beside the 4:3 screen
+/// are in the widescreen margins, where the sheet showed dark triangular holes that came and went as the camera turned
+/// [C: ADC census of the fall owners (lane F1 log) at fullgame1 0447, 2026-10-19: owner 0x31e260 kicked only triangles inside the 4:3 screen in a turned
+/// view; owner 0x31d480 kicks most of its off-screen ones]. Candidates: a skipped triangle in front of the eye (Q > 0 at every
+/// corner: the others are behind it), inside the guard band (|x| <= 1024, |y| <= 896 pixels from the centre) with a corner off the
+/// 4:3 screen (|x| > 256 or |y| > 224); the ones inside the 4:3 screen stay out as retail leaves them. A rejected batch can carry
+/// stale vertices (near the eye, in strip patterns: huge false triangles at the user's falls recording, field 390), so a candidate
+/// goes out flagged `FX_REFILL` and only the waterfall pass draws it, when its corners are a sheet triangle seen kicked before
+/// (viewer/waterfx.rs `SheetMem::refill`); every other path skips the flag.
+pub const FX_REFILL: usize = 1 << 19;
+const REFILL_LEVEL: u32 = 11;
+const REFILL_TEX: usize = 42;
+
+fn widescreen_refill(pr: &Prim, view: &View) -> bool {
+	if pr.sprite {
+		return false;
+	}
+	let d = pr.v.map(|v| (v.x - view.cx, v.y - view.cy, v.q));
+	d.iter().all(|&(x, y, q)| q > 0.0 && x.abs() <= 1024.0 && y.abs() <= 896.0) && d.iter().any(|&(x, y, _)| x.abs() > 256.0 || y.abs() > 224.0)
+}
+
 /// RAC_EFX_DRAW=0 leaves the layer out (A/B pictures); default on.
 pub fn enabled() -> bool {
 	static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -443,28 +470,30 @@ pub fn enabled() -> bool {
 /// Everything `build_in` reads from the machine at a field's end, copied (a few KB) so the build can run after the
 /// worker has gone on to the next field: per owner whether an older port claims it and its packet walk (None when claimed),
 /// the draw environment's ten registers and the fx slot table's TEX0 words (`slot`).
+#[derive(Debug)]
 pub struct BuildIn {
-	level: u32,
 	own: Vec<Own>,
-	pub claimed: Vec<bool>,
 	pub pkts: Vec<Option<efx_own::Pkt>>,
 	env: Vec<(u8, u64)>,
 	slots: Vec<u64>,
+	level: u32,
 }
 
 /// `BuildIn` of the field the machine has just ended (reads RAM).
 pub fn capture(m: &Machine, level: u32, own: &[Own]) -> BuildIn {
+	let t_cap = std::time::Instant::now();
+	let r = capture_inner(m, level, own);
+	super::efx_vu::sp_add(0, t_cap.elapsed().as_nanos() as u64);
+	r
+}
+
+fn capture_inner(m: &Machine, level: u32, own: &[Own]) -> BuildIn {
 	let claimed: Vec<bool> = own.iter().map(|o| claimed(m, level, o.fnp)).collect();
 	let pkts = own.iter().zip(&claimed).map(|(o, &c)| (!c).then(|| efx_own::walk(&m.cpu, o))).collect();
 	let env = (0..10).map(|k| DRAW_ENV + 16 * k).map(|a| (m.rd32(a + 8) as u8, m.rd32(a) as u64 | (m.rd32(a + 4) as u64) << 32)).collect();
 	let tbl = va(SLOT_TABLE.wrapping_add_signed(*super::LEVEL_SHIFT.get(level as usize).unwrap_or(&0)));
 	let slots = (0..SLOTS).map(|n| tbl + 16 * n).map(|a| m.rd32(a) as u64 | (m.rd32(a + 4) as u64) << 32).collect();
-	BuildIn { level, own: own.to_vec(), claimed, pkts, env, slots }
-}
-
-/// The field's owners (`efx_own::field_end`) -> world quads for the mirror (`Fx.qa`), in queue order.
-pub fn build(m: &Machine, level: u32, own: &[Own], vu: &super::efx_vu::VuOut, out: &mut Vec<WorldQuad>, pools: &mut Vec<WorldStrip>) -> Stats {
-	build_in(&capture(m, level, own), vu, out, pools)
+	BuildIn { own: own.to_vec(), pkts, env, slots, level }
 }
 
 /// `build` from a captured `BuildIn` (no machine access: any thread).
@@ -503,6 +532,8 @@ pub fn build_in(b: &BuildIn, vu: &super::efx_vu::VuOut, out: &mut Vec<WorldQuad>
 			st.fns.push(o.fnp);
 		}
 		let mut g = Gs::new();
+		g.keep_adc = b.level == REFILL_LEVEL;
+		let mut refill = Vec::new();
 		let mut prims = Vec::new();
 		match vq {
 			Some(q) => g.gif(q, &mut prims),
@@ -519,6 +550,15 @@ pub fn build_in(b: &BuildIn, vu: &super::efx_vu::VuOut, out: &mut Vec<WorldQuad>
 			}
 			continue;
 		}
+		if g.keep_adc {
+			for pr in std::mem::take(&mut g.adc) {
+				if widescreen_refill(&pr, &view) && efx_own::slot_of(o, pr.tex0).unwrap_or_else(|| slot(&b.slots, pr.tex0, &mut cache)).is_some_and(|t| plain_tex(t) == REFILL_TEX) {
+					refill.push(pr);
+				}
+			}
+		}
+		let kicked = prims.len();
+		prims.extend(refill.drain(..));
 		let dump = dump_fn() == Some(o.fnp);
 		if dump {
 			eprintln!("efxdump fn {:x} c0 {:x} c1 {:x} prims {} words {}", o.fnp, o.c0, o.c1, prims.len(), p.words.len());
@@ -600,6 +640,9 @@ pub fn build_in(b: &BuildIn, vu: &super::efx_vu::VuOut, out: &mut Vec<WorldQuad>
 			let flat = attr & 8 == 0;
 			// PRIM FGE: the GS fogs the texture-shaded colour per vertex F (`fog_tex`).
 			let fogged = attr & 0x20 != 0;
+			if pi >= kicked && (fix.is_some() || pr.sprite) {
+				continue;
+			}
 			if let Some((fix, add)) = fix {
 				// FIX blends go to the strip pass (texture and vertex alpha ignored): consecutive prims of one state share a strip.
 				let tri: Option<[([f32; 3], [f32; 2], [f32; 4]); 3]> = if pr.sprite {
@@ -687,6 +730,7 @@ pub fn build_in(b: &BuildIn, vu: &super::efx_vu::VuOut, out: &mut Vec<WorldQuad>
 				let c = if flat { [colour(pr.v[2].rgba); 3] } else { pr.v.map(|v| colour(v.rgba)) };
 				let t = pr.v.map(|v| uv(&v));
 				let tex = if fogged { fog_tex(tex, [pr.v[0].f, pr.v[1].f, pr.v[2].f], pr.fogcol) } else { tex };
+				let tex = if pi >= kicked { tex | FX_REFILL } else { tex };
 				out.push(WorldQuad { pos: [p0, p1, p2, p2], uv: [t[0], t[1], t[2], t[2]], colour: [c[0], c[1], c[2], c[2]], tex, additive });
 				st.tris += 1;
 			}

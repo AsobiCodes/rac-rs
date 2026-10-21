@@ -5,11 +5,10 @@
 //! decomp/notes/collision_and_gameplay.md "Hit classifier". Runs once per 50 Hz game tick with the authored
 //! per-tick units (fRam0015ed6c = 1/60, fRam0015ed70 = 1/3600).
 
-use super::{foes, Event, Game, Kind};
-use crate::inventory::PYROCITOR;
-use crate::particles::{pool_release, PointLight, PoolSlot, Rng, Sprite, FX_TEX, PART_TEX_BASE};
-use crate::physics::{add, length, scale, sub, World, V3};
-use std::f32::consts::{PI, TAU};
+use super::Game;
+use crate::particles::{pool_release, PoolSlot, Sprite, FX_TEX, PART_TEX_BASE};
+use crate::physics::V3;
+use std::f32::consts::TAU;
 
 /// The held weapon's moby class and the nozzle moby class.
 pub const PYRO_CLASS: u32 = 176;

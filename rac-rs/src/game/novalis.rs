@@ -3,12 +3,7 @@
 //! lily pads, teleporters, gold bolts and the breakable props. The game's authored timers are scale(n) PAL ticks;
 //! here they are seconds of PAL_DT (`ticks`). Solid actors block the hero with their class collision blocks (Game::solids).
 
-use super::Event;
 use super::Game;
-use super::Kind;
-use crate::gameplay::{self, Cuboid, MobyInstance, Polygon};
-use crate::physics::{add, dot, length, scale, sub, V3};
-use std::f32::consts::{PI, TAU};
 
 pub(super) const CRANK: u32 = 280;
 /// NOV-14.3c the sand mouse's bolt (game/mouse.rs).

@@ -12,6 +12,9 @@ use crate::retail::mouse_menu::{Kind, MenuSnap};
 /// Page structs of the front end (frontend_flow.md section 2): root, New Game, Load Game, Options, Language, Video, Sound.
 const P_ROOT: u32 = 0x1d4548;
 const P_NEW: u32 = 0x1d4c08;
+/// New Game's overwrite confirm (FUN_002230b8: Cross on a used slot sets the next page 0x1d4db8, id 0x1a): title, slot list,
+/// text 0x4fb3 panel (FUN_00221650), Circle Yes / Triangle No labels.
+const P_OVERWRITE: u32 = 0x1d4db8;
 const P_LOAD: u32 = 0x1d4b80;
 const P_OPTIONS: [u32; 2] = [0x1d4708, 0x1d47c0];
 const P_LANGUAGE: u32 = 0x1d48c0;
@@ -28,6 +31,7 @@ fn page_of(m: Option<&MenuSnap>) -> Option<frontend::Page> {
 	Some(match crate::retail::disc::unva(m.page) {
 		P_ROOT => Root,
 		P_NEW => NewGame,
+		P_OVERWRITE => Overwrite,
 		P_LOAD => LoadGame,
 		p if P_OPTIONS.contains(&p) => Options,
 		P_LANGUAGE => Language,
@@ -57,6 +61,8 @@ fn sel_of(m: &MenuSnap, page: frontend::Page, slot_cur: [u32; 2]) -> usize {
 			Some(_) => (slot_cur[(page == frontend::Page::NewGame) as usize] as usize).min(crate::save::SLOTS - 1),
 			None => 0,
 		},
+		// The confirm keeps New Game's slot list (item 0x1d4ce8) and its cursor on screen.
+		frontend::Page::Overwrite => (slot_cur[1] as usize).min(crate::save::SLOTS - 1),
 		_ => cur.map_or(0, cursor),
 	}
 }
@@ -65,10 +71,6 @@ fn sel_of(m: &MenuSnap, page: frontend::Page, slot_cur: [u32; 2]) -> usize {
 const TURBO_BUDGET: std::time::Duration = std::time::Duration::from_millis(40);
 
 impl App {
-	/// The old hand-made front end (own state machine) is up: its keys and mouse work. Never in retail mode.
-	pub(super) fn old_front(&self) -> bool {
-		self.front.is_some() && self.retail.is_none()
-	}
 
 	/// The retail front end runs and rac-rs still shows a level: load the title scene (scene, art, text) in its place once, keeping the
 	/// running `Retail`. `load_level` with `want_front` is the same path the old Quit Game used.
@@ -122,6 +124,8 @@ impl App {
 				if let Some(a) = &mut self.audio {
 					a.pause_all(true);
 				}
+				// A new movie ends a held last picture's hold (as handler.rs's MOVIE_HOLD does; its first frame resets the tint).
+				self.fm_movie_hold = false;
 				self.movie = Some(fmv::player::Player::start(&self.iso_path, &m, lang, self.audio.as_mut()));
 			}
 			if let Some(g) = &self.gpu {
@@ -287,6 +291,13 @@ impl App {
 		if let Some(g) = &mut self.gpu {
 			g.hud.clear();
 			g.hud_split = None;
+			// A front-end frame draws no sharp overlay: the sharp HUD target of the last level would make a New Game caption
+			// (mode 6, the capture's picture) wait for a plane that is never drawn.
+			crate::retail::set_hud_target(0);
+			// [PC] Sharp title / main menu (hudsharp.rs): the art quads take the edge-aware sampler on a tall enough window; the
+			// noise and scanline sprites of the panel frames keep the nearest look.
+			let flat = fe.art.as_ref().and_then(|a| a.frame).map_or([usize::MAX; 2], |f| [f[1].0, f[2].0]);
+			super::hudsharp::set(crate::retail::ui_sharp(g.config.height), flat);
 			g.movie.black = false;
 			let (w, h) = (g.config.width as f32, g.config.height as f32);
 			// Mode 6 with the capture's picture up: it replaces the menu and the title's fade (the game's own fade is in it).
@@ -322,7 +333,7 @@ impl App {
 				g.hud.push(crate::overlay::Quad { tex: RETAIL_OV_TEX, rect: [0.0, 0.0, w, h], uv: [0.5 - 0.5 * k, 0.0, 0.5 + 0.5 * k, 1.0], colour: [1.0; 4], angle: 0.0, corners: None });
 			}
 			g.set_clip_view(None);
-			g.set_marker(at, skinned.as_ref());
+			g.set_marker(at, skinned.as_ref(), None);
 			g.set_props(Some(&[]), &HashMap::new(), &HashMap::new(), &actors, &[], &[], &[], &[]);
 			g.set_particles(&[], &[], &[], &[], &self.cam, None);
 		}

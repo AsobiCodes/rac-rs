@@ -1,9 +1,8 @@
-﻿//! rac-rs: a from-scratch Rust reimplementation of Ratchet & Clank (PS2) that runs on the user's own
-//! disc image. This first layer reads the disc the way the game does: by sector, through the table
-//! of contents, with Insomniac's WAD decompression.
-
-// Public build (cargo feature `windows_gui`, set by setup.ps1): no console window next to the game. Dev builds and test tools keep theirs.
-#![cfg_attr(all(windows, feature = "windows_gui"), windows_subsystem = "windows")]
+﻿// rac-rs: a from-scratch Rust reimplementation of Ratchet & Clank (PS2) that runs on the user's own
+// disc image. This first layer reads the disc the way the game does: by sector, through the table
+// of contents, with Insomniac's WAD decompression.
+// This file is the root of the library crate rac_game (src/lib.rs includes it); the exe is exe/src/main.rs, which
+// sets the no-console subsystem (feature `windows_gui`) and calls `main` below.
 
 mod ambience;
 mod anim;
@@ -13,12 +12,12 @@ mod bytes;
 mod camera;
 mod camgrid;
 mod collision;
+mod devtune;
 mod dynlight;
 mod flow;
 mod fmv;
 mod game;
 mod frontend;
-#[allow(dead_code)]
 mod gsfull;
 mod gadgets;
 mod gameplay;
@@ -30,7 +29,6 @@ mod level;
 mod loadlog;
 mod map;
 mod mesh;
-mod missions;
 mod mobies;
 mod particles;
 mod music;
@@ -72,7 +70,8 @@ const USAGE: &str = "usage:
   rac-rs ties   <disc.iso> <level|all>          decode tie (prop) classes and placements
   rac-rs scan  <disc.iso>                    decompress every sector-aligned WAD blob
   rac-rs verify <disc.iso> <file>...           check Wrench-extracted files appear in decompressed blobs
-  rac-rs dump   <disc.iso> <sector> <out>      decompress the WAD starting at <sector> into <out>";
+  rac-rs dump   <disc.iso> <sector> <out>      decompress the WAD starting at <sector> into <out>
+  rac-rs warm-gpu                              build the GPU capture's kernels once (the driver keeps them), then exit";
 
 /// Without a console (feature `windows_gui`) stderr goes nowhere, so panics and the final error are appended to `<player dir>/crash.log`.
 #[cfg(feature = "windows_gui")]
@@ -205,12 +204,10 @@ fn launch_args() -> Result<Vec<String>, String> {
 	}
 	let player = root.join("player");
 	let _ = std::fs::create_dir_all(&player);
-	let skip = std::fs::read_to_string(root.join("oracle").join("hand").join("hand_skip.txt")).map(|t| t.lines().next().unwrap_or("").trim().to_string()).unwrap_or_default();
 	// SAFETY: still single-threaded (called first in main, after the load-log clock which starts no thread).
 	unsafe {
 		std::env::set_var("ORACLE_ISO", &iso);
 		std::env::set_var("ORACLE_STUBS", root.join("oracle").join("stubs.txt"));
-		std::env::set_var("ORACLE_HAND_SKIP", skip);
 		std::env::set_var("RAC_PLAYER_DIR", &player);
 		if std::env::var_os("COLD_LANG").is_none() {
 			let lang = lang.filter(|l| ["en", "fr", "de", "es", "it"].contains(&l.as_str())).unwrap_or_else(|| "en".to_string());
@@ -228,7 +225,7 @@ fn launch_args() -> Result<Vec<String>, String> {
 	Ok(["view", iso.as_str(), "0", "--retail-cold", "--modern-cam"].map(String::from).to_vec())
 }
 
-fn main() -> ExitCode {
+pub fn main() -> ExitCode {
 	loadlog::init();
 	#[cfg(feature = "windows_gui")]
 	std::panic::set_hook(Box::new(|info| {
@@ -260,6 +257,7 @@ fn main() -> ExitCode {
 		Some("scan") if args.len() == 2 => cmd_scan(&args[1]).map(|_| ()),
 		Some("verify") if args.len() >= 3 => cmd_verify(&args[1], &args[2..]),
 		Some("dump") if args.len() == 4 => cmd_dump(&args[1], &args[2], &args[3]),
+		Some("warm-gpu") => retail::warm_gpu().map_err(Into::into),
 		_ => {
 			eprintln!("{USAGE}");
 			return ExitCode::from(2);

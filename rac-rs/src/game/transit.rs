@@ -2,7 +2,6 @@
 //! tick (substate 4, `FUN_002a2ce0`) and the departure flight (substate 3, `FUN_002a39b0` case 3). State machines only:
 //! the flight is driven by viewer/travel.rs `Step::Flight` (SCN-4.3a); the warp draw pass (SCN-4.2), its viewer wiring
 //! and the pose history feed are not ported yet.
-#![allow(dead_code)]
 
 use super::mouse::wrap_angle;
 use super::pyro::approach;

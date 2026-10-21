@@ -1,6 +1,5 @@
 //! KER-20a: the traffic hover-cars. (decomp/notes/kerwan_*.md; moved from game/kerwan.rs.)
 
-use super::*;
 
 /// KER-20a: the traffic hover-car classes, all on the shared updater FUN_0029d4d8
 /// (decomp/notes/kerwan_environment.md KER-20a).

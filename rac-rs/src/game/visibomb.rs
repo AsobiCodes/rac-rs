@@ -6,9 +6,6 @@
 //! 179 update FUN_002d0998 `update_visibomb_aux`.
 
 use super::*;
-use crate::gameplay::{pal_ticks, PAL_DT};
-use super::mouse::wrap_angle;
-use std::f32::consts::{FRAC_PI_2, PI};
 
 /// The missile class and its aux class (BRIDGE-48 draw props).
 pub const MISSILE: u32 = 172;
@@ -46,7 +43,6 @@ pub struct RenderWords {
 /// The class-172 missile (its pvar and actor words; one at a time, global 0x141330). `fins` are the joint-block
 /// Y angles of slots 0 / 1 (blocks 0x1412b0 / 0x1412f0), `aux_k` / `aux_pos` / `aux_m` the aux 179 pvar +0xc, position and
 /// basis, `bend` the loop voice bend of this tick.
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct Missile172 {
 	pub pos: V3,

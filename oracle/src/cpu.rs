@@ -2,100 +2,12 @@
 //! Semantics follow PCSX2's interpreter (register upper halves, LWL/LWR
 //! tables, divide-by-zero results); floats follow PCSX2 default rounding.
 
-use crate::fpu::{self, CSR_CHOP};
+use crate::fpu;
 use crate::mem::Mem;
+#[doc(hidden)]
+pub use ee_core::cpu::*;
 use std::collections::HashMap;
 
-const LO64: u128 = u64::MAX as u128;
-const HI64: u128 = !LO64;
-
-#[inline(always)]
-pub fn sx32(v: u32) -> u64 {
-    v as i32 as i64 as u64
-}
-#[inline(always)]
-pub fn w4(x: u128) -> [u32; 4] {
-    unsafe { std::mem::transmute(x) }
-}
-#[inline(always)]
-pub fn uw4(x: [u32; 4]) -> u128 {
-    unsafe { std::mem::transmute(x) }
-}
-#[inline(always)]
-fn h8(x: u128) -> [u16; 8] {
-    unsafe { std::mem::transmute(x) }
-}
-#[inline(always)]
-fn uh8(x: [u16; 8]) -> u128 {
-    unsafe { std::mem::transmute(x) }
-}
-fn mapw(a: u128, b: u128, f: impl Fn(u32, u32) -> u32) -> u128 {
-    let (a, b) = (w4(a), w4(b));
-    uw4([f(a[0], b[0]), f(a[1], b[1]), f(a[2], b[2]), f(a[3], b[3])])
-}
-fn maph(a: u128, b: u128, f: impl Fn(u16, u16) -> u16) -> u128 {
-    let (a, b) = (h8(a), h8(b));
-    let mut r = [0u16; 8];
-    for i in 0..8 {
-        r[i] = f(a[i], b[i]);
-    }
-    uh8(r)
-}
-fn mapb(a: u128, b: u128, f: impl Fn(u8, u8) -> u8) -> u128 {
-    let (a, b) = (a.to_le_bytes(), b.to_le_bytes());
-    let mut r = [0u8; 16];
-    for i in 0..16 {
-        r[i] = f(a[i], b[i]);
-    }
-    u128::from_le_bytes(r)
-}
-fn ssw(v: i64) -> u32 {
-    v.clamp(i32::MIN as i64, i32::MAX as i64) as i32 as u32
-}
-fn ssh(v: i32) -> u16 {
-    v.clamp(-32768, 32767) as i16 as u16
-}
-fn ssb(v: i32) -> u8 {
-    v.clamp(-128, 127) as i8 as u8
-}
-
-pub const LWL_MASK: [u32; 4] = [0x00ff_ffff, 0x0000_ffff, 0x0000_00ff, 0];
-pub const LWR_MASK: [u32; 4] = [0, 0xff00_0000, 0xffff_0000, 0xffff_ff00];
-pub const SWL_MASK: [u32; 4] = [0xffff_ff00, 0xffff_0000, 0xff00_0000, 0];
-pub const SWR_MASK: [u32; 4] = [0, 0x0000_00ff, 0x0000_ffff, 0x00ff_ffff];
-pub const LDL_MASK: [u64; 8] = [
-    0x00ff_ffff_ffff_ffff, 0x0000_ffff_ffff_ffff, 0x0000_00ff_ffff_ffff, 0x0000_0000_ffff_ffff,
-    0x0000_0000_00ff_ffff, 0x0000_0000_0000_ffff, 0x0000_0000_0000_00ff, 0,
-];
-pub const LDR_MASK: [u64; 8] = [
-    0, 0xff00_0000_0000_0000, 0xffff_0000_0000_0000, 0xffff_ff00_0000_0000,
-    0xffff_ffff_0000_0000, 0xffff_ffff_ff00_0000, 0xffff_ffff_ffff_0000, 0xffff_ffff_ffff_ff00,
-];
-pub const SDL_MASK: [u64; 8] = [
-    0xffff_ffff_ffff_ff00, 0xffff_ffff_ffff_0000, 0xffff_ffff_ff00_0000, 0xffff_ffff_0000_0000,
-    0xffff_ff00_0000_0000, 0xffff_0000_0000_0000, 0xff00_0000_0000_0000, 0,
-];
-pub const SDR_MASK: [u64; 8] = [
-    0, 0x0000_0000_0000_00ff, 0x0000_0000_0000_ffff, 0x0000_0000_00ff_ffff,
-    0x0000_0000_ffff_ffff, 0x0000_00ff_ffff_ffff, 0x0000_ffff_ffff_ffff, 0x00ff_ffff_ffff_ffff,
-];
-
-// VU upper-op kinds.
-pub const ADD: u8 = 0;
-pub const SUB: u8 = 1;
-pub const MADD: u8 = 2;
-pub const MSUB: u8 = 3;
-pub const MAX: u8 = 4;
-pub const MIN: u8 = 5;
-pub const MUL: u8 = 6;
-pub const BC_KIND: [u8; 7] = [ADD, SUB, MADD, MSUB, MAX, MIN, MUL];
-/// Special1/special2 28..=39: (kind, uses I instead of Q).
-pub const QI: [(u8, bool); 12] = [
-    (MUL, false), (MAX, true), (MUL, true), (MIN, true), (ADD, false), (MADD, false),
-    (ADD, true), (MADD, true), (SUB, false), (MSUB, false), (SUB, true), (MSUB, true),
-];
-/// 40..=47 full-vector kinds (46 = OPMSUB/OPMULA handled separately).
-pub const FULL: [u8; 8] = [ADD, MADD, MUL, MAX, SUB, MSUB, 255, MIN];
 
 pub struct Stub {
     pub ret: u64,
@@ -109,6 +21,9 @@ pub struct Stub {
     pub host: Option<fn(&mut Cpu) -> bool>,
 }
 
+/// `#[repr(C)]`: the fields up to `mem` (and `Mem`'s first fields) are ee-core's `Cpu`, the view the generated
+/// code works on (`core_mut`); lib.rs checks the offsets at compile time.
+#[repr(C)]
 pub struct Cpu {
     pub r: [u128; 32],
     pub hi: u128,
@@ -116,31 +31,35 @@ pub struct Cpu {
     pub sa: u32,
     pub pc: u32,
     pub npc: u32,
-    pub cp0: [u32; 32],
     pub f: [u32; 32],
     pub facc: u32,
     pub fcr31: u32,
     pub vf: [[u32; 4]; 32],
     pub vacc: [u32; 4],
     pub vi: [u32; 32],
-    pub mem: Mem,
     pub icount: u64,
+    pub div_csr: u32,
+    pub vsync_armed: bool,
     pub stop: Option<String>,
+    /// Cold boot (`cold`): the kernel HLE that replaces the BIOS (or only hook rules); None for savestate runs.
+    pub cold: Option<Box<crate::cold::Kernel>>,
+    /// Recompiled functions (rec/), when enabled.
+    pub rec: Option<Box<crate::rec::Table>>,
+    /// [PC] (speed) Moved up from after `cp0` so ee-core's `Cpu` view can test it inline (`Cpu::hand`): `#[repr(C)]` order is
+    /// layout, `rec/mod.rs` asserts the offset. One bit per code word of the 32 MB RAM: the pcs `stub` must see.
     pub stub_bits: Vec<u64>,
+    pub mem: Mem,
+    pub cp0: [u32; 32],
     pub stubs: HashMap<u32, Stub>,
     pub stub_hits: HashMap<u32, u64>,
     pub syscalls: HashMap<i32, u64>,
     pub sema_next: u32,
-    pub div_csr: u32,
     pub ring: [u32; 64],
     pub ri: usize,
     pub vu_calls: HashMap<u32, u64>,
     /// SetVSyncFlag pointers (flag, csr), written at each vblank start.
     pub vsync: Option<(u32, u32)>,
     pub irqs: [u64; 2],
-    pub vsync_armed: bool,
-    /// Cold boot (`cold`): the kernel HLE that replaces the BIOS (or only hook rules); None for savestate runs.
-    pub cold: Option<Box<crate::cold::Kernel>>,
     pub watch: std::collections::HashSet<u32>,
     pub watch_hits: std::collections::BTreeMap<u32, u64>,
     /// ORACLE_CALL: print args at entry and v0 at return of this function.
@@ -154,8 +73,6 @@ pub struct Cpu {
     pub iop: Vec<u8>,
     /// The game disc (2048-byte sectors) for sceCdRead.
     pub iso: Option<std::fs::File>,
-    /// Recompiled functions (rec/), when enabled.
-    pub rec: Option<Box<crate::rec::Table>>,
     /// The host's frame: run at each armed vblank wait (it raises the vblank); the game then goes on in place
     /// (rec/mod.rs `vblank_hook`). None: the code unwinds to a host loop at the wait.
     pub vblank_cb: Option<Box<dyn FnMut(&mut Cpu) + Send>>,
@@ -175,6 +92,8 @@ pub struct Cpu {
     pub mc: crate::mc::Mc,
     /// Native prog0 (vu0aot.rs).
     pub vu0_aot: crate::vu0aot::Vu0Aot,
+    /// Native one-joint skinning loop (skinff.rs).
+    pub skinff: crate::skinff::SkinFf,
 }
 
 /// Architectural state for the hand-written functions' checks (`Cpu::snapshot` / `restore`): registers, RAM,
@@ -200,6 +119,35 @@ pub struct Snap {
 }
 
 impl Cpu {
+    /// ee-core's view of this CPU (the generated code's `Cpu`): the same memory, the first fields.
+    #[inline(always)]
+    pub fn core(&self) -> &ee_core::cpu::Cpu {
+        unsafe { &*(self as *const Cpu as *const ee_core::cpu::Cpu) }
+    }
+    #[inline(always)]
+    pub fn core_mut(&mut self) -> &mut ee_core::cpu::Cpu {
+        unsafe { &mut *(self as *mut Cpu as *mut ee_core::cpu::Cpu) }
+    }
+    /// The whole CPU behind ee-core's view (`core_mut`; the generated code only ever has views of a whole Cpu).
+    #[inline(always)]
+    pub fn full(c: &mut ee_core::cpu::Cpu) -> &mut Cpu {
+        unsafe { &mut *(c as *mut ee_core::cpu::Cpu as *mut Cpu) }
+    }
+
+    // Register helpers, VU macro ops and MMI live in ee-core (cpu.rs there), where the generated code inlines them.
+    #[inline(always)] pub fn g(&self, i: usize) -> u64 { self.core().g(i) }
+    #[inline(always)] pub fn s(&mut self, i: usize, v: u64) { self.core_mut().s(i, v) }
+    #[inline(always)] fn q(&mut self, i: usize, v: u128) { self.core_mut().q(i, v) }
+    #[inline(always)] pub fn set_lh(&mut self, lo: u64, hi: u64) { self.core_mut().set_lh(lo, hi) }
+    #[inline(always)] pub(crate) fn halt(&mut self, msg: String) { self.core_mut().halt(msg) }
+    #[inline(always)] #[doc(hidden)] pub fn vu_out(&mut self, dst: usize, v: [u32; 4], mask: u32, mac: bool) { self.core_mut().vu_out(dst, v, mask, mac) }
+    #[inline(always)] pub fn fmac(&self, kind: u8, s: [u32; 4], t: [u32; 4]) -> [u32; 4] { self.core().fmac(kind, s, t) }
+    #[inline(always)] pub fn fmac_g<const FAST: bool>(&self, kind: u8, s: [u32; 4], t: [u32; 4]) -> [u32; 4] { self.core().fmac_g::<FAST>(kind, s, t) }
+    #[inline(always)] pub fn set_vi(&mut self, i: usize, v: u32) { self.core_mut().set_vi(i, v) }
+    #[inline(always)] #[doc(hidden)] pub fn vu_special1(&mut self, op: u32, pc: u32) { self.core_mut().vu_special1(op, pc) }
+    #[inline(always)] #[doc(hidden)] pub fn vu_special2(&mut self, op: u32, pc: u32) { self.core_mut().vu_special2(op, pc) }
+    #[inline(always)] #[doc(hidden)] pub fn mmi(&mut self, op: u32, pc: u32, rs: usize, rt: usize, rd: usize, sa: u32) { self.core_mut().mmi(op, pc, rs, rt, rd, sa) }
+
     pub fn snapshot(&self) -> Snap {
         Snap {
             r: self.r,
@@ -280,6 +228,7 @@ impl Cpu {
             vu0_trace: None,
             mc: Default::default(),
             vu0_aot: crate::vu0aot::Vu0Aot::from_env(),
+            skinff: Default::default(),
         }
     }
 
@@ -307,37 +256,6 @@ impl Cpu {
     }
 
     #[inline(always)]
-    pub fn g(&self, i: usize) -> u64 {
-        self.r[i] as u64
-    }
-    #[inline(always)]
-    pub fn s(&mut self, i: usize, v: u64) {
-        if i != 0 {
-            self.r[i] = (self.r[i] & HI64) | v as u128;
-        }
-    }
-    #[inline(always)]
-    fn q(&mut self, i: usize, v: u128) {
-        if i != 0 {
-            self.r[i] = v;
-        }
-    }
-    #[inline(always)]
-    pub fn set_lh(&mut self, lo: u64, hi: u64) {
-        self.lo = (self.lo & HI64) | lo as u128;
-        self.hi = (self.hi & HI64) | hi as u128;
-    }
-    fn set_lh1(&mut self, lo: u64, hi: u64) {
-        self.lo = (self.lo & LO64) | ((lo as u128) << 64);
-        self.hi = (self.hi & LO64) | ((hi as u128) << 64);
-    }
-    fn halt(&mut self, msg: String) {
-        if self.stop.is_none() {
-            self.stop = Some(msg);
-        }
-    }
-
-    #[inline(always)]
     fn branch(&mut self, cond: bool, pc: u32, op: u32, likely: bool) {
         if cond {
             self.npc = pc.wrapping_add(4).wrapping_add(((op as i16 as i32) << 2) as u32);
@@ -357,6 +275,12 @@ impl Cpu {
 
     #[inline(always)]
     pub fn step(&mut self) {
+        self.step_impl::<false>()
+    }
+
+    /// One interpreter step; `INL`: the decoder is inlined into the caller (the dispatcher's own loop, `run_rec`).
+    #[inline(always)]
+    pub(crate) fn step_impl<const INL: bool>(&mut self) {
         if self.icount >= self.mem.due {
             self.mem.mature(self.icount);
             if self.icount >= self.mem.tick {
@@ -379,7 +303,11 @@ impl Cpu {
         self.icount += 1;
         self.mem.now = self.icount;
         self.mem.pc = pc;
-        self.exec(op, pc);
+        if INL {
+            self.exec_body(op, pc)
+        } else {
+            self.exec(op, pc)
+        }
     }
 
     /// Takes INT0 (INTC) / INT1 (DMAC) through the BIOS vector at 0x80000200
@@ -388,11 +316,11 @@ impl Cpu {
         let (i0, i1) = self.mem.irq_lines();
         self.cp0[13] = (self.cp0[13] & !0xc00) | (i0 as u32) << 10 | (i1 as u32) << 11;
         if !i0 && !i1 {
-            self.mem.irq_dirty = false;
+            self.mem.clear_dirty();
             return;
         }
         let st = self.cp0[12];
-        if st & 1 == 0 || st & 0x1_0000 == 0 || st & 6 != 0 || self.cp0[13] & st & 0xc00 == 0 {
+        if !Self::irq_taken(st, i0, i1) {
             return;
         }
         self.irqs[if i0 && st & 0x400 != 0 { 0 } else { 1 }] += 1;
@@ -402,6 +330,13 @@ impl Cpu {
         self.cp0[12] |= 2;
         self.pc = 0x8000_0200;
         self.npc = 0x8000_0204;
+    }
+
+    /// Whether `try_irq` takes an interrupt with Status `st` and these lines (INT0, INT1): IE and EIE set, EXL and ERL
+    /// clear, and an asserted line's IM bit set.
+    #[inline(always)]
+    pub(crate) fn irq_taken(st: u32, i0: bool, i1: bool) -> bool {
+        st & 1 != 0 && st & 0x1_0000 != 0 && st & 6 == 0 && ((i0 as u32) << 10 | (i1 as u32) << 11) & st != 0
     }
 
     /// Vblank start: SetVSyncFlag outputs and INTC VBLANK_S.
@@ -426,7 +361,7 @@ impl Cpu {
         self.snd.field();
         let s = self.mem.hw32(crate::mem::INTC_STAT);
         self.mem.set_hw32(crate::mem::INTC_STAT, s | 4);
-        self.mem.irq_dirty = true;
+        self.mem.mark_dirty();
         // T1 counts BUSCLK/256 (the game's mode 0x82): one PAL field is 147456000 / 256 / 50 = 11520 counts, and the
         // 16-bit counter wraps. A game frame that spans vblanks reads that much more (the long-frame catch-up test).
         // NTSC (the USA disc): 9610 counts a field (`ver::t1_field`).
@@ -436,6 +371,9 @@ impl Cpu {
     fn stub(&mut self, pc: u32) -> bool {
         if self.cold.is_some() && crate::cold::stub(self, pc) {
             return true;
+        }
+        if pc == crate::POLL_HEAD {
+            self.poll_ff(pc);
         }
         if self.watch.contains(&pc) {
             *self.watch_hits.entry(pc).or_insert(0) += 1;
@@ -471,13 +409,17 @@ impl Cpu {
             if !f(self) {
                 return false;
             }
-            *self.stub_hits.entry(pc).or_insert(0) += 1;
+            if crate::mem::stats() {
+                *self.stub_hits.entry(pc).or_insert(0) += 1;
+            }
             let ra = self.g(31) as u32;
             self.pc = ra;
             self.npc = ra.wrapping_add(4);
             return true;
         }
-        *self.stub_hits.entry(pc).or_insert(0) += 1;
+        if crate::mem::stats() {
+            *self.stub_hits.entry(pc).or_insert(0) += 1;
+        }
         if pc == 0x11b1c8 {
             self.sif_call_rpc();
         }
@@ -500,7 +442,13 @@ impl Cpu {
     }
 
     #[doc(hidden)]
+    #[inline(never)]
     pub fn exec(&mut self, op: u32, pc: u32) {
+        self.exec_body(op, pc)
+    }
+
+    #[inline(always)]
+    fn exec_body(&mut self, op: u32, pc: u32) {
         let rs = ((op >> 21) & 31) as usize;
         let rt = ((op >> 16) & 31) as usize;
         let rd = ((op >> 11) & 31) as usize;
@@ -525,7 +473,7 @@ impl Cpu {
                     }
                     24 => self.sa = ((self.g(rs) as u32) & 0xf) ^ (immu as u32 & 0xf),
                     25 => self.sa = (((self.g(rs) as u32) & 7) ^ (immu as u32 & 7)) << 1,
-                    _ => self.halt(format!("unknown REGIMM {op:08x} at {pc:08x}")),
+                    _ => self.bad_insn("REGIMM", op, pc),
                 }
             }
             2 => self.npc = (self.pc & 0xf000_0000) | ((op & 0x03ff_ffff) << 2),
@@ -564,7 +512,7 @@ impl Cpu {
                 let v = (self.g(rt) & LDR_MASK[sh]) | (m >> (sh * 8));
                 self.s(rt, v);
             }
-            28 => self.mmi(op, pc, rs, rt, rd, sa),
+            28 => self.mmi_interp(op, pc, rs, rt, rd, sa),
             30 => {
                 let v = self.mem.rd128(ea & !15);
                 self.q(rt, v);
@@ -653,8 +601,31 @@ impl Cpu {
             57 => self.mem.wr32(ea, self.f[rt]),
             62 => self.mem.wr128(ea & !15, uw4(self.vf[rt])),
             63 => self.mem.wr64(ea, self.g(rt)),
-            _ => self.halt(format!("unknown op {op:08x} at {pc:08x}")),
+            _ => self.bad_insn("op", op, pc),
         }
+    }
+
+    // [PC] (speed) The interpreter's rare or big paths live in functions of their own, so the dispatcher loop (`run_rec`,
+    // which inlines `exec_body`) and `cop2` stay small: MMI and the VU0 macro decoders are inlined into compiled code only
+    // (inlining them into the loop measured slower).
+    #[inline(never)]
+    fn mmi_interp(&mut self, op: u32, pc: u32, rs: usize, rt: usize, rd: usize, sa: u32) {
+        self.mmi(op, pc, rs, rt, rd, sa)
+    }
+
+    #[inline(never)]
+    fn cop2_macro(&mut self, op: u32, pc: u32) {
+        if op & 0x3f >= 60 {
+            self.vu_special2(op, pc)
+        } else {
+            self.vu_special1(op, pc)
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn bad_insn(&mut self, kind: &str, op: u32, pc: u32) {
+        self.halt(format!("unknown {kind} {op:08x} at {pc:08x}"));
     }
 
     fn special(&mut self, op: u32, pc: u32, rs: usize, rt: usize, rd: usize, sa: u32) {
@@ -746,6 +717,7 @@ impl Cpu {
         }
     }
 
+    #[inline(never)]
     fn cop0(&mut self, op: u32, pc: u32, rs: usize, rt: usize, rd: usize) {
         match rs {
             0 => {
@@ -788,7 +760,7 @@ impl Cpu {
                     };
                     self.pc = t;
                     self.npc = t.wrapping_add(4);
-                    self.mem.irq_dirty = true;
+                    self.mem.mark_dirty();
                 }
                 _ => {}
             },
@@ -796,6 +768,7 @@ impl Cpu {
         }
     }
 
+    #[inline(never)]
     fn cop1(&mut self, op: u32, pc: u32, rs: usize, ft: usize, fs: usize, fd: usize) {
         match rs {
             0 => self.s(ft, sx32(self.f[fs])),
@@ -869,102 +842,22 @@ impl Cpu {
 
     // ---------------- VU0 macro mode ----------------
 
-    /// Macro-mode upper op: same arithmetic and flags as micro mode (vu.rs
-    /// vu_upper), committed at once. MAC/status/clip flags are what CFC2
-    /// reads (e.g. the collision range checks in seg_collide 0x1efbf0). [PC] (speed) Inlined into the recompiled
-    /// code's `vu_special1` / `vu_special2` calls, where `op` is a constant: the decode in `vu_upper` folds away
-    /// (CLIP / ITOF / FTOI / ABS / OPMULA ran the whole decoder per op, ~6% of the EE thread on Blarg).
-    #[inline(always)]
-    fn vu_macro_upper(&mut self, op: u32, pc: u32) {
-        let u = match self.vu_upper(op, self.vi[18]) {
-            Ok(u) => u,
-            Err(e) => return self.halt(format!("{e} at {pc:08x}")),
-        };
-        if u.dst == 32 {
-            self.awr(u.val, u.mask);
-        } else if u.dst < 32 {
-            self.vwr(u.dst, u.val, u.mask);
-        }
-        if let Some(m) = u.mac {
-            let st = ((m & 0xf != 0) as u32) | (((m & 0xf0 != 0) as u32) << 1);
-            self.vi[17] = m;
-            self.vi[16] = (self.vi[16] & !0xf) | st | (st << 6);
-        }
-        if let Some(c) = u.clip {
-            self.vi[18] = c;
-        }
-    }
-
-    /// A VU0 macro upper result (recompiled code): written to VF `dst` (32 = ACC, above = none) under `mask`;
-    /// with `mac`, the MAC flags and status. Same writes as `vu_macro_upper`.
-    #[inline(always)]
     #[doc(hidden)]
-    pub fn vu_out(&mut self, dst: usize, v: [u32; 4], mask: u32, mac: bool) {
-        if dst == 32 {
-            self.awr(v, mask);
-        } else if dst < 32 {
-            self.vwr(dst, v, mask);
+    #[inline(never)]
+    fn ctc2_vi(&mut self, rd: usize, v: u32, pc: u32) {
+        self.set_vi(rd, v);
+        if let Some(t) = self.vu0_trace.as_mut() {
+            t.push((1, rd as u32, v, pc));
         }
-        if mac {
-            let m = crate::vu::mac_of(v, mask);
-            let st = ((m & 0xf != 0) as u32) | (((m & 0xf0 != 0) as u32) << 1);
-            self.vi[17] = m;
-            self.vi[16] = (self.vi[16] & !0xf) | st | (st << 6);
-        }
-    }
-
-    #[inline(always)]
-    fn vwr(&mut self, d: usize, v: [u32; 4], dest: u32) {
-        if d == 0 {
-            return;
-        }
-        for i in 0..4 {
-            if dest & (8 >> i) != 0 {
-                self.vf[d][i] = v[i];
+        // A microprogram parked in a wait loop re-tests its condition (the EE's handshake).
+        if self.vu0_parked() {
+            if let Err(e) = self.vu0_resume() {
+                self.halt(format!("{e} (CTC2 vi{rd} at {pc:08x})"));
             }
         }
     }
-    #[inline(always)]
-    fn awr(&mut self, v: [u32; 4], dest: u32) {
-        for i in 0..4 {
-            if dest & (8 >> i) != 0 {
-                self.vacc[i] = v[i];
-            }
-        }
-    }
-    #[inline(always)]
-    pub fn fmac(&self, kind: u8, s: [u32; 4], t: [u32; 4]) -> [u32; 4] {
-        self.fmac_g::<false>(kind, s, t)
-    }
-    /// `fmac` with FAST = true: no MXCSR switching per op (a `fpu::ChopGuard` must be alive).
-    #[inline(always)]
-    pub fn fmac_g<const FAST: bool>(&self, kind: u8, s: [u32; 4], t: [u32; 4]) -> [u32; 4] {
-        match kind {
-            ADD => fpu::vadd_g::<FAST>(s, t),
-            SUB => fpu::vsub_g::<FAST>(s, t),
-            MUL => fpu::vmul_g::<FAST>(s, t),
-            MADD => fpu::vadd_g::<FAST>(self.vacc, fpu::vmul_g::<FAST>(s, t)),
-            MSUB => fpu::vsub_g::<FAST>(self.vacc, fpu::vmul_g::<FAST>(s, t)),
-            MAX => [fpu::max(s[0], t[0]), fpu::max(s[1], t[1]), fpu::max(s[2], t[2]), fpu::max(s[3], t[3])],
-            _ => [fpu::min(s[0], t[0]), fpu::min(s[1], t[1]), fpu::min(s[2], t[2]), fpu::min(s[3], t[3])],
-        }
-    }
-    fn vu_mem_addr(&self, vi: usize, lane: usize) -> usize {
-        ((self.vi[vi] as usize * 16) & 0xff0) + lane * 4
-    }
-    fn vu_rd(&self, a: usize) -> u32 {
-        u32::from_le_bytes(self.mem.vu0d[a..a + 4].try_into().unwrap())
-    }
-    fn vu_wr(&mut self, a: usize, v: u32) {
-        self.mem.vu0d[a..a + 4].copy_from_slice(&v.to_le_bytes());
-    }
-    pub fn set_vi(&mut self, i: usize, v: u32) {
-        if i != 0 {
-            self.vi[i] = if i < 16 { v & 0xffff } else { v };
-        }
-    }
 
-    #[doc(hidden)]
+    #[inline(never)]
     pub fn cop2(&mut self, op: u32, pc: u32, rs: usize, rt: usize, rd: usize) {
         match rs {
             1 => self.q(rt, uw4(self.vf[rd])),
@@ -993,18 +886,7 @@ impl Cpu {
                     31 => {
                         *self.syscalls.entry(-0x1000).or_insert(0) += 1;
                     }
-                    _ => {
-                        self.set_vi(rd, v);
-                        if let Some(t) = self.vu0_trace.as_mut() {
-                            t.push((1, rd as u32, v, pc));
-                        }
-                        // A microprogram parked in a wait loop re-tests its condition (the EE's handshake).
-                        if self.vu0_parked() {
-                            if let Err(e) = self.vu0_resume() {
-                                self.halt(format!("{e} (CTC2 vi{rd} at {pc:08x})"));
-                            }
-                        }
-                    }
+                    _ => self.ctc2_vi(rd, v, pc),
                 }
             }
             8 => {
@@ -1017,539 +899,11 @@ impl Cpu {
                     _ => self.branch(c, pc, op, true),
                 }
             }
-            16..=31 => {
-                if op & 0x3f >= 60 {
-                    self.vu_special2(op, pc)
-                } else {
-                    self.vu_special1(op, pc)
-                }
-            }
-            _ => self.halt(format!("unknown COP2 {op:08x} at {pc:08x}")),
-        }
-    }
-
-    #[doc(hidden)]
-    #[inline(always)]
-    pub fn vu_special1(&mut self, op: u32, pc: u32) {
-        let ft = ((op >> 16) & 31) as usize;
-        let fs = ((op >> 11) & 31) as usize;
-        let fd = ((op >> 6) & 31) as usize;
-        let f = (op & 0x3f) as usize;
-        match f {
-            0..=47 => self.vu_macro_upper(op, pc),
-            48 => self.set_vi(fd, self.vi[fs].wrapping_add(self.vi[ft])),
-            49 => self.set_vi(fd, self.vi[fs].wrapping_sub(self.vi[ft])),
-            50 => {
-                let im = ((((op >> 6) & 31) as i32) << 27 >> 27) as u32;
-                self.set_vi(ft, self.vi[fs].wrapping_add(im));
-            }
-            52 => self.set_vi(fd, self.vi[fs] & self.vi[ft]),
-            53 => self.set_vi(fd, self.vi[fs] | self.vi[ft]),
-            56 | 57 => {
-                let a = if f == 56 { (op >> 6) & 0x7fff } else { self.vi[27] };
-                *self.vu_calls.entry(a * 8).or_insert(0) += 1;
-                if let Err(e) = self.vu0_micro(a * 8) {
-                    self.halt(format!("{e} (VCALLMS from {pc:08x})"));
-                }
-            }
-            _ => self.halt(format!("unknown VU special1 {op:08x} at {pc:08x}")),
-        }
-    }
-
-    #[doc(hidden)]
-    #[inline(always)]
-    pub fn vu_special2(&mut self, op: u32, pc: u32) {
-        let dest = (op >> 21) & 15;
-        let ft = ((op >> 16) & 31) as usize;
-        let fs = ((op >> 11) & 31) as usize;
-        let f = ((op & 3) | ((op >> 4) & 0x7c)) as usize;
-        let s = self.vf[fs];
-        let fsf = ((op >> 21) & 3) as usize;
-        let ftf = ((op >> 23) & 3) as usize;
-        match f {
-            0..=46 => self.vu_macro_upper(op, pc),
-            47 | 59 => {}
-            48 => self.vwr(ft, s, dest),
-            49 => self.vwr(ft, [s[1], s[2], s[3], s[0]], dest),
-            52 | 54 => {
-                let is = fs;
-                if f == 54 {
-                    self.set_vi(is, self.vi[is].wrapping_sub(1));
-                }
-                let a = self.vu_mem_addr(is, 0);
-                let v = [self.vu_rd(a), self.vu_rd(a + 4), self.vu_rd(a + 8), self.vu_rd(a + 12)];
-                self.vwr(ft, v, dest);
-                if f == 52 {
-                    self.set_vi(is, self.vi[is].wrapping_add(1));
-                }
-            }
-            53 | 55 => {
-                let it = ft;
-                if f == 55 {
-                    self.set_vi(it, self.vi[it].wrapping_sub(1));
-                }
-                let a = self.vu_mem_addr(it, 0);
-                for i in 0..4 {
-                    if dest & (8 >> i) != 0 {
-                        self.vu_wr(a + i * 4, s[i]);
-                    }
-                }
-                if f == 53 {
-                    self.set_vi(it, self.vi[it].wrapping_add(1));
-                }
-            }
-            56 => self.vi[22] = fpu::div(s[fsf], self.vf[ft][ftf], CSR_CHOP),
-            57 => self.vi[22] = fpu::sqrt(self.vf[ft][ftf], CSR_CHOP),
-            58 => self.vi[22] = fpu::rsqrt(s[fsf], self.vf[ft][ftf], CSR_CHOP),
-            60 => self.set_vi(ft, s[fsf] & 0xffff),
-            61 => {
-                let v = self.vi[fs] as u16 as i16 as i32 as u32;
-                self.vwr(ft, [v; 4], dest);
-            }
-            62 => {
-                let lane = (0..4).find(|i| dest & (8 >> i) != 0).unwrap_or(0);
-                let a = self.vu_mem_addr(fs, lane);
-                let v = self.vu_rd(a) & 0xffff;
-                self.set_vi(ft, v);
-            }
-            63 => {
-                let v = self.vi[ft] & 0xffff;
-                for i in 0..4 {
-                    if dest & (8 >> i) != 0 {
-                        let a = self.vu_mem_addr(fs, i);
-                        self.vu_wr(a, v);
-                    }
-                }
-            }
-            64 | 65 => {
-                if f == 64 {
-                    let r = self.vi[20];
-                    let x = (r >> 4) & 1;
-                    let y = (r >> 22) & 1;
-                    let r = (r << 1) ^ x ^ y;
-                    self.vi[20] = (r & 0x7f_ffff) | 0x3f80_0000;
-                }
-                let r = self.vi[20];
-                self.vwr(ft, [r; 4], dest);
-            }
-            66 => self.vi[20] = 0x3f80_0000 | (s[fsf] & 0x7f_ffff),
-            67 => self.vi[20] = 0x3f80_0000 | ((self.vi[20] ^ s[fsf]) & 0x7f_ffff),
-            _ => self.halt(format!("unknown VU special2 {op:08x} at {pc:08x}")),
+            16..=31 => self.cop2_macro(op, pc),
+            _ => self.bad_insn("COP2", op, pc),
         }
     }
 
     // ---------------- MMI ----------------
 
-    #[doc(hidden)]
-    // Inlined: recompiled code calls these with constant operands, so each call site folds to its one operation
-    // instead of a decode at run time (same code, same results).
-    #[inline(always)]
-    pub fn mmi(&mut self, op: u32, pc: u32, rs: usize, rt: usize, rd: usize, sa: u32) {
-        let (a, b) = (self.r[rs], self.r[rt]);
-        match op & 0x3f {
-            0 | 1 | 32 | 33 => {
-                let up = op & 0x3f >= 32;
-                let sh = if up { 64 } else { 0 };
-                let acc = ((self.lo >> sh) as u32 as u64) | (((self.hi >> sh) as u32 as u64) << 32);
-                let (x, y) = (if up { w4(a)[2] } else { a as u32 }, if up { w4(b)[2] } else { b as u32 });
-                let p = if op & 1 == 0 {
-                    (acc as i64).wrapping_add((x as i32 as i64) * (y as i32 as i64)) as u64
-                } else {
-                    acc.wrapping_add((x as u64) * (y as u64))
-                };
-                let (l, h) = (sx32(p as u32), sx32((p >> 32) as u32));
-                if up {
-                    self.set_lh1(l, h)
-                } else {
-                    self.set_lh(l, h)
-                }
-                self.s(rd, l);
-            }
-            4 => {
-                if rd != 0 {
-                    let w = w4(a);
-                    let mut r = w4(self.r[rd]);
-                    for n in 0..2 {
-                        let v = w[n] as i32;
-                        let v = if v < 0 { !v } else { v };
-                        r[n] = if v == 0 { 31 } else { v.leading_zeros() - 1 };
-                    }
-                    self.r[rd] = uw4(r);
-                }
-            }
-            8 => self.mmi0(op, pc, a, b, rd, sa),
-            9 => self.mmi2(op, pc, a, b, rs, rd, sa),
-            16 => self.s(rd, (self.hi >> 64) as u64),
-            17 => self.hi = (self.hi & LO64) | ((a as u64 as u128) << 64),
-            18 => self.s(rd, (self.lo >> 64) as u64),
-            19 => self.lo = (self.lo & LO64) | ((a as u64 as u128) << 64),
-            24 => {
-                let p = (a as u32 as i32 as i64) * (b as u32 as i32 as i64);
-                self.set_lh1(sx32(p as u32), sx32((p >> 32) as u32));
-                self.s(rd, sx32(p as u32));
-            }
-            25 => {
-                let p = (a as u32 as u64) * (b as u32 as u64);
-                self.set_lh1(sx32(p as u32), sx32((p >> 32) as u32));
-                self.s(rd, sx32(p as u32));
-            }
-            26 => {
-                let (l, h) = div32(a as u32, b as u32);
-                self.set_lh1(l, h);
-            }
-            27 => {
-                let (l, h) = divu32(a as u32, b as u32);
-                self.set_lh1(l, h);
-            }
-            40 => self.mmi1(op, pc, a, b, rd, sa),
-            41 => self.mmi3(op, pc, a, b, rs, rd, sa),
-            48 => {
-                let (l, h) = (w4(self.lo), w4(self.hi));
-                let v = match sa {
-                    0 => uw4([l[0], h[0], l[2], h[2]]),
-                    1 => uw4([l[1], h[1], l[3], h[3]]),
-                    2 => {
-                        let x = ((h[0] as u64) << 32 | l[0] as u64) as i64;
-                        let y = ((h[2] as u64) << 32 | l[2] as u64) as i64;
-                        (sx32(ssw(x)) as u128) | ((sx32(ssw(y)) as u128) << 64)
-                    }
-                    3 => {
-                        let (l, h) = (h8(self.lo), h8(self.hi));
-                        uh8([l[0], l[2], h[0], h[2], l[4], l[6], h[4], h[6]])
-                    }
-                    4 => {
-                        let (l, h) = (w4(self.lo), w4(self.hi));
-                        let c = |v: u32| ssh(v as i32);
-                        uh8([c(l[0]), c(l[1]), c(h[0]), c(h[1]), c(l[2]), c(l[3]), c(h[2]), c(h[3])])
-                    }
-                    _ => {
-                        self.halt(format!("unknown PMFHL {op:08x} at {pc:08x}"));
-                        return;
-                    }
-                };
-                self.q(rd, v);
-            }
-            49 => {
-                if sa == 0 {
-                    let w = w4(a);
-                    let (mut l, mut h) = (w4(self.lo), w4(self.hi));
-                    l[0] = w[0];
-                    h[0] = w[1];
-                    l[2] = w[2];
-                    h[2] = w[3];
-                    self.lo = uw4(l);
-                    self.hi = uw4(h);
-                } else {
-                    self.halt(format!("unknown PMTHL {op:08x} at {pc:08x}"));
-                }
-            }
-            52 => self.q(rd, maph(b, 0, |x, _| x << (sa & 15))),
-            54 => self.q(rd, maph(b, 0, |x, _| x >> (sa & 15))),
-            55 => self.q(rd, maph(b, 0, |x, _| ((x as i16) >> (sa & 15)) as u16)),
-            60 => self.q(rd, mapw(b, 0, |x, _| x << sa)),
-            62 => self.q(rd, mapw(b, 0, |x, _| x >> sa)),
-            63 => self.q(rd, mapw(b, 0, |x, _| ((x as i32) >> sa) as u32)),
-            _ => self.halt(format!("unknown MMI {op:08x} at {pc:08x}")),
-        }
-    }
-
-    #[inline(always)]
-    fn mmi0(&mut self, op: u32, pc: u32, a: u128, b: u128, rd: usize, sa: u32) {
-        let v = match sa {
-            0 => mapw(a, b, |x, y| x.wrapping_add(y)),
-            1 => mapw(a, b, |x, y| x.wrapping_sub(y)),
-            2 => mapw(a, b, |x, y| if (x as i32) > (y as i32) { !0 } else { 0 }),
-            3 => mapw(a, b, |x, y| if (x as i32) > (y as i32) { x } else { y }),
-            4 => maph(a, b, |x, y| x.wrapping_add(y)),
-            5 => maph(a, b, |x, y| x.wrapping_sub(y)),
-            6 => maph(a, b, |x, y| if (x as i16) > (y as i16) { !0 } else { 0 }),
-            7 => maph(a, b, |x, y| if (x as i16) > (y as i16) { x } else { y }),
-            8 => mapb(a, b, |x, y| x.wrapping_add(y)),
-            9 => mapb(a, b, |x, y| x.wrapping_sub(y)),
-            10 => mapb(a, b, |x, y| if (x as i8) > (y as i8) { !0 } else { 0 }),
-            16 => mapw(a, b, |x, y| ssw(x as i32 as i64 + y as i32 as i64)),
-            17 => mapw(a, b, |x, y| ssw(x as i32 as i64 - y as i32 as i64)),
-            18 => {
-                let (x, y) = (w4(a), w4(b));
-                uw4([y[0], x[0], y[1], x[1]])
-            }
-            19 => {
-                let (x, y) = (w4(a), w4(b));
-                uw4([y[0], y[2], x[0], x[2]])
-            }
-            20 => maph(a, b, |x, y| ssh(x as i16 as i32 + y as i16 as i32)),
-            21 => maph(a, b, |x, y| ssh(x as i16 as i32 - y as i16 as i32)),
-            22 => {
-                let (x, y) = (h8(a), h8(b));
-                uh8([y[0], x[0], y[1], x[1], y[2], x[2], y[3], x[3]])
-            }
-            23 => {
-                let (x, y) = (h8(a), h8(b));
-                uh8([y[0], y[2], y[4], y[6], x[0], x[2], x[4], x[6]])
-            }
-            24 => mapb(a, b, |x, y| ssb(x as i8 as i32 + y as i8 as i32)),
-            25 => mapb(a, b, |x, y| ssb(x as i8 as i32 - y as i8 as i32)),
-            26 => {
-                let (x, y) = (a.to_le_bytes(), b.to_le_bytes());
-                let mut r = [0u8; 16];
-                for i in 0..8 {
-                    r[2 * i] = y[i];
-                    r[2 * i + 1] = x[i];
-                }
-                u128::from_le_bytes(r)
-            }
-            27 => {
-                let (x, y) = (a.to_le_bytes(), b.to_le_bytes());
-                let mut r = [0u8; 16];
-                for i in 0..8 {
-                    r[i] = y[2 * i];
-                    r[8 + i] = x[2 * i];
-                }
-                u128::from_le_bytes(r)
-            }
-            30 => mapw(b, 0, |x, _| (x & 0x1f) << 3 | (x >> 5 & 0x1f) << 11 | (x >> 10 & 0x1f) << 19 | (x >> 15 & 1) << 31),
-            31 => mapw(b, 0, |x, _| x >> 3 & 0x1f | (x >> 11 & 0x1f) << 5 | (x >> 19 & 0x1f) << 10 | (x >> 31) << 15),
-            _ => {
-                self.halt(format!("unknown MMI0 {op:08x} at {pc:08x}"));
-                return;
-            }
-        };
-        self.q(rd, v);
-    }
-
-    #[inline(always)]
-    fn mmi1(&mut self, op: u32, pc: u32, a: u128, b: u128, rd: usize, sa: u32) {
-        let v = match sa {
-            1 => mapw(0, b, |_, y| if y == 0x8000_0000 { 0x7fff_ffff } else { (y as i32).unsigned_abs() }),
-            2 => mapw(a, b, |x, y| if x == y { !0 } else { 0 }),
-            3 => mapw(a, b, |x, y| if (x as i32) < (y as i32) { x } else { y }),
-            5 => maph(0, b, |_, y| if y == 0x8000 { 0x7fff } else { (y as i16).unsigned_abs() }),
-            6 => maph(a, b, |x, y| if x == y { !0 } else { 0 }),
-            7 => maph(a, b, |x, y| if (x as i16) < (y as i16) { x } else { y }),
-            10 => mapb(a, b, |x, y| if x == y { !0 } else { 0 }),
-            16 => mapw(a, b, |x, y| x.saturating_add(y)),
-            17 => mapw(a, b, |x, y| x.saturating_sub(y)),
-            18 => {
-                let (x, y) = (w4(a), w4(b));
-                uw4([y[2], x[2], y[3], x[3]])
-            }
-            20 => maph(a, b, |x, y| x.saturating_add(y)),
-            21 => maph(a, b, |x, y| x.saturating_sub(y)),
-            22 => {
-                let (x, y) = (h8(a), h8(b));
-                uh8([y[4], x[4], y[5], x[5], y[6], x[6], y[7], x[7]])
-            }
-            24 => mapb(a, b, |x, y| x.saturating_add(y)),
-            25 => mapb(a, b, |x, y| x.saturating_sub(y)),
-            26 => {
-                let (x, y) = (a.to_le_bytes(), b.to_le_bytes());
-                let mut r = [0u8; 16];
-                for i in 0..8 {
-                    r[2 * i] = y[8 + i];
-                    r[2 * i + 1] = x[8 + i];
-                }
-                u128::from_le_bytes(r)
-            }
-            27 => {
-                let s = (self.sa & 15) * 8;
-                if s == 0 {
-                    b
-                } else {
-                    (b >> s) | (a << (128 - s))
-                }
-            }
-            _ => {
-                self.halt(format!("unknown MMI1 {op:08x} at {pc:08x}"));
-                return;
-            }
-        };
-        self.q(rd, v);
-    }
-
-    #[inline(always)]
-    fn mmi2(&mut self, op: u32, pc: u32, a: u128, b: u128, rs: usize, rd: usize, sa: u32) {
-        let _ = rs;
-        let v = match sa {
-            0 | 4 | 12 => {
-                let (x, y) = (w4(a), w4(b));
-                let (l, h) = (w4(self.lo), w4(self.hi));
-                let mut out = [0u64; 2];
-                let (mut nl, mut nh) = ([0u64; 2], [0u64; 2]);
-                for n in 0..2 {
-                    let p = (x[2 * n] as i32 as i64) * (y[2 * n] as i32 as i64);
-                    let acc = ((h[2 * n] as u64) << 32 | l[2 * n] as u64) as i64;
-                    let r = match sa {
-                        0 => acc.wrapping_add(p),
-                        4 => acc.wrapping_sub(p),
-                        _ => p,
-                    };
-                    out[n] = r as u64;
-                    nl[n] = sx32(r as u32);
-                    nh[n] = sx32((r >> 32) as u32);
-                }
-                self.lo = nl[0] as u128 | (nl[1] as u128) << 64;
-                self.hi = nh[0] as u128 | (nh[1] as u128) << 64;
-                out[0] as u128 | (out[1] as u128) << 64
-            }
-            2 | 3 => {
-                let (x, y) = (w4(a), w4(b));
-                let f = |v: u32, s: u32| if sa == 2 { v << (s & 31) } else { v >> (s & 31) };
-                sx32(f(y[0], x[0])) as u128 | (sx32(f(y[2], x[2])) as u128) << 64
-            }
-            8 => self.hi,
-            9 => self.lo,
-            10 => {
-                let (x, y) = (h8(a), h8(b));
-                uh8([y[0], x[4], y[1], x[5], y[2], x[6], y[3], x[7]])
-            }
-            13 => {
-                let (x, y) = (w4(a), w4(b));
-                let (mut nl, mut nh) = ([0u64; 2], [0u64; 2]);
-                for n in 0..2 {
-                    let (q, r) = div32(x[2 * n], y[2 * n]);
-                    nl[n] = q;
-                    nh[n] = r;
-                }
-                self.lo = nl[0] as u128 | (nl[1] as u128) << 64;
-                self.hi = nh[0] as u128 | (nh[1] as u128) << 64;
-                return;
-            }
-            14 => (b & LO64) | (a << 64),
-            16 | 28 => {
-                let (x, y) = (h8(a), h8(b));
-                let (mut l, mut h) = (w4(self.lo), w4(self.hi));
-                let p = |i: usize| (x[i] as i16 as i32).wrapping_mul(y[i] as i16 as i32) as u32;
-                let acc = sa == 16;
-                let add = |o: u32, v: u32| if acc { o.wrapping_add(v) } else { v };
-                l[0] = add(l[0], p(0));
-                l[1] = add(l[1], p(1));
-                h[0] = add(h[0], p(2));
-                h[1] = add(h[1], p(3));
-                l[2] = add(l[2], p(4));
-                l[3] = add(l[3], p(5));
-                h[2] = add(h[2], p(6));
-                h[3] = add(h[3], p(7));
-                self.lo = uw4(l);
-                self.hi = uw4(h);
-                uw4([l[0], h[0], l[2], h[2]])
-            }
-            18 => a & b,
-            19 => a ^ b,
-            26 => {
-                let y = h8(b);
-                uh8([y[2], y[1], y[0], y[3], y[6], y[5], y[4], y[7]])
-            }
-            27 => {
-                let y = h8(b);
-                uh8([y[3], y[2], y[1], y[0], y[7], y[6], y[5], y[4]])
-            }
-            30 => {
-                let y = w4(b);
-                uw4([y[2], y[1], y[0], y[3]])
-            }
-            31 => {
-                let y = w4(b);
-                uw4([y[1], y[2], y[0], y[3]])
-            }
-            _ => {
-                self.halt(format!("unknown MMI2 {op:08x} at {pc:08x}"));
-                return;
-            }
-        };
-        self.q(rd, v);
-    }
-
-    #[inline(always)]
-    fn mmi3(&mut self, op: u32, pc: u32, a: u128, b: u128, rs: usize, rd: usize, sa: u32) {
-        let _ = rs;
-        let v = match sa {
-            0 | 12 => {
-                let (x, y) = (w4(a), w4(b));
-                let (l, h) = (w4(self.lo), w4(self.hi));
-                let mut out = [0u64; 2];
-                let (mut nl, mut nh) = ([0u64; 2], [0u64; 2]);
-                for n in 0..2 {
-                    let p = (x[2 * n] as u64) * (y[2 * n] as u64);
-                    let acc = (h[2 * n] as u64) << 32 | l[2 * n] as u64;
-                    let r = if sa == 0 { acc.wrapping_add(p) } else { p };
-                    out[n] = r;
-                    nl[n] = sx32(r as u32);
-                    nh[n] = sx32((r >> 32) as u32);
-                }
-                self.lo = nl[0] as u128 | (nl[1] as u128) << 64;
-                self.hi = nh[0] as u128 | (nh[1] as u128) << 64;
-                out[0] as u128 | (out[1] as u128) << 64
-            }
-            3 => {
-                let (x, y) = (w4(a), w4(b));
-                let f = |v: u32, s: u32| ((v as i32) >> (s & 31)) as u32;
-                sx32(f(y[0], x[0])) as u128 | (sx32(f(y[2], x[2])) as u128) << 64
-            }
-            8 => {
-                self.hi = a;
-                return;
-            }
-            9 => {
-                self.lo = a;
-                return;
-            }
-            10 => {
-                let (x, y) = (h8(a), h8(b));
-                uh8([y[0], x[0], y[2], x[2], y[4], x[4], y[6], x[6]])
-            }
-            13 => {
-                let (x, y) = (w4(a), w4(b));
-                let (mut nl, mut nh) = ([0u64; 2], [0u64; 2]);
-                for n in 0..2 {
-                    let (q, r) = divu32(x[2 * n], y[2 * n]);
-                    nl[n] = q;
-                    nh[n] = r;
-                }
-                self.lo = nl[0] as u128 | (nl[1] as u128) << 64;
-                self.hi = nh[0] as u128 | (nh[1] as u128) << 64;
-                return;
-            }
-            14 => (a >> 64) | (b & HI64),
-            18 => a | b,
-            19 => !(a | b),
-            26 => {
-                let y = h8(b);
-                uh8([y[0], y[2], y[1], y[3], y[4], y[6], y[5], y[7]])
-            }
-            27 => {
-                let y = h8(b);
-                uh8([y[0], y[0], y[0], y[0], y[4], y[4], y[4], y[4]])
-            }
-            30 => {
-                let y = w4(b);
-                uw4([y[0], y[2], y[1], y[3]])
-            }
-            _ => {
-                self.halt(format!("unknown MMI3 {op:08x} at {pc:08x}"));
-                return;
-            }
-        };
-        self.q(rd, v);
-    }
-}
-
-#[inline]
-pub fn div32(a: u32, b: u32) -> (u64, u64) {
-    let (a, b) = (a as i32, b as i32);
-    if a == i32::MIN && b == -1 {
-        (sx32(0x8000_0000), 0)
-    } else if b != 0 {
-        (sx32(a.wrapping_div(b) as u32), sx32(a.wrapping_rem(b) as u32))
-    } else {
-        (if a < 0 { 1 } else { u64::MAX }, sx32(a as u32))
-    }
-}
-
-#[inline]
-pub fn divu32(a: u32, b: u32) -> (u64, u64) {
-    if b != 0 {
-        (sx32(a / b), sx32(a % b))
-    } else {
-        (u64::MAX, sx32(a))
-    }
 }

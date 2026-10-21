@@ -31,6 +31,40 @@ struct Tag {
     j: u32,
 }
 
+/// [PC] (speed) Recycled VIF1 word buffers: the consumer of a `Job::Vif1` hands its word Vec back with `recycle_words`, and
+/// `Mem::vif1_kick` takes one with `take_words` instead of allocating ~3 MB (and page-faulting it in) every kick. At most 4 are kept;
+/// a consumer that never recycles only costs the old allocation. Contents are never read across kicks (len is reset to 0).
+static WORDS_POOL: std::sync::Mutex<Vec<Vec<u32>>> = std::sync::Mutex::new(Vec::new());
+
+/// An empty word Vec with room for about `want` words (the biggest recycled buffer, else a fresh one).
+pub fn take_words(want: usize) -> Vec<u32> {
+    let got = WORDS_POOL.lock().ok().and_then(|mut p| {
+        let i = (0..p.len()).max_by_key(|&i| p[i].capacity())?;
+        Some(p.swap_remove(i))
+    });
+    match got {
+        Some(mut v) => {
+            v.clear();
+            v.reserve(want);
+            v
+        }
+        None => Vec::with_capacity(want),
+    }
+}
+
+/// Gives a finished VIF1 word buffer back (small ones are just dropped).
+pub fn recycle_words(mut v: Vec<u32>) {
+    if v.capacity() < 1 << 16 {
+        return;
+    }
+    v.clear();
+    if let Ok(mut p) = WORDS_POOL.lock() {
+        if p.len() < 4 {
+            p.push(v);
+        }
+    }
+}
+
 /// A packet for the capture: a VIF1 stream (words, block marks) or GIF path 3 qwords, with the DISPFB then.
 pub enum Job {
     Vif1(Vec<u32>, Vec<(usize, u32)>, u64),
@@ -192,6 +226,7 @@ impl Gs {
                 self.vif1_reset();
                 self.vif1(&w, &marks);
                 self.blocks.clear();
+                recycle_words(w);
             }
             Job::Gif(qs, d) => {
                 self.dispfb = d;

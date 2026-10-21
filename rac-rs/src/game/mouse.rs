@@ -3,23 +3,7 @@
 //! Particle effects (shadow, dust, the type 0x35 burst) are NOV-14.3b: their shared-RNG draws are taken here in
 //! retail order, the effects are not spawned.
 
-use super::foes::self;
-use super::novalis::MOUSE;
-use super::novalis::MOUSE_SHOT;
-use super::{Event, Game, Kind};
-use crate::gameplay::self;
-use crate::gameplay::PAL_DT;
-use crate::gameplay::PAL_DT2;
-use crate::particles::Rng;
-use crate::physics::add;
-use crate::physics::length;
-use crate::physics::scale;
-use crate::physics::sub;
-use crate::physics::MobySolid;
-use crate::physics::Scene;
-use crate::physics::World;
-use crate::physics::V3;
-use std::f32::consts::{PI, TAU};
+use std::f32::consts::PI;
 
 
 

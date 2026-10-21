@@ -10,7 +10,6 @@
 use crate::mesh::Mesh;
 
 /// Which Graphics row turns the ice on (`ICE_GATE`; Water = only while Water is Enhanced too).
-#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Gate {
 	Lighting,

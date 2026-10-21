@@ -8,19 +8,41 @@
 
 use std::collections::HashMap;
 
-pub const RAM: usize = 32 << 20;
+/// [PC] (speed) Whether the report counters count: `Mem::hw_reads` / `hw_writes` / `dma_kicks` / `kick_pcs` and
+/// `Cpu::stub_hits` / `vu_calls`. Only reports read them (the gate tool, examples coldboot / gsstat / travel, which switch it
+/// on); in the game the hash-map update on every hardware access, stub call and VU0 micro call was pure overhead.
+pub static STATS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[inline(always)]
+pub fn stats() -> bool {
+    STATS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub use ee_core::mem::RAM;
 
 /// T1_COUNT counts in one PAL field (BUSCLK / 256 / 50).
 pub const T1_FIELD: u32 = 11520;
 
+/// `#[repr(C)]`: the first fields are ee-core's `Mem` (the generated code's memory fast path).
+#[repr(C)]
 pub struct Mem {
     pub ram: Vec<u8>,
     pub spr: Vec<u8>,
+    pub vu0d: Vec<u8>,
+    /// Debug: log CPU writes into VU0 data memory too (env COLD_WATCH_VU0D); `vu0d_cpu_writes` counts them (all of
+    /// them while the log is on; otherwise recompiled code stores there directly, see rec/mod.rs `fbuf`).
+    pub watch_vu: bool,
+    /// An interrupt line may be asserted: the CPU re-tests INTC/DMAC.
+    pub irq_dirty: bool,
+    /// When the pending VIF1 stop becomes visible (u64::MAX: none).
+    pub due: u64,
+    /// Poll limit: 0 while `irq_dirty`, else `due` (the generated code's block-entry test is `icount + n <= limit`).
+    /// Written only through `mark_dirty`, `clear_dirty`, `set_due`.
+    pub limit: u64,
     pub vu0m: Vec<u8>,
     /// Changes (`vu0m_changed`) with every write to VU0 micro memory: VIF0 MPG, EE stores, state loads and restores;
     /// code that writes `vu0m` directly calls `vu0m_changed` itself. Not machine state (never saved).
     pub vu0m_gen: u32,
-    pub vu0d: Vec<u8>,
     pub vu1m: Vec<u8>,
     pub vu1d: Vec<u8>,
     pub hw: Vec<u8>,
@@ -38,17 +60,10 @@ pub struct Mem {
     /// Debug: scratchpad byte range (lo, hi) whose writes (CPU and SPR DMA) are logged into `watch_log` (last 64).
     pub watch: Option<(usize, usize)>,
     pub watch_log: std::collections::VecDeque<String>,
-    /// Debug: log CPU writes into VU0 data memory too (env COLD_WATCH_VU0D); `vu0d_cpu_writes` counts them (all of
-    /// them while the log is on; otherwise recompiled code stores there directly, see rec/mod.rs `fbuf`).
-    pub watch_vu: bool,
     pub vu0d_cpu_writes: u64,
     pub gs_field: u32,
     /// Instruction count (set by the CPU every step).
     pub now: u64,
-    /// An interrupt line may be asserted: the CPU re-tests INTC/DMAC.
-    pub irq_dirty: bool,
-    /// When the pending VIF1 stop becomes visible (u64::MAX: none).
-    pub due: u64,
     /// Cold boot field timer (EE instruction count of the next forced vblank; u64::MAX: none, savestate runs).
     pub tick: u64,
     /// When the pending VIF1 stop (`vif1_pend`) is due; `due` is the earlier of this and `tick`.
@@ -62,6 +77,9 @@ pub struct Mem {
     pub gsc: Option<Box<crate::gs::Gs>>,
     /// The GS capture on its own thread (`Machine::capture_gs_async`): the packets go there instead.
     pub gsq: Option<std::sync::mpsc::Sender<crate::gs::Job>>,
+    /// [PC] (speed) Words the last captured VIF1 chain copied: the next one's buffer starts that large instead of
+    /// growing (and recopying) from empty. Only a capacity, never state.
+    pub vif1_words: usize,
 }
 
 pub const INTC_STAT: u32 = 0x1000_f000;
@@ -80,6 +98,13 @@ enum Loc {
 }
 
 #[inline(always)]
+/// [PC] (speed) The scratchpad offset of an `n`-byte access at `a` that lies wholly inside it (`map`'s `Loc::Spr`).
+#[inline(always)]
+fn spr_at(a: u32, n: usize) -> Option<usize> {
+    let i = (a & 0x3fff) as usize;
+    (a & 0xffff_c000 == 0x7000_0000 && i + n <= 0x4000).then_some(i)
+}
+
 fn map(a: u32) -> Loc {
     if a & 0xf000_0000 == 0x7000_0000 {
         return if a & 0x0fff_ffff < 0x4000 { Loc::Spr((a & 0x3fff) as usize) } else { Loc::Bad };
@@ -104,6 +129,117 @@ fn map(a: u32) -> Loc {
     }
 }
 
+/// Write-watched RAM for the picture thread's mirror (speed lane A, rac-rs `retail/snap_pipe.rs`).
+///
+/// `watch_next()` makes the next `Mem::new` allocate its RAM with `VirtualAlloc(MEM_WRITE_WATCH)`; the OS then records which
+/// 4 KB pages any write touched (CPU stores of the recompiled code, `memcpy`, file reads into the buffer), and `Mem::mirror_to`
+/// copies exactly those pages into a second machine. The Vec is built from the VirtualAlloc pointer: it must never be dropped
+/// or grown (the live machine's `Cpu` is leaked in a `ManuallyDrop`, see `Machine`). Without Windows, or when the flag is not
+/// set, RAM is an ordinary Vec and `mirror_to` copies it whole.
+pub mod watch {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    static NEXT: AtomicBool = AtomicBool::new(false);
+    /// Start address of the write-watched RAM (0: none).
+    pub static BASE: AtomicUsize = AtomicUsize::new(0);
+
+    /// The next `Mem::new` gets write-watched RAM (consumed by it).
+    pub fn watch_next() {
+        NEXT.store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(windows)]
+    mod sys {
+        extern "system" {
+            pub fn VirtualAlloc(addr: *mut u8, size: usize, ty: u32, prot: u32) -> *mut u8;
+            pub fn GetWriteWatch(flags: u32, base: *mut u8, size: usize, addrs: *mut *mut u8, count: *mut usize, gran: *mut u32) -> u32;
+            pub fn GetModuleHandleA(name: *const u8) -> *mut u8;
+            pub fn GetProcAddress(module: *mut u8, name: *const u8) -> *mut u8;
+        }
+    }
+
+    /// Running under Wine / Proton (the Windows exe on Linux, the Steam Deck): ntdll exports `wine_get_version` there.
+    /// Wine emulates MEM_WRITE_WATCH with page protection and a fault on the first write to each watched page, so on Wine the
+    /// write watch costs the EE thread about one fault per dirty page and field: not worth it, see `available`.
+    pub fn is_wine() -> bool {
+        #[cfg(windows)]
+        unsafe {
+            let h = sys::GetModuleHandleA(b"ntdll.dll\0".as_ptr());
+            return !h.is_null() && !sys::GetProcAddress(h, b"wine_get_version\0".as_ptr()).is_null();
+        }
+        #[allow(unreachable_code)]
+        false
+    }
+
+    /// The OS write watch is cheap here: native Windows only (not Wine, not Linux/macOS builds).
+    pub fn available() -> bool {
+        cfg!(windows) && !is_wine()
+    }
+
+    pub(super) fn new_ram() -> Vec<u8> {
+        #[cfg(windows)]
+        if NEXT.swap(false, Ordering::SeqCst) {
+            // MEM_COMMIT | MEM_RESERVE | MEM_WRITE_WATCH, PAGE_READWRITE: zeroed, like `vec![0; RAM]`.
+            let p = unsafe { sys::VirtualAlloc(std::ptr::null_mut(), super::RAM, 0x1000 | 0x2000 | 0x20_0000, 4) };
+            if !p.is_null() {
+                BASE.store(p as usize, Ordering::SeqCst);
+                return unsafe { Vec::from_raw_parts(p, super::RAM, super::RAM) };
+            }
+        }
+        vec![0; super::RAM]
+    }
+
+    /// The 4 KB page indexes of `ram` written since the last call (or since `new_ram`), and the write watch is reset.
+    /// None: this RAM is not write-watched (or the call failed): the caller copies everything.
+    #[allow(unused_variables)]
+    pub fn dirty_pages(ram: &[u8]) -> Option<Vec<u32>> {
+        #[cfg(windows)]
+        {
+            if ram.as_ptr() as usize != BASE.load(Ordering::SeqCst) || ram.len() != super::RAM {
+                return None;
+            }
+            let mut addrs = vec![std::ptr::null_mut::<u8>(); super::RAM / 4096];
+            let mut n = addrs.len();
+            let mut gran = 0u32;
+            // WRITE_WATCH_FLAG_RESET = 1
+            let r = unsafe { sys::GetWriteWatch(1, ram.as_ptr() as *mut u8, ram.len(), addrs.as_mut_ptr(), &mut n, &mut gran) };
+            if r != 0 || gran != 4096 || n > addrs.len() {
+                return None;
+            }
+            let b = ram.as_ptr() as usize;
+            return Some(addrs[..n].iter().map(|&a| ((a as usize - b) / 4096) as u32).collect());
+        }
+        #[allow(unreachable_code)]
+        None
+    }
+}
+
+impl Mem {
+    /// Brings the mirror `dst` to this memory's RAM, scratchpad and GS registers (the only memories the picture path reads).
+    /// `fresh`: the first call (or a mirror that was not kept in step): all of RAM is copied, and the write watch is reset
+    /// first so the next call starts from this state. Else only the pages written since the previous call are copied
+    /// (the whole RAM when the write watch is not available). Returns the RAM bytes copied.
+    /// The host must have this machine parked (between `Machine::frame` calls).
+    pub fn mirror_to(&self, dst: &mut Mem, fresh: &mut bool) -> usize {
+        let pages = watch::dirty_pages(&self.ram);
+        dst.spr.copy_from_slice(&self.spr);
+        dst.gs.copy_from_slice(&self.gs);
+        match pages {
+            Some(p) if !*fresh => {
+                for &pg in &p {
+                    let o = pg as usize * 4096;
+                    dst.ram[o..o + 4096].copy_from_slice(&self.ram[o..o + 4096]);
+                }
+                p.len() * 4096
+            }
+            _ => {
+                dst.ram.copy_from_slice(&self.ram);
+                *fresh = false;
+                self.ram.len()
+            }
+        }
+    }
+}
+
 impl Mem {
     /// Call after writing `vu0m` directly (the native prog0's "this is prog0" verdict is dropped, see vu0aot.rs).
     pub fn vu0m_changed(&mut self) {
@@ -112,7 +248,7 @@ impl Mem {
 
     pub fn new() -> Mem {
         Mem {
-            ram: vec![0; RAM],
+            ram: watch::new_ram(),
             spr: vec![0; 0x4000],
             vu0m: vec![0; 0x1000],
             vu0m_gen: 0,
@@ -135,6 +271,7 @@ impl Mem {
             now: 0,
             irq_dirty: true,
             due: u64::MAX,
+            limit: 0,
             tick: u64::MAX,
             dma_due: 0,
             dma_delay: 20_000,
@@ -144,6 +281,7 @@ impl Mem {
             gsc: None,
             gsq: None,
             gs_field: 0,
+            vif1_words: 0,
         }
     }
 
@@ -166,7 +304,10 @@ impl Mem {
             let i = a as usize;
             u16::from_le_bytes(self.ram[i..i + 2].try_into().unwrap())
         } else {
-            self.rd(a, 2) as u16
+            match spr_at(a, 2) {
+                Some(i) => u16::from_le_bytes(self.spr[i..i + 2].try_into().unwrap()),
+                None => self.rd(a, 2) as u16,
+            }
         }
     }
     #[inline(always)]
@@ -175,7 +316,10 @@ impl Mem {
             let i = a as usize;
             u32::from_le_bytes(self.ram[i..i + 4].try_into().unwrap())
         } else {
-            self.rd(a, 4) as u32
+            match spr_at(a, 4) {
+                Some(i) => u32::from_le_bytes(self.spr[i..i + 4].try_into().unwrap()),
+                None => self.rd(a, 4) as u32,
+            }
         }
     }
     #[inline(always)]
@@ -184,7 +328,10 @@ impl Mem {
             let i = a as usize;
             u64::from_le_bytes(self.ram[i..i + 8].try_into().unwrap())
         } else {
-            self.rd(a, 8)
+            match spr_at(a, 8) {
+                Some(i) => u64::from_le_bytes(self.spr[i..i + 8].try_into().unwrap()),
+                None => self.rd(a, 8),
+            }
         }
     }
     pub fn rd128(&mut self, a: u32) -> u128 {
@@ -202,6 +349,8 @@ impl Mem {
         if a < RAM as u32 - 1 {
             let i = a as usize;
             self.ram[i..i + 2].copy_from_slice(&v.to_le_bytes());
+        } else if let (Some(i), None) = (spr_at(a, 2), self.watch) {
+            self.spr[i..i + 2].copy_from_slice(&v.to_le_bytes());
         } else {
             self.wr(a, v as u64, 2)
         }
@@ -211,6 +360,8 @@ impl Mem {
         if a < RAM as u32 - 3 {
             let i = a as usize;
             self.ram[i..i + 4].copy_from_slice(&v.to_le_bytes());
+        } else if let (Some(i), None) = (spr_at(a, 4), self.watch) {
+            self.spr[i..i + 4].copy_from_slice(&v.to_le_bytes());
         } else {
             self.wr(a, v as u64, 4)
         }
@@ -220,6 +371,8 @@ impl Mem {
         if a < RAM as u32 - 7 {
             let i = a as usize;
             self.ram[i..i + 8].copy_from_slice(&v.to_le_bytes());
+        } else if let (Some(i), None) = (spr_at(a, 8), self.watch) {
+            self.spr[i..i + 8].copy_from_slice(&v.to_le_bytes());
         } else {
             self.wr(a, v, 8)
         }
@@ -243,6 +396,14 @@ impl Mem {
     }
 
     fn rd(&mut self, a: u32, n: usize) -> u64 {
+        // [PC] (speed) Scratchpad first: the same bytes as the `Loc::Spr` arm below, without the address decode.
+        if a & 0xffff_c000 == 0x7000_0000 {
+            let i = (a & 0x3fff) as usize;
+            let mut b = [0u8; 8];
+            let e = (i + n).min(self.spr.len());
+            b[..e - i].copy_from_slice(&self.spr[i..e]);
+            return u64::from_le_bytes(b);
+        }
         let loc = map(a);
         match loc {
             Loc::Hw(p) => self.hw_rd(p, n),
@@ -269,6 +430,12 @@ impl Mem {
     }
 
     fn wr(&mut self, a: u32, v: u64, n: usize) {
+        if a & 0xffff_c000 == 0x7000_0000 && self.watch.is_none() {
+            let i = (a & 0x3fff) as usize;
+            let e = (i + n).min(self.spr.len());
+            self.spr[i..e].copy_from_slice(&v.to_le_bytes()[..e - i]);
+            return;
+        }
         let loc = map(a);
         match loc {
             Loc::Hw(p) => self.hw_wr(p, v, n),
@@ -310,7 +477,9 @@ impl Mem {
     }
 
     fn hw_rd(&mut self, p: u32, n: usize) -> u64 {
-        *self.hw_reads.entry(p).or_insert(0) += 1;
+        if stats() {
+            *self.hw_reads.entry(p).or_insert(0) += 1;
+        }
         let v = match p & !3 {
             0x1000_0800 => self.rcnt1,
             0x1000_0000 | 0x1000_1000 | 0x1000_1800 => (self.now as u32 >> 1) & 0xffff,
@@ -329,31 +498,35 @@ impl Mem {
     }
 
     fn hw_wr(&mut self, p: u32, v: u64, n: usize) {
-        *self.hw_writes.entry(p).or_insert(0) += 1;
+        if stats() {
+            *self.hw_writes.entry(p).or_insert(0) += 1;
+        }
         match p & !3 {
             0x1000_0800 => self.rcnt1 = 0x1000,
             0x1000_e010 => {
                 let s = self.hw32(p);
                 let v = v as u32;
                 self.set_hw32(p, (s & !(v & 0xffff)) ^ (v & 0xffff_0000));
-                self.irq_dirty = true;
+                self.mark_dirty();
             }
             0x1000_f000 => {
                 let s = self.hw32(p);
                 self.set_hw32(p, s & !(v as u32));
-                self.irq_dirty = true;
+                self.mark_dirty();
             }
             0x1000_f010 => {
                 let s = self.hw32(p);
                 self.set_hw32(p, s ^ (v as u32));
-                self.irq_dirty = true;
+                self.mark_dirty();
             }
             0x1000_8000 | 0x1000_9000 | 0x1000_a000 | 0x1000_b000 | 0x1000_b400 | 0x1000_c000
             | 0x1000_c400 | 0x1000_c800 | 0x1000_d000 | 0x1000_d400 => {
                 self.set_hw32(p, v as u32);
                 if v & 0x100 != 0 {
-                    *self.dma_kicks.entry(p).or_insert(0) += 1;
-                    *self.kick_pcs.entry((p, self.pc)).or_insert(0) += 1;
+                    if stats() {
+                        *self.dma_kicks.entry(p).or_insert(0) += 1;
+                        *self.kick_pcs.entry((p, self.pc)).or_insert(0) += 1;
+                    }
                     let ch = match p {
                         0x1000_8000 => 0,
                         0x1000_9000 => 1,
@@ -380,7 +553,7 @@ impl Mem {
                     if ch != 5 && ch != 7 {
                         let s = self.hw32(D_STAT);
                         self.set_hw32(D_STAT, s | 1 << ch);
-                        self.irq_dirty = true;
+                        self.mark_dirty();
                     }
                 }
             }
@@ -402,7 +575,8 @@ impl Mem {
     }
 
     /// Debug (env COLD_SPRLOG=FROM:CAP): log SPR DMA transfers from icount FROM, at most CAP lines.
-    fn sprlog(&self, line: String) {
+    // [PC] (speed) The line is built only when it prints (it was formatted for every transfer).
+    fn sprlog(&self, line: impl FnOnce() -> String) {
         use std::sync::atomic::{AtomicU64, Ordering};
         static CFG: std::sync::OnceLock<(u64, u64)> = std::sync::OnceLock::new();
         static N: AtomicU64 = AtomicU64::new(0);
@@ -413,7 +587,7 @@ impl Mem {
                 .unwrap_or((u64::MAX, 0))
         });
         if self.now >= from && N.fetch_add(1, Ordering::Relaxed) < cap {
-            eprintln!("sprdma {line} pc {:08x} @{}", self.pc, self.now);
+            eprintln!("sprdma {} pc {:08x} @{}", line(), self.pc, self.now);
         }
     }
 
@@ -425,6 +599,23 @@ impl Mem {
         let mode = (chcr >> 2) & 3;
         let mut sadr = self.hw32(base + 0x80) & 0x3ff0;
         let copy = |m: &mut Mem, madr: u32, sadr: u32, qwc: u32| {
+            // [PC] (speed) Without a watch: the same quadwords as the loop below, copied in runs up to the scratchpad's
+            // wrap (in order, so a transfer above 16 KB overwrites the same way). The game moves ~1500 blocks a field.
+            if m.watch.is_none() {
+                let base = (madr & 0x01ff_fff0) as usize;
+                let mut left = (qwc as usize).min(RAM.saturating_sub(base) / 16);
+                let (mut ra, mut sa) = (base, (sadr & 0x3ff0) as usize);
+                while left > 0 {
+                    let k = left.min((0x4000 - sa) / 16);
+                    if to {
+                        m.spr[sa..sa + k * 16].copy_from_slice(&m.ram[ra..ra + k * 16]);
+                    } else {
+                        m.ram[ra..ra + k * 16].copy_from_slice(&m.spr[sa..sa + k * 16]);
+                    }
+                    (ra, sa, left) = (ra + k * 16, 0, left - k);
+                }
+                return;
+            }
             for q in 0..qwc {
                 let ra = (madr & 0x01ff_fff0).wrapping_add(q * 16) as usize;
                 let sa = ((sadr + q * 16) & 0x3ff0) as usize;
@@ -452,7 +643,7 @@ impl Mem {
             }
             let madr = self.hw32(base + 0x10);
             let qwc = self.hw32(base + 0x20) & 0xffff;
-            self.sprlog(format!("{} normal chcr {chcr:08x} madr {madr:08x} sadr {sadr:04x} qwc {qwc}", if to { "to" } else { "from" }));
+            self.sprlog(|| format!("{} normal chcr {chcr:08x} madr {madr:08x} sadr {sadr:04x} qwc {qwc}", if to { "to" } else { "from" }));
             copy(self, madr, sadr, qwc);
             self.set_hw32(base + 0x10, madr.wrapping_add(qwc * 16));
             self.set_hw32(base + 0x80, (sadr + qwc * 16) & 0x3ff0);
@@ -497,7 +688,7 @@ impl Mem {
                 }
                 _ => (tadr + 16, 0, true),
             };
-            self.sprlog(format!("to chain chcr {chcr:08x} tadr {tadr:08x} tag {tag:016x} data {data:08x} sadr {sadr:04x} qwc {qwc}"));
+            self.sprlog(|| format!("to chain chcr {chcr:08x} tadr {tadr:08x} tag {tag:016x} data {data:08x} sadr {sadr:04x} qwc {qwc}"));
             copy(self, data, sadr, qwc);
             sadr = (sadr + qwc * 16) & 0x3ff0;
             if end || (tag >> 31) & 1 != 0 && chcr & 0x80 != 0 {
@@ -530,7 +721,7 @@ impl Mem {
                 eprintln!("seq download qwc {qwc:x} madr {madr0:x}");
             }
         }
-        let mut words = Vec::new();
+        let mut words = if cap { crate::gs::take_words(self.vif1_words) } else { Vec::new() };
         let mut marks = vec![(0usize, 0u32)];
         if cap {
             self.dma_words(self.hw32(VIF1 + 0x10), qwc, &mut words);
@@ -598,12 +789,13 @@ impl Mem {
             }
         }
         if cap && mode == 1 {
+            self.vif1_words = words.len();
             self.gsc_vif1(words, marks);
         }
         let fin = (chcr & 0xffcf) | (asp as u32) << 4 | tag_hi;
         self.vif1_pend = Some([fin, madr, tadr, asr[0], asr[1]]);
         self.dma_due = self.now + self.dma_delay;
-        self.due = self.dma_due.min(self.tick);
+        self.set_due(self.dma_due.min(self.tick));
     }
 
     /// A DMA qword (RAM, or scratchpad when bit 31 is set); no side effects.
@@ -622,6 +814,27 @@ impl Mem {
     }
 
     fn dma_words(&self, a: u32, q: u32, out: &mut Vec<u32>) {
+        // [PC] (speed) RAM data that does not wrap: the same words in one pass (the game sends ~800K words a field).
+        let o = (a & 0x01ff_fff0) as usize;
+        if a & 0x8000_0000 == 0 && o + q as usize * 16 <= RAM {
+            let b = &self.ram[o..o + q as usize * 16];
+            // [PC] (speed) little-endian host: one block copy of the RAM bytes into the word Vec (same words as the from_le_bytes loop).
+            #[cfg(target_endian = "little")]
+            {
+                let n = b.len() / 4;
+                out.reserve(n);
+                // SAFETY: `reserve` made room for n more u32 (4n bytes) behind len; the source is a disjoint &[u8] of exactly 4n bytes
+                // (q*16); every bit pattern is a valid u32; set_len follows the copy.
+                unsafe {
+                    let len = out.len();
+                    std::ptr::copy_nonoverlapping(b.as_ptr(), out.as_mut_ptr().add(len) as *mut u8, n * 4);
+                    out.set_len(len + n);
+                }
+            }
+            #[cfg(not(target_endian = "little"))]
+            out.extend(b.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())));
+            return;
+        }
         for k in 0..q {
             let v = self.dma_qw(a.wrapping_add(k * 16));
             out.extend([v as u32, (v >> 32) as u32, (v >> 64) as u32, (v >> 96) as u32]);
@@ -706,13 +919,38 @@ impl Mem {
         self.gs_job(job);
     }
 
+    /// An interrupt line may be asserted (the CPU re-tests INTC/DMAC); the poll limit drops to 0.
+    #[inline(always)]
+    pub fn mark_dirty(&mut self) {
+        self.irq_dirty = true;
+        self.limit = 0;
+    }
+
+    /// The lines were re-tested and are low.
+    #[inline(always)]
+    pub fn clear_dirty(&mut self) {
+        self.irq_dirty = false;
+        self.limit = self.due;
+    }
+
+    #[inline(always)]
+    pub fn set_due(&mut self, d: u64) {
+        self.due = d;
+        self.limit = if self.irq_dirty { 0 } else { d };
+    }
+
+    /// `limit` follows `irq_dirty` and `due` (test: the writers above keep it).
+    pub fn limit_ok(&self) -> bool {
+        self.limit == if self.irq_dirty { 0 } else { self.due }
+    }
+
     /// The scheduled VIF1 stop becomes visible: registers, CIS1, interrupt.
     pub fn mature(&mut self, ic: u64) {
         if self.vif1_pend.is_some() && ic < self.dma_due {
-            self.due = self.dma_due.min(self.tick);
+            self.set_due(self.dma_due.min(self.tick));
             return;
         }
-        self.due = self.tick;
+        self.set_due(self.tick);
         let Some([chcr, madr, tadr, a0, a1]) = self.vif1_pend.take() else { return };
         self.vif1_stops += 1;
         self.set_hw32(VIF1, chcr & !0x100);
@@ -723,13 +961,13 @@ impl Mem {
         self.set_hw32(VIF1 + 0x50, a1);
         let s = self.hw32(D_STAT);
         self.set_hw32(D_STAT, s | 2);
-        self.irq_dirty = true;
+        self.mark_dirty();
     }
 
     /// Cold boot: the next forced vblank is one field of instructions after `now`.
     pub fn rearm_tick(&mut self, now: u64) {
         self.tick = now + crate::ver::period();
-        self.due = if self.vif1_pend.is_some() { self.dma_due.min(self.tick) } else { self.tick };
+        self.set_due(if self.vif1_pend.is_some() { self.dma_due.min(self.tick) } else { self.tick });
     }
 
     /// Interrupt lines: (INT0 = INTC, INT1 = DMAC).

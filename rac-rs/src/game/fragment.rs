@@ -3,11 +3,6 @@
 //! they tumble, bounce off the world and explode when their life runs out (updater FUN_0030c648). Both parents leave
 //! the static class-1816 remains (creator FUN_002789b8, updater 0x30cb30 `jr ra`).
 
-use super::*;
-use crate::gameplay::{PAL_DT, PAL_DT2};
-use crate::particles::{euler_m, Rng};
-use crate::physics::cross;
-use std::f32::consts::PI;
 
 pub(super) const SHROOM_FRAGMENT: u32 = 1815;
 pub(super) const REMAINS: u32 = 1816;

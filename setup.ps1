@@ -11,8 +11,9 @@
 #   (b) checks that the disc image is Ratchet & Clank PAL / Europe v1.00 (SCES-50916) or USA v1.00 (SCUS-97199) (size and SHA-1)
 #   (c) generates the game code from the disc image with tools\recgen_iso.py (boot code + 19 levels) into .\oracle\rec and .\oracle\game
 #   (c2) generates the VU microcode translations (graphics code) from the disc image with tools\vugen_iso.py into
-#        .\oracle\src\vu0_prog0.rs, vu0_prog1.rs, vu0_prog9hi.rs and .\rac-rs\src\gsfull\vu1_prog*.rs + vu1aot_gen.rs
-#   (d) builds the game with cargo (release) into .\build
+#        .\oracle\src\vu0_prog0.rs, vu0_prog1.rs, vu0_prog9hi.rs, skinff_ee.rs, skinff_vu.rs (the skinning fast path: tools\skinff_ee.py,
+#        tools\skinff_gen.py, run by vugen_iso.py) and .\rac-rs\src\gsfull\vu1_prog*.rs + vu1aot_gen.rs
+#   (d) builds the game with cargo (release) into .\build, guided by the speed profile for your disc in .\pgo when the release has one
 #   (e) writes generated\play.cfg (the disc image path) and Play.cmd, which starts the game from your disc image (cold boot: logos, title screen, New Game, no savestate),
 #       and a desktop shortcut to the game exe (the exe, started with no arguments, reads generated\play.cfg)
 # Everything it makes stays inside this folder (toolchain\, oracle\rec, oracle\game, the generated .rs files named above, generated\
@@ -21,8 +22,10 @@
 # (into toolchain\cargo). Delete the folder to remove everything. The disc image is only read.
 #
 # Switches: -Console (no window: run the steps here in the console),
-#           -SkipHash (size check only), -CheckOnly (do (a) and (b) only), -Regenerate (redo (c)), -Jobs N (parallel generators, default 4),
-#           -NoBuild (stop after (c2)), -NoShortcut (no desktop shortcut), -NoSharedSlow (generate the memory-access slow paths inline instead of as shared helpers).
+#           -SkipHash (size check only), -CheckOnly (do (a) and (b) only), -Regenerate (redo (c)), -Jobs N (parallel generators, default: one per logical CPU, at most 12),
+#           -NoBuild (stop after (c2)), -NoShortcut (no desktop shortcut), -CargoJobs N (compiler jobs at once in (d); default: automatic), -NoSharedSlow (generate the memory-access slow paths inline instead of as shared helpers),
+#           -NoPgo (build without the speed profile in .\pgo).
+#           -NoFetchAhead (download the libraries in (d), not in the background during (b), (c) and (c2)).
 param(
     [string]$Iso = '',
     [switch]$SkipHash,
@@ -31,7 +34,10 @@ param(
     [switch]$NoBuild,
     [switch]$NoSharedSlow,
     [switch]$NoShortcut,
-    [int]$Jobs = 4,
+    [switch]$NoPgo,                 # (d) without the speed profile (pgo\<serial>.profdata.gz)
+    [switch]$NoFetchAhead,
+    [int]$Jobs = 0,                 # parallel generators in (c); 0 = one per logical CPU, at most 12 (each needs about 120 MB)
+    [int]$CargoJobs = 0,            # compiler jobs at once in (d); 0 = automatic
     [switch]$Console,
     [string]$ShortcutDir = '',      # where the shortcut goes (default: the desktop)
     [switch]$TestNoShow,            # test only: build the launcher without showing it and save PNGs of its views
@@ -56,19 +62,36 @@ Set-Location -LiteralPath $root
 # The supported discs (v1.00 of each): Ratchet & Clank (Europe) (En,Fr,De,Es,It) (v1.00), serial SCES-50916, and
 # Ratchet & Clank (USA) (En,Fr,De,Es,It), serial SCUS-97199. They have different sizes; the SHA-1 then proves the copy.
 $Discs = @(
-    @{ Size = [long]4213997568; Sha1 = 'B0DFBD8EAC0D84F173B6FC25D8A02A5FF22C652F'; Name = 'PAL / Europe v1.00 (SCES-50916)' },
-    @{ Size = [long]4214095872; Sha1 = 'AEE9275384F739C9B24CD5DE6F7E200292DB7B01'; Name = 'USA v1.00 (SCUS-97199)' }
+    @{ Size = [long]4213997568; Sha1 = 'B0DFBD8EAC0D84F173B6FC25D8A02A5FF22C652F'; Name = 'PAL / Europe v1.00 (SCES-50916)'; Serial = 'SCES-50916' },
+    @{ Size = [long]4214095872; Sha1 = 'AEE9275384F739C9B24CD5DE6F7E200292DB7B01'; Name = 'USA v1.00 (SCUS-97199)'; Serial = 'SCUS-97199' }
 )
 # The PAL values until a disc is picked; (b) sets them from the disc found.
 $ExpectedSize = $Discs[0].Size
 $ExpectedSha1 = $Discs[0].Sha1
 $DiscName = $Discs[0].Name
-$GenFlags = @('--no-comments', '--compact', '--shared-slow', '--outline-mem')
-if ($NoSharedSlow) { $GenFlags = @('--no-comments', '--compact', '--outline-mem') }   # inline slow paths: bigger source and slower build, speed measured in SETUP_NOTES 7b
+$GenFlags = @('--no-comments', '--compact', '--shared-slow', '--outline-mem', '--direct-mem', '--skin-ff', '--vu-guard')
+if ($NoSharedSlow) { $GenFlags = @('--no-comments', '--compact', '--outline-mem', '--direct-mem', '--skin-ff', '--vu-guard') }   # inline slow paths: bigger source and slower build, speed measured in SETUP_NOTES 7b
 $Levels = 0..18
 
 function Step($text) { Write-Host ''; Write-Host "== $text" -ForegroundColor Cyan }
-function Fail($text) { Write-Host "ERROR: $text" -ForegroundColor Red; exit 1 }
+function Fail($text) { Stop-LibsFetch; Write-Host "ERROR: $text" -ForegroundColor Red; Wait-RustJob; exit 1 }
+$script:RustJob = $null
+function Wait-RustJob {
+    # the background Rust install of (a) (see Complete-Tools), when it still runs: let it finish, stopping it halfway could
+    # leave toolchain\ broken
+    $rj = $script:RustJob
+    $script:RustJob = $null
+    if ($rj -and -not $rj.Proc.HasExited) { Write-Host '  (letting the Rust download in the background finish first ...)'; [void]$rj.Proc.WaitForExit(900000) }
+}
+$script:LibsFetch = $null
+function Stop-LibsFetch {
+    # the background download of the libraries (see "libraries download" in (a)): only that process tree, when it still runs
+    $lf = $script:LibsFetch
+    $script:LibsFetch = $null
+    if ($lf -and -not $lf.Proc.HasExited) {
+        try { Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\taskkill.exe') -ArgumentList "/PID $($lf.Proc.Id) /T /F" -NoNewWindow -Wait } catch { }
+    }
+}
 $timings = [ordered]@{}
 
 # ================================================================ starting the game, desktop shortcut (shared by the launcher and -Console)
@@ -222,14 +245,14 @@ function Get-FilesHash([string[]]$rels) {
 function Get-VuGenFiles {
     $names = [string[]]@([System.IO.Directory]::GetFiles((Join-Path $root 'tools\vu')) | ForEach-Object { [System.IO.Path]::GetFileName($_) })
     [Array]::Sort($names, [System.StringComparer]::Ordinal)
-    return @('tools/vugen_iso.py') + @($names | ForEach-Object { 'tools/vu/' + $_ })
+    return @('tools/vugen_iso.py', 'tools/skinff_ee.py', 'tools/skinff_gen.py') + @($names | ForEach-Object { 'tools/vu/' + $_ })
 }
 
 function Test-ProtectedPath([string]$rel) {
     # What an update never touches: the toolchain, the build, the generated code, the player's saves, the disc image.
     $r = $rel.Replace('\', '/').TrimStart('/').ToLowerInvariant()
     foreach ($p in @('toolchain/', 'build/', 'generated/', 'player/', 'oracle/rec/', 'oracle/game/', 'test_shots/')) { if ($r.StartsWith($p)) { return $true } }
-    if ($r -in @('play.cmd', 'oracle/src/vu0_prog0.rs', 'oracle/src/vu0_prog1.rs', 'oracle/src/vu0_prog9hi.rs', 'rac-rs/src/gsfull/vu1aot_gen.rs', 'rac-rs/src/particles/orb_tables.rs')) { return $true }
+    if ($r -in @('play.cmd', 'oracle/src/vu0_prog0.rs', 'oracle/src/vu0_prog1.rs', 'oracle/src/vu0_prog9hi.rs', 'oracle/src/skinff_ee.rs', 'oracle/src/skinff_vu.rs', 'rac-rs/src/gsfull/vu1aot_gen.rs', 'rac-rs/src/particles/orb_tables.rs')) { return $true }
     if ($r -match '^rac-rs/src/gsfull/vu1_prog\d+\.rs$') { return $true }
     return $r.EndsWith('.iso')
 }
@@ -424,7 +447,7 @@ if (-not $Console) {
     $StepNames = @('Download tools', 'Check disc', 'Prepare game code', 'Build game', 'Finish')
     $StepNamesInstall = $StepNames
     $StepNamesUpdate = @('Download update', 'Check tools', 'Prepare game code', 'Build game', 'Finish')
-    $ExpectedCompiles = 528      # "Compiling" lines of a complete first build (measured); the bar never goes above 98% for the build
+    $ExpectedCompiles = 563      # "Compiling" lines of a complete first build (measured); the bar never goes above 98% for the build
     $AppTitle = 'Ratchet & Clank (rac-rs)'
     $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $UI = @{}
@@ -1339,14 +1362,17 @@ if ($ApplyUpdate) {
         }
         Remove-Item -LiteralPath $utmp -Recurse -Force -ErrorAction SilentlyContinue
         $ch = @($res.Changed)
-        $exp = 1
-        if (@($ch | Where-Object { $_ -like 'oracle/src/*' -or $_ -eq 'oracle/Cargo.toml' }).Count -gt 0) { $exp = 528 }
+        # compiles to expect (progress bar): rac-rs only: the game library, the two build-order crates and the exe; the
+        # generated crates depend on oracle/core (ee-core) only, so they rebuild when it or the generators change
+        $exp = 4
+        if (@($ch | Where-Object { $_ -like 'oracle/core/*' -or $_ -like 'tools/*' }).Count -gt 0) { $exp = 563 }
+        elseif (@($ch | Where-Object { $_ -like 'oracle/src/*' -or $_ -eq 'oracle/Cargo.toml' }).Count -gt 0) { $exp = 8 }
         elseif (@($ch | Where-Object { $_ -like 'oracle/hand/*' }).Count -gt 0) { $exp = 3 }
         Write-Host "  $($ch.Count) files updated, $(@($res.Removed).Count) removed"
         Write-Host "expect-compiles: $exp"
     } else {
         Write-Host '  the files are already updated; only the rebuild is left'
-        Write-Host 'expect-compiles: 528'
+        Write-Host 'expect-compiles: 563'
     }
     # Files that were not copied by Sync-Update (no generated\synced_<version>: a ZIP unzipped over the folder) carry the ZIP's times: stamp them, or cargo may keep the old game.
     $syncMark = Join-Path $root ('generated\synced_' + (Get-LocalVersion))
@@ -1416,27 +1442,32 @@ function Get-Pinned($url, $file, $sha) {
     Fail "could not download $url (check the internet connection, then run Setup.cmd again)"
 }
 
-# Rust
+# Rust. A first setup downloads and installs it (about 150 MB) in the background: Python and the assembler come meanwhile, then
+# the disc check and the game code (Python only) run while it installs. Complete-Tools (below) finishes (a) once it is there.
 $cargo = Join-Path $tc 'cargo\bin\cargo.exe'
-$rv = ''
-if (Test-Path -LiteralPath $cargo) { try { $rv = (& (Join-Path $tc 'cargo\bin\rustc.exe') --version 2>$null) } catch { $rv = '' } }
+# The GNU host's own linker tools (ld, dlltool for the Windows API import libraries) come with Rust; rustc finds dlltool on PATH
+# (the GNU assembler that dlltool runs is added to the same folder by Complete-Tools).
+$rsc = Join-Path $tc "rustup\toolchains\$RustVersion-$RustHost\lib\rustlib\$RustHost\bin\self-contained"
+$env:Path = "$rsc;$env:Path"
+function Get-RustVersion {
+    $v = ''
+    if (Test-Path -LiteralPath $cargo) { try { $v = (& (Join-Path $tc 'cargo\bin\rustc.exe') --version 2>$null) } catch { $v = '' } }
+    return "$v"
+}
+$rv = Get-RustVersion
 if ($rv -notmatch "^rustc $([regex]::Escape($RustVersion)) ") {
-    Write-Host "  downloading Rust $RustVersion ($RustHost, about 150 MB) into toolchain\ ..."
+    Write-Host "  downloading Rust $RustVersion ($RustHost, about 150 MB) into toolchain\ (in the background) ..."
     $ri = Join-Path $tcDl "rustup-init-$RustupVersion.exe"
     Get-Pinned $RustupUrl $ri $RustupSha256
     # rustup checks every Rust package it downloads against the signed release manifest of $RustVersion.
-    & $ri -y --no-modify-path --profile minimal --default-host $RustHost --default-toolchain $RustVersion
-    if ($LASTEXITCODE -ne 0) { Fail 'installing Rust into toolchain\ failed (see the messages above); run Setup.cmd again' }
-    $rv = ''
-    try { $rv = (& (Join-Path $tc 'cargo\bin\rustc.exe') --version 2>$null) } catch { $rv = '' }
-    if ($rv -notmatch "^rustc $([regex]::Escape($RustVersion)) ") { Fail "Rust in toolchain\ does not run (rustc --version: '$rv')" }
+    $rl = Join-Path $tc 'rust_install.log'
+    Remove-Item -LiteralPath $rl, "$rl.out" -Force -ErrorAction SilentlyContinue
+    $p = Start-Process -FilePath $ri -ArgumentList @('-y', '--no-modify-path', '--profile', 'minimal', '--default-host', $RustHost, '--default-toolchain', $RustVersion) -NoNewWindow -PassThru -RedirectStandardOutput "$rl.out" -RedirectStandardError $rl
+    $null = $p.Handle      # keeps the exit code readable
+    $script:RustJob = [pscustomobject]@{ Proc = $p; Log = $rl; T0 = Get-Date }
+} else {
+    Write-Host "  $rv ($RustHost, toolchain\)"
 }
-Write-Host "  $rv ($RustHost, toolchain\)"
-# The GNU host's own linker tools (ld, dlltool for the Windows API import libraries) come with Rust; rustc finds dlltool on PATH
-# (the GNU assembler that dlltool runs is added to the same folder below, after Python).
-$rsc = Join-Path $tc "rustup\toolchains\$RustVersion-$RustHost\lib\rustlib\$RustHost\bin\self-contained"
-if (-not (Test-Path -LiteralPath (Join-Path $rsc 'dlltool.exe'))) { Fail "Rust in toolchain\ is incomplete ($rsc\dlltool.exe missing); delete the toolchain folder and run Setup.cmd again" }
-$env:Path = "$rsc;$env:Path"
 
 # Python (embeddable package: python.exe + the standard library, nothing else; the generators need nothing more)
 $python = Join-Path $tc 'python\python.exe'
@@ -1467,20 +1498,123 @@ $AsPkgs = [ordered]@{
     'mingw-w64-x86_64-zstd-1.5.7-2-any.pkg.tar.zst'           = '1ADD6705B344664F6ACA108C85F79AB5BDD9E1162662BB06A4CF40A34F6E0907'
 }
 $asFiles = @('as.exe', 'libintl-8.dll', 'libiconv-2.dll', 'zlib1.dll', 'libzstd.dll')
+$script:AsPkgFiles = @()
 if (@($asFiles | Where-Object { -not (Test-Path -LiteralPath (Join-Path $rsc $_)) }).Count -gt 0) {
     Write-Host '  downloading the GNU assembler (MSYS2 binutils 2.47, about 9 MB) into toolchain\ ...'
-    $pk = @()
     foreach ($e in $AsPkgs.GetEnumerator()) {
         $f = Join-Path $tcDl $e.Key
         Get-Pinned "$MsysRepo/$($e.Key)" $f $e.Value
-        $pk += $f
+        $script:AsPkgFiles += $f
     }
-    & $python -I (Join-Path $root 'tools\mingw_as.py') $rsc @pk
-    if ($LASTEXITCODE -ne 0) { Fail 'unpacking the GNU assembler into toolchain\ failed (see the messages above); run Setup.cmd again' }
 }
-Write-Host '  GNU assembler (binutils 2.47, toolchain\)'
-if (Test-Path -LiteralPath $tcDl) { Remove-Item -LiteralPath $tcDl -Recurse -Force -ErrorAction SilentlyContinue }
 $timings['tools'] = [math]::Round(((Get-Date) - $t).TotalSeconds, 1)
+
+# Libraries download: the crates.io libraries of the game (wgpu, winit, cpal and what they use, about 150) need nothing from
+# the disc, so cargo downloads and unpacks them in the background while (b), (c) and (c2) run, instead of at the start of (d).
+# Download only (cargo fetch): nothing is compiled, so (d) builds exactly as without it. A failure here is not an error: (d)
+# downloads whatever is missing and reports real errors. Messages: generated\fetch_libs.log.
+function Read-SharedText([string]$path) {
+    # a file another process is still writing
+    if (-not (Test-Path -LiteralPath $path)) { return '' }
+    $fs = $null
+    try {
+        $fs = New-Object System.IO.FileStream($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $buf = New-Object byte[] ([int]$fs.Length)
+        $r = $fs.Read($buf, 0, $buf.Length)
+        return [System.Text.Encoding]::UTF8.GetString($buf, 0, $r)
+    } catch { return '' } finally { if ($fs) { $fs.Dispose() } }
+}
+
+function Get-BgSeconds($job) {
+    # seconds from the start of a background job to its end. Process.ExitTime reads as 0 for these processes, so the end
+    # is the last write of its message files (or now).
+    $end = Get-Date
+    $last = $job.T0
+    foreach ($f in @($job.Log, "$($job.Log).out")) {
+        try { $w = (Get-Item -LiteralPath $f -ErrorAction Stop).LastWriteTime; if ($w -gt $last) { $last = $w } } catch { }
+    }
+    if ($last -gt $job.T0 -and $last -lt $end) { $end = $last }
+    return [math]::Round(($end - $job.T0).TotalSeconds, 1)
+}
+
+function Start-LibsFetch {
+    # cargo reads the whole workspace, the game crate oracle\game included, which (c) writes meanwhile: so it reads a copy of
+    # the crates without the generated code (rac-rs and oracle without rec and game, about 7 MB) in generated\fetch_ws, with a
+    # stub game crate. It downloads into the same cargo home as (d).
+    $fws = Join-Path $root 'generated\fetch_ws'
+    try {
+        if (Test-Path -LiteralPath $fws) { Remove-Item -LiteralPath $fws -Recurse -Force }
+        New-Item -ItemType Directory -Force -Path (Join-Path $fws 'oracle\game\src') | Out-Null
+        Copy-Item -LiteralPath (Join-Path $root 'rac-rs') -Destination $fws -Recurse
+        Get-ChildItem -LiteralPath (Join-Path $root 'oracle') | Where-Object { $_.Name -ne 'rec' -and $_.Name -ne 'game' } | Copy-Item -Destination (Join-Path $fws 'oracle') -Recurse
+        # a cargo workspace root above rac-rs\ (Cargo.toml and its Cargo.lock at the top of the folder), when the release has one
+        foreach ($n in @('Cargo.toml', 'Cargo.lock')) { $f = Join-Path $root $n; if (Test-Path -LiteralPath $f -PathType Leaf) { Copy-Item -LiteralPath $f -Destination $fws } }
+        $u8 = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText((Join-Path $fws 'oracle\game\Cargo.toml'), "[package]`nname = `"ee-game`"`nversion = `"0.1.0`"`nedition = `"2021`"`n`n[dependencies]`nee-oracle = { path = `"..`" }`n", $u8)
+        [System.IO.File]::WriteAllText((Join-Path $fws 'oracle\game\src\lib.rs'), "// stub for the libraries download (setup.ps1)`n", $u8)
+    } catch {
+        Write-Host "  (no background download of the libraries: $($_.Exception.Message))" -ForegroundColor Yellow
+        return $null
+    }
+    $log = Join-Path $root 'generated\fetch_libs.log'
+    Remove-Item -LiteralPath $log, "$log.out" -Force -ErrorAction SilentlyContinue
+    $a = @('fetch', '--manifest-path', (Join-Path $fws 'rac-rs\Cargo.toml'), '--target', $RustHost) | ForEach-Object { if ($_ -match '[\s&]') { '"' + $_ + '"' } else { $_ } }
+    $p = Start-Process -FilePath $cargo -ArgumentList $a -WorkingDirectory $root -NoNewWindow -PassThru -RedirectStandardOutput "$log.out" -RedirectStandardError $log
+    $null = $p.Handle      # keeps the exit code readable
+    Write-Host '  downloading the libraries of the game in the background (messages in generated\fetch_libs.log)'
+    return [pscustomobject]@{ Proc = $p; Log = $log; T0 = Get-Date }
+}
+
+function Wait-LibsFetch {
+    $lf = $script:LibsFetch
+    if (-not $lf) { return }
+    if (-not $lf.Proc.HasExited) { Write-Host '  waiting for the background download of the libraries ...' }
+    if (-not $lf.Proc.WaitForExit(900000)) { Write-Host '  the background download takes too long; stopping it (step (d) downloads the rest)' -ForegroundColor Yellow; Stop-LibsFetch; return }
+    $script:LibsFetch = $null
+    Remove-Item -LiteralPath (Join-Path $root 'generated\fetch_ws') -Recurse -Force -ErrorAction SilentlyContinue
+    $txt = Read-SharedText $lf.Log
+    $n = ([regex]::Matches($txt, '(?m)^\s+Downloaded ')).Count
+    $timings['fetch_bg'] = Get-BgSeconds $lf
+    if ($lf.Proc.ExitCode -eq 0) { Write-Host "  libraries: $n downloaded in the background (in $($timings['fetch_bg']) s)" }
+    else { Write-Host "  the background download of the libraries stopped (exit $($lf.Proc.ExitCode), see generated\fetch_libs.log); step (d) downloads the rest" -ForegroundColor Yellow }
+}
+
+$script:ToolsDone = $false
+function Complete-Tools([bool]$wait) {
+    # The rest of (a) once Rust is installed: check it, put the GNU assembler next to its dlltool, start the libraries download.
+    # $wait: wait for a background Rust install; without it, return $false while the install still runs (called between the
+    # steps of (b)..(c2), so that the libraries download starts as soon as it can).
+    $rj = $script:RustJob
+    if ($rj) {
+        if (-not $rj.Proc.HasExited) {
+            if (-not $wait) { return $false }
+            Write-Host '  waiting for the Rust download (in the background since step (a)) ...'
+            $rj.Proc.WaitForExit()
+        }
+        $script:RustJob = $null
+        $timings['rust_bg'] = Get-BgSeconds $rj
+        if ($rj.Proc.ExitCode -ne 0) {
+            Get-Content -LiteralPath $rj.Log -Tail 15 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $_" }
+            Fail "installing Rust into toolchain\ failed (exit $($rj.Proc.ExitCode), messages in toolchain\rust_install.log); run Setup.cmd again"
+        }
+        $v = Get-RustVersion
+        if ($v -notmatch "^rustc $([regex]::Escape($RustVersion)) ") { Fail "Rust in toolchain\ does not run (rustc --version: '$v')" }
+        Write-Host "  $v ($RustHost, toolchain\; installed in the background in $($timings['rust_bg']) s)"
+    }
+    if ($script:ToolsDone) { return $true }
+    $script:ToolsDone = $true
+    if (-not (Test-Path -LiteralPath (Join-Path $rsc 'dlltool.exe'))) { Fail "Rust in toolchain\ is incomplete ($rsc\dlltool.exe missing); delete the toolchain folder and run Setup.cmd again" }
+    if ($script:AsPkgFiles.Count -gt 0) {
+        & $python -I (Join-Path $root 'tools\mingw_as.py') $rsc @($script:AsPkgFiles) | Out-Host
+        if ($LASTEXITCODE -ne 0) { Fail 'unpacking the GNU assembler into toolchain\ failed (see the messages above); run Setup.cmd again' }
+    }
+    Write-Host '  GNU assembler (binutils 2.47, toolchain\)'
+    if (Test-Path -LiteralPath $tcDl) { Remove-Item -LiteralPath $tcDl -Recurse -Force -ErrorAction SilentlyContinue }
+    if (-not $CheckOnly -and -not $NoBuild -and -not $NoFetchAhead) { $script:LibsFetch = Start-LibsFetch }
+    return $true
+}
+[void](Complete-Tools ([bool]$CheckOnly))      # -CheckOnly: (a) complete before (b), as before
+
 
 # ---------------------------------------------------------------- (b) disc image
 Step '(b) disc image'
@@ -1522,11 +1656,12 @@ if ($CheckOnly) { Write-Host 'Checks passed.' -ForegroundColor Green; exit 0 }
 
 # ---------------------------------------------------------------- (c) generate
 Step '(c) generating game code from the disc image'
+[void](Complete-Tools $false)
 $gen = Join-Path $root 'generated'          # logs and stamps
 $orc = Join-Path $root 'oracle'             # the generated crates go to oracle\rec and oracle\game (the layout of the dev tree)
 $stamp = Join-Path $gen 'done.txt'
 $wantBase = "$ExpectedSha1 $ExpectedSize flags=$($GenFlags -join ' ')"
-$genFiles = @('tools/recgen_iso.py', 'tools/fn_bounds.tsv', 'oracle/stubs.txt')
+$genFiles = @('tools/recgen_iso.py', 'tools/share_iso.py', 'tools/fn_bounds.tsv', 'oracle/stubs.txt')
 if ($ExpectedSha1 -eq 'AEE9275384F739C9B24CD5DE6F7E200292DB7B01') { $genFiles += 'tools/fn_bounds_usa.tsv' }
 $genHash = Get-FilesHash $genFiles
 # Earlier generator revisions (the first is v0.1.0, whose stamp has no gen= part) that make byte-identical output: an install made by one of them
@@ -1551,13 +1686,21 @@ if ($Regenerate -or $have -ne $want) {
     Remove-Item -LiteralPath $stamp -Force -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath (Join-Path $gen 'logs')) { Remove-Item -LiteralPath (Join-Path $gen 'logs') -Recurse -Force }
     New-Item -ItemType Directory -Force -Path (Join-Path $gen 'logs') | Out-Null
+    # content and time of every generated file, so that files which come out the same keep their time (below: only changed crates rebuild)
+    $genSnap = Join-Path $gen 'logs\gen_files_before.txt'
+    & $python (Join-Path $root 'tools\share_iso.py') --rec (Join-Path $orc 'rec') --snapshot $genSnap
+    if ($LASTEXITCODE -ne 0) { Fail 'listing the generated files failed (tools\share_iso.py --snapshot)' }
+    # shared templates of the previous generation (rebuilt below from the new level crates, which recgen_iso.py writes in full)
+    Get-ChildItem -LiteralPath (Join-Path $orc 'rec') -Directory -Filter 'sh_*' -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
     $t = Get-Date
     $queue = New-Object System.Collections.Queue
     foreach ($l in $Levels) { $queue.Enqueue($l) }
     $running = @()
     $failed = @()
+    $gj = $(if ($Jobs -gt 0) { $Jobs } else { [math]::Min(12, [math]::Max(1, [Environment]::ProcessorCount)) })      # same files for any number
+    Write-Host "  $gj generators at once"
     while ($queue.Count -gt 0 -or $running.Count -gt 0) {
-        while ($queue.Count -gt 0 -and $running.Count -lt [math]::Max(1, $Jobs)) {
+        while ($queue.Count -gt 0 -and $running.Count -lt $gj) {
             $lv = $queue.Dequeue()
             $a = @(('"' + (Join-Path $root 'tools\recgen_iso.py') + '"'), '--iso', ('"' + $Iso + '"'), '--level', "$lv", '--out', ('"' + $orc + '"'), '--oracle', ('"' + $orc + '"')) + $GenFlags
             if ($lv -gt 0) { $a += '--keep-boot' }
@@ -1567,7 +1710,8 @@ if ($Regenerate -or $have -ne $want) {
             $running += [pscustomobject]@{ Level = $lv; Proc = $p; Log = $log }
             Write-Host "  level $lv started"
         }
-        Start-Sleep -Milliseconds 700
+        Start-Sleep -Milliseconds 250
+        if ($script:RustJob -and $script:RustJob.Proc.HasExited) { [void](Complete-Tools $false) }
         $still = @()
         foreach ($r in $running) {
             if ($r.Proc.HasExited) {
@@ -1582,6 +1726,15 @@ if ($Regenerate -or $have -ne $want) {
     # the parallel generators race on game\src\lib.rs: rewrite it once from what is on disk
     & $python (Join-Path $root 'tools\recgen_iso.py') --facade-only --out $orc --oracle $orc
     if ($LASTEXITCODE -ne 0) { Fail 'facade rewrite failed' }
+    # functions that repeat across levels (same code, other addresses and constants) get one shared body each: rec\sh_NN
+    # (bit-exact: the pass proves every copy rebuilds token for token from its shared body and its own values)
+    & $python (Join-Path $root 'tools\share_iso.py') --rec (Join-Path $orc 'rec')
+    if ($LASTEXITCODE -ne 0) { Fail 'sharing pass failed (tools\share_iso.py)' }
+    [void](Complete-Tools $false)
+    & $python (Join-Path $root 'tools\recgen_iso.py') --facade-only --out $orc --oracle $orc
+    if ($LASTEXITCODE -ne 0) { Fail 'facade rewrite failed' }
+    & $python (Join-Path $root 'tools\share_iso.py') --rec (Join-Path $orc 'rec') --keep-times $genSnap
+    if ($LASTEXITCODE -ne 0) { Fail 'restoring file times failed (tools\share_iso.py --keep-times)' }
     # every crate must be in the facade (concurrent generators rewrite it)
     $nCrates = (Get-ChildItem -LiteralPath (Join-Path $orc 'rec') -Directory).Count
     $nReg = (Select-String -LiteralPath (Join-Path $orc 'game\src\lib.rs') -Pattern '::FNS\)' ).Count
@@ -1596,17 +1749,20 @@ if ($Regenerate -or $have -ne $want) {
 # ---------------------------------------------------------------- (c2) VU microcode translations
 # The VU0/VU1 microprograms (graphics/maths code of the game) are cut out of YOUR disc image and translated to Rust here;
 # none of that is shipped. Output (written in place, the files the sources already include): oracle\src\vu0_prog0.rs,
-# vu0_prog1.rs, vu0_prog9hi.rs,
+# vu0_prog1.rs, vu0_prog9hi.rs, skinff_ee.rs, skinff_vu.rs (the skinning fast path: the loop's code words are read from the disc
+# image, tools\skinff_ee.py and tools\skinff_gen.py run inside vugen_iso.py),
 # rac-rs\src\gsfull\vu1_prog*.rs and vu1aot_gen.rs.
+# An update from a release without these files (v0.2.2) regenerates: the files are missing and the tool hash ($vuWant) changed.
 Step '(c2) generating the VU microcode translations from the disc image'
+[void](Complete-Tools $false)
 New-Item -ItemType Directory -Force -Path $gen | Out-Null
 $vuStamp = Join-Path $gen 'vu_done.txt'
 $vuBase = "$ExpectedSha1 vu1"
-$VuCompatible = @('5b49455da24a986799cd727bb9a4563a70609ab5759df4c060f5df0b00bec669', '066ba6b16b9293793872b68e6a66c106bb2e4f4c8a2e184b1a83ce29eedf26d0')      # as $GenCompatible, for tools\vugen_iso.py and tools\vu\ (the first is v0.1.0)
+$VuCompatible = @('5b49455da24a986799cd727bb9a4563a70609ab5759df4c060f5df0b00bec669', '066ba6b16b9293793872b68e6a66c106bb2e4f4c8a2e184b1a83ce29eedf26d0')      # as $GenCompatible, for tools\vugen_iso.py, tools\skinff_ee.py, tools\skinff_gen.py and tools\vu\ (the first is v0.1.0)
 $vuWant = "$vuBase gen=$(Get-FilesHash (Get-VuGenFiles))"
 $vuHave = ''
 if (Test-Path -LiteralPath $vuStamp) { $vuHave = (Get-Content -LiteralPath $vuStamp -Raw).Trim() }
-if (-not (Test-Path -LiteralPath (Join-Path $orc 'src\vu0_prog0.rs')) -or -not (Test-Path -LiteralPath (Join-Path $orc 'src\vu0_prog1.rs')) -or -not (Test-Path -LiteralPath (Join-Path $orc 'src\vu0_prog9hi.rs')) -or -not (Test-Path -LiteralPath (Join-Path $root 'rac-rs\src\gsfull\vu1aot_gen.rs')) -or -not (Test-Path -LiteralPath (Join-Path $root 'rac-rs\src\particles\orb_tables.rs'))) { $vuHave = '' }
+if (-not (Test-Path -LiteralPath (Join-Path $orc 'src\vu0_prog0.rs')) -or -not (Test-Path -LiteralPath (Join-Path $orc 'src\vu0_prog1.rs')) -or -not (Test-Path -LiteralPath (Join-Path $orc 'src\vu0_prog9hi.rs')) -or -not (Test-Path -LiteralPath (Join-Path $orc 'src\skinff_ee.rs')) -or -not (Test-Path -LiteralPath (Join-Path $orc 'src\skinff_vu.rs')) -or -not (Test-Path -LiteralPath (Join-Path $root 'rac-rs\src\gsfull\vu1aot_gen.rs')) -or -not (Test-Path -LiteralPath (Join-Path $root 'rac-rs\src\particles\orb_tables.rs'))) { $vuHave = '' }
 if ($vuHave -and $vuHave -ne $vuWant) {
     $oldGen = ''
     if ($vuHave -eq $vuBase) { $oldGen = $VuCompatible[0] } elseif ($vuHave.StartsWith($vuBase + ' gen=')) { $oldGen = $vuHave.Substring($vuBase.Length + 5) }
@@ -1626,7 +1782,103 @@ if ($Regenerate -or $vuHave -ne $vuWant) {
 } else {
     Write-Host '  already generated (use -Regenerate to redo)'
 }
-if ($NoBuild) { Write-Host 'Generation done (-NoBuild).' -ForegroundColor Green; exit 0 }
+if ($NoBuild) { [void](Complete-Tools $true); Write-Host 'Generation done (-NoBuild).' -ForegroundColor Green; exit 0 }
+
+# ---------------------------------------------------------------- build meter (step d)
+# While cargo runs, a background job samples memory, paging and CPU every 2 s into generated\logs\build_meter.csv; the summary
+# is printed and written to generated\build_report.txt (stays on this PC, nothing is sent anywhere). It reads Windows' WMI
+# performance classes, whose names are the same in every Windows language. A meter failure never fails the setup.
+function Get-PcInfo {
+    $i = [pscustomobject]@{ Logical = [Environment]::ProcessorCount; Cores = 0; Cpu = ''; RamGB = 0.0 }
+    try {
+        $p = @(Get-CimInstance Win32_Processor)
+        $i.Logical = [int](($p | Measure-Object NumberOfLogicalProcessors -Sum).Sum)
+        $i.Cores = [int](($p | Measure-Object NumberOfCores -Sum).Sum)
+        $i.Cpu = ($p[0].Name -replace '\s+', ' ').Trim()
+        $i.RamGB = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 1)
+    } catch { }
+    if ($i.Logical -lt 1) { $i.Logical = [Environment]::ProcessorCount }
+    if ($i.Cores -lt 1) { $i.Cores = $i.Logical }
+    return $i
+}
+
+function Get-CargoJobs($pc) {
+    # One job per logical CPU (cargo's own default; on a 12-core / 24-thread PC 24 jobs built in 11m19s and 12 jobs in 16m49s),
+    # but not more jobs than the RAM holds: a generated crate needs about 0.65 GB while it compiles (measured 15 GB for 24 jobs,
+    # the largest single one 3.4 GB), and 4 GB stay for Windows and the open programs. Paging to disk slows the build much more
+    # than fewer jobs do. 32 GB: no limit; 16 GB: 18 jobs; 8 GB: 6 jobs.
+    $j = [math]::Max(1, $pc.Logical)
+    if ($pc.RamGB -gt 0) { $j = [math]::Min($j, [math]::Max(2, [int][math]::Floor(($pc.RamGB - 4.0) / 0.65))) }
+    return $j
+}
+
+function Start-BuildMeter($dir) {
+    try {
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        $csv = Join-Path $dir 'build_meter.csv'
+        $stop = Join-Path $dir 'build_meter.stop'
+        Remove-Item -LiteralPath $stop -Force -ErrorAction SilentlyContinue
+        $job = Start-Job -ArgumentList $csv, $stop, $tc -ScriptBlock {
+            param($csv, $stop, $tc)
+            $w = New-Object System.IO.StreamWriter($csv, $false)
+            $w.WriteLine('sec,commit_mb,commit_limit_mb,avail_mb,pages_in,pages_out,cpu_pct,rustc_n,rustc_mb,rustc_max_mb,other_rustc_n')
+            $t0 = Get-Date
+            while (-not (Test-Path -LiteralPath $stop)) {
+                try {
+                    $m = Get-CimInstance Win32_PerfRawData_PerfOS_Memory
+                    $c = Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'"
+                    $n = 0; $o = 0; $mb = 0.0; $mx = 0.0
+                    foreach ($r in @(Get-Process -Name rustc -ErrorAction SilentlyContinue)) {
+                        $path = ''
+                        try { $path = $r.Path } catch { }
+                        if ($path -and $path.StartsWith($tc, [StringComparison]::OrdinalIgnoreCase)) {
+                            $n++; $v = $r.PrivateMemorySize64 / 1MB; $mb += $v; if ($v -gt $mx) { $mx = $v }
+                        } else { $o++ }
+                    }
+                    $w.WriteLine(('{0:F0},{1:F0},{2:F0},{3},{4},{5},{6},{7},{8:F0},{9:F0},{10}' -f ((Get-Date) - $t0).TotalSeconds, ($m.CommittedBytes / 1MB),
+                        ($m.CommitLimit / 1MB), $m.AvailableMBytes, $m.PagesInputPersec, $m.PagesOutputPersec, $c.PercentProcessorTime, $n, $mb, $mx, $o))
+                    $w.Flush()
+                } catch { }
+                Start-Sleep -Milliseconds 2000
+            }
+            $w.Close()
+        }
+        return [pscustomobject]@{ Job = $job; Csv = $csv; Stop = $stop }
+    } catch { return $null }
+}
+
+function Stop-BuildMeter($meter, $sec, $jobs, $pc, $report, $ok) {
+    if (-not $meter) { return }
+    try {
+        Set-Content -LiteralPath $meter.Stop -Value 'stop' -Encoding ASCII
+        $null = Wait-Job $meter.Job -Timeout 30
+        Remove-Job $meter.Job -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $meter.Stop -Force -ErrorAction SilentlyContinue
+        $rows = @(Import-Csv -LiteralPath $meter.Csv)
+        if ($rows.Count -lt 2) { return }
+        function Col($name) { return @($rows | ForEach-Object { [double]$_.$name }) }
+        $commit = Col 'commit_mb'; $avail = Col 'avail_mb'; $pin = Col 'pages_in'; $pout = Col 'pages_out'
+        $cpu = Col 'cpu_pct'; $rn = Col 'rustc_n'; $rmb = Col 'rustc_mb'; $rmx = Col 'rustc_max_mb'; $oth = Col 'other_rustc_n'
+        $outMB = [math]::Round(($pout[-1] - $pout[0]) * 4096 / 1MB)      # 4 KB pages written to the page file
+        $inMB = [math]::Round(($pin[-1] - $pin[0]) * 4096 / 1MB)        # 4 KB pages read back from disk (page file and mapped files)
+        $minAvail = ($avail | Measure-Object -Minimum).Minimum
+        $busy = @($rn | Where-Object { $_ -gt 0 })
+        $paging = ($outMB -gt 512) -or ($minAvail -lt [math]::Max(512, $pc.RamGB * 1024 * 0.03))
+        $l = @(
+            ('build {0}: {1} s wall ({2}), cargo -j {3}; {4}, {5} cores / {6} logical CPUs, {7} GB RAM' -f $(if ($ok) { 'ok' } else { 'FAILED' }), $sec,
+                [TimeSpan]::FromSeconds([math]::Round($sec)).ToString(), $jobs, $pc.Cpu, $pc.Cores, $pc.Logical, $pc.RamGB),
+            ('  memory: peak commit {0:F1} GB of {1:F1} GB limit, lowest free RAM {2:F1} GB, compilers peak {3:F1} GB together, {4:F1} GB the largest one' -f
+                (($commit | Measure-Object -Maximum).Maximum / 1024), ([double]$rows[-1].commit_limit_mb / 1024), ($minAvail / 1024),
+                (($rmb | Measure-Object -Maximum).Maximum / 1024), (($rmx | Measure-Object -Maximum).Maximum / 1024)),
+            ('  paging: {0} ({1} MB written to the page file, {2} MB read from disk)' -f $(if ($paging) { 'YES, Windows ran short of memory' } else { 'no' }), $outMB, $inMB),
+            ('  compilers at once: max {0}, mean {1:F1}; CPU busy mean {2:F0}%; other compilers on this PC: max {3}' -f
+                ($rn | Measure-Object -Maximum).Maximum, $(if ($busy.Count) { ($busy | Measure-Object -Average).Average } else { 0 }),
+                ($cpu | Measure-Object -Average).Average, ($oth | Measure-Object -Maximum).Maximum)
+        )
+        $l | ForEach-Object { Write-Host "  $_" }
+        Set-Content -LiteralPath $report -Value $l -Encoding UTF8
+    } catch { Write-Host "  (build meter: $($_.Exception.Message))" -ForegroundColor Yellow }
+}
 
 # ---------------------------------------------------------------- (d) build
 Step '(d) building the game (release; this takes a long time and a lot of memory on the first run)'
@@ -1642,10 +1894,60 @@ foreach ($d in (Get-ChildItem -LiteralPath (Join-Path $orc 'rec') -Directory | S
 }
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $prof) | Out-Null
 Set-Content -LiteralPath $prof -Value $pl -Encoding ASCII
+# Profile-guided optimisation (PGO): pgo\<disc serial>.profdata.gz, recorded by the developers with a training build of this
+# version playing through every planet, tells the compiler which code the game runs most, so it optimises and lays out that code
+# for speed (same behaviour, faster game thread). The profile holds only function names, checksums and run counts, no game code
+# or data. Where it does not fit a function (changed code) the compiler ignores it for that function: never wrong, only less
+# fast. -NoPgo, no profile for this disc, or an unpack error: the normal build.
+$cfgs = @('--config', $prof)
+$pgoDir = Join-Path $gen 'pgo'
+$pgoGz = Join-Path $root ('pgo\' + $disc.Serial + '.profdata.gz')
+$pgoOn = $false
+if (-not $NoPgo -and (Test-Path -LiteralPath $pgoGz -PathType Leaf)) {
+    try {
+        $pgoTag = (Get-Sha256Hex $pgoGz).Replace('-', '').Substring(0, 12).ToLower()
+        $pgoFile = Join-Path $pgoDir ($disc.Serial + '-' + $pgoTag + '.profdata')      # checksum in the name: a new profile rebuilds
+        if (-not (Test-Path -LiteralPath $pgoFile -PathType Leaf)) {
+            if (Test-Path -LiteralPath $pgoDir) { Remove-Item -LiteralPath $pgoDir -Recurse -Force }    # an older profile
+            New-Item -ItemType Directory -Force -Path $pgoDir | Out-Null
+            $zin = [System.IO.File]::OpenRead($pgoGz)
+            try {
+                $gz = New-Object System.IO.Compression.GZipStream($zin, [System.IO.Compression.CompressionMode]::Decompress)
+                $zout = [System.IO.File]::Create($pgoFile + '.part')
+                try { $gz.CopyTo($zout) } finally { $zout.Dispose(); $gz.Dispose() }
+            } finally { $zin.Dispose() }
+            Move-Item -LiteralPath ($pgoFile + '.part') -Destination $pgoFile
+        }
+        # the rustflags go in a config file (no quoting trouble with spaces in the folder path); the LLVM switch keeps the log
+        # quiet about functions the profile does not fit; -pgso=false keeps code that ran little optimised for speed, not size
+        $pgoToml = Join-Path $pgoDir 'pgo.toml'
+        $tl = "# written by setup.ps1 (step d): profile-guided optimisation`n[build]`nrustflags = [`"-Cprofile-use=" + $pgoFile.Replace('\', '\\') + "`", `"-Cllvm-args=-no-pgo-warn-mismatch`", `"-Cllvm-args=-pgso=false`"]`n"
+        [System.IO.File]::WriteAllText($pgoToml, $tl, (New-Object System.Text.UTF8Encoding($false)))
+        $cfgs += @('--config', $pgoToml)
+        $pgoOn = $true
+        Write-Host "  speed profile (PGO): on, pgo\$($disc.Serial).profdata.gz"
+    } catch {
+        Write-Host "  speed profile (PGO): off, could not unpack pgo\$($disc.Serial).profdata.gz ($($_.Exception.Message))" -ForegroundColor Yellow
+    }
+}
+if (-not $pgoOn) {
+    if (Test-Path -LiteralPath $pgoDir) { Remove-Item -LiteralPath $pgoDir -Recurse -Force -ErrorAction SilentlyContinue }
+    if ($NoPgo) { Write-Host '  speed profile (PGO): off (-NoPgo)' }
+    elseif (-not (Test-Path -LiteralPath $pgoGz -PathType Leaf)) { Write-Host "  speed profile (PGO): off (this version has none for $($disc.Serial))" }
+}
+[void](Complete-Tools $true)
+Wait-LibsFetch
+# How many compiler jobs run at once (cargo -j): -CargoJobs N, or 0 = automatic (see Get-CargoJobs).
+$pcInfo = Get-PcInfo
+$cj = $(if ($CargoJobs -gt 0) { $CargoJobs } else { Get-CargoJobs $pcInfo })
+Write-Host ("  {0} compiler jobs at once ({1} logical CPUs, {2} cores, {3} GB RAM{4})" -f $cj, $pcInfo.Logical, $pcInfo.Cores, $pcInfo.RamGB, $(if ($CargoJobs -gt 0) { ', set by -CargoJobs' } else { '' }))
+$meter = Start-BuildMeter (Join-Path $gen 'logs')
 $t = Get-Date
-& $cargo build --release --manifest-path (Join-Path $root 'rac-rs\Cargo.toml') --target-dir (Join-Path $root 'build') --bin rac-rs --features rac-rs/windows_gui --config $prof
-if ($LASTEXITCODE -ne 0) { Fail 'cargo build failed' }
+& $cargo build --release --manifest-path (Join-Path $root 'rac-rs\Cargo.toml') --target-dir (Join-Path $root 'build') -p rac-rs-exe --bin rac-rs --features rac-rs-exe/windows_gui @cfgs -j $cj --timings
+$cargoExit = $LASTEXITCODE
 $timings['build'] = [math]::Round(((Get-Date) - $t).TotalSeconds, 1)
+Stop-BuildMeter $meter $timings['build'] $cj $pcInfo (Join-Path $gen 'build_report.txt') ($cargoExit -eq 0)
+if ($cargoExit -ne 0) { Fail 'cargo build failed' }
 $exe = Join-Path $root 'build\release\rac-rs.exe'
 if (-not (Test-Path -LiteralPath $exe)) { Fail "build finished but $exe is missing" }
 Write-Host "  built $exe ($([math]::Round((Get-Item -LiteralPath $exe).Length / 1MB)) MB) in $($timings['build']) s"

@@ -13,12 +13,8 @@
 //! takes `&mut u8`); the target-eligible byte +0xbc has no carrier; the held loop voice follows the hero.
 
 use super::*;
-use crate::camera::fast_cos;
-use crate::camera::fast_sin;
-use crate::gameplay::{pal_ticks, PAL_DT, PAL_DT2};
-use crate::particles::{polar, PointLight, Rng, Spawn, WorldQuad};
-use crate::physics::{cross, vdot, vrsqrt, vscale, vsqrt};
-use crate::shadows::fast_atan2;
+use crate::particles::WorldQuad;
+use crate::physics::cross;
 
 /// The held class.
 pub const HELD: u32 = 185;

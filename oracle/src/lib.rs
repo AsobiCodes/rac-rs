@@ -8,7 +8,7 @@ mod wad;
 pub mod cold;
 pub mod ver;
 pub mod cpu;
-pub mod fpu;
+pub use ee_core::fpu;
 pub mod gate;
 pub mod gs;
 pub mod hle;
@@ -23,6 +23,7 @@ mod vu;
 mod vu0_prog0;
 mod vu0_prog1;
 mod vu0_prog9hi;
+pub mod skinff;
 pub mod vu0aot;
 
 use cpu::Cpu;
@@ -31,6 +32,8 @@ use mem::Mem;
 const LEVEL: u32 = 0x15ed84;
 /// The vblank poll loop the game waits in (boot).
 pub(crate) const VBLANK_WAIT: u32 = 0x118cb0;
+/// sceGsSyncV's INTC_STAT poll while no vsync callback is registered (boot FUN_00118bd0 +0x40; `Cpu::poll_ff`).
+pub(crate) const POLL_HEAD: u32 = 0x118c10;
 /// Pad read (boot FUN_00124bd8): copies the pad DMA reply into a1, returns its length.
 pub const PAD_READ: u32 = 0x124bd8;
 
@@ -220,6 +223,23 @@ fn halted(c: &Cpu) -> Option<String> {
 }
 
 impl Machine {
+    /// An empty machine that is never run: the target of `mirror_to` (a view of RAM, scratchpad and GS registers for a
+    /// reader thread; rac-rs `retail/snap_pipe.rs`). No game thread, no write watch.
+    pub fn ghost() -> Machine {
+        Machine { cpu: std::mem::ManuallyDrop::new(Box::new(Cpu::new(Mem::new()))), game: None }
+    }
+
+    /// Copies what the picture path reads into `ghost` (`Mem::mirror_to`); call between frames. Returns the RAM bytes copied.
+    pub fn mirror_to(&self, ghost: &mut Machine, fresh: &mut bool) -> usize {
+        self.cpu.mem.mirror_to(&mut ghost.cpu.mem, fresh)
+    }
+
+    /// True when `ghost` holds the same RAM, scratchpad and GS registers as this machine (RAC_SNAP_CHECK).
+    pub fn same_view(&self, ghost: &Machine) -> bool {
+        let (a, b) = (&self.cpu.mem, &ghost.cpu.mem);
+        a.ram == b.ram && a.spr == b.spr && a.gs == b.gs
+    }
+
     /// Loads `dir` (p2s.py output) and the stubs file `stubs.txt` from `dir` or its parents.
     pub fn load(dir: &str) -> Machine {
         let mut cpu = load(dir);
@@ -361,9 +381,7 @@ impl Machine {
                 c.rec_catch = true;
                 let r = loop {
                     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| loop {
-                        for _ in 0..4096 {
-                            c.step_rec();
-                        }
+                        c.run_rec(4096);
                         if let Some(e) = halted(c) {
                             return e;
                         }

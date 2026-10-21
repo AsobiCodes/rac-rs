@@ -1,4 +1,3 @@
-use super::*;
 
 /// Type 0x0f ember (spawn FUN_002804e8, update FUN_00280620). Colour runs `c1` -> `c0` as life ends.
 /// With `trail` set (flag word nonzero) every odd global tick skips the drag and drops a trail ember.

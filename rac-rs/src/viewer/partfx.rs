@@ -43,12 +43,21 @@ impl FxLights {
 	}
 }
 
+/// How many effect lights a frame gathers by Graphics level of Particles (1 Low, 2 Medium, otherwise High = `FX_LIGHTS`).
+pub(super) const fn light_count(level: u8) -> usize {
+	match level {
+		1 => 2,
+		2 => 4,
+		_ => FX_LIGHTS,
+	}
+}
+
 /// Gathers the additive particle quads (4 vertices each, as built by gpu.rs `set_particles`) within `FX_FAR` of the eye into
 /// effect lights: brightest first, each quad joins the first light within `GATHER` of it (or starts one while fewer than
 /// `FX_LIGHTS` exist). A quad's colour is its vertex colour x its texture's mean alpha-weighted colour (`tints`; the flame
 /// and spark textures carry the hue, their vertex colours are mostly grey). A quad weighs its alpha x area; a light takes the weighted mean position and hue, brightness
 /// `FX_GAIN` x sqrt(sum of weight x luminance) (capped, faded out below `FX_FLOOR`..2 x `FX_FLOOR`) and reach `FX_REACH.0 + FX_REACH.1` x sqrt(sum of weights), at most `FX_REACH.2`.
-pub(super) fn lights<'a>(quads: impl Iterator<Item = (u32, &'a [Vertex])>, tints: &HashMap<u32, [f32; 3]>, eye: [f32; 3]) -> FxLights {
+pub(super) fn lights<'a>(quads: impl Iterator<Item = (u32, &'a [Vertex])>, tints: &HashMap<u32, [f32; 3]>, eye: [f32; 3], max: usize) -> FxLights {
 	struct E {
 		p: [f32; 3],
 		c: [f32; 3],
@@ -83,7 +92,7 @@ pub(super) fn lights<'a>(quads: impl Iterator<Item = (u32, &'a [Vertex])>, tints
 		});
 		let a = match near {
 			Some(i) => &mut acc[i],
-			None if acc.len() < FX_LIGHTS => {
+			None if acc.len() < max.min(FX_LIGHTS) => {
 				acc.push(([0.0; 3], [0.0; 3], 0.0, 0.0));
 				acc.last_mut().unwrap()
 			}
@@ -211,8 +220,8 @@ impl PartFx {
 	/// (`msaa`, loaded) and depth (`depth`, read-only), resolving into the post scene (`resolve`) and the post glow target
 	/// (`glow`). `generation` = post targets' generation (they are remade with the depth target).
 	#[allow(clippy::too_many_arguments)]
-	/// `fx`: the effect lights that light the smoke (none in the cover pass).
-	pub(super) fn begin<'e>(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, enc: &'e mut wgpu::CommandEncoder, msaa: &wgpu::TextureView, depth: &wgpu::TextureView, resolve: &wgpu::TextureView, glow: &wgpu::TextureView, generation: u64, fx: &FxLights) -> wgpu::RenderPass<'e> {
+	/// `fx`: the effect lights that light the smoke (none in the cover pass). `far`: the world far plane the depth was drawn with.
+	pub(super) fn begin<'e>(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, enc: &'e mut wgpu::CommandEncoder, msaa: &wgpu::TextureView, depth: &wgpu::TextureView, resolve: &wgpu::TextureView, glow: &wgpu::TextureView, generation: u64, fx: &FxLights, far: f32) -> wgpu::RenderPass<'e> {
 		let tex = resolve.texture();
 		let key = (tex.width(), tex.height(), generation);
 		if self.t.as_ref().is_none_or(|t| t.key != key) {
@@ -228,7 +237,7 @@ impl PartFx {
 			self.t = Some(Targets { key, glow_ms, bind });
 		}
 		let t = self.t.as_ref().expect("particle targets");
-		queue.write_buffer(&self.ubuf, 0, bytemuck::bytes_of(&SoftU { p: [RETAIL_NEAR, RETAIL_FAR, FADE, GLOW], n: [fx.n as f32, SMOKE, 0.0, 0.0], l: fx.rows() }));
+		queue.write_buffer(&self.ubuf, 0, bytemuck::bytes_of(&SoftU { p: [RETAIL_NEAR, far, FADE, GLOW], n: [fx.n as f32, SMOKE, 0.0, 0.0], l: fx.rows() }));
 		let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
 			label: Some("particles"),
 			color_attachments: &[
@@ -261,17 +270,30 @@ mod tests {
 		v.extend(quad([11.0, 0.0, 0.0], 2.0, [1.0, 0.5, 0.0, 1.0]));
 		v.extend(quad([30.0, 0.0, 0.0], 1.0, [0.0, 0.0, 1.0, 1.0]));
 		v.extend(quad([500.0, 0.0, 0.0], 4.0, [1.0, 1.0, 1.0, 1.0]));
-		let fx = lights([(0, &v[..])].into_iter(), &HashMap::from([(0, [1.0; 3])]), [0.0; 3]);
+		let fx = lights([(0, &v[..])].into_iter(), &HashMap::from([(0, [1.0; 3])]), [0.0; 3], FX_LIGHTS);
 		assert_eq!(fx.n, 2);
 		let [a, b] = [fx.l[0], fx.l[1]];
 		assert!((a[0][0] - 10.5).abs() < 1e-4 && a[0][3] > FX_REACH.0);
 		// Hue kept (orange: top channel = brightness), the blue one on its own.
 		assert!(a[1][0] > a[1][1] && a[1][2] == 0.0);
 		assert!((b[0][0] - 30.0).abs() < 1e-4 && b[1][2] > 0.0 && b[1][0] == 0.0);
-		assert!(lights([(0, &[][..])].into_iter(), &HashMap::new(), [0.0; 3]).n == 0);
+		assert!(lights([(0, &[][..])].into_iter(), &HashMap::new(), [0.0; 3], FX_LIGHTS).n == 0);
 		// The texture's hue wins over a grey vertex colour.
 		let g = quad([10.0, 0.0, 0.0], 2.0, [0.5, 0.5, 0.5, 1.0]);
-		let o = lights([(7 | crate::particles::FX_CLAMP as u32, &g[..])].into_iter(), &HashMap::from([(7, [0.8, 0.3, 0.0])]), [0.0; 3]);
+		let o = lights([(7 | crate::particles::FX_CLAMP as u32, &g[..])].into_iter(), &HashMap::from([(7, [0.8, 0.3, 0.0])]), [0.0; 3], FX_LIGHTS);
 		assert!(o.l[0][1][0] > o.l[0][1][1] && o.l[0][1][2] == 0.0);
+	}
+
+	/// Graphics levels: High gathers all `FX_LIGHTS` (today), Medium and Low fewer; a lower cap keeps only the brightest clusters.
+	#[test]
+	fn light_count_by_level_caps_the_gather() {
+		assert_eq!((light_count(3), light_count(2), light_count(1)), (FX_LIGHTS, 4, 2));
+		let mut v = Vec::new();
+		for k in 0..6 {
+			v.extend(quad([10.0 + 12.0 * k as f32, 0.0, 0.0], 2.0, [1.0, 0.5, 0.0, 1.0]));
+		}
+		let tints = HashMap::from([(0, [1.0; 3])]);
+		let n = |level| lights([(0, &v[..])].into_iter(), &tints, [0.0; 3], light_count(level)).n;
+		assert_eq!((n(3), n(2), n(1)), (6, 4, 2));
 	}
 }

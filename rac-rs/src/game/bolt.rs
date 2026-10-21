@@ -3,8 +3,6 @@
 
 use super::pickups::bolt_wrap;
 use super::*;
-use crate::particles::euler_m;
-use crate::shadows::fast_atan2;
 
 
 

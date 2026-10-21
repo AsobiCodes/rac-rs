@@ -244,28 +244,31 @@ pub fn min4(a: V, b: V) -> V {
 pub fn abs4(a: V) -> V {
     unsafe { _mm_and_si128(a, _mm_set1_epi32(0x7fff_ffff)) }
 }
-/// ITOF0/4/12/15: `fout(mulss_nc(cvtsi2ss_nc(s as i32), sc))` per lane.
+/// ITOF0/4/12/15: `fout(mulss_nc(cvtsi2ss_nc(s as i32), sc))` per lane. CVTDQ2PS rounds like CVTSI2SS (MXCSR, toward zero
+/// here); asm so the compiler never reasons about the rounding mode. The scales are <= 1, so the product is finite and
+/// `fout` is the identity.
 #[inline(always)]
 pub fn itof4<const K: u32>(s: V) -> V {
     let sc = [1.0f32, 0.0625, 1.0 / 4096.0, 1.0 / 32768.0][K as usize];
-    let mut a = [0u32; 4];
-    unsafe { _mm_storeu_si128(a.as_mut_ptr() as *mut V, s) };
-    for l in 0..4 {
-        a[l] = crate::fpu::fout(crate::fpu::mulss_nc(crate::fpu::cvtsi2ss_nc(a[l] as i32), sc));
+    unsafe {
+        let mut x = _mm_castsi128_ps(s);
+        asm!("cvtdq2ps {x}, {x}", x = inout(xmm_reg) x, options(nostack, nomem, pure));
+        mulps(_mm_castps_si128(x), _mm_castps_si128(_mm_set1_ps(sc)))
     }
-    unsafe { _mm_loadu_si128(a.as_ptr() as *const V) }
 }
-/// FTOI0/4/12/15: `cvt_w(fout(mulss_nc(fin(s), sc)))` per lane.
+/// FTOI0/4/12/15: `cvt_w(fout(mulss_nc(fin(s), sc)))` per lane. The product is finite (rounding toward zero never
+/// gives Inf). |p| < 2^31 (exponent field <= 0x4e800000, as `cvt_w` tests) truncates exactly in CVTTPS2DQ; above that
+/// it gives 0x80000000 and the positive lanes saturate to 0x7fffffff (0x80000000 ^ 0xffffffff).
 #[inline(always)]
 pub fn ftoi4<const K: u32>(s: V) -> V {
     let sc = [1.0f32, 16.0, 4096.0, 32768.0][K as usize];
-    let mut a = [0u32; 4];
-    unsafe { _mm_storeu_si128(a.as_mut_ptr() as *mut V, s) };
-    for l in 0..4 {
-        let v = crate::fpu::fout(crate::fpu::mulss_nc(crate::fpu::fin(a[l]), sc));
-        a[l] = crate::fpu::cvt_w(v);
+    unsafe {
+        let p = mulps(clamp4(s), _mm_castps_si128(_mm_set1_ps(sc)));
+        let r = _mm_cvttps_epi32(_mm_castsi128_ps(p));
+        let ov = _mm_cmpgt_epi32(_mm_and_si128(p, _mm_set1_epi32(0x7f80_0000)), _mm_set1_epi32(0x4e80_0000));
+        let pos = _mm_cmpgt_epi32(p, _mm_set1_epi32(-1));
+        _mm_xor_si128(r, _mm_and_si128(ov, pos))
     }
-    unsafe { _mm_loadu_si128(a.as_ptr() as *const V) }
 }
 
 /// MAC flag lane masks of a result (`mac_of`): (zero lanes, sign lanes), each lane-ordered (bit 0 = x) and cut to

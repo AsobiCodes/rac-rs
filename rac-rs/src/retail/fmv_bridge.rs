@@ -222,6 +222,13 @@ pub fn waiting() -> bool {
 	s.playing
 }
 
+/// [PC] Run-ahead (retail.rs `Retail::ahead`): a field the worker was handed before a movie began waits here until the
+/// movie ended (or the window went away), as `Retail::tick` holds back every later field while one plays; in lockstep no
+/// field is handed out meanwhile and this returns at once.
+pub fn hold_field() {
+	wait_finish();
+}
+
 /// The movie ended or was skipped: the game thread returns from the player.
 pub fn finish() {
 	let mut s = st();

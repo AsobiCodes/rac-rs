@@ -1,5 +1,6 @@
-//! Dev debug keys for the user's own playtests (2026-10-13), keyboard only. DEV ONLY: inert unless the environment variable
-//! RAC_DEBUG_KEYS=1 is set (the dev launcher sets it, the release Play.cmd does not). Off, nothing is registered,
+//! Debug keys for the user's own playtests (2026-10-13), keyboard only. Inert unless the environment variable RAC_DEBUG_KEYS=1 is
+//! set (the dev launcher sets it) or the player switched Debug mode on (Pause -> Options -> Controls -> Debug, `devtools::set_menu`,
+//! default Off; the release Play.cmd sets neither). Off, nothing is registered,
 //! nothing is written and the window title is unchanged, so retail stays bit-exact (the savestate smoke hashes do not move).
 //!
 //! Keys (in game, retail mode; F7 is the modern camera):
@@ -61,10 +62,22 @@ struct St {
 
 static ST: Mutex<St> = Mutex::new(St { god: false, ammo: false, table: 0, retry: 0, note: None });
 
-/// The switch: RAC_DEBUG_KEYS=1.
+/// The switch: RAC_DEBUG_KEYS=1 or Debug mode On in the menu (`devtools::menu`).
 pub fn enabled() -> bool {
 	static ON: OnceLock<bool> = OnceLock::new();
-	*ON.get_or_init(|| std::env::var("RAC_DEBUG_KEYS").is_ok_and(|v| v == "1"))
+	super::devtools::gate(*ON.get_or_init(|| std::env::var("RAC_DEBUG_KEYS").is_ok_and(|v| v == "1")), super::devtools::menu())
+}
+
+/// Debug mode was switched Off (`devtools::set_menu`): drops the immortality / infinite ammo switches and every unapplied press, so a
+/// later On starts from nothing (the env switch alone keeps working as before: it never goes through here).
+pub fn menu_off() {
+	PENDING.store(0, Ordering::SeqCst);
+	BOLT_PRESSES.store(0, Ordering::SeqCst);
+	if let Ok(mut st) = ST.lock() {
+		st.god = false;
+		st.ammo = false;
+		st.note = None;
+	}
 }
 
 fn trace() -> bool {
@@ -377,6 +390,25 @@ mod tests {
 		assert_eq!(bolts_add(&mut r, 1), (9_999_999, 9_999_999));
 		wr32(&mut r, BOLTS, 12_000_000);
 		assert_eq!(bolts_add(&mut r, 1).1, 12_000_000, "past the cap stays");
+	}
+
+	/// Debug mode Off (`devtools::set_menu`) drops the switches and the unapplied presses; the gate is env OR menu.
+	#[test]
+	fn menu_off_clears_the_switches_and_the_gate_is_env_or_menu() {
+		assert!(!super::super::devtools::gate(false, false));
+		assert!(super::super::devtools::gate(true, false) && super::super::devtools::gate(false, true) && super::super::devtools::gate(true, true));
+		{
+			let mut st = ST.lock().unwrap();
+			st.god = true;
+			st.ammo = true;
+			st.note = Some(("GOD OFF".into(), Instant::now()));
+		}
+		PENDING.store(P_GOD | P_AMMO, Ordering::SeqCst);
+		BOLT_PRESSES.store(3, Ordering::SeqCst);
+		menu_off();
+		let st = ST.lock().unwrap();
+		assert!(!st.god && !st.ammo && st.note.is_none());
+		assert_eq!((PENDING.load(Ordering::SeqCst), BOLT_PRESSES.load(Ordering::SeqCst)), (0, 0));
 	}
 
 	#[test]

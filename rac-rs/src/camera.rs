@@ -13,10 +13,8 @@ use crate::camgrid::CamGrid;
 use crate::gameplay::{self, Cuboid};
 use crate::level::Level;
 use crate::gameplay::PAL_DT;
-use crate::physics::{add, cross, dot, length, normalize, scale, sub, vadd1, vdiv, vmul, vscale, vsub1, MobySolid, Scene, World, V3};
-use crate::game::kerwan::cam1::Class1Cam;
+use crate::physics::{add, cross, dot, length, normalize, scale, sub, vadd1, vmul, Scene, World, V3};
 use crate::game::kerwan::cam14::lin_spring;
-use crate::game::kerwan::cam14::Class14Cam;
 
 /// One game frame on PAL.
 pub const TICK: f32 = 0.02;
@@ -351,7 +349,6 @@ pub struct CameraRig {
 	over_up: V3,
 	bup: V3,
 	/// KER-63a: the follow-blend registers a class-1 accept resets (read only by the CAM-4b driver, SHR-CAMDRV).
-	#[allow(dead_code)]
 	pub blend_regs: CamBlendRegs,
 	/// CAM-7.3a: the level's path polygons the class-3 rail camera follows (gameplay polygons, as the currents).
 	rail_paths: Vec<gameplay::Polygon>,
@@ -387,7 +384,6 @@ pub struct CameraRig {
 	/// the unsmoothed target up (0x166ec0; its reader is the class-4 predicate, SHR-CAMDRVa2).
 	up_s: V3,
 	up_v: V3,
-	#[allow(dead_code)]
 	up_t: V3,
 }
 
@@ -895,6 +891,7 @@ impl CamShake {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::physics::vsub1;
 	use crate::{iso, toc};
 
 	#[test]

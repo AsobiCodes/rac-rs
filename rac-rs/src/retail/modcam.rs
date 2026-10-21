@@ -198,11 +198,9 @@ struct Lv {
 	res: u32,
 	ring: u32,
 	/// Lock registry: the null-ended actor list hero_lock_registry_pick walks (tests: finding enemies).
-	#[cfg_attr(not(test), allow(dead_code))]
 	reg: u32,
 	attack: u32,
 	/// objects::attached_value(moby) -> the health float (!= 0) [C 0x2009a0 / 0x23b228 disasm] (tests).
-	#[cfg_attr(not(test), allow(dead_code))]
 	health: u32,
 	/// LEVEL_SHIFT of the camera globals from Novalis / Rilgar's addresses.
 	shift: i32,
@@ -277,6 +275,10 @@ fn lv_of(level: u32) -> Option<&'static Lv> {
 fn lv_here(c: &Cpu, at: fn(&Lv) -> u32) -> Option<&'static Lv> {
 	let l = c.mem.ram[0x15ed84] as usize; // level byte (Machine::level)
 	(*crate::retail::disc::pick(&LVS, &LVS_USA)).get(l).filter(|lv| at(lv) == c.pc).or_else(|| (*crate::retail::disc::pick(&LVS, &LVS_USA)).iter().find(|lv| at(lv) == c.pc))
+}
+/// Log only (RAC_AIM_LOG, the camera-speed proof): the follow camera's position, Novalis 0x1671c0 plus the level's shift.
+pub fn cam_pos_diag(m: &ee_oracle::Machine) -> [f32; 3] {
+	lv_of(m.rd8(0x15ed84) as u32).map_or([0.0; 3], |lv| m.rdv3(lv.g(0x1671c0)))
 }
 fn follow_any(c: &mut Cpu) -> bool {
 	lv_here(c, |l| l.follow).is_some_and(|lv| follow(c, lv))
@@ -390,6 +392,9 @@ const ATK_STICK: u32 = 0x13fda8;
 const ATK_YAW: u32 = 0x13fdac;
 const AIM_ON: u32 = 0x140600;
 const AIM_YAW: u32 = 0x14060c;
+/// Hero state group word (hero_movement.md section 2): 2 = fall states, 4 = jump states. And the airborne flag (0 = grounded).
+const HERO_GROUP: u32 = 0x1413dc;
+const HERO_AIRBORNE: u32 = 0x13f65e;
 
 #[derive(Clone, Copy)]
 struct St {
@@ -432,6 +437,10 @@ struct St {
 	/// Trace of the last wall test (base reach, safe reach, rise goal) and the moby the boom segment hit (0 = terrain).
 	tr: [f32; 3],
 	tr_moby: u32,
+	/// The dynamic layer's state (lane P; unused with RAC_MODCAM_DYN=0).
+	dy: Dy,
+	/// Whether the dynamic layer (Smooth) ran last field: a change (Options Static / Smooth, or the env switch) re-seeds `dy`.
+	dyn_was: bool,
 }
 
 static ST: Mutex<St> = Mutex::new(St {
@@ -464,6 +473,8 @@ static ST: Mutex<St> = Mutex::new(St {
 	hero_last: [0.0; 3],
 	tr: [0.0; 3],
 	tr_moby: 0,
+	dy: Dy::ZERO,
+	dyn_was: true,
 });
 
 /// The moby the last `seg` hit (0 = terrain or no hit), for traces.
@@ -509,6 +520,7 @@ pub fn rows(yaw: f32, pitch: f32) -> [[f32; 3]; 3] {
 }
 
 /// The eye for a pivot, view yaw / pitch and boom length.
+#[cfg(test)]
 pub fn eye(pivot: [f32; 3], yaw: f32, pitch: f32, len: f32) -> [f32; 3] {
 	let f = rows(yaw, pitch)[0];
 	[pivot[0] - f[0] * len, pivot[1] - f[1] * len, pivot[2] - f[2] * len]
@@ -763,6 +775,524 @@ impl Drop for Guard {
 	}
 }
 
+// ---- dynamic layer (lane P, 2026-10-20: "more dynamic, Elden Ring style") ------------------------------------------------------
+// The pivot follows the hero through critically damped springs (horizontal fast, vertical slow, a jump does not bob it, a leash
+// keeps the hero framed); after a pause without camera input and while the hero runs, the view eases behind the run direction and
+// toward a default elevation (with a little look down at drops / falls and up on slopes); the boom breathes with run speed and open
+// space and eases out after a wall; the strafe lock-on frames hero and target; the right stick ramps up. Mouse look stays direct.
+// RAC_MODCAM_DYN=0 runs the plain Modern camera of before: every dynamic line of `step` sits behind `dynamic`, the old arithmetic
+// is untouched. Constants: RAC_TUNE="mc_h_time=0.12,mc_rc_delay=2" (devtune, read once; names and defaults in `tune()`).
+
+/// The PC options' Camera row (pcext.rs): Smooth (true, the default) = the dynamic camera, Static = the plain Modern camera. Live:
+/// the next field follows. RAC_MODCAM_DYN, when set, wins (the exactness scripts run with RAC_MODCAM_DYN=0).
+pub fn set_smooth(on: bool) {
+	SMOOTH.store(on, Ordering::Relaxed);
+}
+
+static SMOOTH: AtomicBool = AtomicBool::new(true);
+
+/// Whether the dynamic layer runs: RAC_MODCAM_DYN ("0" = the plain Modern camera, read once) wins when set, else the Camera row.
+fn dyn_on() -> bool {
+	static D: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+	dyn_resolve(*D.get_or_init(|| std::env::var("RAC_MODCAM_DYN").ok().map(|v| v != "0")), SMOOTH.load(Ordering::Relaxed))
+}
+
+/// The env switch (when set) wins over the Camera row.
+fn dyn_resolve(env: Option<bool>, smooth: bool) -> bool {
+	env.unwrap_or(smooth)
+}
+
+/// RAC_MODCAM_LOG=1: one stderr line per field with the camera state (proof logs), read once.
+fn log_on() -> bool {
+	static D: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+	*D.get_or_init(|| std::env::var("RAC_MODCAM_LOG").is_ok_and(|v| v != "0" && !v.is_empty()))
+}
+
+/// Seconds a field is: the disc's own field rate (PAL 0.02 s, USA 1001/60000 s), so every spring and rate below (all in seconds)
+/// feels the same on both discs.
+#[inline]
+fn dt() -> f32 {
+	super::disc::field_dt()
+}
+
+struct Tune {
+	/// Pivot spring smoothing times (s): horizontal, vertical.
+	h_time: f32,
+	v_time: f32,
+	/// Share of a jump's rise the pivot follows before landing (falls below the takeoff follow fully).
+	air_follow: f32,
+	/// Leash (m): the pivot never lags the hero's chest by more than this sideways, with the hero above it, or with it above him.
+	leash_h: f32,
+	leash_up: f32,
+	leash_dn: f32,
+	/// Smoothing of the hero velocity estimate (s).
+	vel_time: f32,
+	/// Recentre: idle seconds before it starts, ease-in time, rate (1/s) base and extra at 90 deg sideways, the highest turn rate
+	/// (rad/s), the lowest run speed (m/s), the most it swings per episode (rad).
+	rc_delay: f32,
+	rc_ramp: f32,
+	rc_base: f32,
+	rc_side: f32,
+	rc_max: f32,
+	rc_speed: f32,
+	rc_budget: f32,
+	/// Default elevation (rad, + looks down), the dead zone around it that is left alone (rad), its ease rate (1/s) and the lowest
+	/// speed it works at.
+	pitch_def: f32,
+	pitch_dz: f32,
+	pitch_k: f32,
+	pitch_speed: f32,
+	/// Look-up on slopes (rad per unit slope, most), look-down at a drop ahead and while falling (rad), bias in / out times (s).
+	bias_up_k: f32,
+	bias_up_max: f32,
+	bias_drop: f32,
+	bias_fall: f32,
+	bias_in: f32,
+	bias_out: f32,
+	/// Drop probe: base and per-speed reach ahead (m), the depth without ground that counts as a drop (m).
+	drop_ahead: f32,
+	drop_ahead_k: f32,
+	drop_depth: f32,
+	/// Boom length: extra share at run speed, factor in tight / open space, smoothing (s), probe length (m), ease-out time (s).
+	dist_run: f32,
+	dist_open_min: f32,
+	dist_open_max: f32,
+	dist_tau: f32,
+	open_ray: f32,
+	boom_out: f32,
+	/// Right stick ramp: rise and fall rate (full deflection per second).
+	ramp_up: f32,
+	ramp_dn: f32,
+	/// Lock-on framing: pivot share toward the target sideways / up, the target's rise above centre (m), the largest shift (m),
+	/// extra boom for far targets (start m, per m, most m), ease in / out (s), hold after the lock drops (s).
+	frame_side: f32,
+	frame_up_k: f32,
+	frame_rise: f32,
+	frame_max: f32,
+	frame_far_start: f32,
+	frame_far_k: f32,
+	frame_far_max: f32,
+	frame_tau_in: f32,
+	frame_tau_out: f32,
+	frame_hold: f32,
+	/// Safety layer (bit flags, 3 = all, 0 = off = the camera of dev s85, for A/B proofs): 1 = the lagged pivot is clipped by a wall
+	/// test from the hero's chest, 2 = the boom never ends past a contact (no `MIN_LEN` floor); the margin kept off a surface (m).
+	safe: f32,
+	safe_margin: f32,
+}
+
+fn tune() -> &'static Tune {
+	static T: std::sync::OnceLock<Tune> = std::sync::OnceLock::new();
+	T.get_or_init(|| {
+		let f = |n: &str, d: f32| crate::devtune::f32(&format!("mc_{n}"), d);
+		Tune {
+			h_time: f("h_time", 0.10),
+			v_time: f("v_time", 0.28),
+			air_follow: f("air_follow", 0.35),
+			leash_h: f("leash_h", 1.6),
+			leash_up: f("leash_up", 1.5),
+			leash_dn: f("leash_dn", 1.0),
+			vel_time: f("vel_time", 0.12),
+			rc_delay: f("rc_delay", 1.2),
+			rc_ramp: f("rc_ramp", 0.5),
+			rc_base: f("rc_base", 0.35),
+			rc_side: f("rc_side", 1.6),
+			rc_max: f("rc_max", 0.9),
+			rc_speed: f("rc_speed", 3.0),
+			rc_budget: f("rc_budget", 1.3),
+			pitch_def: f("pitch_def", 0.33),
+			pitch_dz: f("pitch_dz", 0.10),
+			pitch_k: f("pitch_k", 0.6),
+			pitch_speed: f("pitch_speed", 1.5),
+			bias_up_k: f("bias_up_k", 0.30),
+			bias_up_max: f("bias_up_max", 0.12),
+			bias_drop: f("bias_drop", 0.16),
+			bias_fall: f("bias_fall", 0.22),
+			bias_in: f("bias_in", 0.35),
+			bias_out: f("bias_out", 0.5),
+			drop_ahead: f("drop_ahead", 0.6),
+			drop_ahead_k: f("drop_ahead_k", 0.28),
+			drop_depth: f("drop_depth", 3.0),
+			dist_run: f("dist_run", 0.10),
+			dist_open_min: f("dist_open_min", 0.82),
+			dist_open_max: f("dist_open_max", 1.10),
+			dist_tau: f("dist_tau", 0.6),
+			open_ray: f("open_ray", 7.0),
+			boom_out: f("boom_out", 0.2),
+			ramp_up: f("ramp_up", 4.0),
+			ramp_dn: f("ramp_dn", 12.0),
+			frame_side: f("frame_side", 0.45),
+			frame_up_k: f("frame_up_k", 0.06),
+			frame_rise: f("frame_rise", 0.30),
+			frame_max: f("frame_max", 2.0),
+			frame_far_start: f("frame_far_start", 8.0),
+			frame_far_k: f("frame_far_k", 0.12),
+			frame_far_max: f("frame_far_max", 2.0),
+			frame_tau_in: f("frame_tau_in", 0.3),
+			frame_tau_out: f("frame_tau_out", 0.45),
+			frame_hold: f("frame_hold", 0.3),
+			safe: f("safe", 3.0),
+			safe_margin: f("safe_margin", 0.2),
+		}
+	})
+}
+
+/// The dynamic layer's per-camera state.
+#[derive(Clone, Copy)]
+struct Dy {
+	/// The field `dyn_track` last ran in (a gap re-seeds the velocity) and the hero position then.
+	field: u32,
+	hero_prev: [f32; 3],
+	/// Smoothed hero velocity (m/s, world) and the pivot spring's velocity.
+	hv: [f32; 3],
+	pv: [f32; 3],
+	/// Fields without camera input.
+	idle: u32,
+	/// Fields in a row the hero was airborne in a jump / fall state; `is_air` = at least 2 (debounce).
+	air: u32,
+	is_air: bool,
+	/// At the last grounded field: the hero goal's and the pivot's height along hero up (the takeoff reference).
+	ref_h: f32,
+	ref_p: f32,
+	/// Horizontal speed and vertical speed along hero up (m/s, smoothed).
+	speed: f32,
+	vz: f32,
+	/// Recentre turned so far this episode (rad).
+	rc_used: f32,
+	/// Pitch bias (rad, + looks down).
+	bias: f32,
+	/// A drop lies ahead (probe, every 3rd field) and its smoothed 0..1 weight.
+	drop: bool,
+	drop_w: f32,
+	/// Free share (0..1) of the left, right and up probes, the boom length factor, the boom's ease-out velocity.
+	open_s: [f32; 3],
+	dist_f: f32,
+	len_v: f32,
+	/// Lock framing: fields left of the hold, the last lock-on point, the pivot shift and the extra boom length.
+	lock_hold: u32,
+	lock_pt: [f32; 3],
+	frame_off: [f32; 3],
+	frame_len: f32,
+	/// The ramped right stick.
+	rs: [f32; 2],
+	/// The pivot the camera orbits this field: the spring's pivot clipped at walls and floors between it and the hero's chest.
+	pivc: [f32; 3],
+}
+
+impl Dy {
+	const ZERO: Dy = Dy {
+		field: 0,
+		hero_prev: [0.0; 3],
+		hv: [0.0; 3],
+		pv: [0.0; 3],
+		idle: 0,
+		air: 0,
+		is_air: false,
+		ref_h: 0.0,
+		ref_p: 0.0,
+		speed: 0.0,
+		vz: 0.0,
+		rc_used: 0.0,
+		bias: 0.0,
+		drop: false,
+		drop_w: 0.0,
+		open_s: [1.0; 3],
+		dist_f: 1.0,
+		len_v: 0.0,
+		lock_hold: 0,
+		lock_pt: [0.0; 3],
+		frame_off: [0.0; 3],
+		frame_len: 0.0,
+		rs: [0.0; 2],
+		pivc: [0.0; 3],
+	};
+}
+
+fn add3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+	[a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+fn scale3(a: [f32; 3], k: f32) -> [f32; 3] {
+	[a[0] * k, a[1] * k, a[2] * k]
+}
+fn sstep(x: f32) -> f32 {
+	let x = x.clamp(0.0, 1.0);
+	x * x * (3.0 - 2.0 * x)
+}
+/// The share of the way to a goal one field covers with a first-order lag of `tau` seconds.
+fn k_of(tau: f32) -> f32 {
+	if tau <= 1e-4 {
+		1.0
+	} else {
+		1.0 - (-dt() / tau).exp()
+	}
+}
+/// One field of a critically damped spring on the offset `y` (velocity `v`) from its goal, smoothing time `ts` (w = 2 / ts, the
+/// exact solution, so no overshoot and no step-size trouble): (y, v) afterwards.
+fn crit(y: f32, v: f32, ts: f32) -> (f32, f32) {
+	let w = 2.0 / ts.max(0.02);
+	let e = (-w * dt()).exp();
+	let t = v + w * y;
+	((y + t * dt()) * e, (v - w * t * dt()) * e)
+}
+/// A stick axis `tgt` ramped from `r`: up at `ramp_up` full deflections a second, down (or through zero) at `ramp_dn`.
+fn ramp1(r: f32, tgt: f32) -> f32 {
+	let t = tune();
+	let rate = if tgt.abs() > r.abs() && tgt * r >= 0.0 { t.ramp_up } else { t.ramp_dn };
+	let m = rate * dt();
+	r + (tgt - r).clamp(-m, m)
+}
+
+/// Every field, before the camera moves: the hero's velocity, jump / fall state, the idle time (`input` = the camera was used).
+fn dyn_track(c: &mut Cpu, st: &mut St, fr: &Frame, hero: [f32; 3], hero_goal: [f32; 3], input: bool) {
+	let t = tune();
+	let field = st.field;
+	let piv_h = dot3(st.pivot, fr.u);
+	let d = &mut st.dy;
+	let dp = sub(hero, d.hero_prev);
+	let gap = field.wrapping_sub(d.field) != 1 || len3(dp) > JUMP;
+	d.field = field;
+	d.hero_prev = hero;
+	if gap {
+		d.hv = [0.0; 3];
+	} else {
+		let a = k_of(t.vel_time);
+		for i in 0..3 {
+			d.hv[i] += (dp[i] / dt() - d.hv[i]) * a;
+		}
+	}
+	d.speed = dot3(d.hv, fr.a).hypot(dot3(d.hv, fr.b));
+	d.vz = dot3(d.hv, fr.u);
+	// A jump or fall state with no ground contact; two fields in a row (a bump on a slope is not a jump).
+	let flying = matches!(c.mem.rd32(HERO_GROUP), 2 | 4) && c.mem.rd16(HERO_AIRBORNE) != 0;
+	d.air = if flying { d.air.saturating_add(1) } else { 0 };
+	d.is_air = d.air >= 2;
+	if d.air == 0 {
+		d.ref_h = dot3(hero_goal, fr.u);
+		d.ref_p = piv_h;
+	}
+	d.idle = if input { 0 } else { d.idle.saturating_add(1) };
+	if input || d.speed < t.rc_speed * 0.5 {
+		d.rc_used = 0.0;
+	}
+}
+
+/// The pivot follows the hero goal (chest) through critically damped springs: fast sideways, slower vertically; while a jump is in
+/// the air the vertical goal follows only `air_follow` of the rise above the takeoff (falls below it follow fully); a leash keeps
+/// the hero within `leash_*` of the pivot. Not used in RMB aim (the old exponential follow keeps that feel).
+fn dyn_follow(st: &mut St, fr: &Frame, hero_goal: [f32; 3]) {
+	let t = tune();
+	let u = fr.u;
+	let d = &mut st.dy;
+	let hh = dot3(hero_goal, u);
+	let mut goal = hero_goal;
+	if d.is_air {
+		let off = hh - d.ref_h;
+		let gh = d.ref_p + if off > 0.0 { off * t.air_follow } else { off };
+		goal = add3(goal, scale3(u, gh - hh));
+	}
+	let y = sub(st.pivot, goal);
+	let (yv, vv) = (dot3(y, u), dot3(d.pv, u));
+	let yh = sub(y, scale3(u, yv));
+	let vh = sub(d.pv, scale3(u, vv));
+	let (mut nyh, mut nvh) = ([0.0f32; 3], [0.0f32; 3]);
+	for i in 0..3 {
+		(nyh[i], nvh[i]) = crit(yh[i], vh[i], t.h_time);
+	}
+	let (nyv, nvv) = crit(yv, vv, t.v_time);
+	let mut pv = add3(nvh, scale3(u, nvv));
+	// Leash against the real hero (not the partial jump goal): never lose him.
+	let e = add3(sub(goal, hero_goal), add3(nyh, scale3(u, nyv)));
+	let ev = dot3(e, u);
+	let mut eh = sub(e, scale3(u, ev));
+	let mut ev2 = ev;
+	let hvv = dot3(d.hv, u);
+	let lh = len3(eh);
+	if lh > t.leash_h {
+		eh = scale3(eh, t.leash_h / lh);
+		pv = add3(sub(d.hv, scale3(u, hvv)), scale3(u, dot3(pv, u)));
+	}
+	if ev > t.leash_dn || ev < -t.leash_up {
+		ev2 = ev.clamp(-t.leash_up, t.leash_dn);
+		pv = add3(sub(pv, scale3(u, dot3(pv, u))), scale3(u, hvv));
+	}
+	st.pivot = add3(hero_goal, add3(eh, scale3(u, ev2)));
+	d.pv = pv;
+}
+
+/// Lazy recentre and default elevation (no camera input for `rc_delay` s, the hero running, no RMB aim): the yaw eases toward the
+/// run direction, faster the more sideways he runs, not at all toward the camera, at most `rc_budget` per episode; the pitch eases
+/// toward `pitch_def`.
+fn dyn_auto(st: &mut St, fr: &Frame) {
+	let t = tune();
+	let idle_s = st.dy.idle as f32 * dt();
+	let sp = st.dy.speed;
+	if idle_s < t.rc_delay {
+		return;
+	}
+	let ease = sstep((idle_s - t.rc_delay) / t.rc_ramp);
+	if sp >= t.rc_speed && st.dy.rc_used < t.rc_budget {
+		let (vx, vy) = (dot3(st.dy.hv, fr.a), dot3(st.dy.hv, fr.b));
+		let ang = wrap(vy.atan2(vx) - st.yaw);
+		// Running toward the camera (more than about 110 deg off the view direction): no swing.
+		let gate = sstep((ang.cos() + 0.5) / 0.3);
+		// The swing tapers off over the last 0.4 rad of its budget (no sudden stop).
+		let taper = sstep((t.rc_budget - st.dy.rc_used) / 0.4);
+		let rate = (t.rc_base + t.rc_side * ang.sin().abs()) * gate * ease * sstep((sp - t.rc_speed) / 2.0) * taper;
+		let lim = t.rc_max * dt();
+		let turn = (ang * (1.0 - (-rate * dt()).exp())).clamp(-lim, lim);
+		st.yaw = wrap(st.yaw + turn);
+		st.dy.rc_used += turn.abs();
+	}
+	if sp >= t.pitch_speed {
+		// Only the part outside the dead zone around the default pulls (a pitch the player chose nearby stays).
+		let err = t.pitch_def - st.pitch;
+		st.pitch += (err - err.clamp(-t.pitch_dz, t.pitch_dz)) * k_of(1.0 / t.pitch_k) * ease;
+	}
+}
+
+/// The look-up / look-down bias: a little up on uphill runs, down at a drop ahead and while falling. Eased, never touches the
+/// player's own pitch; fades fast in RMB aim.
+fn dyn_bias(st: &mut St) {
+	let t = tune();
+	let aiming = st.aiming;
+	let d = &mut st.dy;
+	let mut g = 0.0f32;
+	if !aiming {
+		if !d.is_air && d.speed > 1.5 && d.vz > 0.0 {
+			g -= (d.vz / d.speed * t.bias_up_k).min(t.bias_up_max);
+		}
+		g += t.bias_drop * d.drop_w;
+		if d.is_air && d.vz < -3.0 {
+			g += t.bias_fall * ((-d.vz - 3.0) / 10.0).clamp(0.0, 1.0);
+		}
+	}
+	let tau = if aiming { 0.12 } else if g.abs() > d.bias.abs() { t.bias_in } else { t.bias_out };
+	d.bias += (g - d.bias) * k_of(tau);
+}
+
+/// Retail segment probes (cheap: one or two per field, none in RMB aim): the drop ahead of a running hero (every 3rd field, ground
+/// missing within `drop_depth`) and, one direction per field (left, right, up), how open the space around the pivot is.
+fn dyn_probe(c: &mut Cpu, lv: &Lv, st: &mut St, fr: &Frame, hero: [f32; 3]) {
+	let t = tune();
+	if st.aiming {
+		st.dy.drop = false;
+		st.dy.drop_w += (0.0 - st.dy.drop_w) * k_of(0.15);
+		return;
+	}
+	if st.dy.speed > 1.5 && !st.dy.is_air {
+		if st.field % 3 == 0 {
+			let (vx, vy) = (dot3(st.dy.hv, fr.a), dot3(st.dy.hv, fr.b));
+			let l = vx.hypot(vy).max(1e-3);
+			let ahead = t.drop_ahead + t.drop_ahead_k * st.dy.speed;
+			let dirw = add3(scale3(fr.a, vx / l), scale3(fr.b, vy / l));
+			let s = add3(add3(hero, scale3(dirw, ahead)), scale3(fr.u, 0.7));
+			let e = add3(s, scale3(fr.u, -(0.7 + t.drop_depth)));
+			st.dy.drop = seg(c, lv, s, e).is_none();
+		}
+	} else {
+		st.dy.drop = false;
+	}
+	st.dy.drop_w += ((st.dy.drop as u8 as f32) - st.dy.drop_w) * k_of(0.3);
+	let o = fr.lift(st.dy.pivc, st.lift);
+	let r = fr.rows(st.yaw, st.pitch);
+	let i = (st.field % 3) as usize;
+	let dir = [r[1], scale3(r[1], -1.0), fr.u][i];
+	st.dy.open_s[i] = match seg(c, lv, o, add3(o, scale3(dir, t.open_ray))) {
+		Some(h) => (len3(sub(h, o)) / t.open_ray).min(1.0),
+		None => 1.0,
+	};
+}
+
+/// The boom length factor: a bit longer at run speed and in open space, shorter in tight spaces; 1.0 (fast) in RMB aim.
+fn dyn_dist(st: &mut St) {
+	let t = tune();
+	let s = st.dy.open_s;
+	let open = 0.45 * s[0] + 0.45 * s[1] + 0.10 * s[2];
+	let f_open = t.dist_open_min + (t.dist_open_max - t.dist_open_min) * open;
+	let f_run = 1.0 + t.dist_run * (st.dy.speed / 6.0).clamp(0.0, 1.0);
+	let (goal, tau) = if st.aiming { (1.0, 0.2) } else { (f_open * f_run, t.dist_tau) };
+	st.dy.dist_f += (goal - st.dy.dist_f) * k_of(tau);
+}
+
+/// Lock-on framing (RMB aim with a strafe lock): the pivot shifts toward the target (hero and target stay framed, the target a
+/// little above the centre) and the boom pulls back for far targets; the camera's rotation, and so the aim, is untouched. Eases
+/// back when the lock ends.
+fn dyn_frame(c: &mut Cpu, lv: &Lv, st: &mut St, fr: &Frame, hero_goal: [f32; 3]) {
+	let t = tune();
+	let lock = if st.aiming { super::aim::strafe_lock_for_cam(c, st.field) } else { None };
+	match lock {
+		Some((_, p)) => {
+			st.dy.lock_hold = (t.frame_hold / dt()).round() as u32;
+			st.dy.lock_pt = p;
+		}
+		None => st.dy.lock_hold = st.dy.lock_hold.saturating_sub(1),
+	}
+	let have = st.aiming && st.dy.lock_hold > 0;
+	let (mut want, mut want_len) = ([0.0f32; 3], 0.0f32);
+	if have {
+		let p0 = fr.lift(st.dy.pivc, st.lift);
+		let rel = sub(st.dy.lock_pt, p0);
+		let r = fr.rows(st.yaw, st.pitch);
+		let (right, up) = (scale3(r[1], -1.0), r[2]);
+		let off_r = (dot3(rel, right) * t.frame_side).clamp(-t.frame_max, t.frame_max);
+		let off_u = (dot3(rel, up) * t.frame_up_k - t.frame_rise).clamp(-0.6, 0.4);
+		want = add3(scale3(right, off_r), scale3(up, off_u));
+		want_len = ((len3(sub(st.dy.lock_pt, hero_goal)) - t.frame_far_start) * t.frame_far_k).clamp(0.0, t.frame_far_max);
+		// Not through a wall: the shift stops 0.2 m short of the first contact.
+		let m = len3(want);
+		if m > 0.05 {
+			if let Some(h) = seg(c, lv, p0, add3(p0, want)) {
+				want = scale3(want, ((len3(sub(h, p0)) - 0.2).max(0.0) / m).min(1.0));
+			}
+		}
+	}
+	let k = k_of(if have { t.frame_tau_in } else { t.frame_tau_out });
+	for i in 0..3 {
+		st.dy.frame_off[i] += (want[i] - st.dy.frame_off[i]) * k;
+	}
+	st.dy.frame_len += (want_len - st.dy.frame_len) * k;
+}
+
+/// The segment test from `from` to `to`, extended `safe_margin` beyond `to`: on a contact the point stops `safe_margin` short of it
+/// (never past `to`). The extension makes the clip continuous: it starts the moment `to` comes within the margin of a surface, so
+/// nothing pops when it begins or ends.
+fn clip_line(c: &mut Cpu, lv: &Lv, from: [f32; 3], to: [f32; 3]) -> [f32; 3] {
+	let d = sub(to, from);
+	let m = len3(d);
+	if m < 0.05 {
+		return to;
+	}
+	let k = tune().safe_margin;
+	let u = scale3(d, 1.0 / m);
+	match seg(c, lv, from, add3(to, scale3(u, k))) {
+		Some(h) => add3(from, scale3(u, (len3(sub(h, from)) - k).clamp(0.0, m))),
+		None => to,
+	}
+}
+
+/// Safety, step 1: the spring pivot lags the hero's chest (soft follow; a jump follows only 35 % of its rise), so on a climb it
+/// ends up under the ledge he stands on or inside the step in front of him. A boom test from there starts inside the rock: it
+/// collapses to `MIN_LEN` and the eye sits in the terrain (the whole screen dark green). The pivot is therefore tested from the
+/// chest (retail's segment test) and stops `safe_margin` short of the first contact. The spring state itself is not changed: it
+/// keeps its smooth catch-up and the pivot comes out of the clip with no pop.
+fn dyn_clear(c: &mut Cpu, lv: &Lv, chest: [f32; 3], pivot: [f32; 3]) -> [f32; 3] {
+	clip_line(c, lv, chest, pivot)
+}
+
+/// Proof log: where the retail segment test meets the line chest -> eye (both directions) and chest -> pivot, as the fraction of the
+/// line (9 = free). Chest -> pivot below 1, or a boom collapsed to `MIN_LEN`, is a camera inside the terrain; chest -> eye below 1 alone
+/// is only the hero hidden behind a corner (a lip he jumps over, a wall he leans on) and is not clipped.
+fn dbg_chk(c: &mut Cpu, lv: &Lv, chest: [f32; 3], pivot: [f32; 3], eye: [f32; 3]) -> [f32; 3] {
+	let fr = |c: &mut Cpu, a: [f32; 3], b: [f32; 3]| {
+		let m = len3(sub(b, a));
+		if m < 0.05 {
+			return 9.0;
+		}
+		seg(c, lv, a, b).map_or(9.0, |h| len3(sub(h, a)) / m)
+	};
+	[fr(c, chest, eye), fr(c, eye, chest), fr(c, chest, pivot)]
+}
+
 /// Wrapping hand on the follow camera update: retail first, then the modern pose.
 fn follow(c: &mut Cpu, lv: &'static Lv) -> bool {
 	if IN.swap(true, Ordering::SeqCst) {
@@ -862,6 +1392,22 @@ fn step(c: &mut Cpu, lv: &'static Lv, rec: u32, st: &mut St) {
 		st.live = true;
 		st.blend = 0;
 		(st.aim_t, st.lift, st.lift_cap) = (0, 0.0, AIM_LIFT);
+		st.dy = Dy::ZERO;
+		st.dy.hero_prev = hero;
+		st.dy.field = st.field.wrapping_sub(1);
+	}
+	let dynamic = dyn_on();
+	if dynamic != st.dyn_was {
+		// Static <-> Smooth flipped in the menu: the springs start afresh from the pose on screen (the pivot is shared, so the eye does
+		// not jump); leaving Smooth keeps the look-up / look-down bias it had in the pitch.
+		if !dynamic && st.dy.bias != 0.0 {
+			st.pitch = (st.pitch + st.dy.bias).clamp(PITCH.0, PITCH.1);
+		}
+		st.dy = Dy::ZERO;
+		st.dy.hero_prev = hero;
+		st.dy.field = st.field.wrapping_sub(1);
+		st.dyn_was = dynamic;
+		eprintln!("retail: modcam feel {} (field {})", if dynamic { "Smooth" } else { "Static" }, st.field);
 	}
 	// Input: mouse (0.003 rad a count, RAC_MODCAM_SENS scales), the right stick (keys Q/E turn the view left / right,
 	// Z/X tilt it up / down), wheel zoom.
@@ -872,8 +1418,17 @@ fn step(c: &mut Cpu, lv: &'static Lv, rec: u32, st: &mut St) {
 	let dz = |v: f32| if v.abs() < 0.2 { 0.0 } else { v };
 	let lr = if c.mem.rd8(OPT_LR) == 0 { -1.0 } else { 1.0 };
 	let ud = if c.mem.rd8(OPT_UD) == 0 { -1.0 } else { 1.0 };
-	let dyaw = (-(inp.look[0] as f32) * MOUSE * sens + dz(rx) * ROTATE_RATE) * lr;
-	let dpitch = (inp.look[1] as f32 * MOUSE * sens - dz(ry) * TILT_STEP) * ud;
+	// The Camera speed row (pcext.rs camopts section): percent / 50, exactly 1.0 until the player sets it.
+	let k = super::pcext::camspeed_scale();
+	// Dynamic: the mouse stays direct, the right stick ramps up (a gentle acceleration; keys Q/E Z/X ramp too).
+	let (sx, sy) = if dynamic {
+		st.dy.rs = [ramp1(st.dy.rs[0], dz(rx)), ramp1(st.dy.rs[1], dz(ry))];
+		(st.dy.rs[0], st.dy.rs[1])
+	} else {
+		(dz(rx), dz(ry))
+	};
+	let dyaw = (-(inp.look[0] as f32) * MOUSE * sens * k + sx * ROTATE_RATE * k) * lr;
+	let dpitch = (inp.look[1] as f32 * MOUSE * sens * k - sy * TILT_STEP * k) * ud;
 	st.dist = (st.dist - inp.zoom as f32 * 0.5).clamp(ZOOM.0, ZOOM.1);
 	// Aim mode (RMB): the mouse keeps turning the camera as it does without RMB; nothing is picked or framed.
 	// Aim mode is a ground feature: on a magnetic wall retail stows the guns (0x1413fc) and the facing / aim yaw words are world-z.
@@ -882,19 +1437,40 @@ fn step(c: &mut Cpu, lv: &'static Lv, rec: u32, st: &mut St) {
 		st.aim_logged = st.aiming;
 		eprintln!("retail: modcam aim {} (field {})", if st.aiming { "on" } else { "off" }, st.field);
 	}
-	let (goal_len, piv) = (st.dist, piv_goal);
+	let piv = piv_goal;
+	let mut goal_len = st.dist;
 	st.yaw = wrap(st.yaw + dyaw);
 	st.pitch = (st.pitch + dpitch).clamp(PITCH.0, PITCH.1);
+	if dynamic {
+		let input = inp.look != [0, 0] || dz(rx) != 0.0 || dz(ry) != 0.0 || inp.zoom != 0 || inp.aim;
+		dyn_track(c, st, &fr, hero, piv, input);
+		if !st.aiming {
+			dyn_auto(st, &fr);
+			st.pitch = st.pitch.clamp(PITCH.0, PITCH.1);
+		}
+	}
 	if st.aiming {
 		face(c, st, st.yaw);
 	}
-	for i in 0..3 {
-		st.pivot[i] += (piv[i] - st.pivot[i]) * FOLLOW;
+	if dynamic && !st.aiming && st.aim_t == 0 {
+		dyn_follow(st, &fr, piv);
+	} else {
+		let old = st.pivot;
+		for i in 0..3 {
+			st.pivot[i] += (piv[i] - st.pivot[i]) * FOLLOW;
+		}
+		if dynamic {
+			// Aim keeps the old follow; the spring takes over from the velocity it left.
+			st.dy.pv = [(st.pivot[0] - old[0]) / dt(), (st.pivot[1] - old[1]) / dt(), (st.pivot[2] - old[2]) / dt()];
+		}
 	}
 	// Big hero jumps (respawn, teleport): follow at once.
 	if len3(sub(piv, st.pivot)) > 8.0 {
 		st.pivot = piv;
+		st.dy.pv = [0.0; 3];
 	}
+	// The pivot the camera orbits: the spring's, clipped at what lies between it and the hero's chest (dynamic only).
+	st.dy.pivc = if dynamic && (tune().safe as u32) & 1 != 0 { dyn_clear(c, lv, piv, st.pivot) } else { st.pivot };
 	// Wall: pull in at once to the hit (minus 0.2), release outward RELEASE a field. With a wall close behind the hero
 	// (boom under RISE_MIN) the camera rises over him (pitch up in 0.3 rad steps, the first that gives room) instead of
 	// sitting in his head; the rise ends once the boom has RISE_BAND more room (hysteresis), and it moves on a critically
@@ -906,9 +1482,9 @@ fn step(c: &mut Cpu, lv: &'static Lv, rec: u32, st: &mut St) {
 	}
 	st.aim_t = if st.aiming { (st.aim_t + 1).min(AIM_BLEND) } else { st.aim_t.saturating_sub(1) };
 	if st.aim_t > 0 {
-		let up = [st.pivot[0], st.pivot[1], st.pivot[2] + AIM_LIFT + AIM_CEIL];
-		let goal = match seg(c, lv, st.pivot, up) {
-			Some(h) => (h[2] - st.pivot[2] - AIM_CEIL).clamp(0.0, AIM_LIFT),
+		let up = [st.dy.pivc[0], st.dy.pivc[1], st.dy.pivc[2] + AIM_LIFT + AIM_CEIL];
+		let goal = match seg(c, lv, st.dy.pivc, up) {
+			Some(h) => (h[2] - st.dy.pivc[2] - AIM_CEIL).clamp(0.0, AIM_LIFT),
 			None => AIM_LIFT,
 		};
 		st.lift_cap += (goal - st.lift_cap).clamp(-AIM_CAP_STEP, AIM_CAP_STEP);
@@ -917,9 +1493,22 @@ fn step(c: &mut Cpu, lv: &'static Lv, rec: u32, st: &mut St) {
 	} else {
 		st.lift = 0.0;
 	}
-	let pivot_r = fr.lift(st.pivot, st.lift);
+	let mut pivot_r = fr.lift(st.dy.pivc, st.lift);
+	if dynamic {
+		dyn_probe(c, lv, st, &fr, hero);
+		dyn_bias(st);
+		dyn_dist(st);
+		dyn_frame(c, lv, st, &fr, piv);
+		pivot_r = add3(pivot_r, st.dy.frame_off);
+		goal_len = (st.dist * st.dy.dist_f + st.dy.frame_len).clamp(ZOOM.0, ZOOM.1);
+	}
 	let (pivot, yaw) = (pivot_r, st.yaw);
 	let reach = |c: &mut Cpu, p: f32| match seg(c, lv, pivot, fr.eye(pivot, yaw, p, goal_len)) {
+		// Dynamic: never past the contact itself (the floor of MIN_LEN would put the eye in the wall when the contact is closer).
+		Some(h) if dynamic && (tune().safe as u32) & 2 != 0 => {
+			let l = len3(sub(h, pivot));
+			(l - 0.2).max(MIN_LEN.min(0.5 * l))
+		}
 		Some(h) => (len3(sub(h, pivot)) - 0.2).max(MIN_LEN),
 		None => goal_len,
 	};
@@ -947,13 +1536,31 @@ fn step(c: &mut Cpu, lv: &'static Lv, rec: u32, st: &mut St) {
 	st.rise_goal = rise_goal;
 	st.rise_v += RISE_W * RISE_W * (rise_goal - st.rise) - 2.0 * RISE_W * st.rise_v;
 	st.rise += st.rise_v;
-	let pitch = (st.pitch + st.rise).min(PITCH.1);
+	let pitch = if dynamic { (st.pitch + st.rise + st.dy.bias).clamp(PITCH.0, PITCH.1) } else { (st.pitch + st.rise).min(PITCH.1) };
 	let safe = if (pitch - st.pitch).abs() < 1e-4 { base } else { reach(c, pitch) };
-	st.len = if safe < st.len { safe } else { (st.len + RELEASE).min(safe) };
+	st.len = if safe < st.len {
+		st.dy.len_v = 0.0;
+		safe
+	} else if dynamic && !st.aiming {
+		// Dynamic: after a wall the boom eases back out on a critically damped spring (about 0.5 s, no pop, no jolt).
+		let (y, v) = crit(st.len - safe, st.dy.len_v, tune().boom_out);
+		st.dy.len_v = v;
+		(safe + y).min(safe)
+	} else {
+		(st.len + RELEASE).min(safe)
+	};
 	st.tr = [base, safe, rise_goal];
 	let e = fr.eye(pivot_r, st.yaw, pitch, st.len);
 	st.last_rows = write_pose(c, rec, e, &fr, st.yaw, pitch);
 	st.last = (e, st.yaw, pitch);
+	if log_on() {
+		let chk = dbg_chk(c, lv, piv, pivot_r, e);
+		let d = &st.dy;
+		eprintln!(
+			"modcam-log f={} dyn={} yaw={:.5} pitch={:.5} out={:.5} bias={:.4} len={:.5} goal={:.4} safe={:.4} piv={:.3},{:.3},{:.3} hero={:.3},{:.3},{:.3} sp={:.2} vz={:.2} idle={} air={} drop={:.2} open={:.2},{:.2},{:.2} lock={} off={:.2},{:.2},{:.2} flen={:.2} aim={} rc={:.2} chk={:.3},{:.3},{:.3} pc={:.3},{:.3},{:.3} eye={:.3},{:.3},{:.3} cl={:.3}",
+			st.field, dynamic as u8, st.yaw, st.pitch, pitch, d.bias, st.len, goal_len, safe, st.pivot[0], st.pivot[1], st.pivot[2], hero[0], hero[1], hero[2], d.speed, d.vz, d.idle, d.is_air as u8, d.drop_w, d.open_s[0], d.open_s[1], d.open_s[2], d.lock_hold, d.frame_off[0], d.frame_off[1], d.frame_off[2], d.frame_len, st.aiming as u8, d.rc_used, chk[0], chk[1], chk[2], d.pivc[0], d.pivc[1], d.pivc[2], e[0], e[1], e[2], len3(sub(d.pivc, st.pivot))
+		);
+	}
 }
 
 /// Aiming: Ratchet faces `want` (the camera's horizontal direction). Standing (stick idle), his facing and wished yaw turn
@@ -1023,7 +1630,8 @@ pub fn aim_cam() -> Option<AimCam> {
 		return None;
 	}
 	let (eye, yaw, pitch) = st.last;
-	Some(AimCam { eye, fwd: rows(yaw, pitch)[0], pivot: [st.pivot[0], st.pivot[1], st.pivot[2] + st.lift], field: st.field })
+	let o = st.dy.frame_off;
+	Some(AimCam { eye, fwd: rows(yaw, pitch)[0], pivot: [st.dy.pivc[0] + o[0], st.dy.pivc[1] + o[1], st.dy.pivc[2] + st.lift + o[2]], field: st.field })
 }
 
 /// Retail's segment test (seg_collide of the running level) from `a` to `b` with `mask`: the contact point and the moby hit
@@ -1126,6 +1734,35 @@ mod tests {
 		assert_eq!(f.len(), 2);
 		assert_eq!(f[0], (10, 20, Input { look: [5, -3], aim: true, zoom: 0, toggle: false }));
 		assert_eq!(f[1].2.zoom, 2);
+	}
+
+	#[test]
+	fn camera_feel_switch_resolution() {
+		// The Camera row (Static / Smooth) decides unless RAC_MODCAM_DYN is set, which wins either way.
+		assert!(dyn_resolve(None, true), "Smooth: the dynamic layer");
+		assert!(!dyn_resolve(None, false), "Static: the plain Modern camera");
+		assert!(!dyn_resolve(Some(false), true), "RAC_MODCAM_DYN=0 forces Static");
+		assert!(dyn_resolve(Some(true), false), "RAC_MODCAM_DYN=1 forces Smooth");
+	}
+
+	#[test]
+	fn dynamic_spring_and_ramp() {
+		// The pivot spring is critically damped: it converges and never overshoots, whatever the start velocity sign.
+		let (mut y, mut v) = (1.0f32, 0.0f32);
+		for _ in 0..100 {
+			(y, v) = crit(y, v, 0.28);
+			assert!(y >= 0.0);
+		}
+		assert!(y < 1e-3 && v.abs() < 1e-2);
+		// The right stick ramps to full deflection in 1 / ramp_up s and lets go faster.
+		let mut r = 0.0f32;
+		for _ in 0..13 {
+			r = ramp1(r, 1.0);
+		}
+		assert!((r - 1.0).abs() < 1e-5);
+		assert!(ramp1(1.0, 0.0) < 1.0 && 1.0 - ramp1(1.0, 0.0) > ramp1(0.0, 1.0));
+		assert_eq!(sstep(2.0), 1.0);
+		assert!((k_of(0.5) - (1.0 - (-0.04f32).exp())).abs() < 1e-6);
 	}
 
 	fn reset_st() {

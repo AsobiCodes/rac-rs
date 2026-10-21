@@ -2,9 +2,6 @@
 //! FUN_002ddca0: it falls under gravity, spins on all three axes, fades with its remaining life and despawns when the
 //! life runs out. No placement and no spawner yet: KER-77 owns the allocator that seeds it.
 
-use super::*;
-use super::super::mouse::wrap_angle;
-use crate::gameplay::PAL_DT2;
 use crate::physics::V3;
 
 /// KER-71: the debris class (0x4c5).
@@ -23,7 +20,6 @@ pub(in crate::game) struct Debris1221 {
 
 impl Debris1221 {
 	/// KER-77's seeding of a claimed piece. The alpha byte is rewritten by every update before the draw.
-	#[allow(dead_code)]
 	pub(in crate::game) fn seed(vel: V3, spin: V3, life: i32, max: i32) -> Debris1221 {
 		Debris1221 { vel, spin, max, life, alpha: 0x80 }
 	}

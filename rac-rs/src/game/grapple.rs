@@ -5,10 +5,6 @@
 //! held states 2..=7. The caller applies `GrappleOut` (held blend `blend(seq, 0, scale(10))`, rope flag, cues as class
 //! 208 sounds); the hook's own states 3-7 run in the ARI-47c hook step H.
 
-use super::*;
-use crate::gameplay::PAL_DT;
-use crate::physics::{vadd1, vmul, vrsqrt};
-use crate::player::Player;
 
 
 

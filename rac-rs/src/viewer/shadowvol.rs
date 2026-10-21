@@ -12,8 +12,24 @@ const SHADOW_SHADER: &str = r#"
 struct U { view_proj: mat4x4<f32> };
 @group(0) @binding(0) var<uniform> u: U;
 
+// The level shader's `world_clip` (viewer.rs): z rebuilt from w so the volumes test against the same precise depth.
+fn world_clip(m: mat4x4<f32>, p: vec3<f32>) -> vec4<f32> {
+	var c = m * vec4<f32>(p, 1.0);
+	let wr = vec4<f32>(m[0][3], m[1][3], m[2][3], m[3][3]);
+	let zr = vec4<f32>(m[0][2], m[1][2], m[2][2], m[3][2]);
+	let ww = dot(wr.xyz, wr.xyz);
+	if (ww > 1.0e-6) {
+		let a = dot(zr.xyz, wr.xyz) / ww;
+		let d = zr.xyz - a * wr.xyz;
+		if (dot(d, d) <= 1.0e-10 * ww) {
+			c.z = a * c.w + (zr.w - a * wr.w);
+		}
+	}
+	return c;
+}
+
 @vertex fn vs_shadow(@location(0) p: vec3<f32>) -> @builtin(position) vec4<f32> {
-	return u.view_proj * vec4<f32>(p, 1.0);
+	return world_clip(u.view_proj, p);
 }
 
 @fragment fn fs_shadow() -> @location(0) vec4<f32> {
@@ -46,7 +62,7 @@ pub(super) struct ShadowPipes {
 impl ShadowPipes {
 	pub(super) fn new(device: &wgpu::Device, ulayout: &wgpu::BindGroupLayout, colour: wgpu::TextureFormat, depth: wgpu::TextureFormat) -> ShadowPipes {
 		crate::viewer::gs_state::guard_path("shadowvol");
-		let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("shadow volumes"), source: wgpu::ShaderSource::Wgsl(SHADOW_SHADER.into()) });
+		let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("shadow volumes"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("shadow volumes", SHADOW_SHADER.into())) });
 		let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("shadow volumes"), bind_group_layouts: &[Some(ulayout)], immediate_size: 0 });
 		let make = |volume: bool, op: wgpu::StencilOperation, compare: wgpu::CompareFunction| {
 			let face = wgpu::StencilFaceState { compare, fail_op: wgpu::StencilOperation::Keep, depth_fail_op: wgpu::StencilOperation::Keep, pass_op: op };

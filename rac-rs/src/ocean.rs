@@ -52,7 +52,6 @@ pub struct OceanDef {
 	pub low_base: Option<usize>,
 	/// Ocean fog words: near/far distance (world units = words / 1024), intensity near/far, FOGCOL. The values are
 	/// baked into the fragment shaders (`fs_ocean` Aridia, `fs_ocean_k` Kerwan in viewer.rs; tested against them).
-	#[allow(dead_code)]
 	pub fog: ([f32; 2], [f32; 2], [u8; 3]),
 	/// First `Game.frames` value on which the ocean is drawn (Kerwan: update call 1 only initialises, call 2 queues
 	/// the first draw).

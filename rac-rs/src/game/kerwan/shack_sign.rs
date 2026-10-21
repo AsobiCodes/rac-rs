@@ -3,8 +3,6 @@
 //! snapshots the standing prop's pose before the updates and `Game::carry` applies the old -> new rotation (zero
 //! displacement) through the 0x20 carry bit of its placed flags 0x60.
 
-use super::*;
-use super::super::mouse::wrap_angle;
 
 /// KER-10: the sign class (1 placement, Moby 923).
 pub(in crate::game) const SHACK_SIGN: u32 = 825;

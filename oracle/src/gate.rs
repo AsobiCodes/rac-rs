@@ -114,6 +114,8 @@ fn mobys(a: &[u8], o: &[u8], b: &[u8], lvl: u8) {
 }
 
 pub fn main() {
+    // The access and call counts in the report below.
+    crate::mem::STATS.store(true, std::sync::atomic::Ordering::Relaxed);
     // Recompiled code nests a Rust frame per retail call.
     std::thread::Builder::new().stack_size(256 << 20).spawn(run).unwrap().join().unwrap();
 }
@@ -220,9 +222,7 @@ fn run() {
         cpu.vblank();
     }));
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| loop {
-        for _ in 0..4096 {
-            cpu.step_rec();
-        }
+        cpu.run_rec(4096);
         hist.entry(cpu.pc).and_modify(|c| *c += 1).or_insert(1);
         if let Some(s) = &cpu.stop {
             println!("STOP: {s}");

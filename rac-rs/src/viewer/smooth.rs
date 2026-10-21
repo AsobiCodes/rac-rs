@@ -161,6 +161,54 @@ pub(super) fn prop_blends(prev: &PropXf, cur: &PropXf) -> bool {
 	prev.shown && cur.shown && prev.class == cur.class && prev.mirror == cur.mirror && near(prev.pos, cur.pos)
 }
 
+/// Moby classes drawn on the hero: Clank 601, the back packs 607 / 608 / 609, the head items 433 / 1289 / 1290 (hero item table rows
+/// 1-7, collision_and_gameplay.md) and the class 1204 bulb mesh; only while within `ATTACH_REACH` of him (strafe.rs `turn_parts`).
+const ATTACHED: [u32; 8] = [601, 607, 608, 609, 433, 1289, 1290, ATTACH_BULB];
+const ATTACH_BULB: u32 = 1204;
+const ATTACH_REACH: f32 = 1.5;
+
+/// The hero's model frame as a column-major placement: feet `pos`, columns = the hero rows of BRIDGE-75 (yaw only when untilted).
+fn hero_frame(pos: V3, yaw: f32, tilt: [f32; 2]) -> [f32; 16] {
+	let r = if tilt == [0.0; 2] {
+		let (s, c) = yaw.sin_cos();
+		[[c, s, 0.0], [-s, c, 0.0], [0.0, 0.0, 1.0]]
+	} else {
+		particles::euler_m([tilt[0], tilt[1], yaw])
+	};
+	[r[0][0], r[0][1], r[0][2], 0.0, r[1][0], r[1][1], r[1][2], 0.0, r[2][0], r[2][1], r[2][2], 0.0, pos[0], pos[1], pos[2], 1.0]
+}
+
+/// `inverse(h) * m` of two rigid column-major placements: `m` in the frame of `h`.
+fn rel_place(h: &[f32; 16], m: &[f32; 16]) -> [f32; 16] {
+	let mut o = [0.0; 16];
+	o[15] = 1.0;
+	for j in 0..3 {
+		for k in 0..3 {
+			o[j * 4 + k] = h[k * 4] * m[j * 4] + h[k * 4 + 1] * m[j * 4 + 1] + h[k * 4 + 2] * m[j * 4 + 2];
+		}
+	}
+	let d = [m[12] - h[12], m[13] - h[13], m[14] - h[14]];
+	for k in 0..3 {
+		o[12 + k] = h[k * 4] * d[0] + h[k * 4 + 1] * d[1] + h[k * 4 + 2] * d[2];
+	}
+	o
+}
+
+/// `a * b` of two rigid column-major placements.
+fn compose(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
+	let mut o = [0.0; 16];
+	o[15] = 1.0;
+	for j in 0..3 {
+		for i in 0..3 {
+			o[j * 4 + i] = a[i] * b[j * 4] + a[4 + i] * b[j * 4 + 1] + a[8 + i] * b[j * 4 + 2];
+		}
+	}
+	for i in 0..3 {
+		o[12 + i] = a[12 + i] + a[i] * b[12] + a[4 + i] * b[13] + a[8 + i] * b[14];
+	}
+	o
+}
+
 #[derive(Default)]
 pub(super) struct Smooth {
 	/// This display frame: ticks run, blend factor, and whether blending is on (setting on, not paused, no capture).
@@ -172,9 +220,27 @@ pub(super) struct Smooth {
 	hero_prev: Option<(V3, f32)>,
 	/// BRIDGE-75 [PC]: the hero body tilt (roll, pitch) before the newest tick.
 	hero_tilt_prev: [f32; 2],
+	/// Hero-attached props (`attach`): the hero's placement as the game ticked it (before / after the newest tick), what `hero`
+	/// drew this frame (feet, yaw, tilt; None = not blended), and the placements `attach` made, per prop slot.
+	hero_was: Option<[f32; 16]>,
+	hero_now: Option<[f32; 16]>,
+	drawn: Option<(V3, f32, [f32; 2])>,
+	attached: Vec<Option<([f32; 16], f32)>>,
 	/// Skinned poses: the last computed (state after the newest tick seen) and the one before it.
 	hero_last: Option<Posed>,
 	hero_before: Option<Posed>,
+	/// [PC] perf (lane R2): with the GPU hero (gpuhero.rs) `hero` leaves the pose unblended and this holds the blend factor for
+	/// `Gpu::set_marker` (the blend source is `hero_before`).
+	hero_blend: Option<f32>,
+	/// Set during a tick whose hero pose jumps on purpose (Modern controls, retail/strafe.rs: the run clip flipped between forward
+	/// and reversed, or the leg twist jumped): the next `hero` call draws the new pose unblended. A vertex blend of a forward and a
+	/// reversed run frame (legs swapped, lower body turned) pulled the legs through each other for a display frame.
+	pub hero_cut: bool,
+	/// Pose generation numbers (herocache `next_gen`) of `hero_last` / `hero_before`, and what `hero` handed out: (pose as returned,
+	/// blend source). 0 = unknown, e.g. a pose the CPU blended.
+	gen_last: u64,
+	gen_before: u64,
+	hero_gens: (u64, u64),
 	posed_last: HashMap<PoseKey, Posed>,
 	posed_before: HashMap<PoseKey, Posed>,
 	fx_last: HashMap<usize, Posed>,
@@ -199,7 +265,8 @@ impl Smooth {
 
 	/// After the game ticks of a display frame: the blend factor and whether to blend.
 	pub(super) fn frame(&mut self, on: bool, accum: f32) {
-		self.alpha = (accum / crate::gameplay::PAL_DT).clamp(0.0, 1.0);
+		// The field time of the disc (USA 59.94 Hz: PAL_DT left alpha at 0.83 and jumped back every field).
+		self.alpha = (accum / crate::retail::disc::field_dt()).clamp(0.0, 1.0);
 		self.active = on;
 	}
 
@@ -212,12 +279,21 @@ impl Smooth {
 	}
 
 	/// The hero's drawn placement, pose and body tilt (`at` = feet and yaw, None = not drawn; tilt = BRIDGE-75 roll, pitch).
-	pub(super) fn hero(&mut self, game: &Game, at: Option<(V3, f32)>, skinned: Option<Posed>) -> (Option<(V3, f32)>, Option<Posed>, [f32; 2]) {
+	pub(super) fn hero(&mut self, game: &Game, at: Option<(V3, f32)>, skinned: Option<Posed>, pgen: u64) -> (Option<(V3, f32)>, Option<Posed>, [f32; 2]) {
 		if self.ticks > 0 {
-			self.hero_before = if self.ticks == 1 { self.hero_last.take() } else { None };
+			let cut = std::mem::take(&mut self.hero_cut);
+			let keep = self.ticks == 1 && !cut;
+			self.hero_before = if keep { self.hero_last.take() } else { None };
+			self.gen_before = if keep { self.gen_last } else { 0 };
 			self.hero_last = skinned.clone();
+			self.gen_last = pgen;
 		}
 		let tilt_now = game.player.body_tilt;
+		self.hero_now = Some(hero_frame(game.player.pos, game.player.yaw, tilt_now));
+		self.hero_was = self.hero_prev.map(|(p, y)| hero_frame(p, y, self.hero_tilt_prev));
+		self.drawn = None;
+		self.hero_blend = None;
+		self.hero_gens = (pgen, self.gen_before);
 		if !self.active {
 			return (at, skinned, tilt_now);
 		}
@@ -229,15 +305,94 @@ impl Smooth {
 			(Some(a), Some(prev)) if a == cur && near(prev.0, a.0) => {
 				let p = self.hero_tilt_prev;
 				tilt = [lerp_angle(p[0], tilt_now[0], t), lerp_angle(p[1], tilt_now[1], t)];
-				Some((lerp3(prev.0, a.0, t), lerp_angle(prev.1, a.1, t)))
+				let drawn = (lerp3(prev.0, a.0, t), lerp_angle(prev.1, a.1, t));
+				self.drawn = Some((drawn.0, drawn.1, tilt));
+				Some(drawn)
 			}
 			(a, _) => a,
 		};
 		let skinned = match (&self.hero_before, skinned) {
-			(Some(b), Some(s)) => blend_posed(b, &s, t).or(Some(s)),
+			(Some(_), Some(s)) if super::gpuhero::gpu_hero_on() => {
+				self.hero_blend = Some(t);
+				Some(s)
+			}
+			(Some(b), Some(s)) => match blend_posed(b, &s, t) {
+				// Blended on the CPU: a new pose every frame, no generation.
+				Some(p) => {
+					self.hero_gens.0 = 0;
+					Some(p)
+				}
+				None => Some(s),
+			},
 			(_, s) => s,
 		};
 		(at, skinned, tilt)
+	}
+
+	/// Generation numbers of the pose `hero` returned and of `hero_before` (0 = unknown).
+	pub(super) fn hero_gens(&self) -> (u64, u64) {
+		self.hero_gens
+	}
+
+	pub(super) fn hero_before(&self) -> Option<&Posed> {
+		self.hero_before.as_ref()
+	}
+
+	/// The GPU hero's blend: the pose before the newest tick and the factor (None = draw the pose as given).
+	pub(super) fn hero_blend(&self) -> Option<(&Posed, f32)> {
+		self.hero_before.as_ref().zip(self.hero_blend)
+	}
+
+	/// Hero-attached props (Clank, the back pack, the head items, the bulb mesh) of this display frame, drawn from their placement
+	/// RELATIVE to the hero: per tick `rel = inverse(hero as the game ticked him) * prop`, and the prop is drawn at the drawn hero
+	/// (blended, Modern-strafe turned) times `rel`, blended between the two ticks only while the hero's own pose blends (so Clank sits at
+	/// the joint of the pose that is drawn). They stay glued to Ratchet whatever the smoothing, the speed or the turn: the prop path
+	/// (blend in world space from `props_prev`) and the hero path (own pose blend, dropped when a frame runs several ticks) disagreed.
+	/// Called with the final drawn `at` / `tilt` before the glows and `props`; fills `attached`. Not blended (Smoothing off, a
+	/// placement other than the plain gameplay one): nothing, so the props are drawn as the game ticked them.
+	pub(super) fn attach(&mut self, props: &[Prop], at: Option<(V3, f32)>, tilt: [f32; 2]) {
+		self.attached.clear();
+		if !self.active {
+			return;
+		}
+		let (Some(drawn), Some(at), Some(now)) = (self.drawn, at, self.hero_now) else { return };
+		if drawn != (at.0, at.1, tilt) {
+			return;
+		}
+		let was = self.hero_was.unwrap_or(now);
+		let blend = self.hero_before.is_some();
+		let t = self.alpha;
+		let d = hero_frame(at.0, at.1, tilt);
+		let near_hero = |h: &[f32; 16], p: V3| (p[0] - h[12]).hypot(p[1] - h[13]) < ATTACH_REACH && (p[2] - h[14]).abs() < 3.0;
+		self.attached.resize(props.len(), None);
+		for (pi, p) in props.iter().enumerate() {
+			if !p.shown || !ATTACHED.contains(&p.class_id) || !near_hero(&now, p.pos) {
+				continue;
+			}
+			let rel_now = rel_place(&now, &place(p.pos, p.rot));
+			let prev = self.props_prev.get(pi).filter(|pv| blend && prop_blends(pv, &PropXf::of(p)) && near_hero(&was, pv.pos));
+			let (rel, scale) = match prev {
+				Some(pv) => (blend_place(&rel_place(&was, &place(pv.pos, pv.rot)), &rel_now, t), pv.scale + (p.scale - pv.scale) * t),
+				None => (rel_now, p.scale),
+			};
+			self.attached[pi] = Some((mirror_column(compose(&d, &rel), p.mirror), scale));
+		}
+	}
+
+	/// The placement `attach` made for prop `pi` this frame, if it is hero-attached and the hero is blended.
+	pub(super) fn attached_xf(&self, pi: usize) -> Option<([f32; 16], f32)> {
+		self.attached.get(pi).copied().flatten()
+	}
+
+	/// Clank's bulb glow as this frame draws it: `raw` (the glow as the game ticked it) kept at its offset from the bulb mesh
+	/// (class 1204) and carried along with the mesh's drawn placement (`attach`). None when the mesh is not drawn by `attach`.
+	pub(super) fn bulb_glow(&self, props: &[Prop], raw: V3) -> Option<V3> {
+		let (pi, p) = props.iter().enumerate().find(|&(pi, p)| p.class_id == ATTACH_BULB && p.shown && !p.mirror && self.attached_xf(pi).is_some())?;
+		let (m, _) = self.attached_xf(pi)?;
+		let r = place(p.pos, p.rot);
+		let d = [raw[0] - p.pos[0], raw[1] - p.pos[1], raw[2] - p.pos[2]];
+		let off: V3 = std::array::from_fn(|k| r[k * 4] * d[0] + r[k * 4 + 1] * d[1] + r[k * 4 + 2] * d[2]);
+		Some(std::array::from_fn(|i| m[12 + i] + m[i] * off[0] + m[4 + i] * off[1] + m[8 + i] * off[2]))
 	}
 
 	/// Props: keeps the pose history, adds the blended poses to `fx_posed` (they take precedence in `set_props`) and
@@ -266,6 +421,11 @@ impl Smooth {
 						fx_posed.insert(pi, bl);
 					}
 				}
+			}
+		}
+		for (pi, a) in self.attached.iter().enumerate() {
+			if a.is_some() && pi < xf.len() {
+				xf[pi] = *a;
 			}
 		}
 		PROP_XF.with(|c| *c.borrow_mut() = xf);
@@ -368,6 +528,21 @@ mod tests {
 		assert_eq!(ps[2], [0.0, 9.0, 0.0]);
 		// Different vertex counts: no blend.
 		assert!(blend_posed(&a, &(vec![[0.0; 3]], vec![[0.0; 3]]), 0.5).is_none());
+	}
+
+	#[test]
+	fn hero_attached_placement_follows_the_hero() {
+		// A prop beside a turned and tilted hero: its placement in the hero's frame composed with the same frame gives it back,
+		// and with the hero turned about the feet it keeps its distance from the feet and its hero-relative placement.
+		let h = hero_frame([1.0, 2.0, 0.5], 0.7, [0.1, -0.2]);
+		let m = place([1.1, 2.2, 1.3], [0.0, 0.1, 0.9]);
+		let rel = rel_place(&h, &m);
+		assert!(close(&compose(&h, &rel), &m));
+		let turned = hero_frame([1.0, 2.0, 0.5], 0.7 + 0.5, [0.1, -0.2]);
+		let m2 = compose(&turned, &rel);
+		let dist = |a: &[f32; 16]| ((a[12] - 1.0).powi(2) + (a[13] - 2.0).powi(2) + (a[14] - 0.5).powi(2)).sqrt();
+		assert!((dist(&m2) - dist(&m)).abs() < 1e-5);
+		assert!(close(&rel_place(&turned, &m2), &rel));
 	}
 
 	#[test]

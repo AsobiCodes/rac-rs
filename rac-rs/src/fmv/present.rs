@@ -74,7 +74,7 @@ impl Presenter {
 				wgpu::BindGroupLayoutEntry { binding: 4, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
 			],
 		});
-		let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("movie"), source: wgpu::ShaderSource::Wgsl(SHADER.into()) });
+		let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("movie"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("movie", SHADER.into())) });
 		let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("movie"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
 		let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
 			label: Some("movie"),
@@ -97,8 +97,11 @@ impl Presenter {
 		Presenter { pipeline, layout, sampler, ubuf, planes: None, aspect: 4.0 / 3.0, active: false, black: false, tint: [0.0, 0.0, 0.0, 1.0] }
 	}
 
-	/// Uploads a decoded frame and shows it from the next `draw` on.
+	/// Uploads a decoded frame and shows it from the next `draw` on. A decoded frame is a playing movie's picture, never a
+	/// held one, so it shows untinted: a movie-end fade tint left from the movie before (a second movie right after the
+	/// first, Veldin's ending) does not darken it.
 	pub fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, f: &Frame) {
+		self.tint = [0.0, 0.0, 0.0, 1.0];
 		let (w, h) = (f.width, f.height);
 		if self.planes.as_ref().is_none_or(|p| p.size != (w, h)) {
 			let mk = |w: u32, h: u32| {

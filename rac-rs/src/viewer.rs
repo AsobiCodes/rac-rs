@@ -30,6 +30,7 @@ mod hudart;
 mod popups;
 mod gpu;
 mod gpuskin;
+mod gpuhero;
 mod bindless;
 pub(crate) mod gs_state;
 mod warpfx;
@@ -38,16 +39,25 @@ mod shadowvol;
 mod post;
 mod sunshadow;
 mod waterfx;
+mod underwater;
 mod icefx;
 mod mirror;
 mod partfx;
+mod vegfx;
 mod app;
 mod handler;
 mod front_mirror;
+mod hudsharp;
 mod heroanim;
 mod smooth;
+mod herocache;
+mod gpucache;
+mod tiegpu;
+mod interp;
 mod profile;
 mod pace;
+mod presenter;
+mod fardraw;
 
 /// Particle texture number n is uploaded into `fx_tex` under key PART_TEX + n; effect types reach it
 /// through `Gpu::part_defs` (level particle def table, decomp/notes/particles.md).
@@ -118,6 +128,8 @@ struct Uniforms {
 	sun: [f32; 4],
 	sun_bias: [f32; 4],
 	sun_texel: [f32; 4],
+	/// [PC] Dynamic shadows Low / Medium / High (sunshadow.rs `Quality`): PCF kernel side, map uv scale, cascades read.
+	sun_q: [f32; 4],
 }
 
 /// Mobies lit by a dynamic light in one frame (the rest take none).
@@ -203,7 +215,7 @@ fn metal_byte(class_id: u32) -> u8 {
 const METAL_LIGHT: f32 = -4.0;
 
 const SHADER: &str = r#"
-struct U { view_proj: mat4x4<f32>, sky_view_proj: mat4x4<f32>, lights: array<array<vec4<f32>, 4>, 16>, ambient: array<vec4<f32>, 4>, fog_colour: vec4<f32>, fog: vec4<f32>, eye: vec4<f32>, points: array<vec4<f32>, 16>, dynl: array<vec4<f32>, 256>, sun_vp: array<mat4x4<f32>, 3>, sun: vec4<f32>, sun_bias: vec4<f32>, sun_texel: vec4<f32> };
+struct U { view_proj: mat4x4<f32>, sky_view_proj: mat4x4<f32>, lights: array<array<vec4<f32>, 4>, 16>, ambient: array<vec4<f32>, 4>, fog_colour: vec4<f32>, fog: vec4<f32>, eye: vec4<f32>, points: array<vec4<f32>, 16>, dynl: array<vec4<f32>, 256>, sun_vp: array<mat4x4<f32>, 3>, sun: vec4<f32>, sun_bias: vec4<f32>, sun_texel: vec4<f32>, sun_q: vec4<f32> };
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var sun_map: texture_depth_2d_array;
 @group(0) @binding(2) var sun_cmp: sampler_comparison;
@@ -290,7 +302,7 @@ fn shrub_inst(inst: u32) -> u32 {
 	return inst;
 }
 
-// [PC] perf round 3: the props batch posed here (gpuskin.rs; `gpuskin::emulate` is the CPU twin, RAC_CPU_SKIN=1 the CPU
+// [PC] perf round 3: the props batch posed here (gpuskin.rs; `gpuskin::emulate` is the CPU twin of the shader
 // path). The vertex buffer holds the static model, `sj` = (slot, vertex in slot); the slot's record and its pose entries
 // (model-space position, normal) come from storage buffers.
 struct PropInst { m0: vec4<f32>, m1: vec4<f32>, m2: vec4<f32>, m3: vec4<f32>, light: vec4<f32>, tint: vec4<f32>, ptint: vec4<f32>, a: vec4<f32>, k: vec4<u32> };
@@ -334,9 +346,29 @@ fn vs_props_pose(p: vec3<f32>, uv: vec2<f32>, n: vec3<f32>, c: vec4<f32>, l: vec
 	return vs_main(vec3<f32>(0.0, 0.0, -1.0e6), uv, nn, c, l);
 }
 
+// [PC] depth precision (Veldin ground-patch / rock flicker, 2026-10-20): the clip position with z rebuilt from w as the
+// perspective's own z = A w + B (A, B read off the matrix rows), so the depth carries only the rounding of w, like the GS's
+// K / w. The full z row cancels two ~500 m terms per vertex (world coordinates) and loses ~1 cm at 10 m, enough for coplanar
+// terrain layers (decal patches over the ground) to z-fight as the camera moves. Mathematically the same z; a matrix whose z
+// row is not A * w row + const (ortho, oblique) keeps its own z.
+fn world_clip(m: mat4x4<f32>, p: vec3<f32>) -> vec4<f32> {
+	var c = m * vec4<f32>(p, 1.0);
+	let wr = vec4<f32>(m[0][3], m[1][3], m[2][3], m[3][3]);
+	let zr = vec4<f32>(m[0][2], m[1][2], m[2][2], m[3][2]);
+	let ww = dot(wr.xyz, wr.xyz);
+	if (ww > 1.0e-6) {
+		let a = dot(zr.xyz, wr.xyz) / ww;
+		let d = zr.xyz - a * wr.xyz;
+		if (dot(d, d) <= 1.0e-10 * ww) {
+			c.z = a * c.w + (zr.w - a * wr.w);
+		}
+	}
+	return c;
+}
+
 fn vs_main(p: vec3<f32>, uv: vec2<f32>, n: vec3<f32>, c: vec4<f32>, l: vec4<f32>) -> VOut {
 	var o: VOut;
-	o.pos = u.view_proj * vec4<f32>(p, 1.0);
+	o.pos = world_clip(u.view_proj, p);
 	o.w = p;
 	o.uv = uv;
 	o.n = n;
@@ -372,46 +404,36 @@ fn vs_main(p: vec3<f32>, uv: vec2<f32>, n: vec3<f32>, c: vec4<f32>, l: vec4<f32>
 }
 
 // [PC] Dynamic shadows (sunshadow.rs; u.sun.w = 0 when off, and nothing below runs).
-const SUN_NEAR_GAP: f32 = 4.0;
-const SUN_FAR_GAP: f32 = 12.0;
 
-// One map layer at map point uv, receiver depth z (cascade k for its depth scale): the blocked fraction (3x3 hardware PCF
-// taps), faded out for far blockers (roofs, canopies, tall cliffs): 2002's baked colours already paint what they shade, and a
-// covered area keeps its painted interior light. The gap is the distance along the light to the nearest blocker of the 3x3.
-fn sun_layer(uv: vec2<f32>, layer: i32, z: f32, k: i32) -> f32 {
+// One map layer at map point uv, receiver depth z: the blocked fraction (High: 4x4 hardware PCF taps half a texel off the grid: a
+// smooth 5-texel edge instead of 3x3's stair steps; Medium 3x3, Low 2x2: u.sun_q.x is the kernel side).
+fn sun_pcf(uv: vec2<f32>, layer: i32, z: f32) -> f32 {
 	let ts = 1.0 / u.sun_bias.w;
+	let n = i32(u.sun_q.x);
+	let h = (u.sun_q.x - 1.0) * 0.5;
 	var lit = 0.0;
-	for (var y = -1; y <= 1; y++) {
-		for (var x = -1; x <= 1; x++) {
-			lit += textureSampleCompareLevel(sun_map, sun_cmp, uv + vec2<f32>(f32(x), f32(y)) * ts, layer, z);
+	for (var y = 0; y < n; y++) {
+		for (var x = 0; x < n; x++) {
+			lit += textureSampleCompareLevel(sun_map, sun_cmp, uv + (vec2<f32>(f32(x), f32(y)) - h) * ts, layer, z);
 		}
 	}
-	let occ = 1.0 - lit / 9.0;
-	if (occ <= 0.0) { return 0.0; }
-	let dim = vec2<i32>(textureDimensions(sun_map));
-	let c = clamp(vec2<i32>(uv * vec2<f32>(dim)), vec2<i32>(1), dim - 2);
-	var dmin = 1.0;
-	for (var y = -1; y <= 1; y++) {
-		for (var x = -1; x <= 1; x++) {
-			dmin = min(dmin, textureLoad(sun_map, c + vec2<i32>(x, y), layer, 0));
-		}
-	}
-	let gap = max(z - dmin, 0.0) * u.sun_texel[k] / max(u.sun_bias[k], 1e-9);
-	return occ * (1.0 - smoothstep(SUN_NEAR_GAP, SUN_FAR_GAP, gap));
+	return 1.0 - lit / (u.sun_q.x * u.sun_q.x);
 }
 
-// The first cascade whose map holds p answers: every caster (layer k) or, where a far roof has faded those out, the moving
-// casters alone (layer k + 3: Ratchet under a roof still casts along the light that lights him). p moves 1.5 texels towards
-// the light first (no acne); the last cascade fades out at its rim.
+// The first cascade whose map holds p answers, every caster at full strength however far it stands (no fade by blocker
+// distance: a fade cut shadows off halfway, stacked half shadows under whole ones and lit odd patches of rooms; a roof darkens
+// what it covers, indoors are dark). p moves 2 texels towards the light first (no acne under the 4x4 kernel); the last
+// cascade fades out at its rim.
 fn sun_occ(p: vec3<f32>) -> f32 {
-	for (var k = 0; k < 3; k++) {
-		let q = u.sun_vp[k] * vec4<f32>(p - u.sun.xyz * (u.sun_texel[k] * 1.5), 1.0);
+	let nc = i32(u.sun_q.z);
+	for (var k = 0; k < nc; k++) {
+		let q = u.sun_vp[k] * vec4<f32>(p - u.sun.xyz * (u.sun_texel[k] * 2.0), 1.0);
 		let e = max(abs(q.x), abs(q.y));
 		if (e < 0.98 && q.z > 0.0 && q.z < 1.0) {
-			let uv = vec2<f32>(q.x * 0.5 + 0.5, 0.5 - q.y * 0.5);
+			let uv = vec2<f32>(q.x * 0.5 + 0.5, 0.5 - q.y * 0.5) * u.sun_q.y;
 			let z = q.z - u.sun_bias[k];
-			var occ = max(sun_layer(uv, k, z, k), sun_layer(uv, k + 3, z, k));
-			if (k == 2) { occ *= 1.0 - smoothstep(0.8, 0.98, e); }
+			var occ = sun_pcf(uv, k, z);
+			if (k == nc - 1) { occ *= 1.0 - smoothstep(0.8, 0.98, e); }
 			return occ;
 		}
 	}
@@ -563,7 +585,10 @@ fn ice_look(i: VOut, rgb: vec3<f32>) -> vec3<f32> {
 	// GS fog: coefficient linear in distance, 255 = unfogged (FUN_001f7900).
 	let d = distance(i.w, u.eye.xyz);
 	let f = clamp(u.fog.z + (d - u.fog.x) * (u.fog.w - u.fog.z) / max(u.fog.y - u.fog.x, 0.001), min(u.fog.z, u.fog.w), 255.0) / 255.0;
-	return vec4<f32>(mix(u.fog_colour.rgb, rgb, f), 1.0);
+	// [PC] Global illumination (post.rs `moby_cover`): with the post chain on (u.sun_texel.w = 1) an opaque moby (Ratchet, enemies,
+	// crates, pickups: colour alpha >= 0) leaves alpha 0 in the post scene, every other opaque pixel leaves 1, so the bounce light
+	// neither starts from a moby nor lands on one. Nothing else reads the post scene's alpha.
+	return vec4<f32>(mix(u.fog_colour.rgb, rgb, f), select(1.0, 0.0, i.c.a >= 0.0 && u.sun_texel.w > 0.0));
 }
 
 // Shrub fragments with alpha (faded mesh, billboards): the baked world colour of `fs` with the GS alpha As = texel alpha x A >> 7,
@@ -651,14 +676,24 @@ fn shrub_mesh_texel(i: VOut) -> vec4<f32> {
 	return textureSampleLevel(tex, samp, i.uv, gs_level(i));
 }
 
+// [PC] Enhanced (u.sun_texel.w = 1; applied by the callers: bindless.rs rewrites `shrub_mesh_texel` by its text): a magnified leaf texture's alpha ramp is cut at half alpha over one screen pixel, so a leaf
+// close to the camera keeps a sharp solid outline instead of a wide see-through blur; far away (minified) the ramp spans less
+// than a pixel and the texel alpha is kept. Classic leaves the texel as the GS samples it.
+fn crisp_leaf(c: vec4<f32>) -> vec4<f32> {
+	if (u.sun_texel.w <= 0.0) { return c; }
+	let w = fwidth(c.a);
+	if (w >= 0.5) { return c; }
+	return vec4<f32>(c.rgb, clamp((c.a - 0.5) / max(w, 1e-4) + 0.5, 0.0, 1.0));
+}
+
 @fragment fn fs_shrub_ge12(i: VOut) -> @location(0) vec4<f32> {
-	let r = shrub_rgba(i, shrub_mesh_texel(i));
+	let r = shrub_rgba(i, crisp_leaf(shrub_mesh_texel(i)));
 	if (r.a * 128.0 < 12.0) { discard; }
 	return r;
 }
 
 @fragment fn fs_shrub_lt12(i: VOut) -> @location(0) vec4<f32> {
-	let r = shrub_rgba(i, shrub_mesh_texel(i));
+	let r = shrub_rgba(i, crisp_leaf(shrub_mesh_texel(i)));
 	if (r.a * 128.0 >= 12.0) { discard; }
 	return r;
 }
@@ -1019,6 +1054,9 @@ struct Scene {
 	tie_draws: Vec<Draw>,
 	tie_ranges: Vec<[std::ops::Range<u32>; 3]>,
 	tie_cull: Vec<ties::TieCull>,
+	/// [PC] Dynamic shadows (sunshadow.rs): the LOD `Gpu::cull_ties` drew each tie with this frame (u8::MAX = not drawn), so a
+	/// tie casts with the very mesh it is seen as.
+	tie_lod: Vec<u8>,
 	/// REN-CULL-OCC / BRIDGE-30: the level's occlusion grid and this frame's mask (`Gpu::set_clip_view` updates it).
 	occ: crate::occlusion::Occlusion,
 	/// FRAME-1a: the occlusion state of the per-tick draw verdict (its own `last` fallback, rebuilt once per tick).
@@ -1078,6 +1116,9 @@ struct Scene {
 	tfrag_verts: Vec<Vertex>,
 	tfrag_cols: Vec<Vec<[f32; 4]>>,
 	tfrag_b: f32,
+	/// [PC] Dynamic shadows (sunshadow.rs): the LOD `Gpu::cull_tfrags` drew each fragment with this frame (u8::MAX = not drawn):
+	/// a fragment casts with the mesh it receives on (a coarser LOD above the drawn one shadowed the ground under it).
+	tfrag_lod: Vec<u8>,
 	sky: Option<Batch>,
 	/// NOV-31: the vertices of `sky` with each shell's range and unturned positions (`Gpu::set_sky_spin`).
 	sky_shells: Option<SkyShells>,
@@ -1099,15 +1140,12 @@ struct Scene {
 	/// Crates, bolts and enemies: one model copy per `game::Prop` slot (`props_ranges`), re-posed
 	/// into `props.vbuf` every frame; hidden slots collapse to a point.
 	props: Batch,
+	/// [PC] perf (lane A7): the index buffer a pool growth last moved the props indices out of; the next growth copies them
+	/// back into it (`Gpu::append_props`). None until a pool grows.
+	props_ibuf_spare: Option<wgpu::Buffer>,
 	props_model: Vec<Vertex>,
-	/// PC perf: the vertices last uploaded to `props.vbuf` (a CPU mirror) and per slot whether its range holds the plain
-	/// hidden copy (model with every position at `HIDDEN_POS`); a frame re-uploads only the slots it rewrote.
-	props_verts: Vec<Vertex>,
-	props_hidden: Vec<bool>,
-	/// PC perf: per prop slot the inputs its vertices were last built from when unposed (`gpu::SlotKey`), else None.
-	props_key: Vec<Option<[u32; 32]>>,
 	props_ranges: Vec<std::ops::Range<usize>>,
-	/// [PC] perf round 3 (gpuskin.rs, unless RAC_CPU_SKIN=1): the static (slot, vertex) attribute of the props batch, and this
+	/// [PC] perf round 3 (gpuskin.rs): the static (slot, vertex) attribute of the props batch, and this
 	/// frame's slot records and pose entries as uploaded (the clipper, the prompt and the bench mirror read them).
 	props_sj: Option<wgpu::Buffer>,
 	/// Per slot the largest distance of a model vertex from the model origin (the clipper's sphere pre-test, gpuskin.rs).
@@ -1142,6 +1180,16 @@ struct Scene {
 	/// NOV-5.9d: the hero marker's clippable faces (marker model incl. the held gadgets) and those masked in `marker.ibuf`.
 	marker_faces: Vec<clip::PropFace>,
 	marker_masked: Vec<u32>,
+	/// PC perf (lane A, B2): the inputs and skinned pose the kept `marker_verts` were built from (viewer/gpucache.rs).
+	marker_key: Option<gpucache::MarkerKey>,
+	marker_skin: (Vec<[f32; 3]>, Vec<[f32; 3]>),
+	/// [PC] perf (lane R2): the marker built by a compute pass (gpuhero.rs); None = CPU path only.
+	marker_gpu: Option<gpuhero::HeroGpu>,
+	/// PC perf (lane A, B3): the inputs of the last `cull_ties` pass and its reused job list.
+	tie_pass: Option<gpucache::TiePassKey>,
+	tie_jobs: Vec<tiegpu::Job>,
+	/// [PC] perf (lane D5b): the GPU vertex rewrite of the ties (None = the CPU rewrite does it all).
+	tie_gpu: Option<tiegpu::TieGpu>,
 	/// Debris pieces: one unposed model per class (vertices, and face indices by texture slot). Each frame the live
 	/// pieces are instanced into `debris` (capacity MOBY_LIMIT pieces of the largest class), so no per-class cap.
 	/// Third element: per texture slot one strip-phase byte per face, parallel to the index list (255 = never clip).
@@ -1202,7 +1250,10 @@ struct Gpu {
 	window: Arc<Window>,
 	surface: wgpu::Surface<'static>,
 	device: wgpu::Device,
-	queue: wgpu::Queue,
+	/// [PC] Gated on the deferred submit of the previous frame (presenter.rs `GatedQueue`): every use waits for it.
+	queue: presenter::GatedQueue,
+	/// [PC] Presents on a worker thread (presenter.rs); flush() before the surface is reconfigured.
+	presenter: presenter::Presenter,
 	config: wgpu::SurfaceConfiguration,
 	pipeline: wgpu::RenderPipeline,
 	pipeline_cull: [wgpu::RenderPipeline; 2],
@@ -1259,8 +1310,8 @@ struct Gpu {
 	panel_posed: Option<u32>,
 	/// BRIDGE-45: the metal packets, textures and this frame's metal batch.
 	metal: MetalDraw,
-	/// [PC] perf round 3: the props pipelines and storage buffers of the vertex-shader posing (None with RAC_CPU_SKIN=1).
-	props_gpu: Option<gpuskin::PropsGpu>,
+	/// [PC] perf round 3: the props pipelines and storage buffers of the vertex-shader posing .
+	props_gpu: gpuskin::PropsGpu,
 	/// [PC] perf round 3 (bindless.rs): the texture-array pipelines of the tie and shrub draws (None: per-draw bind groups), and
 	/// while `load_scene` runs the texture view of every bind group `upload` / `upload_chain` made with the scene sampler.
 	bindless: Option<bindless::Bindless>,
@@ -1294,6 +1345,10 @@ struct Gpu {
 	shrub_cap: f32,
 	/// NOV-28.2: live pool-particle far cap (water.rs `PART_FAR` / `PART_FAR_UNDER`).
 	part_far: f32,
+	/// [PC] The camera water flag of this field (retail.rs `SwapWords::under`) and the underwater look (underwater.rs).
+	under_flag: bool,
+	under_surf: Option<f32>,
+	under: underwater::Under,
 	/// Dynamic point-light slots for the next frame's uniforms (`Uniforms::points`, scenery mobies).
 	points: [[f32; 4]; 16],
 	/// This frame's light table with allocation serials, and the posed mobies' third lights (`dyn_id`).
@@ -1316,12 +1371,14 @@ struct Gpu {
 	post: post::Post,
 	/// [PC] Water Enhanced (waterfx.rs).
 	waterfx: waterfx::WaterFx,
-	/// [PC] Water Enhanced: the planar mirror's uniforms (mirror.rs).
-	mirror: mirror::Mirror,
+	/// [PC] Water Enhanced: the planar mirrors' uniforms (mirror.rs), one per mirror pass of a frame (`mirror::MAX_MIRRORS`).
+	mirror: Vec<mirror::Mirror>,
 	/// [PC] Water Enhanced: the water bed's uniforms (mirror.rs `Gpu::draw_bed`).
 	bed: mirror::Mirror,
 	/// [PC] Particles Enhanced (partfx.rs).
 	partfx: partfx::PartFx,
+	/// [PC] PREVIEW: more vegetation (vegfx.rs, RAC_VEG).
+	veg: vegfx::VegFx,
 	modern_ok: bool,
 	/// [PC] Dynamic shadows (sunshadow.rs): the cascade maps, bound in the level's group 0 with their compare sampler.
 	sun: sunshadow::SunShadow,
@@ -1340,6 +1397,8 @@ struct Gpu {
 	/// BRIDGE-28: the two wrench afterimage vertex ranges of the next `set_marker` (first, end, alpha byte), then the three
 	/// whole-hero afterimage ranges (BRIDGE-40, WPN-6.6a); taken by it.
 	marker_ghosts: [Option<(usize, usize, u8)>; 5],
+	/// [PC] perf (lane R2): pose generation numbers (now, before) of the next `set_marker` (0 = unknown); taken by it. See `HeroGpu::set_poses`.
+	hero_gens: (u64, u64),
 	/// WPN-3.2: the held bomb's marker vertex range (first, end) and its pulse colour scale (0x80 = 1); taken by the next `set_marker`.
 	marker_bomb: Option<(usize, usize, [f32; 3])>,
 	/// BRIDGE-75: the hero body tilt (roll, pitch) of the next `set_marker`; taken by it (the frontend draw is untilted).
@@ -1547,6 +1606,8 @@ struct App {
 	/// PC perf: (game frame counter, props address, props count) when the last frame's prop poses were built; a frame with
 	/// no game tick and the same stamp moves those poses over instead of skinning them again (same pose keys, same anim state).
 	pose_stamp: Option<(u32, usize, usize)>,
+	/// PC perf (lane A B1): the hero's posed bundle of the last tick (viewer/herocache.rs).
+	hero_cache: Option<herocache::HeroCache>,
 	/// The wrench in Ratchet's hand: its vertices and normals in his wrist joint's frame.
 	wrench: Option<Posed>,
 	/// Wrench joints 0 and 1 in the held pose, in the wrist frame (the hit sweep's endpoints, FUN_00259918).
@@ -1599,6 +1660,9 @@ struct App {
 	prefetch_link: Option<(usize, app::PrefetchLink)>,
 	/// The level switch waits for the prefetch's scene build (no new picture meanwhile).
 	switch_hold: bool,
+	/// [PC] Frames left in which the world draws black after a retail level switch, until retail presents its first picture of the
+	/// new level (its fade-in overlay is not up on the switch frame: the new level flashed in full brightness).
+	arrival_black: u32,
 	/// The level a prefetch was started for last (not started twice for one travel).
 	prefetch_tried: Option<usize>,
 	class_rows: std::collections::HashMap<u32, u32>,
@@ -1685,8 +1749,6 @@ struct App {
 	quick_mouse: bool,
 	give: Option<(u8, Option<u16>)>,
 	play_ticks: u32,
-	/// RAC_FIRE_TICKS: scripted fire presses (play ticks) for --shot; RAC_HERO: x y z yaw start.
-	fire_script: Vec<u32>,
 	/// RAC_ATTACK_TICKS: play ticks the wrench is pressed for 3 ticks (scripted --shot scenes).
 	attack_script: Vec<u32>,
 	/// The two camera shake records (camera.md "Shake consumer").
@@ -1859,37 +1921,8 @@ struct FrontEnd {
 
 /// Title ambience in the global bank [I]: looping bed sounds, then (sound, first tick, last tick) windows.
 const TITLE_BED: [usize; 3] = [2, 3, 8];
-const TITLE_TIMED: [(usize, f32, f32); 2] = [(4, 0x2e4 as f32, 0x4d8 as f32), (9, 0x114 as f32, 0x12c as f32)];
 /// Language slot of all_text per menu language (EN, FR, DE, ES, IT; slot 1 is unused).
 const TEXT_SLOT: [usize; 5] = [0, 2, 3, 4, 5];
-
-/// Button-code press value of a key (HERO-19b): D-pad up 0, down 1, left 2, right 3, Square (F) 4, Circle (G / Y) 5.
-pub(crate) fn code_value(k: KeyCode) -> Option<u8> {
-	Some(match k {
-		KeyCode::ArrowUp | KeyCode::KeyW => 0,
-		KeyCode::ArrowDown | KeyCode::KeyS => 1,
-		KeyCode::ArrowLeft | KeyCode::KeyA => 2,
-		KeyCode::ArrowRight | KeyCode::KeyD => 3,
-		KeyCode::KeyF => 4,
-		KeyCode::KeyG | KeyCode::KeyY => 5,
-		_ => return None,
-	})
-}
-
-fn menu_key(k: KeyCode) -> Option<frontend::Key> {
-	use frontend::Key::*;
-	Some(match k {
-		KeyCode::ArrowUp | KeyCode::KeyW => Up,
-		KeyCode::ArrowDown | KeyCode::KeyS => Down,
-		KeyCode::ArrowLeft | KeyCode::KeyA => Left,
-		KeyCode::ArrowRight | KeyCode::KeyD => Right,
-		KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space => Confirm,
-		KeyCode::Escape | KeyCode::Backspace => Back,
-		KeyCode::KeyG | KeyCode::KeyY => Circle,
-		KeyCode::KeyM | KeyCode::Tab => Start,
-		_ => return None,
-	})
-}
 
 pub fn run(iso_path: &str, level: usize, shot: Option<String>, start: Option<[f32; 5]>, play: bool, front: bool, give: Option<(u8, Option<u16>)>) -> Result<(), Box<dyn std::error::Error>> {
 	init_pool();
@@ -1988,6 +2021,7 @@ fn new_app(iso_path: &str, level: usize, shot: Option<String>, start: Option<[f3
 		accum: 0.0,
 		smooth: Default::default(),
 		pose_stamp: None,
+		hero_cache: None,
 		wrench: None,
 		wrench_axis: None,
 		wrench_rig: None,
@@ -2018,6 +2052,7 @@ fn new_app(iso_path: &str, level: usize, shot: Option<String>, start: Option<[f3
 		prefetch: None,
 		prefetch_link: None,
 		switch_hold: false,
+		arrival_black: 0,
 		prefetch_tried: None,
 		class_rows: std::collections::HashMap::new(),
 		ambient_plays: Vec::new(),
@@ -2071,7 +2106,6 @@ fn new_app(iso_path: &str, level: usize, shot: Option<String>, start: Option<[f3
 		quick_mouse: false,
 		give,
 		play_ticks: 0,
-		fire_script: std::env::var("RAC_FIRE_TICKS").unwrap_or_default().split(',').filter_map(|v| v.trim().parse().ok()).collect(),
 		attack_script: std::env::var("RAC_ATTACK_TICKS").unwrap_or_default().split(',').filter_map(|v| v.trim().parse().ok()).collect(),
 		debris_bspheres: HashMap::new(),
 		class_kinds: HashMap::new(),
@@ -2255,6 +2289,7 @@ fn buffer(device: &wgpu::Device, label: &str, data: &[u8], usage: wgpu::BufferUs
 
 /// Column-major placement of a moby instance: rotation Z * Y * X (radians), then translation.
 /// A tinted prop's vertex `j` from the tint's first vertex on: constant unlit colour (baked code, draw alpha below -2.0), else unchanged.
+#[cfg(test)]
 fn tint_override(colour: [f32; 4], j: usize, tint: Option<([f32; 3], usize)>, alpha: u8) -> [f32; 4] {
 	match tint.filter(|&(_, s)| j >= s) {
 		Some((c, _)) => [c[0], c[1], c[2], moby_baked_encoding(alpha)],
@@ -2638,17 +2673,6 @@ struct Sfx {
 	ambient_ok: bool,
 }
 
-/// Help 20011's text (the save icon), decomp/notes/ingame_save_quit.md s6.
-const SAVE_ICON_TEXT: u32 = 0x4e2b;
-/// The map header's planet name (table V 0x1c1e40, stride 12; decomp/notes/ingame_other_screens.md):
-/// 0x4ecc + id for 1..17, Veldin 0x4ede for 0 and 18.
-fn planet_name(level: usize) -> u32 {
-	match level {
-		1..=17 => 0x4ecc + level as u32,
-		_ => 0x4ede,
-	}
-}
-
 /// Mix level of the music: the settings default 0x2cc of the 0x400 full scale (music.md; the
 /// Settings gain scales it from there).
 const MUSIC_VOLUME: f32 = 0x2cc as f32 / 1024.0;
@@ -2879,13 +2903,6 @@ fn forward(cam: &Camera) -> [f32; 3] {
 	[cam.yaw.cos() * cam.pitch.cos(), cam.yaw.sin() * cam.pitch.cos(), cam.pitch.sin()]
 }
 
-/// SCN-6 pause open (FUN_0028ba40): save the live projection and force the default 0.63 (vertical 0.63 * 0.756).
-fn pause_projection_save(cam: &mut Camera) -> f32 {
-	let saved = cam.tan_half;
-	cam.tan_half = TAN_HALF_FOV;
-	saved
-}
-
 /// Column-major perspective * look-at, Z up, depth 0..1. The world passes (RETAIL_NEAR, RETAIL_FAR); the vertical
 /// tan is `cam.tan_half` and the horizontal follows the window aspect [PC] (REN-7a).
 fn view_proj(cam: &Camera, aspect: f32, near: f32, far: f32) -> [[f32; 4]; 4] {
@@ -3113,16 +3130,6 @@ mod proj_tests {
 		let zs = |raw: f32| -224.0f32 + 536860160.0 / raw;
 		assert_eq!(zs(32.0), 16776656.0);
 		assert!(((16776656.0 - zs(1024.0)) / (16776656.0 - 496.0) - 0.96879154f32).abs() < 1e-6);
-	}
-
-	// SCN-6 test 1: the pause forces the default projection and the close restores the saved one exactly.
-	#[test]
-	fn pause_projection_save_restore() {
-		let mut cam = Camera { pos: [0.0; 3], yaw: 0.0, pitch: 0.0, tan_half: 0.8, up: [0.0, 0.0, 1.0] };
-		let saved = pause_projection_save(&mut cam);
-		assert_eq!(cam.tan_half, crate::camera::PROJ_SCALAR * PROJ_Y_RATIO);
-		cam.tan_half = saved;
-		assert_eq!(cam.tan_half, 0.8);
 	}
 
 	// REN-7b test 2: the scene key scalar converts to the vertical tan.

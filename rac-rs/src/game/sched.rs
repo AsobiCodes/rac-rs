@@ -1,7 +1,6 @@
 //! The actor scheduler (FUN_002650e0) and the 64-slot hit ring (0x178500), decomp/notes/collision_and_gameplay.md
 //! "Novalis collector and hit-ring refinement" and research/novalis_2026-10-04/handoff.md section 3.
 
-use crate::physics::V3;
 
 
 /// Per-actor scheduler state: update distance (actor +0x30), override (+0x31), group (+0x21, -1 = individual),

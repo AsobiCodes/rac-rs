@@ -2,17 +2,9 @@
 //! (class 1819, FUN_002f1890) and ARI-38 flying transports (1212 / 1213, FUN_002ebde8 / FUN_002ec748, BRIDGE-66).
 //! The actor variants live in `aridia::Actor`; `Game::update_aridia` dispatches here.
 
-use super::aridia::set_len;
-use super::aridia::FLOWER;
-use super::aridia::FLOWER_PIECE;
-use super::aridia::FLOWER_REMAINS;
 use super::aridia::TRANSPORTS;
-use super::aridia::TRANSPORT_PIECES;
-use super::{foes, Event, Game, Kind};
-use crate::gameplay::Polygon;
-use crate::particles::Rng;
-use crate::physics::{add, scale, sub, V3};
-use std::cell::Cell;
+use super::Game;
+use crate::physics::V3;
 
 
 const GLOW_HALF: [f32; 2] = [f32::from_bits(0x3f66_6666), f32::from_bits(0x3f99_999a)];

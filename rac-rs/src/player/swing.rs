@@ -1,9 +1,7 @@
 //! ARI-45: Swingshot acquisition (decomp/notes/aridia_gadgets.md "ARI-45 port spec"): the swing selector, the pull
 //! selector, their common scorer and the dispatcher case 0xc that enters the swing (0x2c) or the pull (0x24).
 
-use super::*;
 use crate::gameplay::pal_ticks;
-use crate::gameplay::Cuboid;
 use crate::gameplay::PAL_DT;
 
 
@@ -39,7 +37,7 @@ use crate::gameplay::PAL_DT;
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::physics::Scene;
+	use crate::physics::{Scene, World};
 
 	fn flat_world() -> World {
 		World::new([[[-50.0, -50.0, 0.0], [50.0, -50.0, 0.0], [50.0, 50.0, 0.0]], [[-50.0, -50.0, 0.0], [50.0, 50.0, 0.0], [-50.0, 50.0, 0.0]]], 4.0)

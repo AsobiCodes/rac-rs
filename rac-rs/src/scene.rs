@@ -429,14 +429,6 @@ pub fn warp_bundle(disc: &mut Disc) -> R<Vec<u8>> {
 	wad::decompress(&file).map_err(|e| format!("warp bundle: {e}"))
 }
 
-/// The warp bundle's sound bank (5 sounds, one per stream type): header word `0x19` from the base `w[1]`, the same
-/// two-chunk container as a level bank. Retail loads it into the level bank handle 0x15ed5c when the warp starts
-/// (Novalis OV:103878-103886) and plays sound `ty` at tick 1 of each warp segment (OV:102534-102540).
-pub fn warp_bank(bundle: &[u8]) -> R<crate::sound::Bank> {
-	let at = u32_at(bundle, 4)? as usize + u32_at(bundle, 0x19 * 4)? as usize;
-	crate::sound::Bank::parse(bundle.get(at..).ok_or("warp bank outside the bundle")?)
-}
-
 /// Warp stream of type `ty` (0..4) from the decompressed bundle: header word `0x14 + ty` is the directory offset
 /// from the base `w[1]`, a directory of (offset, size) pairs ended by size 0 (at most 0x46), each chunk at directory
 /// + 0x800 + offset, WAD-compressed like the title chunks. 96 ticks per chunk.

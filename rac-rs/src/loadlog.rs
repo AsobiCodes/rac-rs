@@ -24,3 +24,25 @@ pub fn say(text: impl FnOnce() -> String) {
 		eprintln!("load: +{:.3} {}", secs(), text());
 	}
 }
+
+/// [PC] perf (lane A7): `line` to stderr from a log thread, so the caller (the render thread) does not wait for the write
+/// (a console or a redirected stderr took ~2 ms per line in a prop pool growth). Lines keep their order among themselves.
+pub fn later(line: String) {
+	static TX: OnceLock<Option<std::sync::mpsc::Sender<String>>> = OnceLock::new();
+	let tx = TX.get_or_init(|| {
+		let (tx, rx) = std::sync::mpsc::channel::<String>();
+		std::thread::Builder::new().name("log".into()).spawn(move || {
+			for l in rx {
+				eprintln!("{l}");
+			}
+		}).ok().map(|_| tx)
+	});
+	match tx {
+		Some(tx) => {
+			if let Err(e) = tx.send(line) {
+				eprintln!("{}", e.0);
+			}
+		}
+		None => eprintln!("{line}"),
+	}
+}

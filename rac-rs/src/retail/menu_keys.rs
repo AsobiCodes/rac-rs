@@ -2,7 +2,8 @@
 //! the title front end), plus the per-screen table the button prompts name keys from (decomp/notes/button_prompts.md
 //! "Modern menu controls").
 //!
-//! In a menu the keyboard no longer works as a DualShock: arrows (and WASD) move the selection, Enter / Space confirm,
+//! In a menu the keyboard no longer works as a DualShock: arrows (and WASD) move the selection, Enter / Space (and a left
+//! click on no item, or anywhere in a dialog / the vendor / the front end's message box) confirm,
 //! Esc / Backspace go back or answer No, Q / E are L1 / R1 (the ring, the planet selector), Tab is a screen's extra action
 //! (the map's Play Infobot). What "confirm" and "back" press depends on the screen: the Quit Game page answers Yes on
 //! Circle, so there Enter presses Circle; the pause root closes on Start, so there Esc presses Start (`screen`). The old
@@ -15,13 +16,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use winit::keyboard::KeyCode as K;
 
 pub const START: u16 = 0x800;
+#[cfg(test)]
 pub const SQUARE: u16 = 0x80;
 
 /// Page ids (+0x3c of the page struct) of the in-level page menu (decomp/notes/ingame_pause_menu.md) [C].
 pub const ROOT: u32 = 2;
-pub const QUICK_SELECT: u32 = 5;
 pub const QUIT_GAME: u32 = 0xd;
 pub const MAP: u32 = 0xb;
+#[cfg(test)]
+pub const QUICK_SELECT: u32 = 5;
 pub const MISSIONS: u32 = 0xc;
 pub const GALAXY: u32 = 0xf;
 pub const GALAXY_CHILD: u32 = 0x10;
@@ -133,10 +136,14 @@ pub const HINTS: [(u16, u16, Role); 10] = [
 	(0x4eef, CIRCLE, Role::Alt),       // '\x11 Play Infobot'
 ];
 
-/// The key table of the menu `m` (in the title front end, whose page ids are its own, only the hints count).
+/// The key table of the menu `m` (in the title front end, whose page ids are its own, only the hints count). The hints are
+/// the hint items and any item that lists only hint texts: New Game's overwrite confirm in the front end (page 0x1d4db8,
+/// id 0x1a) shows '\x11 Yes' 0x524f / '\x12 No' 0x524b as the two records of one label item [C, front_mirror.rs P_OVERWRITE],
+/// so there Enter presses Circle (Yes) as on the in-level Overwrite page.
 pub fn screen(m: &MenuSnap) -> Screen {
 	let mut s = Screen { id: m.id, ..DEFAULT };
-	for it in m.items.iter().filter(|i| matches!(i.kind, Kind::Hint(_))) {
+	let hints_only = |i: &&super::mouse_menu::Item| matches!(i.kind, Kind::Hint(_)) || (!i.texts.is_empty() && i.texts.iter().all(|t| HINTS.iter().any(|h| h.0 == *t)));
+	for it in m.items.iter().filter(hints_only) {
 		for &t in &it.texts {
 			if let Some(&(_, b, r)) = HINTS.iter().find(|h| h.0 == t) {
 				match r {
@@ -178,7 +185,9 @@ pub fn current() -> Option<Screen> {
 }
 
 /// The key a player presses for pad button `bit` on screen `s`; None when the button has no menu key there (the prompt
-/// then names the gameplay binding). `short`: the abbreviation of a long name for a tight legend box.
+/// then names the gameplay binding). `short`: the abbreviation of a long name for a tight legend box. Circle with no role on
+/// the screen is G (its letter in `pad_from_keys`, which `menu_pad` keeps): the left mouse button, its play name, clicks the
+/// menu instead.
 pub fn key_for(s: &Screen, bit: u16, short: bool) -> Option<&'static str> {
 	Some(if bit == s.confirm {
 		if short { "Ent" } else { "Enter" }
@@ -190,9 +199,29 @@ pub fn key_for(s: &Screen, bit: u16, short: bool) -> Option<&'static str> {
 		"Q"
 	} else if bit == R1 {
 		"E"
+	} else if bit == CIRCLE {
+		"G"
 	} else {
 		return None;
 	})
+}
+
+/// The front end's modal message box (front mode 4, memory card and 60 Hz messages; frontend.rs `dialog_keys`) from the hint
+/// texts it shows, each naming its button [C: all_text.bin]: '\x10 Yes' 0x524e, '\x11 Yes' 0x524f, '\x12 No' 0x524b,
+/// '\x10 Continue' 0x524a, '\x12 Go back?' 0x4fa8. Yes / Continue / Go back is confirm, No is back; a box with one hint has
+/// it on both (like `dialog` 2). None when it shows no hint (the keys stay the play keys). Id 0xf7, a `dialog` id (centred
+/// lines: long names).
+pub fn front_dialog(yes: u32, no: u32, hint: u32) -> Option<Screen> {
+	let button = |t: u32| match t {
+		0x524e | 0x524a => Some(CROSS),
+		0x524f => Some(CIRCLE),
+		0x524b | 0x4fa8 => Some(TRIANGLE),
+		_ => None,
+	};
+	let one = button(hint);
+	let confirm = button(yes).or(one)?;
+	let back = button(no).or(one).unwrap_or(confirm);
+	Some(Screen { id: 0xf7, confirm, back, alt: 0, sticks: false })
 }
 
 // ---- keys -> pad -----------------------------------------------------------------------------------------------------
@@ -340,6 +369,21 @@ mod tests {
 		// Overwrite: Enter = Yes (Circle), Esc = No (Triangle).
 		let o = screen(&page(OVERWRITE, &[]));
 		assert_eq!((o.confirm, o.back), (CIRCLE, TRIANGLE));
+		// The front end's overwrite confirm: one label item lists '\x11 Yes' / '\x12 No' (no hint items): Enter = Circle.
+		let mut fo = front(page(OVERWRITE, &[]));
+		fo.items.push(Item { addr: 0x200, slot: 3, rect: [0, 0, 10, 10], kind: Kind::Label { rows: vec![(5.0, false), (10.0, false)], rowh: 5.0, cursor: 0 }, texts: vec![0x524f, 0x524b] });
+		assert_eq!((screen(&fo).confirm, screen(&fo).back), (CIRCLE, TRIANGLE));
+		// A label that also lists other texts is no legend.
+		fo.items[0].texts.push(0x4f27);
+		assert_eq!(screen(&fo).confirm, CROSS);
+		// The front end's message box: its hints name the keys.
+		assert_eq!(front_dialog(0x524f, 0x524b, 0).map(|s| (s.confirm, s.back)), Some((CIRCLE, TRIANGLE)));
+		assert_eq!(front_dialog(0x524e, 0x524b, 0).map(|s| (s.confirm, s.back)), Some((CROSS, TRIANGLE)));
+		assert_eq!(front_dialog(0, 0, 0x524a).map(|s| (s.confirm, s.back)), Some((CROSS, CROSS)));
+		assert_eq!(front_dialog(0, 0, 0x4fa8).map(|s| (s.confirm, s.back)), Some((TRIANGLE, TRIANGLE)));
+		assert_eq!(front_dialog(0, 0, 0), None);
+		assert!(is_dialog(&front_dialog(0, 0, 0x524a).unwrap()));
+		assert_eq!(menu_pad(&front_dialog(0x524f, 0x524b, 0).unwrap(), &keys(&[K::Enter])).0, CIRCLE);
 		// The vendor: Enter buys, Esc leaves, F (its play key) buys all ammo, arrows browse.
 		assert_eq!(menu_pad(&VENDOR, &keys(&[K::Enter])).0, CROSS);
 		assert_eq!(menu_pad(&VENDOR, &keys(&[K::Escape])).0, TRIANGLE);
@@ -397,6 +441,8 @@ mod tests {
 		assert_eq!(key_for(&q, CIRCLE, false), Some("Enter"));
 		assert_eq!(key_for(&q, TRIANGLE, false), Some("Esc"));
 		assert_eq!(key_for(&q, CROSS, false), None);
+		// Circle with no role on the screen: G (the left mouse button clicks the menu).
+		assert_eq!(key_for(&DEFAULT, CIRCLE, false), Some("G"));
 		assert_eq!(key_for(&DEFAULT, CROSS, true), Some("Ent"));
 		assert_eq!(key_for(&DEFAULT, L1, false), Some("Q"));
 		assert_eq!(key_for(&DEFAULT, R1, false), Some("E"));

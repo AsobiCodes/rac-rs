@@ -214,12 +214,14 @@ impl GsState {
 	}
 
 	/// True when a texel that passes writes Z: ZTE on, ZMSK off (AFAIL ZB_ONLY / KEEP decide for the failing texels).
+	#[cfg(test)]
 	pub fn writes_z(&self) -> bool {
 		self.test.zte && !self.zmsk
 	}
 
 	/// The wgpu blend for ABE + ALPHA, or None when the draw is opaque. `Err` = a formula no fixed-function wgpu blend
 	/// state expresses (a path must then blend in the shader or log it as unhandled).
+	#[cfg(test)]
 	pub fn wgpu_blend(&self) -> Result<Option<wgpu::BlendState>, Blend> {
 		if !self.abe {
 			return Ok(None);

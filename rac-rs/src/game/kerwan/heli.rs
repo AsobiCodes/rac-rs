@@ -4,8 +4,6 @@
 //! ("KER-2d port spec"); case 1 (the approach flight to the pad), case 4 (the knocked drift), case 5 (death) and the
 //! shared tail ("KER-2b port spec").
 
-use super::*;
-use crate::physics::V3;
 
 /// KER-2a: the helicopter class.
 pub(in crate::game) const HELI: u32 = 631;

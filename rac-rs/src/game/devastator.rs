@@ -8,13 +8,6 @@
 //! (BRIDGE-55): a face hit takes dir = v0 - v1 of the hit face (seg_collide 0x174290 - 0x1742a0), an actor hit the
 //! primitive normal P - centre of the winning shape (`Game.last_hit_normal`); an OBB victim keeps -unit(vel) [I].
 
-use super::*;
-use crate::gameplay::pal_ticks;
-use crate::gameplay::PAL_DT;
-use crate::particles::PointLight;
-use crate::particles::Rng;
-use crate::physics::cross;
-use std::f32::consts::{PI, TAU};
 
 
 /// The rocket class.

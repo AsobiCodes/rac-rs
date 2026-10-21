@@ -154,14 +154,6 @@ impl Player {
 		}
 	}
 
-	/// Level start / death restart (FUN_00279bb8 then FUN_002798c0(cur, 1, 0x400)): everything stops,
-	/// a queued request becomes the current track, and `track` (the spawn area's music id, when it
-	/// has one) or the current track plays from its intro at full volume.
-	/// Checkpoint music word (SAV-1c, savegame.md): the queued track, else the current one.
-	pub fn track_word(&self) -> i32 {
-		if self.queued == -1 { self.cur } else { self.queued }
-	}
-
 	pub fn restart(&mut self, track: Option<i16>) {
 		if self.queued != -1 {
 			self.cur = self.queued;
@@ -298,11 +290,6 @@ impl Player {
 		}
 	}
 
-	/// Pause (true) or resume (false) the music and stinger in place, no fade.
-	pub fn hold(&mut self, on: bool) {
-		self.held = on;
-	}
-
 	pub fn held(&self) -> bool {
 		self.held
 	}
@@ -317,37 +304,8 @@ mod tests {
 	use super::*;
 
 	// NOV-34b
-	#[test]
-	fn hold_freezes_music_and_stinger() {
-		let mut p = Player::from_units(&[1024; 9]);
-		p.restart(Some(0));
-		p.update(0.5);
-		p.hold(true);
-		p.update(1.0);
-		assert_eq!(p.main_t, 512.0);
-		assert!(p.main_out().unwrap().paused);
-		p.hold(false);
-		p.update(0.25);
-		assert_eq!(p.main_t, 768.0);
-		assert!(!p.main_out().unwrap().paused);
-		// A playing stinger keeps its elapsed time while held.
-		p.sting = Some((3, 100.0));
-		p.hold(true);
-		p.update(1.0);
-		assert_eq!(p.sting, Some((3, 100.0)));
-	}
 
 	// SAV-1c
-	#[test]
-	fn track_word_prefers_queued() {
-		let mut p = Player::from_units(&[0; 15]);
-		p.restart(None);
-		p.cur = 4;
-		p.queued = -1;
-		assert_eq!(p.track_word(), 4);
-		p.queued = 6;
-		assert_eq!(p.track_word(), 6);
-	}
 	use std::path::{Path, PathBuf};
 
 	const ISO: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../Ratchet & Clank (Europe) (En,Fr,De,Es,It) (v1.00).iso");
