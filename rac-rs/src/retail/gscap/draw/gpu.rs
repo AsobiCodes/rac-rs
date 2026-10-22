@@ -1,4 +1,5 @@
-//! GS capture on the GPU (on by default; RAC_GSCAP_GPU=0 draws on the CPU, `low` picks the power-saving adapter, other
+//! GS capture on the GPU (on by default on NVIDIA, `set_default`; RAC_GSCAP_GPU=0 draws on the CPU, 1 uses the GPU on any
+//! vendor, `low` picks the power-saving adapter, other
 //! text part of an adapter's name): the pixel work of the capture (prims, transfers, local copies, CLUT loads, the
 //! overlay pictures) runs as compute kernels (gpu.wgsl) on local memory, CLUT and overlay planes that live on the GPU.
 //! The CPU keeps the register model, the deferred uploads and each prim's set-up (the same f32 operations as draw.rs)
@@ -237,8 +238,26 @@ pub(crate) enum Take {
     Never,
 }
 
+/// The capture stays on the CPU unless RAC_GSCAP_GPU asks for the GPU (`set_default`): the window's GPU is not NVIDIA.
+static CPU_BY_DEFAULT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The window's GPU (viewer/gpu.rs, before the game loads) sets the default: the capture's own device is opened on a second
+/// thread while the window's device starts presenting, and with the RX 9070 XT's Vulkan driver the game's window froze white
+/// before its first frame while that device was opening (GitHub #12; v0.2.2, which had no GPU capture, ran). NVIDIA, where it
+/// was measured, keeps it; other drivers draw on the CPU as v0.2.2 did. Without a window (`rac-rs warm-gpu`) the GPU is used.
+pub(crate) fn set_default(on: bool) {
+    CPU_BY_DEFAULT.store(!on, std::sync::atomic::Ordering::Relaxed);
+    if !on && std::env::var("RAC_GSCAP_GPU").ok().filter(|w| !w.is_empty()).is_none() {
+        eprintln!("gscap: the HUD capture draws on the CPU (the GPU capture is on by default only on NVIDIA; RAC_GSCAP_GPU=1 turns it on)");
+    }
+}
+
 fn want() -> Option<String> {
-    let w = std::env::var("RAC_GSCAP_GPU").ok().filter(|w| !w.is_empty()).unwrap_or_else(|| "1".into());
+    let w = match std::env::var("RAC_GSCAP_GPU").ok().filter(|w| !w.is_empty()) {
+        Some(w) => w,
+        None if CPU_BY_DEFAULT.load(std::sync::atomic::Ordering::Relaxed) => return None,
+        None => "1".into(),
+    };
     (w != "0").then_some(w)
 }
 
@@ -298,6 +317,7 @@ impl Gpu {
                 .name("gs-gpu-open".into())
                 .spawn(move || {
                     idle();
+                    let _w = crate::runlog::waiting("opening the GS capture GPU (device, kernels)");
                     Self::open(&w)
                 })
                 .ok();
@@ -320,7 +340,10 @@ impl Gpu {
                 drop(o);
                 match h {
                     Some(h) => h.join().ok().flatten(),
-                    None => Self::open(&want),
+                    None => {
+                        let _w = crate::runlog::waiting("opening the GS capture GPU (device, kernels)");
+                        Self::open(&want)
+                    }
                 }
             }
         };
@@ -374,13 +397,17 @@ impl Gpu {
 
     fn open(want: &str) -> Option<Box<Gpu>> {
         let t0 = std::time::Instant::now();
-        let inst = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        // Vulkan only, also when the window draws on another backend (WGPU_BACKEND=dx12): DX12's shader compiler (FXC) rejects five
+        // kernels ("unable to unroll loop") and needs minutes for k_hd. Without Vulkan the capture draws on the CPU.
+        let mut desc = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
+        desc.backends = wgpu::Backends::VULKAN;
+        let inst = wgpu::Instance::new(desc);
         let adapter = if want == "1" || want == "low" {
             let pp = if want == "low" { wgpu::PowerPreference::LowPower } else { wgpu::PowerPreference::HighPerformance };
             pollster::block_on(inst.request_adapter(&wgpu::RequestAdapterOptions { power_preference: pp, compatible_surface: None, force_fallback_adapter: false, apply_limit_buckets: false })).ok()?
         } else {
             let w = want.to_lowercase();
-            pollster::block_on(inst.enumerate_adapters(wgpu::Backends::all())).into_iter().find(|a| a.get_info().name.to_lowercase().contains(&w))?
+            pollster::block_on(inst.enumerate_adapters(wgpu::Backends::VULKAN)).into_iter().find(|a| a.get_info().name.to_lowercase().contains(&w))?
         };
         let info = adapter.get_info();
         let timing = std::env::var_os("RAC_GSGPU_TIME").is_some() && adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY);
@@ -392,7 +419,12 @@ impl Gpu {
             features |= wgpu::Features::PIPELINE_CACHE;
         }
         let (dev, q) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { label: Some("gs capture"), required_features: features, ..Default::default() })).ok()?;
-        let sm = dev.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("gs capture"), source: wgpu::ShaderSource::Wgsl(match std::env::var("RAC_GSGPU_WGSL") {
+        dev.set_device_lost_callback(|reason, msg| {
+            if reason != wgpu::DeviceLostReason::Destroyed {
+                eprintln!("gscap gpu: the capture device was lost ({reason:?}): {msg}");
+            }
+        });
+        let sm =dev.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("gs capture"), source: wgpu::ShaderSource::Wgsl(match std::env::var("RAC_GSGPU_WGSL") {
             // Debug: a shader from disk (timing experiments without a rebuild).
             Ok(f) => std::fs::read_to_string(f).ok()?.into(),
             Err(_) => include_str!("gpu.wgsl").into(),
@@ -1083,6 +1115,7 @@ impl Gpu {
         *self.st.entry("submit prep us").or_default() += t_prep.elapsed().as_micros() as u64;
         if let (false, Some((_, _, qm))) = (steps.is_empty(), &self.ts) {
             qm.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+            let _w = crate::runlog::waiting("the GS capture GPU's timestamps");
             self.dev.poll(wgpu::PollType::wait_indefinitely()).ok()?;
             let v: Vec<u64> = bytemuck::cast_slice(&qm.slice(..).get_mapped_range().ok()?[..steps.len() * 16]).to_vec();
             qm.unmap();
@@ -1119,7 +1152,9 @@ impl Gpu {
         if let Some((_, _, sl)) = &hdn {
             sl.map_async(wgpu::MapMode::Read, |_| {});
         }
+        let w = crate::runlog::waiting("the GS capture GPU's picture (readback)");
         self.dev.poll(wgpu::PollType::wait_indefinitely()).ok()?;
+        drop(w);
         *self.st.entry("readback wait us").or_default() += t.elapsed().as_micros() as u64;
         let mut v = vec![0u32; PLANE as usize / 4];
         v.copy_from_slice(bytemuck::cast_slice(&self.rb.slice(..).get_mapped_range().ok()?));
@@ -1137,7 +1172,9 @@ impl Gpu {
     fn rb_finish(&mut self, block: bool) -> Option<Vec<u32>> {
         let p = self.rb_pend.as_ref()?;
         let (done, want, hd) = (p.done.clone(), p.want, p.hd);
+        let w = block.then(|| crate::runlog::waiting("the GS capture GPU's picture (lazy readback)"));
         self.dev.poll(if block { wgpu::PollType::wait_indefinitely() } else { wgpu::PollType::Poll }).ok();
+        drop(w);
         if done.load(std::sync::atomic::Ordering::SeqCst) < want {
             return None;
         }

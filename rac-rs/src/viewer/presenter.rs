@@ -9,7 +9,11 @@
 //! surface is flushed before it is reconfigured (resize) so wgpu never sees an acquired texture still outstanding.
 //! Input latency: the game tick for frame N+1 no longer waits for the GPU to finish frame N, so a new frame shows input
 //! sampled up to one frame later than the blocked version only when GPU-bound; CPU-bound it is the same or earlier.
-//! RAC_PRESENT_THREAD=0 presents inline (the old behaviour); RAC_PRESENT_LOG=1 prints the time spent inside present.
+//! The thread is on by default only on NVIDIA, where it was measured. Other drivers present inline (the old behaviour): a Windows
+//! driver may show the frame through DXGI and need the window's thread inside vkQueuePresentKHR, while that thread waits for the
+//! present (`flush`, the submit gate, or wgpu's queue lock that present holds, e.g. in the front end's level load right after the
+//! first frame), and neither returns: GitHub #12, v0.3.0 white "Not Responding" window on an RX 9070 XT where v0.2.2 (inline) works.
+//! RAC_PRESENT_THREAD=0 presents inline, =1 uses the thread on every GPU; RAC_PRESENT_LOG=1 prints the time spent inside present.
 //!
 //! [PC] Deferred submit (lane A6): the render thread no longer waits for the frame's `enc-finish` jobs (`Cuts::take`, ~1.3 ms per
 //! frame) nor runs the `submit` (~0.3 ms): `Presenter::present_frame` hands the unfinished parts to the present thread, which
@@ -53,6 +57,7 @@ impl Gate {
 			return;
 		}
 		let _t = super::profile::span("sgate");
+		let _w = crate::runlog::waiting("the present thread's submit of the last frame (presenter gate)");
 		let mut g = self.lock.lock().unwrap();
 		while self.pending.load(Ordering::Acquire) {
 			g = self.cv.wait(g).unwrap();
@@ -67,6 +72,21 @@ impl Gate {
 		let _g = self.lock.lock().unwrap();
 		self.pending.store(false, Ordering::Release);
 		self.cv.notify_all();
+	}
+}
+
+/// Clears the `busy` flag and the gate when the present thread ends, also by a panic (a submit or present error): the render
+/// thread would otherwise wait for them forever in `flush` / `Gate::wait`. Its next hand-over then finds the channel closed and
+/// submits and presents inline.
+struct Release(Arc<(Mutex<bool>, Condvar)>, Arc<Gate>);
+
+impl Drop for Release {
+	fn drop(&mut self) {
+		*self.0 .0.lock().unwrap_or_else(|e| e.into_inner()) = false;
+		self.0 .1.notify_all();
+		let _g = self.1.lock.lock().unwrap_or_else(|e| e.into_inner());
+		self.1.pending.store(false, Ordering::Release);
+		self.1.cv.notify_all();
 	}
 }
 
@@ -85,11 +105,13 @@ impl Deref for GatedQueue {
 }
 
 impl Presenter {
-	pub(super) fn new(queue: wgpu::Queue) -> Presenter {
+	/// `vendor`: the adapter's PCI vendor id (the thread's default, see the module doc).
+	pub(super) fn new(queue: wgpu::Queue, vendor: u32) -> Presenter {
 		let gate = Arc::new(Gate { pending: AtomicBool::new(false), lock: Mutex::new(()), cv: Condvar::new() });
 		let defer = std::env::var("RAC_SUBMIT_DEFER").map_or(true, |v| v != "0");
 		let busy = Arc::new((Mutex::new(false), Condvar::new()));
-		let on = std::env::var("RAC_PRESENT_THREAD").map_or(true, |v| v != "0");
+		let on = std::env::var("RAC_PRESENT_THREAD").map_or(vendor == 0x10de, |v| v != "0");
+		eprintln!("present: {}", if on { "on the present thread" } else { "inline (render thread)" });
 		let log = std::env::var("RAC_PRESENT_LOG").is_ok_and(|v| v == "1");
 		let worker = on.then(|| {
 			let (tx, rx) = mpsc::channel::<Job>();
@@ -97,6 +119,7 @@ impl Presenter {
 			let h = std::thread::Builder::new()
 				.name("present".into())
 				.spawn(move || {
+					let _release = Release(b.clone(), g.clone());
 					let (mut n, mut ns) = (0u64, 0u64);
 					let mut sub = (0u64, 0u64);
 					while let Ok(job) = rx.recv() {
@@ -136,6 +159,7 @@ impl Presenter {
 	/// Waits until no present is in flight.
 	pub(super) fn flush(&self) {
 		let mut g = self.busy.0.lock().unwrap();
+		let _w = (*g).then(|| crate::runlog::waiting("the present thread's last present (presenter flush)"));
 		while *g {
 			g = self.busy.1.wait(g).unwrap();
 		}
@@ -234,6 +258,7 @@ impl Cuts {
 	/// All command buffers of the frame in order, `last` being the final encoder's.
 	pub(super) fn take(mut self, last: wgpu::CommandBuffer) -> Vec<wgpu::CommandBuffer> {
 		let _t = super::profile::span("fjoin");
+		let _w = crate::runlog::waiting("the frame's parallel command encoders");
 		let mut v: Vec<wgpu::CommandBuffer> = self.parts.drain(..).filter_map(|rx| rx.recv().ok()).collect();
 		v.push(last);
 		v

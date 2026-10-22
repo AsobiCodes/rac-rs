@@ -1449,6 +1449,20 @@ $cargo = Join-Path $tc 'cargo\bin\cargo.exe'
 # (the GNU assembler that dlltool runs is added to the same folder by Complete-Tools).
 $rsc = Join-Path $tc "rustup\toolchains\$RustVersion-$RustHost\lib\rustlib\$RustHost\bin\self-contained"
 $env:Path = "$rsc;$env:Path"
+# Another MinGW on the PC's PATH (MSYS2, Strawberry Perl, llvm-mingw, w64devkit, ...) broke every link ("cannot find crt2.o",
+# "cannot find -lkernel32"): rustc turns its self-contained linking (the startup files and Windows import libraries in
+# lib\self-contained) off when PATH has an x86_64-w64-mingw32-gcc.exe outside its own folder, but the gcc that runs is still
+# Rust's linker-only one in $rsc (first on PATH), which has none of those files. So those folders are left off PATH for this
+# setup only (the PC's PATH is not changed), and every PC links as one without another MinGW does.
+$pathKeep = New-Object System.Collections.ArrayList
+foreach ($pd in ($env:Path -split ';')) {
+    if (-not $pd.Trim()) { continue }
+    $otherGcc = $false
+    try { $otherGcc = ($pd -ne $rsc) -and (Test-Path -LiteralPath (Join-Path $pd.Trim().Trim('"') 'x86_64-w64-mingw32-gcc.exe') -PathType Leaf) } catch { }
+    if ($otherGcc) { Write-Host "  not using $pd for this setup (another x86_64-w64-mingw32-gcc.exe is there, it would break linking)"; continue }
+    [void]$pathKeep.Add($pd)
+}
+$env:Path = $pathKeep -join ';'
 function Get-RustVersion {
     $v = ''
     if (Test-Path -LiteralPath $cargo) { try { $v = (& (Join-Path $tc 'cargo\bin\rustc.exe') --version 2>$null) } catch { $v = '' } }

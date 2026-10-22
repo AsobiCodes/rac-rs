@@ -433,6 +433,7 @@ impl TieGpu {
 			let st = stats();
 			let stage = &self.stage.as_ref().unwrap().0;
 			stage.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+			let _w = crate::runlog::waiting("the GPU's tie build for its check (tiegpu)");
 			device.poll(wgpu::PollType::wait_indefinitely()).ok();
 			let data = stage.slice(..).get_mapped_range().expect("check map");
 			let vsz = std::mem::size_of::<Vertex>();

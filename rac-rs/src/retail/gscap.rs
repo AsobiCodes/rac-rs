@@ -310,6 +310,11 @@ pub fn gpu_prestart(idle: fn()) {
     draw::gpu::Gpu::prestart(idle);
 }
 
+/// Whether the GPU capture is on without RAC_GSCAP_GPU (draw/gpu.rs `set_default`).
+pub fn gpu_default(on: bool) {
+    draw::gpu::set_default(on);
+}
+
 /// Opens a GPU capture and drops it (`rac-rs warm-gpu`): false without one.
 pub fn gpu_warm() -> bool {
     matches!(draw::gpu::Gpu::take(&vec![0; 4 << 20]), draw::gpu::Take::Ready(_))

@@ -271,6 +271,7 @@ rac-rs/src/retail/strafe.rs
 rac-rs/src/retail/title_boot.rs
 rac-rs/src/retail/vendor.rs
 rac-rs/src/retail/warp.rs
+rac-rs/src/runlog.rs
 rac-rs/src/save.rs
 rac-rs/src/scene.rs
 rac-rs/src/settings.rs

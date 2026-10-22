@@ -505,6 +505,7 @@ impl HeroGpu {
 		enc.copy_buffer_to_buffer(vbuf, 0, &stage, 0, size);
 		queue.submit(Some(enc.finish()));
 		stage.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+		let _w = crate::runlog::waiting("the GPU's hero build for the self-check (gpuhero)");
 		device.poll(wgpu::PollType::wait_indefinitely()).ok();
 		let out = stage.slice(..).get_mapped_range().expect("mapped").to_vec();
 		stage.unmap();

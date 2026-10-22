@@ -111,7 +111,9 @@ impl Pipe {
 	/// Syncs the ghost and hands the field to the picture thread. None: the thread is gone (no effects layer this field).
 	pub fn hand(&mut self, m: &Machine, own: &[Own], lv: u32, field: u32, pending: Pending) -> Option<Handle> {
 		let t = Instant::now();
+		let w = crate::runlog::waiting("a free picture-thread buffer (snap pipe)");
 		let mut g = self.free.recv().ok()?;
+		drop(w);
 		self.wait_ns += t.elapsed().as_nanos() as u64;
 		let t = Instant::now();
 		self.bytes += m.mirror_to(&mut g.0, &mut self.fresh) as u64;
@@ -322,7 +324,9 @@ impl Par {
 		if !std::mem::take(&mut self.started) {
 			return None;
 		}
+		let w = crate::runlog::waiting("the picture thread's helper (snap pipe)");
 		let r = self.rx.recv().ok();
+		drop(w);
 		if let (Some((b, w)), Some((pk, pend))) = (r.as_ref(), self.old.as_mut()) {
 			let b2 = efx_draw::capture(m, self.lv, &self.own);
 			let w2 = pk.prep(m, &self.own, &b2, std::mem::take(pend));

@@ -1,5 +1,6 @@
 //! RAC_LOAD_LOG=1: wall-clock stamps of the load path (boot, title, Load Game, the retail loader, rac-rs's own level load).
 //! Every line is `load: +SECONDS.mmm text`, seconds since the first call (main calls `init` first thing).
+//! The player's run log (runlog.rs) writes the `say` steps too; the extra RAC_LOAD_LOG diagnostics (`on()`) stay off there.
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -20,8 +21,10 @@ pub fn secs() -> f64 {
 }
 
 pub fn say(text: impl FnOnce() -> String) {
-	if on() {
-		eprintln!("load: +{:.3} {}", secs(), text());
+	if on() || crate::runlog::active() {
+		let line = format!("load: +{:.3} {}", secs(), text());
+		crate::runlog::note_step(&line);
+		eprintln!("{line}");
 	}
 }
 

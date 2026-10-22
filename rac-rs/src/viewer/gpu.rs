@@ -34,6 +34,12 @@ impl Gpu {
 			false => wgpu::DeviceDescriptor { required_features: stencil_feature, required_limits: wgpu::Limits { max_storage_buffer_binding_size: storage_bind, ..Default::default() }, ..Default::default() },
 		};
 		let (device, queue) = pollster::block_on(adapter.request_device(&desc)).expect("device");
+		// [PC] wgpu drops a lost device's errors (driver reset, GPU timeout) and the window just stays blank: say so in the run log.
+		device.set_device_lost_callback(|reason, msg| {
+			if reason != wgpu::DeviceLostReason::Destroyed {
+				eprintln!("gpu: the graphics device was lost ({reason:?}): {msg}");
+			}
+		});
 		super::gpuhero::device_created(&adapter, &device);
 		let size = window.inner_size();
 		let mut config = surface.get_default_config(&adapter, size.width.max(1), size.height.max(1)).expect("surface config");
@@ -46,6 +52,11 @@ impl Gpu {
 		}
 		configure_surface(&surface, &device, &config);
 		eprintln!("gpu: {:?} {}, present mode {:?}, frame latency {}", adapter.get_info().backend, adapter.get_info().name, config.present_mode, config.desired_maximum_frame_latency);
+		// The driver (bug reports: a fault on one driver version only).
+		let ai = adapter.get_info();
+		eprintln!("gpu: driver {} {}, vendor {:#06x} device {:#06x}, {:?}", ai.driver, ai.driver_info, ai.vendor, ai.device, ai.device_type);
+		// The GS capture's own GPU device is on by default only on NVIDIA (gscap draw/gpu.rs `set_default`, GitHub #12).
+		crate::retail::gpu_capture_default(ai.vendor == 0x10de);
 
 		let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
 			label: Some("level"),
@@ -432,7 +443,7 @@ impl Gpu {
 		let under = super::underwater::Under::new(&device, config.format);
 		let partfx = super::partfx::PartFx::new(&device, &shader, &ulayout, &tex_layout, config.format, depth_format);
 		let veg = super::vegfx::VegFx::new(&device, &ulayout, &tex_layout, config.format, depth_format);
-		let presenter = super::presenter::Presenter::new(queue.clone());
+		let presenter = super::presenter::Presenter::new(queue.clone(), ai.vendor);
 		let queue = presenter.gated();
 		let mut gpu = Gpu { window, surface, device, queue, presenter, config, pipeline, pipeline_cull, moby_pipelines, moby_cull, shrub_pipelines, clamp_sampler, wrap_samplers, tfrag_pipeline, tfrag_pipeline_lt, tie_pipelines, sky_pipeline, sky_add_pipeline, hud_pipeline, clear_pipeline, pbuf, pbind, preview: None, preview_gold: false, preview_pair: None, preview_worn: None, preview2: None, shop_models: Vec::new(), shop_panel_models: Vec::new(), item_panel, popup_panel, portrait_panel, portrait_shown: false, popup_bolt: None, icon_bolt: None, icon_bolt_sphere: None, popup_bolt_sphere: None, panel_posed: None, metal: MetalDraw::default(), props_gpu, bindless, hud_split: None, hud_textures: Vec::new(), nearest, hud: Vec::new(), retail_ov: None, ubuf, ubind, tex_layout, sampler, depth, msaa, scene: None, lighting: None, reserved_lights: None, fog_live: None, shrub_cap: shrubs::SHRUB_CAP, part_far: crate::water::PART_FAR, under_flag: false, under_surf: None, under, points: [[0.0; 4]; 16], table: [None; 8], moby_dyn: Vec::new(), hero_placed: (gameplay::SPAWN_AMBIENT, 0), hero_env: gameplay::placed_env(gameplay::SPAWN_AMBIENT, 0), scene_actor_light: None, marker_v: None, prop_v: None, class_uv: HashMap::new(), marker_ghosts: [None; 5], hero_gens: (0, 0), marker_bomb: None, marker_light: None, part_pipelines, strip_pipeline, pool_pipeline, pool_add_pipeline, part_tex: None, part_verts: BTreeMap::new(), line_pipeline, line_verts: Vec::new(), part_defs: Vec::new(), fx_meshes: HashMap::new(), fx_tex: HashMap::new(), fx_quads: Vec::new(), water_quads: Vec::new(), strip_draws: Vec::new(), pool_draws: Vec::new(), ocean_pipeline, ocean_tex: None, ocean_draws: Vec::new(), ocean_rgba: Vec::new(), ocean_frame: None, ocean_level_fog: false, ocean_fog: None, ocean_g_pipeline, ocean_ram: Vec::new(), warp_fx: None, movie, hero_tint_out: None, depth_format, shadow, volume_buf: None, volume_counts: (0, 0), marker_tilt: [0.0; 2], post, waterfx, mirror, bed, partfx, veg, level: usize::MAX, modern_ok: false, sun, ship_fight: false };
 		let font = gpu.upload(Some(&overlay::font_texture()), &gpu.nearest);
@@ -447,6 +458,7 @@ impl Gpu {
 			})
 			.collect();
 		gpu.part_tex = Some(gpu.upload_texture(Some(&Texture { w: 64, h: 64, rgba: disc })));
+		crate::loadlog::say(|| "host: gpu ready (pipelines built)".into());
 		gpu
 	}
 
@@ -2528,6 +2540,7 @@ impl Gpu {
 		// The surface holds one acquired image at a time: the previous frame's present (on the present thread) must have returned
 		// before the next acquire, or wgpu panics "Surface image is already acquired" (seen 2026-10-19 on fg1/1_0016, dev s49).
 		self.presenter.flush();
+		let acquire = crate::runlog::waiting("the GPU driver's next window image (vsync / swapchain)");
 		let frame = match self.surface.get_current_texture() {
 			wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
 			wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
@@ -2537,6 +2550,7 @@ impl Gpu {
 			}
 			_ => return None,
 		};
+		drop(acquire);
 		super::profile::lap(super::profile::Phase::Acquire);
 		let view = frame.texture.create_view(&Default::default());
 		let mut enc = self.device.create_command_encoder(&Default::default());

@@ -69,6 +69,11 @@ The game's own button prompts show the keyboard and mouse keys. You can change t
 
 - The faint afterimage trail behind Ratchet during Thruster-Pack flight is not drawn yet.
 - Some glass surfaces can flicker.
+- On AMD and Intel graphics, HUD Sharp only sharpens the title screen and main menu for now. In game, the on-screen text, icons, menus and shop keep the Original look.
+
+## Reporting a problem
+
+If the game freezes, crashes or looks wrong, please [open an issue](https://github.com/AsobiCodes/rac-rs/issues) and attach the file `player\log.txt` from your rac-rs folder. The game writes it every time it runs. It lists your Windows version, processor and graphics card, and what the game did up to the problem. If the game froze, wait about 15 seconds before you close it: the log then also says where it got stuck. The previous run is kept as `player\log.prev.txt`, so if you already restarted the game, attach that file instead. The log stays on your PC; the game sends it nowhere.
 
 ## Legal
 

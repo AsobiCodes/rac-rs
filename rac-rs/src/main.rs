@@ -27,6 +27,7 @@ mod inventory;
 mod iso;
 mod level;
 mod loadlog;
+mod runlog;
 mod map;
 mod mesh;
 mod mobies;
@@ -230,7 +231,15 @@ pub fn main() -> ExitCode {
 	#[cfg(feature = "windows_gui")]
 	std::panic::set_hook(Box::new(|info| {
 		let thread = std::thread::current();
-		crash_log(&format!("panic in thread {}: {info}", thread.name().unwrap_or("?")));
+		let text = format!("panic in thread {}: {info}", thread.name().unwrap_or("?"));
+		// Also into the run log (runlog.rs), next to what led up to it.
+		eprintln!("{text}");
+		// With the calls that led to it (the first few panics: reading the exe's function names takes a moment).
+		static TRACED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+		if TRACED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
+			runlog::note_calls();
+		}
+		crash_log(&text);
 	}));
 	let mut args: Vec<String> = std::env::args().skip(1).collect();
 	// Started by the player: double-clicked (no arguments: the desktop shortcut, Setup's Play) or by Play.cmd (the same cold boot with
@@ -249,6 +258,9 @@ pub fn main() -> ExitCode {
 			}
 		}
 	}
+	// [PC] The player's run log (runlog.rs): stderr into <player dir>/log.txt when it goes nowhere (the double-clicked game).
+	// After `launch_args` (it sets RAC_PLAYER_DIR while the process is still single-threaded).
+	runlog::start(&retail::memcard::player_dir());
 	let result = match args.first().map(String::as_str) {
 		Some("levels") if args.len() == 2 => cmd_levels(&args[1]),
 		Some("view") if args.len() >= 3 => cmd_view(&args[1..]),
@@ -264,7 +276,10 @@ pub fn main() -> ExitCode {
 		}
 	};
 	match result {
-		Ok(()) => ExitCode::SUCCESS,
+		Ok(()) => {
+			runlog::end();
+			ExitCode::SUCCESS
+		}
 		Err(e) => {
 			eprintln!("error: {e}");
 			#[cfg(feature = "windows_gui")]

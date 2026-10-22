@@ -33,11 +33,14 @@ impl ApplicationHandler for App {
 			}
 		}
 		let window = Arc::new(el.create_window(attrs).expect("window"));
+		crate::runlog::set_window(&window);
+		crate::loadlog::say(|| "host: window created".into());
 		self.gpu = Some(Gpu::new(window));
 		self.audio = if self.headless { None } else { audio::Audio::new() };
 		if self.audio.is_none() {
 			eprintln!("no audio output; running silent");
 		}
+		crate::loadlog::say(|| "host: audio ready".into());
 		self.load_level();
 		// The front end starts play itself (New Game / Load Game).
 		if self.autoplay && self.front.is_none() {
@@ -171,6 +174,12 @@ impl ApplicationHandler for App {
 			}
 			WindowEvent::RedrawRequested => {
 				profile::frame_start();
+				// The run log's first frames (a freeze right after the load shows how far drawing got).
+				static FRAMES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+				if FRAMES.load(std::sync::atomic::Ordering::Relaxed) < 3 {
+					let n = FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+					crate::loadlog::say(|| format!("host: frame {n} starts"));
+				}
 				if let Some(d) = crate::retail::test_slow_render() {
 					std::thread::sleep(d);
 				}

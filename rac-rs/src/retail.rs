@@ -171,6 +171,12 @@ pub fn warm_gpu() -> Result<(), String> {
 	if gscap::gpu_warm() { Ok(()) } else { Err("no GPU for the capture".into()) }
 }
 
+/// The window's GPU (viewer/gpu.rs, before the game loads): the GS capture uses a GPU of its own by default only when that one
+/// is NVIDIA (gscap draw/gpu.rs `set_default`).
+pub fn gpu_capture_default(nvidia: bool) {
+	gscap::gpu_default(nvidia);
+}
+
 pub fn active() -> bool {
 	STATE.get().is_some()
 }
@@ -2996,6 +3002,7 @@ fn stubs_path() -> String {
 impl Retail {
 	pub fn load() -> Option<Retail> {
 		let dir = STATE.get()?;
+		crate::loadlog::say(|| "retail: load starts".into());
 		// The window's main loop runs here; the worker and the GS capture mark their own threads.
 		hot::process();
 		hot::thread();
@@ -3020,6 +3027,7 @@ impl Retail {
 			}
 			None => ee_oracle::Machine::load(dir),
 		};
+		crate::loadlog::say(|| "retail: machine ready".into());
 		// The player's own memory card (retail/memcard.rs): a save made in an earlier session, before the first card call.
 		memcard::restore(&mut m);
 		m.record_sound();
@@ -3028,6 +3036,7 @@ impl Retail {
 		let level = m.level();
 		// The recompiled retail functions (ee_oracle rec/); ORACLE_REC=0 interprets everything.
 		ee_game::register();
+		crate::loadlog::say(|| "retail: recompiled code registered".into());
 		// Movies play natively (retail/fmv_bridge.rs): the retail player function is replaced by a hook.
 		fmv_bridge::reset();
 		fmv_bridge::register();
@@ -3112,6 +3121,7 @@ impl Retail {
 		if cap.is_none() && gsf.is_none() {
 			eprintln!("retail: no GS capture (rac-rs HUD)");
 		}
+		crate::loadlog::say(|| "retail: GS capture ready".into());
 		let gs = cap.is_some() || gsf.is_some();
 		let (gtx, gshared) = match gsf {
 			Some((tx, sh)) => (Some(tx), Some(sh)),
@@ -3607,6 +3617,7 @@ impl Retail {
 				card.flush(&m);
 			})
 			.ok()?;
+		crate::loadlog::say(|| "retail: load done, game thread started".into());
 		let cam = first.cam.unwrap_or(([0.0; 3], 0.0, 0.0, 0.63));
 		Some(Retail { tx, worker: Some(worker), replay, replay_ended: false, rx, inflight: 0, taken: 0, ahead: 1, frame_avg: 0.0, waited: 0.0, early: None, movie_req: None, movie_mask: 0, movie_rule: fmv_bridge::Skip::Start, movie_prev: 0, pad_last: 0, snap: first, free: HashMap::new(), order: None, held: HashMap::new(), prop_fx: HashMap::new(), bound: false, level, travel, cam, cam_prev: cam, cam_up: [0.0, 0.0, 1.0], cam_up_prev: [0.0, 0.0, 1.0], failed: false, stop: None, fields: 0, script: pad_script(), keytap: keytap_script(), movies: 0, taps: HashMap::new(), cap_hold: (Vec::new(), 0), mouse_taps: MouseTaps::default(), pad_seen: 0, ms: 0.0, ms_avg: 0.0, gs, gsfull: gshared, aspect: 4.0 / 3.0, mm: mouse_menu::State::default(), mk: menu_keys::Layer::default(), grow: None, tb })
 	}
@@ -3781,7 +3792,10 @@ impl Retail {
 		self.tick_inner(buttons, sticks);
 		// The next field's pad is out (the worker runs it now): only then wait for the capture thread's overlay of the field just taken.
 		if let Some(l) = self.snap.ov_late.take() {
-			if let Some((w, rows, px, disp)) = (l.0)() {
+			let w = crate::runlog::waiting("the GS capture thread's overlay of the last field");
+			let got = (l.0)();
+			drop(w);
+			if let Some((w, rows, px, disp)) = got {
 				self.snap.ov = Some((w, rows, px));
 				self.snap.ov_disp = disp;
 			}
@@ -3789,7 +3803,9 @@ impl Retail {
 		// The effects layer of the field just taken (built on the VU1 thread meanwhile): the quads follow the ported ones.
 		if let Some(l) = self.snap.fx_late.take() {
 			let t_w = std::time::Instant::now();
+			let w = crate::runlog::waiting("the effects (VU1) thread's layer of the last field");
 			let got = l.get();
+			drop(w);
 			efx_vu::prof_wait(t_w.elapsed().as_nanos() as u64);
 			if let (Some((qa, pools)), Some(fx)) = (got, self.snap.fx.as_mut()) {
 				fx.qa.extend(qa);
@@ -3805,6 +3821,7 @@ impl Retail {
 		self.waited = 0.0;
 		if self.inflight > 0 {
 			let t_wait = std::time::Instant::now();
+			let w = crate::runlog::waiting("the game thread's next field (retail)");
 			// The game thread can park in the movie hook (fmv_bridge) in the middle of a field: wait for the field in
 			// 2 ms steps and hand a movie request to the viewer instead of blocking; while the movie plays, return at once.
 			let got = loop {
@@ -3829,6 +3846,7 @@ impl Retail {
 					Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break Err(()),
 				}
 			};
+			drop(w);
 			self.waited = t_wait.elapsed().as_secs_f32() * 1000.0;
 			match got {
 				Ok(mut s) => {
