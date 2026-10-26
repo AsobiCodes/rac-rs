@@ -57,6 +57,32 @@ rac-rs uses crates from crates.io, including wgpu, winit, cpal, rayon, bytemuck,
 
 bundled/omniloader.dll is OmniLoader, this project's own mod loader (MIT OR Apache-2.0), written from the MIT-licensed OpenRAC SDK documentation. Built into it: the Luau script engine (MIT; Roblox Corporation and Lua.org, PUC-Rio) through the mlua crate (MIT), and serde / serde_json (MIT OR Apache-2.0). bundled/mods/arsenal-mastery is a mod of this project with its own LICENSE file.
 
+OmniLoader's mod format (the `omni-mod.json` manifest, which also accepts OpenRAC's `openrac-mod.json`), its Luau API and its sandbox rules follow the OpenRAC SDK 1.3 (https://github.com/OpenRAC/OpenRAC), written from its public documentation and data. No code of OpenRAC's GPL-3.0 game port was read or copied. The OpenRAC SDK licence, copied unchanged:
+
+```
+MIT License
+
+Copyright (c) 2026 the OpenRAC contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 The Luau licence, copied unchanged from the luau0-src crate:
 
 ```

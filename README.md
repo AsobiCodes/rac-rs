@@ -74,6 +74,7 @@ The game works the same without the launcher; everything it changes can also be 
 ## Mods and texture packs
 
 - **Script mods** run through **OmniLoader**, this project's own mod loader, which comes with the game (`bundled\omniloader.dll`). Turn mods on or off in the launcher's Mods page or on the title screen under Options > Mods. With no mod switched on, the game plays exactly as before.
+- **The mod format comes from OpenRAC.** OmniLoader is this project's own code, written from the public, MIT-licensed mod SDK of [OpenRAC](https://github.com/OpenRAC/OpenRAC) (another Ratchet & Clank PC project). It follows OpenRAC's script-mod format and Luau API, so a mod folder with OpenRAC's `openrac-mod.json` is read too. No code of OpenRAC's game port is used. Credit and the SDK licence are in [NOTICE.md](NOTICE.md).
 - **Arsenal Mastery** is preinstalled and switched off: a fan-remaster style mod where weapons level up like in Ratchet & Clank 3, Nanotech levels raise Ratchet's health and enemies are rebalanced to match. Switch it on in the launcher when you want it.
 - **PCSX2 texture packs:** add a pack made for PCSX2 (a folder or a .zip) in the launcher, or import it from your PCSX2 texture folder. Packs cover world textures, water, sky, chrome and glass, the ship, particles, grass, and the HUD and menus. A pack made for the other disc region mostly works too. Turn packs on or off on the title screen under Options > Mods; while one is on, Pause > Options > Mods has the switches in game too.
 
