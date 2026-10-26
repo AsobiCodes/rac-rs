@@ -12,7 +12,11 @@ Support the project (no pressure tho!): https://ko-fi.com/asobicodes
 
 - The whole game is playable from power-on to the end credits, including New Game+.
 - Gameplay follows the original PS2 game one to one. On top of that, the PC version has widescreen, keyboard and mouse controls, gamepad support, and an optional modern camera (mouse look and strafing).
-- Optional modern graphics on the Graphics page (Pause > Options > Graphics): enhanced lighting, global illumination, ambient occlusion, dynamic shadows, clear reflective water with waves, vegetation, enhanced smoke, fire and explosions, sun rays, frame smoothing and a sharp HUD, each with quality levels. The Classic settings keep the original PS2 look.
+- Optional modern graphics on the Graphics page (Pause > Options > Graphics): enhanced lighting with volumetric fog, 3D clouds and shining stars, global illumination, ambient occlusion, dynamic shadows, clear reflective water with waves and tides, vegetation, enhanced smoke, fire and explosions, sun rays, frame smoothing and a sharp HUD, each with quality levels, plus a Graphics Preset row (Low / Medium / High / Custom). The Classic settings keep the original PS2 look.
+- Two renderers: Vulkan (the default) and DirectX 12 (Options > Graphics > Screen > Renderer). ReShade works with both.
+- **RAC-RS Launcher** (since v0.4): a separate app to play, change every option, manage texture packs and mods, keep several game versions side by side, and update with a backup first. See [Launcher](#launcher).
+- **Mods** (since v0.4): script mods through the bundled OmniLoader mod loader. **Arsenal Mastery** comes preinstalled and switched off. See [Mods and texture packs](#mods-and-texture-packs).
+- **PCSX2 texture packs** (since v0.4): packs made for PCSX2 work as they are.
 - Plays from the PAL / Europe disc and, since v0.2, from the USA disc.
 - Windows only for now.
 - Known issues are listed under [Known issues](#known-issues) below.
@@ -21,7 +25,7 @@ Support the project (no pressure tho!): https://ko-fi.com/asobicodes
 
 The game runs on its own original code. When you run setup, it translates the PS2 code from your disc into native Rust ("static recompilation"), and that code runs on a PS2 CPU core written in Rust. Because the game logic is the original code, gameplay behaves exactly like the PS2 version.
 
-Everything around the game code is native PC code written for this port: graphics, sound, movies, input, saving, and the PC features. Where a fix or a PC feature needs it, an original function is rewritten in readable Rust. Changes are tested against the original: test runs play the same frames on both versions and compare the game's memory.
+Everything around the game code is native PC code written for this port: graphics, sound, movies, input, saving, and the PC features. Where a fix, a PC feature or speed needs it, an original function is rewritten in readable Rust. Changes are tested against the original: test runs play the same frames on both versions and compare the game's memory.
 
 ## Goal
 
@@ -37,12 +41,12 @@ That's all. Setup downloads anything else it needs into its own folder.
 
 ## Setup
 
-1. Click the green **Code** button above, choose **Download ZIP**, and unzip it anywhere.
+1. Download **rac-rs-0.4.0.zip** from the [latest release](https://github.com/AsobiCodes/rac-rs/releases/latest) (or click the green **Code** button above and choose **Download ZIP**), and unzip it anywhere. Drives formatted as exFAT, USB sticks and SD cards work too.
 2. Double-click **Setup.cmd**. A window opens (no black console window).
-3. Click **Browse** and pick your `.iso` file. The window checks it and shows a green **Disc OK**. Then click **Install**.
+3. Click **Browse** and pick your `.iso` file. The window checks it and shows a green **Disc OK**. Two boxes below choose whether to also install the **RAC-RS Launcher** and whether to **add the game to Steam** (close Steam first). Then click **Install**.
 4. Wait. The window shows the steps and a progress bar (about 15 minutes; you can keep using your PC). When it says **Ready to play**, click **Play**.
 
-Next time, double-click the **Ratchet & Clank (rac-rs)** shortcut on your desktop, or open Setup.cmd and click **Play**. The same window also has **Repair / rebuild** if something breaks. If anything goes wrong the window says which step failed and has a **Copy details** button. For troubleshooting, `Setup.cmd -Console` runs setup in a console window instead.
+Next time, double-click the **Ratchet & Clank (rac-rs)** shortcut on your desktop (it opens the launcher if you installed it, otherwise the game), or open Setup.cmd and click **Play**. The same window also has **Repair / rebuild** if something breaks. If anything goes wrong the window says which step failed and has a **Copy details** button. For troubleshooting, `Setup.cmd -Console` runs setup in a console window instead.
 
 Setup does the rest by itself:
 
@@ -55,15 +59,34 @@ Your saves are kept in the `player` folder.
 
 **Do not share or upload the generated files or the built game.** They contain code generated from the game disc. Everything setup creates stays inside this folder.
 
+## Launcher
+
+The **RAC-RS Launcher** ([AsobiCodes/rac-rs-launcher](https://github.com/AsobiCodes/rac-rs-launcher)) is an optional app next to the game. Setup offers to install it; you can also download it from its own release page. From the launcher you can:
+
+- start the game, and change every option (graphics, camera, controls, Skip intro) before you play,
+- add, import and switch PCSX2 texture packs, and turn mods on or off with their own settings,
+- keep several game versions side by side and use profiles,
+- update the game: it backs up your current version first.
+
+The game works the same without the launcher; everything it changes can also be set in the game's own menus.
+
+## Mods and texture packs
+
+- **Script mods** run through **OmniLoader**, this project's own mod loader, which comes with the game (`bundled\omniloader.dll`). Turn mods on or off in the launcher's Mods page or on the title screen under Options > Mods. With no mod switched on, the game plays exactly as before.
+- **Arsenal Mastery** is preinstalled and switched off: a fan-remaster style mod where weapons level up like in Ratchet & Clank 3, Nanotech levels raise Ratchet's health and enemies are rebalanced to match. Switch it on in the launcher when you want it.
+- **PCSX2 texture packs:** add a pack made for PCSX2 (a folder or a .zip) in the launcher, or import it from your PCSX2 texture folder. Packs cover world textures, water, sky, chrome and glass, the ship, particles, grass, and the HUD and menus. A pack made for the other disc region mostly works too. Turn packs on or off on the title screen under Options > Mods; while one is on, Pause > Options > Mods has the switches in game too.
+
 ## Updating
 
-When you start the game, it checks online whether a newer version is out. If there is one, a window shows what is new. Click **Update now** to update, or **Not now** to just play. Your saves, your disc setting and the downloaded tools are kept, and only the parts that changed are rebuilt. Most updates take a few minutes; a few take about as long as the first build (about 15 minutes). You can also check by hand: open Setup.cmd and click **Check for updates**. The check only downloads a small version file from GitHub; nothing about you or your game is sent.
+When you start the game, it checks online whether a newer version is out. If there is one, a window shows what is new. Click **Update now** to update, or **Not now** to just play. With the launcher, updates also show up there, and the launcher backs up your current version first. Your saves, your settings, your disc setting and the downloaded tools are kept, and only the parts that changed are rebuilt. Most updates take a few minutes; a few take about as long as the first build (about 15 minutes). You can also check by hand: open Setup.cmd and click **Check for updates**. The check only downloads a small version file from GitHub; nothing about you or your game is sent.
 
 If you downloaded v0.1.0, it has no automatic updates. Download the new ZIP, unzip it over your old folder (replace the files) and double-click **Setup.cmd**. If the window says "Finish the update", click **Update**; otherwise click **Repair / rebuild**. Either way the game is rebuilt once, completely, and your saves and disc settings are kept.
 
+What changed in each version is in [CHANGELOG.md](CHANGELOG.md).
+
 ## Controls
 
-The game's own button prompts show the keyboard and mouse keys. You can change the camera style, the language and every button in the game's Options menu (Pause > Options > Controls for the buttons). Controllers work too: Xbox-style controllers (XInput) and PlayStation controllers (PS4 DualShock 4 and PS5 DualSense, over USB or Bluetooth), also when you switch one on or plug it in after the game has started. With the modern camera on, hold R2 to strafe.
+The game's own button prompts show the keyboard and mouse keys. You can change the camera style, the language and every button in the game's Options menu (Pause > Options > Controls for the buttons; Camera speed and Mouse speed are separate rows). Controllers work too: Xbox-style controllers (XInput) and PlayStation controllers (PS4 DualShock 4 and PS5 DualSense, over USB or Bluetooth), also when you switch one on or plug it in after the game has started. With the modern camera on, hold R2 to strafe.
 
 ## Known issues
 
@@ -73,7 +96,7 @@ The game's own button prompts show the keyboard and mouse keys. You can change t
 
 ## Reporting a problem
 
-If the game freezes, crashes or looks wrong, please [open an issue](https://github.com/AsobiCodes/rac-rs/issues) and attach the file `player\log.txt` from your rac-rs folder. The game writes it every time it runs. It lists your Windows version, processor and graphics card, and what the game did up to the problem. If the game froze, wait about 15 seconds before you close it: the log then also says where it got stuck. The previous run is kept as `player\log.prev.txt`, so if you already restarted the game, attach that file instead. The log stays on your PC; the game sends it nowhere.
+If the game freezes, crashes or looks wrong, please [open an issue](https://github.com/AsobiCodes/rac-rs/issues) and attach the file `player\log.txt` from your rac-rs folder. The game writes it every time it runs. It lists your Windows version, processor and graphics card, and what the game did up to the problem. If the game froze, wait about 15 seconds before you close it: the log then also says where it got stuck. The previous run is kept as `player\log.prev.txt`, so if you already restarted the game, attach that file instead. If you use mods or a texture pack, say which ones, and try once with them switched off. The log stays on your PC; the game sends it nowhere.
 
 ## Legal
 
@@ -83,4 +106,4 @@ The repository contains only original source code and tools. It contains no copy
 
 ## License
 
-GPL-3.0-or-later, see [LICENSE](LICENSE). Credits for third-party work are in [NOTICE.md](NOTICE.md).
+GPL-3.0-or-later, see [LICENSE](LICENSE). Credits for third-party work (including OmniLoader's Luau script engine) are in [NOTICE.md](NOTICE.md).
