@@ -1,3 +1,6 @@
+//! Jet class ids (emitter, dropship, fighter, bomber, shot, Kerwan flyer), `is_jet`, and the old `Game` jet helpers (joint map,
+//! actor bounding sphere, draw-distance fade point).
+//! Leftover from the retired hand port; still compiled because retail mode uses part of `game::Game` (the prop pools). Do not extend.
 use super::*;
 
 pub const EMITTER:u32=27;

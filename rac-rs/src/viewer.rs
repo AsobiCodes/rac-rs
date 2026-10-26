@@ -1,9 +1,26 @@
-//! Real-time level viewer: terrain with textures on the GPU, free-fly camera.
-//! Controls: hold right mouse + move to look, WASD to move, Q/E down/up, Shift faster,
-//! PageUp/PageDown or 1-9/0 to switch level, Esc to quit.
-//! P toggles play mode at the level's start (Shift+P: on the ground under the camera); WASD runs
-//! relative to the camera, Space jumps (Ctrl+Space high jump), F or left mouse swings the wrench,
-//! right mouse orbits. Bolts and health show in the window title.
+//! The window and the wgpu renderer: the front door of everything drawn on screen. `run` (startup.rs) opens the winit window and event
+//! loop; every display frame the handler (handler.rs) steps the game, builds the frame and draws it through the `Gpu` renderer (gpu.rs).
+//! Retail mode is the only game path: the picture is the retail game's own state (retail.rs) drawn natively. The first viewer's fly-cam,
+//! level-switch and play-mode keys are gone; the free camera is a dev tool (retail/devtools.rs).
+//!
+//! Children, one job each (`use super::*;` in each; most items are re-exported here):
+//! - run loop: `startup` (`run`, frame worker pool, `new_app`), `handler` (winit event handler; the per-frame steps are its children),
+//!   `app` (`impl App`: pause frame, level load with prefetch, prop growth), `app_state` (front end, Galactic Map, HUD values and art slots),
+//!   `travel` (ship travel after the Galactic Map), `presenter` (present on a worker thread), `pace` (frame cap), `profile` (frame timing),
+//!   `test_clock` (test-only switches of the regression gate)
+//! - GPU: `gpu` (the wgpu renderer, split into gpu/), `gpuskin` (props posed in the vertex shader), `gpuhero` (hero marker by compute),
+//!   `gpucache` (same-inputs keys for marker and tie culling), `tiegpu` (tie vertex rewrite on the GPU), `bindless` (tie and shrub batches
+//!   without a bind group per draw), `gs_state` (one decode of the retail GS draw state), `clip` (moby guard-band clipper), `warpfx` (arrival
+//!   warp draw), `shadowvol` (moby shadow volumes), `projection` (PAL projection, `view_proj`), `targets` (MSAA / depth views, mips, buffers),
+//!   `maths` (vector, matrix and mesh helpers)
+//! - HUD and front end: `hud`, `hudart`, `popups`, `hudsharp` (sharp title), `front_mirror` (the retail front end drawn by the mirror)
+//! - what is drawn: `hero_pose` (back objects, held gadget rigs), `pause_hero` (pause-menu hero preview), `heroanim` (hero animation clocks),
+//!   `herocache` (hero pose once per game tick), `lights` (pause / gold level-light slots), `sfx` (sound banks, voices), `moby_fade` (moby fade
+//!   and alpha encodings), `smooth` and `interp` (frame smoothing: drawing between two game ticks), `fardraw` (draw-distance option)
+//! - PC graphics options: `post` (Enhanced image), `sunshadow` (dynamic shadows), `waterfx` and `underwater` (water looks), `mirror` (planar
+//!   water mirror), `icefx` (ice gloss), `partfx` (particles Enhanced), `vegfx` (vegetation)
+//! Kept in this file: the main WGSL `SHADER` (and its tests), and the GPU / App state structs whose private fields the other viewer files
+//! read (Vertex, Uniforms, Scene, Gpu, Camera, App).
 
 use crate::level::{Level, Texture};
 use crate::mesh::{Lit, LitKind, Mesh};
@@ -36,11 +53,11 @@ pub(crate) mod gs_state;
 mod warpfx;
 mod clip;
 mod shadowvol;
-mod post;
+mod post; mod volclouds; mod volfog; mod star; mod starfield;
 mod sunshadow;
 mod waterfx;
-mod underwater;
-mod icefx;
+mod under_detect; mod underwater;
+mod icefx; mod texfilter;
 mod mirror;
 mod partfx;
 mod vegfx;
@@ -50,14 +67,38 @@ mod front_mirror;
 mod hudsharp;
 mod heroanim;
 mod smooth;
-mod herocache;
+mod herocache; mod follow;
 mod gpucache;
 mod tiegpu;
 mod interp;
-mod profile;
+mod profile; mod passtime; mod gfxq;
 mod pace;
+mod test_clock;
 mod presenter;
 mod fardraw;
+
+mod startup;
+mod app_state;
+mod projection;
+mod targets;
+mod maths;
+mod hero_pose;
+mod pause_hero;
+mod lights;
+mod sfx;
+mod moby_fade;
+use self::app_state::*;
+use self::projection::*;
+use self::targets::*;
+use self::maths::*;
+use self::hero_pose::*;
+use self::pause_hero::*;
+use self::lights::*;
+use self::sfx::*;
+use self::moby_fade::*;
+pub use self::startup::run;
+pub(crate) use self::projection::{PROJ_Y_RATIO};
+pub(crate) use self::targets::{ITEM_PANEL_TEX, POPUP_PANEL_TEX, PORTRAIT_PANEL_TEX, RETAIL_OV_TEX, RETAIL_FILTER_TEX};
 
 /// Particle texture number n is uploaded into `fx_tex` under key PART_TEX + n; effect types reach it
 /// through `Gpu::part_defs` (level particle def table, decomp/notes/particles.md).
@@ -86,8 +127,7 @@ struct Vertex {
 	uv: [f32; 2],
 	normal: [f32; 3],
 	colour: [f32; 4],
-	/// Mobies (colour alpha >= 0): ambient rgb (GS scale, 0x80 = 1.0) and the light pair packed as
-	/// A * 16 + B + blend (see `moby_light`).
+	/// Mobies (colour alpha >= 0): ambient rgb (GS scale, 0x80 = 1.0) and the light pair packed as A * 16 + B + blend (see `moby_light`).
 	light: [f32; 4],
 }
 
@@ -135,86 +175,7 @@ struct Uniforms {
 /// Mobies lit by a dynamic light in one frame (the rest take none).
 const MAX_DYN: usize = 128;
 
-/// Registers the third light a moby at `origin` takes (MobyProc, `dynlight::moby_light`) and returns its 1-based id
-/// for the vertex colour alpha, 0 when no light reaches it.
-fn dyn_id(table: &[Option<dynlight::SlotLight>; 8], list: &mut Vec<([f32; 3], [f32; 3])>, origin: [f32; 3]) -> f32 {
-	if list.len() >= MAX_DYN {
-		return 0.0;
-	}
-	match dynlight::moby_light(origin, table) {
-		Some(l) => {
-			list.push(l);
-			list.len() as f32
-		}
-		None => 0.0,
-	}
-}
-
-
-fn moby_alpha_encoding(id: f32, alpha: u8) -> (f32, bool) {
-	(id + (128.0 - alpha as f32) / 512.0, alpha < 0x80)
-}
-
-/// The tinted tail of a faded moby: baked -2 colour code with the draw alpha as a fraction below it (0x80 = exactly -2.0).
-fn moby_baked_encoding(alpha: u8) -> f32 {
-	-2.0 - (128.0 - alpha as f32) / 512.0
-}
-
-/// Moby draw-distance fade (FUN_0026a338): `depth1024` is the camera forward distance of the moby's sphere centre in 1/1024 m,
-/// the limit `draw` is clamped to 500 m. None = beyond the limit (not drawn), else the fade byte 0..=0x80.
-/// Entries of the moby draw's deferred list per frame.
-const DEFERRED_CAP: usize = 48;
-
-fn moby_fade(draw: i16, depth1024: f32) -> Option<u8> {
-	let y = ((draw as i32).min(500) << 10) as f32 - depth1024;
-	if y < 0.0 {
-		return None;
-	}
-	Some(((y as i32 as u32) >> 7).min(0x80) as u8)
-}
-
-/// Fade byte of a moby on the deferred-list path (flags & 0xc00, in-game frame): `(L << 10) - trunc(z - w)` with L the unclamped
-/// draw distance and `w` the sphere radius, >> 7 and capped at 0x80 (SCH-6b; the cull itself already used `moby_fade`).
-fn moby_fade_alt(draw: i16, z: f32, w: f32) -> u8 {
-	let y = ((draw as i32) << 10).wrapping_sub((z - w) as i32);
-	(y >> 7).clamp(0, 0x80) as u8
-}
-
-/// SCH-6b: the draw-distance verdict of an effect moby or debris piece centred at `pos` (metres): None = culled,
-/// else the fade byte (0x80 without a draw distance or a view). The centre is `pos * 1024` [I].
-fn effect_fade(view: Option<([f32; 3], [f32; 3])>, draw: Option<i16>, pos: [f32; 3]) -> Option<u8> {
-	let (Some((e, f)), Some(d)) = (view, draw) else { return Some(0x80) };
-	let z: f32 = (0..3).map(|k| f[k] * (pos[k] * 1024.0 - e[k] * 1024.0)).sum();
-	moby_fade(d, z)
-}
-
-/// The moby header alpha: fade times the moby's +0x23 byte, >> 7.
-fn moby_draw_alpha(fade: u8, alpha: u8) -> u8 {
-	((fade as u32 * alpha as u32) >> 7) as u8
-}
-
-/// NOV-35b metal alpha (FUN_0026a338 raw 0x26b498-0x26b4c4, moby_format.md 4.1): with t0 = trunc(z - w) (the sphere's view depth
-/// and radius, 1/1024 m), d = (metal << 10) - t0; d <= 0 -> None (no metal part this frame), else min(d >> 7, 0x80). Not scaled by
-/// the draw-distance fade or byte +0x23.
-fn metal_alpha(metal: u8, z: f32, w: f32) -> Option<u8> {
-	let d = ((metal as i32) << 10).wrapping_sub((z - w) as i32);
-	(d > 0).then(|| ((d as u32) >> 7).min(0x80) as u8)
-}
-
-/// NOV-35b: moby +0x73 of a class with metal packets: 0x18 from the spawn init (FUN_00263020), 0x14 for the bolt pickups 13-16
-/// (bolt_update FUN_002bb088, reward_bolt_create FUN_002bc6e8), 0x20 for the vendor orb 1143 (FUN_003092c0).
-fn metal_byte(class_id: u32) -> u8 {
-	match class_id {
-		13..=16 => 0x14,
-		1143 => 0x20,
-		_ => 0x18,
-	}
-}
-
-/// NOV-35b: `Vertex::light.w` of a metal vertex: its colour is built on the CPU (`light.rgb`), the shader adds no light.
-const METAL_LIGHT: f32 = -4.0;
-
-const SHADER: &str = r#"
+const SHADER: &str = concat!(r#"
 struct U { view_proj: mat4x4<f32>, sky_view_proj: mat4x4<f32>, lights: array<array<vec4<f32>, 4>, 16>, ambient: array<vec4<f32>, 4>, fog_colour: vec4<f32>, fog: vec4<f32>, eye: vec4<f32>, points: array<vec4<f32>, 16>, dynl: array<vec4<f32>, 256>, sun_vp: array<mat4x4<f32>, 3>, sun: vec4<f32>, sun_bias: vec4<f32>, sun_texel: vec4<f32>, sun_q: vec4<f32> };
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var sun_map: texture_depth_2d_array;
@@ -231,7 +192,7 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, @lo
 fn fog_class(l: vec4<f32>, w: f32) -> f32 {
 	// Effects layer (retail/efx_draw.rs `fog_light`): l.w = -5 carries the GS fog byte F in l.x, interpolated linearly in screen space as the GS does.
 	if (l.w < -4.5 && l.w > -5.5) {
-		return l.x;
+		return 255.0 * (1.0 - u.fog_colour.w) + u.fog_colour.w * l.x; // [PC] fog_colour.w = the retail fog's scale (1.0 = retail; volfog/frame.rs `fade_retail_fog`)
 	}
 	let span = max(u.fog.y - u.fog.x, 0.001);
 	let slope = (u.fog.w - u.fog.z) / span;
@@ -608,13 +569,7 @@ fn shrub_bb_texel(i: VOut) -> vec4<f32> {
 	return textureSampleLevel(tex, samp, i.uv, gs_level(i));
 }
 
-// GS TEX1 LCM 0, L 0, MMIN LINEAR_MIPMAP_NEAREST: level 0 when LOD <= 0, else the nearest level capped at MXL (i.kmx = K, MXL).
-fn gs_level(i: VOut) -> f32 {
-	let lod = log2(32.0 / i.pos.w) + i.kmx.x;
-	var level = 0.0;
-	if (lod > 0.0) { level = min(floor(lod + 0.5), i.kmx.y); }
-	return level;
-}
+"#, include_str!("viewer/texfilter.wgsl"), r#"
 
 // Terrain fragment: the baked world colour of `fs` with the level-chosen texel (GS LOD = log2(32 vz) + K; REN-TEX-RESIDENCY).
 // GS ALPHA 0x44 (Cs - Cd) * As + Cd with As = the texel alpha (vertex alpha 128) and TEST 0x5360b (ATE GEQUAL AREF 0x60, AFAIL
@@ -639,7 +594,7 @@ fn tfrag_rgba(i: VOut) -> vec4<f32> {
 	if (i.c.a < -2.0005) { discard; }
 	let r = tfrag_rgba(i);
 	if (r.a * 128.0 >= 96.0 || r.a <= 0.0) { discard; }
-	return r;
+	soft_mark(i, r.a); return r; // [PC] the fog's no-Z texel (volfog/soft.rs)
 }
 
 // Tie fragment: the baked world colour of `fs` with the tie texel (`world_texel`: TEX1 level, CLAMP wrap) and its alpha. TieProc's
@@ -667,7 +622,7 @@ fn tie_rgba(i: VOut) -> vec4<f32> {
 	if (i.c.a < -2.0005) { discard; }
 	let r = tie_rgba(i);
 	if (r.a * 128.0 >= 64.0 || r.a <= 0.0) { discard; }
-	return r;
+	soft_mark(i, r.a); return r; // [PC] the fog's no-Z texel (volfog/soft.rs)
 }
 
 // Shrub mesh texel: the draw's bind group samples with its material's GS CLAMP wrap (bindless.rs rewrites this one), at the
@@ -679,23 +634,22 @@ fn shrub_mesh_texel(i: VOut) -> vec4<f32> {
 // [PC] Enhanced (u.sun_texel.w = 1; applied by the callers: bindless.rs rewrites `shrub_mesh_texel` by its text): a magnified leaf texture's alpha ramp is cut at half alpha over one screen pixel, so a leaf
 // close to the camera keeps a sharp solid outline instead of a wide see-through blur; far away (minified) the ramp spans less
 // than a pixel and the texel alpha is kept. Classic leaves the texel as the GS samples it.
-fn crisp_leaf(c: vec4<f32>) -> vec4<f32> {
-	if (u.sun_texel.w <= 0.0) { return c; }
+fn crisp_leaf(i: VOut, c: vec4<f32>) -> vec4<f32> {
 	let w = fwidth(c.a);
-	if (w >= 0.5) { return c; }
+	if (u.sun_texel.w <= 0.0 || (i.l.w < -2.1 && i.l.w > -2.15) || w >= 0.5) { return c; }
 	return vec4<f32>(c.rgb, clamp((c.a - 0.5) / max(w, 1e-4) + 0.5, 0.0, 1.0));
 }
 
 @fragment fn fs_shrub_ge12(i: VOut) -> @location(0) vec4<f32> {
-	let r = shrub_rgba(i, crisp_leaf(shrub_mesh_texel(i)));
+	let r = shrub_rgba(i, crisp_leaf(i, shrub_mesh_texel(i)));
 	if (r.a * 128.0 < 12.0) { discard; }
 	return r;
 }
 
 @fragment fn fs_shrub_lt12(i: VOut) -> @location(0) vec4<f32> {
-	let r = shrub_rgba(i, crisp_leaf(shrub_mesh_texel(i)));
+	let r = shrub_rgba(i, crisp_leaf(i, shrub_mesh_texel(i)));
 	if (r.a * 128.0 >= 12.0) { discard; }
-	return r;
+	soft_mark(i, r.a); return r; // [PC] the fog's no-Z texel (volfog/soft.rs)
 }
 
 @fragment fn fs_shrub_ge96(i: VOut) -> @location(0) vec4<f32> {
@@ -707,7 +661,7 @@ fn crisp_leaf(c: vec4<f32>) -> vec4<f32> {
 @fragment fn fs_shrub_lt96(i: VOut) -> @location(0) vec4<f32> {
 	let r = shrub_rgba(i, shrub_bb_texel(i));
 	if (r.a * 128.0 >= 96.0) { discard; }
-	return r;
+	soft_mark(i, r.a); return r; // [PC] the fog's no-Z texel (volfog/soft.rs)
 }
 
 @fragment fn fs_shrub_all(i: VOut) -> @location(0) vec4<f32> {
@@ -971,8 +925,7 @@ fn fx_smoke(p: vec3<f32>) -> vec3<f32> {
 @fragment fn fs_hud_flat(i: VOut) -> @location(0) vec4<f32> {
 	return i.c;
 }
-"#;
-
+"#);
 #[derive(Clone, Copy)]
 struct Draw {
 	/// First-instance value: the tfrag pass reads its mip bias and top level from it (`vs_tfrag`).
@@ -1097,7 +1050,7 @@ struct Scene {
 	/// [PC] icefx.rs: per tie / shrub vertex the texture key of a face using it, and the level whose ice marks the vertices carry.
 	tie_vkey: Vec<u32>,
 	shrub_vkey: Vec<u32>,
-	ice_level: usize,
+	ice_level: usize, shrub_soft: Vec<u32>,
 	shrub_a: Vec<u8>,
 	shrub_opaque: Vec<usize>,
 	shrub_faded: Vec<usize>,
@@ -1123,14 +1076,13 @@ struct Scene {
 	/// NOV-31: the vertices of `sky` with each shell's range and unturned positions (`Gpu::set_sky_spin`).
 	sky_shells: Option<SkyShells>,
 	/// ARI-4: the sky sprite batch (skies with textures 2 and 3).
-	sky_sprites: Option<SkySpriteDraw>,
+	sky_sprites: Option<SkySpriteDraw>, stars: Option<starfield::StarMaps>, // [PC] stars: starfield.rs, Enhanced only
 	/// The player's model (Ratchet, or a box if he failed to decode): `marker_model` holds its
 	/// model-space vertices, re-posed into `marker.vbuf` every frame; drawn when `marker_shown`.
 	marker: Batch,
 	marker_model: Vec<Vertex>,
 	/// Ratchet's class tail colour (CLASS-tint): (rgb, first vertex) over the first `marker_hero_len` marker vertices; the appended
-	/// weapon meshes are other mobies and stay lit.
-	/// PC perf: the posed marker vertices of the last `set_marker` (buffer reused every frame).
+	/// weapon meshes are other mobies and stay lit. PC perf: the posed marker vertices of the last `set_marker` (buffer reused every frame).
 	marker_verts: Vec<Vertex>,
 	marker_tint: Option<([f32; 3], usize)>,
 	marker_hero_len: usize,
@@ -1214,8 +1166,7 @@ struct Scene {
 	/// Unposed vertices of the hero previews (keys >= HERO_PREVIEW), re-posed every frame by `set_preview_pose`.
 	preview_models: HashMap<u32, Vec<Vertex>>,
 	bind_groups: Vec<wgpu::BindGroup>,
-	/// Texture key -> `bind_groups` index of every texture the scene uploaded: `Gpu::regrow_props` rebuilds the prop slots
-	/// with it (retail pool growth) without a new upload.
+	/// Texture key -> `bind_groups` index of every texture the scene uploaded: `Gpu::regrow_props` rebuilds the prop slots with it (retail pool growth) without a new upload.
 	tex_slots: HashMap<u32, usize>,
 	/// [PC] Dynamic shadows: per texture slot, whether most of its texels blend (PS2 alpha below 0x60, `fs_moby_b`): see-through
 	/// effect shells (blast domes, glows) cast no sun shadow (sunshadow.rs).
@@ -1224,6 +1175,8 @@ struct Scene {
 	slot_words: Vec<u32>,
 	/// [PC] perf round 3: `bind_groups` as one texture array (bindless.rs; None = per-draw bind groups).
 	tex_array: Option<wgpu::BindGroup>,
+	repl: Option<Box<gpu::repl_upload::ReplScene>>, // [PC] texture packs: slots still waiting for their replacement (None without a textures mod)
+	orig: Option<Box<gpu::split_orig::OrigSet>>, // [PC] split view with a pack: the scene's slots with the original disc textures (None unless kept)
 	clear: wgpu::Color,
 	centre: [f32; 3],
 	radius: f32,
@@ -1368,7 +1321,7 @@ struct Gpu {
 	volume_counts: (u32, u32),
 	/// [PC] Graphics -> Lighting Enhanced (post.rs): the post-processing targets and pipelines, and whether this frame may use them
 	/// (a retail level is on screen: not the front end, a movie or the GS-full reference picture; set by the handler).
-	post: post::Post,
+	post: post::Post, volfog: volfog::VolFog, volclouds: volclouds::VolClouds,
 	/// [PC] Water Enhanced (waterfx.rs).
 	waterfx: waterfx::WaterFx,
 	/// [PC] Water Enhanced: the planar mirrors' uniforms (mirror.rs), one per mirror pass of a frame (`mirror::MAX_MIRRORS`).
@@ -1383,7 +1336,7 @@ struct Gpu {
 	/// [PC] Dynamic shadows (sunshadow.rs): the cascade maps, bound in the level's group 0 with their compare sampler.
 	sun: sunshadow::SunShadow,
 	/// Retail mode: a ship fight is on (`shipmouse::in_ship_fight`): space, no sun to cast from (handler.rs sets it).
-	ship_fight: bool,
+	ship_fight: bool, reshade: gpu::reshade::Slot, // [PC] ReShade add-on (gpu/reshade.rs)
 	/// The loaded level (handler.rs; [PC] Water Enhanced gives Gaspar's lava its own look, waterfx.rs `LAVA_SLOT`).
 	level: usize,
 	/// SCN-3: the lighting word the scene actors copied from the hero when the scene started (FUN_00244e58); None outside a scene.
@@ -1429,6 +1382,7 @@ struct Gpu {
 	/// The level's fx textures by index (blob shadow 0, fire 41/42) and this frame's textured quads
 	/// (shadows.rs, particles.rs fire), drawn before the sprites in order.
 	fx_tex: HashMap<usize, wgpu::BindGroup>,
+	orig_gpu: gpu::split_orig::GpuOrig, // [PC] split view with a pack: the disc's fx, particle and chrome textures (gpu/split_orig.rs)
 	fx_quads: Vec<particles::WorldQuad>,
 	/// Water quads, drawn with the scene fog (fs_part_fog).
 	water_quads: Vec<particles::WorldQuad>,
@@ -1465,14 +1419,6 @@ struct Camera {
 	/// BRIDGE-56 (decomp/notes/port_bridges.md): the view's up hint, Z except under the Visibomb remote camera's roll.
 	up: [f32; 3],
 }
-
-/// PAL vertical/horizontal projection ratio (decomp/notes/camera.md "REN-7a port spec", f32 0x3f418937 / 0.63).
-pub(crate) const PROJ_Y_RATIO: f32 = 0.756;
-/// Vertical half-angle tangent of the retail gameplay projection: 0.63 * 0.756 (REN-7a).
-const TAN_HALF_FOV: f32 = crate::camera::PROJ_SCALAR * PROJ_Y_RATIO;
-/// Effective retail world near/far planes in metres (REN-7a): B/(z_s range + 224)/1024 of the GS z mapping.
-const RETAIL_NEAR: f32 = 0.03125;
-const RETAIL_FAR: f32 = 728.1632;
 
 struct App {
 	/// Frame-profile bench (viewer/bench.rs): an invisible window and no audio output.
@@ -1824,9 +1770,6 @@ struct App {
 	wheel_fade: (f32, usize),
 	/// The level's Galactic Map (decomp/notes/ingame_menu_leftovers.md P1-c).
 	map: Option<MapView>,
-	/// RAC_PAUSE_KEYS: scripted pause-menu presses in play (for --shot) and frames until the next.
-	pause_script: Vec<char>,
-	pause_script_t: u32,
 	/// Retail mode (retail.rs): the interpreter that runs the level instead of the rac-rs game step.
 	retail: Option<crate::retail::Retail>,
 	/// The running `Retail` across a retail level travel (`Retail::switch`), for the next `toggle_play`.
@@ -1836,1168 +1779,8 @@ struct App {
 	retail_prop_meshes: HashMap<u32, crate::mesh::Mesh>,
 }
 
-/// The Galactic Map: the bundle, the explored mask, its HUD texture slot and the world box it fits.
-struct MapView {
-	bundle: map::MapBundle,
-	explored: map::Explored,
-	/// The save codec's span table for this map (map bundle section 1).
-	spans: Vec<u8>,
-	slot: usize,
-	lo: [f32; 2],
-	hi: [f32; 2],
-	/// The hero's map pixel and heading, for the marker.
-	hero: [f32; 2],
-	yaw: f32,
-	affine: Option<[f32; 4]>,
-	/// Select-map zoom (initial 0.65, clamped 0.65..4.0) and the map pixel at the panel centre
-	/// (decomp/notes/ingame_menu_leftovers.md P1-c).
-	zoom: f32,
-	pan: [f32; 2],
-}
-
-/// BRIDGE-21: hero back objects (classes 607 / 601) and the hero attach point they follow.
-const BACK_D0_CLASS: u32 = 607;
-const BACK_D4_CLASS: u32 = 601;
-const BACK_ATTACH_POINT: usize = 5;
-/// BRIDGE-21c: the Clank light class, its d4 joint, class-scale factor, and the glow (half size, camera bias, colour; z lift).
-const CLANK_LIGHT_CLASS: u32 = 1204;
-const CLANK_LIGHT_JOINT: usize = 6;
-const CLANK_LIGHT_SCALE: f32 = 1.3;
-const CLANK_LIGHT_GLOW: (f32, f32, u32) = (0.057, 0.08, 0x280000c0);
-const CLANK_LIGHT_GLOW_Z: f32 = 0.015;
-
-/// Vertices after the suck cannon in the hero mesh: d0, d4 and the Clank light.
-fn back_tail(back: &Option<Held>, clank: &Option<Held>, light: &Option<mobies::MobyClass>) -> usize {
-	rig_len(back) + rig_len(clank) + light.as_ref().map_or(0, |c| c.mesh.positions.len())
-}
-/// BRIDGE-40 (WPN-6.6a): the three whole-hero afterimage copies, last in the hero mesh tail.
-fn hero_ghost_len(hero: &mobies::MobyClass) -> usize {
-	3 * hero.mesh.positions.len()
-}
-/// Vertices of a back rig's mesh (0 when absent): its slot in the hero mesh tail.
-fn rig_len(r: &Option<Held>) -> usize {
-	r.as_ref().map_or(0, |h| h.class.mesh.positions.len())
-}
-
-/// Vertices of every generic held rig mesh (their slot in the hero mesh, after the Suck Cannon).
-fn held_len(rigs: &HashMap<u32, PyroRig>, hook: &Option<Held>) -> usize {
-	game::held::rig_classes().into_iter().filter_map(|c| rigs.get(&c)).map(|r| r.held.class.mesh.positions.len()).sum::<usize>() + hook.as_ref().map_or(0, |h| h.class.mesh.positions.len())
-}
-
-/// A held gadget model posed by its own skeleton.
-struct Held {
-	class: mobies::MobyClass,
-	anim: anim::Animated,
-}
-
-/// The Pyrocitor (gadget class 176) at the hero joint of its attach point, its own joint for attach point 0 (the
-/// muzzle) and the class 179 nozzle in bind pose (mesh, positions, normals). decomp/notes/weapons_framework.md
-/// "Pyrocitor".
-struct PyroRig {
-	held: Held,
-	joint: usize,
-	muzzle: Option<usize>,
-	nozzle: Option<(Mesh, Vec<[f32; 3]>, Vec<[f32; 3]>)>,
-}
-
-/// The front end: menu state over the looping title scene (frontend.rs, notes/title_implementation_prompt.md).
-struct FrontEnd {
-	menu: frontend::Menu,
-	text: frontend::Text,
-	art: Option<frontend::Art>,
-	/// Scene tick (50 per second), looping over the scene.
-	tick: f32,
-	/// Ambience: the looping bed and the timed sounds' voices.
-	bed: Vec<u64>,
-	timed: [Option<u64>; 2],
-	/// RAC_MENU_KEYS: scripted presses (for --shot) and frames until the next one.
-	script: Vec<frontend::Key>,
-	script_t: u32,
-	/// UI-11c: the title attract loop, its 50 Hz tick accumulator and the playing movie.
-	att: frontend::Attract,
-	acc: f32,
-	attract_movie: Option<fmv::player::Player>,
-}
-
-/// Title ambience in the global bank [I]: looping bed sounds, then (sound, first tick, last tick) windows.
-const TITLE_BED: [usize; 3] = [2, 3, 8];
-/// Language slot of all_text per menu language (EN, FR, DE, ES, IT; slot 1 is unused).
-const TEXT_SLOT: [usize; 5] = [0, 2, 3, 4, 5];
-
-pub fn run(iso_path: &str, level: usize, shot: Option<String>, start: Option<[f32; 5]>, play: bool, front: bool, give: Option<(u8, Option<u16>)>) -> Result<(), Box<dyn std::error::Error>> {
-	init_pool();
-	let mut app = new_app(iso_path, level, shot, start, play, front, give)?;
-	profile::init_from_env();
-	let event_loop = EventLoop::new()?;
-	event_loop.run_app(&mut app)?;
-	Ok(())
-}
-
-/// [PC] the frame worker pool (rayon) that the per-item frame work (skinning, prop / tie / marker vertex rebuilds) spreads
-/// over: RAC_THREADS sets its size (1 = everything on the calling thread), else the hardware threads up to `POOL_MAX`
-/// (the per-frame parallel work is ~1.5 ms and stops gaining past 4; larger pools lose more to
-/// preempted workers and to idle workers spinning on the render thread's sibling core, which raises the p99). The calling (render)
-/// thread is worker 0, so it takes its share of every parallel section and steals while it waits instead of sleeping on
-/// a latch (a blocked render thread lost its core and caches). Results are written to fixed slots, so the output does not
-/// depend on the thread count. A second call (tests, the bench) keeps the first pool.
-fn init_pool() {
-	const POOL_MAX: usize = 4;
-	let n = std::env::var("RAC_THREADS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|&n| n > 0).unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()).min(POOL_MAX));
-	let _ = rayon::ThreadPoolBuilder::new().num_threads(n).use_current_thread().thread_name(|i| format!("frame-worker-{i}")).build_global();
-}
-
-fn new_app(iso_path: &str, level: usize, shot: Option<String>, start: Option<[f32; 5]>, play: bool, front: bool, give: Option<(u8, Option<u16>)>) -> Result<App, Box<dyn std::error::Error>> {
-	let mut disc = iso::Disc::open(std::path::Path::new(iso_path))?;
-	let levels = toc::read_levels(&mut disc)?;
-	Ok(App {
-		headless: false,
-		iso_path: iso_path.to_string(),
-		levels,
-		level,
-		gpu: None,
-		cam: Camera { pos: [0.0; 3], yaw: 0.0, pitch: 0.0, tan_half: TAN_HALF_FOV, up: [0.0, 0.0, 1.0] },
-		keys: HashSet::new(),
-		looking: false,
-		last: Instant::now(),
-		pace: pace::Pace::new(),
-		// RAC_SHOT_FRAMES waits longer before the capture (to get past the opening in play mode).
-		shot: shot.map(|p| (p, std::env::var("RAC_SHOT_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(5))),
-		start,
-		world: None,
-		game: None,
-		instances: Vec::new(),
-		polygons: Vec::new(),
-		grind_rails: Vec::new(),
-		groups: Vec::new(),
-		cuboids: Vec::new(),
-		cuboid_basis: Vec::new(),
-		bounds: HashMap::new(),
-		death_height: f32::MIN,
-		ship: None,
-		title: String::new(),
-		orbit: Orbit { yaw: 0.0, pitch: player::CAMERA_PITCH, distance: player::CAMERA_DISTANCE },
-		rig: None,
-		mouse_dx: 0.0,
-		mouse_dy: 0.0,
-		zoom_acc: 0.0,
-		grabbed: false,
-		focused: true,
-		fullscreen: false,
-		rig_hero: [0.0; 3],
-		autoplay: play,
-		spawn: None,
-		attack_mouse: false,
-		cursor: None,
-		menu_drag: false,
-		flow_start: None,
-		flow: None,
-		resume: None,
-		visited: HashMap::new(),
-		skip_held: false,
-		movie: None,
-		fm_ov: false,
-		fm_movie_hold: false,
-		travel: None,
-		ship_play: None,
-		flight_data: None,
-		debris: Vec::new(),
-		pending_level: None,
-		hero_anim: None,
-		hero_rig: heroanim::HeroRig::new(),
-		hero_moby: None,
-		hero_items: HashMap::new(),
-		menu_clip_base: None,
-		hero_actors: HashMap::new(),
-		menu_actor_classes: HashMap::new(),
-		hero_preview_clip: None,
-		panel_model: None,
-		hero_worn: WornSet::default(),
-		worn_back: None,
-		prop_anims: HashMap::new(),
-		actor_slots: Vec::new(),
-		clock: 0.0,
-		messages: Vec::new(),
-		shown_bolts: 0.0,
-		accum: 0.0,
-		smooth: Default::default(),
-		pose_stamp: None,
-		hero_cache: None,
-		wrench: None,
-		wrench_axis: None,
-		wrench_rig: None,
-		retail_parts: None,
-		loose_anims: HashMap::new(),
-		scenes: HashMap::new(),
-		scene_voice: None,
-		gadget_voice: None,
-		portrait_voice: None,
-		portrait_pending: None,
-		ship_voice: None,
-		gadget_frame: None,
-		art: HudArt::default(),
-		hud_t: (0.0, 0.0),
-		ammo_hud: (None, 0.0, 0.0),
-		hud_seen: (u32::MAX, -1),
-		nano_hud: (0, 0, 0, -1),
-		nano_live: true,
-		nano_acc: 0.0,
-		audio: None,
-		sfx: Sfx::default(),
-		ui_sfx: Vec::new(),
-		help_clips: HashMap::new(),
-		help_voice: None,
-		emitters: Vec::new(),
-		emitter_state: Vec::new(),
-		class_ranks: std::collections::HashMap::new(),
-		prefetch: None,
-		prefetch_link: None,
-		switch_hold: false,
-		arrival_black: 0,
-		prefetch_tried: None,
-		class_rows: std::collections::HashMap::new(),
-		ambient_plays: Vec::new(),
-		volume_start: Vec::new(),
-		listener: sound::ListenerVelocity::default(),
-		fog_zone: ([0; 3], [0.0, 1.0e9, 255.0, 255.0]),
-		fog_next: None,
-		part_far_next: crate::water::PART_FAR,
-		volume_voices: Vec::new(),
-		underwater_voices: Vec::new(),
-		enemy_sfx: HashMap::new(),
-		live_shots: Vec::new(),
-		held_click: 0,
-		loops: HashMap::new(),
-		loop_want: HashMap::new(),
-		loop_bend: HashMap::new(),
-		music: Vec::new(),
-		music_player: None,
-		music_voice: None,
-		sting_voice: None,
-		music_deaths: 0,
-		zones: ambience::Zones::default(),
-		areas: Vec::new(),
-		reverb: ambience::Reverb::default(),
-		ckpt_env: None,
-		ckpt_seen: 0,
-		audio_paused: false,
-		prev_swing: None,
-		prev_shown: Vec::new(),
-		particles: particles::Particles::new(),
-		smoke: Vec::new(),
-		fires: Vec::new(),
-		water: None,
-		ship_gloss: None,
-		ocean: None,
-		level_overlay: None,
-		gloss_quads: Vec::new(),
-		effect_mobys: Vec::new(),
-		sprites: Vec::new(),
-		ribbons: Vec::new(),
-		lines: Vec::new(),
-		want_front: front,
-		front: None,
-		save: None,
-		a3_ticks: 0,
-		a3_acc: 0.0,
-		a3_skip: false,
-		a3_menu: false,
-		was_dead: false,
-		fire_mouse: false,
-		quick_mouse: false,
-		give,
-		play_ticks: 0,
-		attack_script: std::env::var("RAC_ATTACK_TICKS").unwrap_or_default().split(',').filter_map(|v| v.trim().parse().ok()).collect(),
-		debris_bspheres: HashMap::new(),
-		class_kinds: HashMap::new(),
-		class_scales: HashMap::new(),
-		colliders: HashMap::new(),
-		shake: camera::CamShake::default(),
-		glove: None,
-		bomb: None,
-		pyro_rig: None,
-		suck_rig: None,
-		held_rigs: HashMap::new(),
-		hook_rig: None,
-		held_muzzle: None,
-		held_xform: None,
-		held_joint0: None,
-		back_rig: None,
-		clank_rig: None,
-		back_joint: None,
-		light_rig: None,
-		clank_light_glow: None,
-		suck_voice: None,
-		suck_matrix: None,
-		pyro_muzzle: None,
-		glint_u: 1.0,
-		sky_sprites: None,
-		glint_cam: None,
-		glint_up: [0.0, 0.0, 1.0],
-		over_cam: None,
-		tick_cam_live: false,
-		pyro_voice: None,
-		voices: VoiceBook::default(),
-		pyro_frames: game::pyro::Frames::default(),
-		settings: Settings::load(),
-		settings_dirty: false,
-		pause: None,
-		pause_saved_tan_half: None,
-		ui_text: None,
-		ui_art: None,
-		help_log: HelpLog::default(),
-		autosave_on: false,
-		save_icon: 0.0,
-		save_help: false,
-		was_scene: false,
-		popup: None,
-		tri_held: None,
-		wheel: None,
-		wheel_fade: (0.0, 0),
-		map: None,
-		pause_script: std::env::var("RAC_PAUSE_KEYS").unwrap_or_default().chars().collect(),
-		pause_script_t: 0,
-		retail: None,
-		retail_carry: None,
-		retail_prop_meshes: HashMap::new(),
-	})
-}
-
-/// 4x MSAA for the scene pass (port extra: modern display, no PS2 aliasing).
-const MSAA: u32 = 4;
-
-/// REN-9b: the shop item-panel render target (retail 512x128 at GS 0x3be000): 4x MSAA colour and depth resolved into a
-/// sampled texture. `bind` samples the resolved colour; the HUD draws it for `Quad.tex == ITEM_PANEL_TEX`.
-struct ItemPanel {
-	msaa: wgpu::TextureView,
-	depth: wgpu::TextureView,
-	resolved: wgpu::TextureView,
-	bind: wgpu::BindGroup,
-}
-/// REN-9b: the shop's item poses split into world mobies and the panel-1 item (never both).
-fn split_item_poses(poses: &[game::vendor::ItemPose]) -> (Vec<(u32, [f32; 16])>, Vec<(u32, [f32; 16])>) {
-	let pick = |dest| poses.iter().filter(|p| p.dest == dest).map(|p| (p.class, place(p.pos, p.rot))).collect();
-	(pick(game::vendor::ItemDest::World), pick(game::vendor::ItemDest::Panel))
-}
-/// Target size in texels (TW 9, TH 7).
-const ITEM_PANEL_SIZE: (u32, u32) = (512, 128);
-/// `Quad.tex` value that selects the item-panel target instead of an overlay texture.
-pub(crate) const ITEM_PANEL_TEX: usize = usize::MAX;
-/// BRIDGE-36 (b): `Quad.tex` selecting the purchase popup target.
-pub(crate) const POPUP_PANEL_TEX: usize = usize::MAX - 1;
-/// BRIDGE-37 (b): `Quad.tex` selecting the shop portrait target.
-pub(crate) const PORTRAIT_PANEL_TEX: usize = usize::MAX - 2;
-/// `Quad.tex` selecting the retail GS overlay (retail.rs): drawn with out = rgb + a * scene.
-pub(crate) const RETAIL_OV_TEX: usize = usize::MAX - 3;
-/// `Quad.tex` selecting the retail screen filter's untextured pipeline (retail/queue_b.rs `screen_quads`): GS ALPHA
-/// 0x42 out = Cd - Cs (colour premultiplied by As on the CPU), clamped at 0 per channel.
-pub(crate) const RETAIL_FILTER_TEX: usize = usize::MAX - 4;
-/// NOV-30a: panel targets (item, popup, portrait) draw their vertices with the MAIN projection (retail
-/// moby_draw_build reads the view x clip matrix the panel path never rebuilds), centred on the 512x128 target:
-/// 256/0.63 px per unit tan horizontally, 224/(0.63*0.756) vertically. Over the 64 px target half height the
-/// tan shrinks by 64/224, and the aspect makes the horizontal scalar 1/0.63 again (224 / (64 * 0.756)).
-const PANEL_TAN_SCALE: f32 = 64.0 / 224.0;
-const PANEL_ASPECT: f32 = 224.0 / (64.0 * PROJ_Y_RATIO);
-
-/// The multisampled colour target, resolved into the swapchain image.
-fn msaa_view(device: &wgpu::Device, format: wgpu::TextureFormat, w: u32, h: u32) -> wgpu::TextureView {
-	device
-		.create_texture(&wgpu::TextureDescriptor {
-			label: Some("msaa"),
-			size: wgpu::Extent3d { width: w.max(1), height: h.max(1), depth_or_array_layers: 1 },
-			mip_level_count: 1,
-			sample_count: MSAA,
-			dimension: wgpu::TextureDimension::D2,
-			format,
-			usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-			view_formats: &[],
-		})
-		.create_view(&Default::default())
-}
-
-/// Box-filtered mip chain below `t` (level 0 excluded); alpha is averaged too.
-fn mip_chain(t: &Texture) -> Vec<(u32, u32, Vec<[u8; 4]>)> {
-	let mut out = Vec::new();
-	let (mut w, mut h, mut px) = (t.w as u32, t.h as u32, t.rgba.clone());
-	while w > 1 || h > 1 {
-		let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
-		let mut next = Vec::with_capacity((nw * nh) as usize);
-		for y in 0..nh {
-			for x in 0..nw {
-				let mut acc = [0u32; 4];
-				for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-					let (sx, sy) = ((x * 2 + dx).min(w - 1), (y * 2 + dy).min(h - 1));
-					let c = px[(sy * w + sx) as usize];
-					for i in 0..4 {
-						acc[i] += c[i] as u32;
-					}
-				}
-				next.push(acc.map(|v| ((v + 2) / 4) as u8));
-			}
-		}
-		out.push((nw, nh, next.clone()));
-		(w, h, px) = (nw, nh, next);
-	}
-	out
-}
-
-fn depth_view(device: &wgpu::Device, w: u32, h: u32, format: wgpu::TextureFormat) -> wgpu::TextureView {
-	device
-		.create_texture(&wgpu::TextureDescriptor {
-			label: Some("depth"),
-			size: wgpu::Extent3d { width: w.max(1), height: h.max(1), depth_or_array_layers: 1 },
-			mip_level_count: 1,
-			sample_count: MSAA,
-			dimension: wgpu::TextureDimension::D2,
-			format,
-			// [PC] Sampled by the Enhanced image (post.rs): its occlusion reads the level's depth.
-			usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-			view_formats: &[],
-		})
-		.create_view(&Default::default())
-}
-
 /// Class 760: the crash-site smoke emitter.
 const SMOKE: u32 = 760;
-
-fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-	[a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
-}
-
-fn normalise(v: [f32; 3]) -> [f32; 3] {
-	let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-9);
-	[v[0] / l, v[1] / l, v[2] / l]
-}
-
-/// Inverse of a 3x3 matrix; a cuboid's half-axes are the rows of its stored inverse's inverse.
-fn invert3(m: [[f32; 3]; 3]) -> Option<[[f32; 3]; 3]> {
-	let c = [cross(m[1], m[2]), cross(m[2], m[0]), cross(m[0], m[1])];
-	let det = m[0][0] * c[0][0] + m[0][1] * c[0][1] + m[0][2] * c[0][2];
-	(det.abs() > 1e-12).then(|| std::array::from_fn(|i| std::array::from_fn(|j| c[j][i] / det)))
-}
-
-fn buffer(device: &wgpu::Device, label: &str, data: &[u8], usage: wgpu::BufferUsages) -> wgpu::Buffer {
-	let buf = device.create_buffer(&wgpu::BufferDescriptor {
-		label: Some(label),
-		size: (data.len() as u64).max(4).next_multiple_of(4),
-		usage: usage | wgpu::BufferUsages::COPY_DST,
-		mapped_at_creation: false,
-	});
-	buf
-}
-
-
-
-/// Column-major placement of a moby instance: rotation Z * Y * X (radians), then translation.
-/// A tinted prop's vertex `j` from the tint's first vertex on: constant unlit colour (baked code, draw alpha below -2.0), else unchanged.
-#[cfg(test)]
-fn tint_override(colour: [f32; 4], j: usize, tint: Option<([f32; 3], usize)>, alpha: u8) -> [f32; 4] {
-	match tint.filter(|&(_, s)| j >= s) {
-		Some((c, _)) => [c[0], c[1], c[2], moby_baked_encoding(alpha)],
-		None => colour,
-	}
-}
-
-fn moby_matrix(m: &gameplay::MobyInstance) -> [f32; 16] {
-	scale_rows(place(m.pos, m.rot), m.scale)
-}
-
-/// Retail scales the three rotation columns by the moby scale (class +0x24 * placement +0x1c); the translation stays.
-fn scale_rows(mut at: [f32; 16], s: f32) -> [f32; 16] {
-	for v in &mut at[..12] {
-		*v *= s;
-	}
-	at
-}
-
-/// `place` of a retail prop: a mirrored one (moby +0x34 bit 0x8000, `Prop::mirror`) has retail's basis row 1 negated, a reflection in
-/// model Y: column 1 of the placement (the image of model Y) is negated, `rot` stays the plain rotation.
-fn place_mirrored(pos: [f32; 3], rot: [f32; 3], mirror: bool) -> [f32; 16] {
-	let mut m = place(pos, rot);
-	if mirror {
-		for v in &mut m[4..8] {
-			*v = -*v;
-		}
-	}
-	m
-}
-
-fn place(pos: [f32; 3], rot: [f32; 3]) -> [f32; 16] {
-	let (sx, cx) = rot[0].sin_cos();
-	let (sy, cy) = rot[1].sin_cos();
-	let (sz, cz) = rot[2].sin_cos();
-	[
-		cz * cy, sz * cy, -sy, 0.0,
-		cz * sy * sx - sz * cx, sz * sy * sx + cz * cx, cy * sx, 0.0,
-		cz * sy * cx + sz * sx, sz * sy * cx - cz * sx, cy * cx, 0.0,
-		pos[0], pos[1], pos[2], 1.0,
-	]
-}
-
-/// A 0.7 x 0.5 x 1.4 box standing on the origin: the player stand-in when Ratchet is unavailable.
-fn box_mesh(texture: u32) -> Mesh {
-	let mut m = Mesh::new("player box".into());
-	for i in 0..8 {
-		m.positions.push([if i & 1 != 0 { 0.35 } else { -0.35 }, if i & 2 != 0 { 0.25 } else { -0.25 }, if i & 4 != 0 { 1.4 } else { 0.0 }]);
-		m.uvs.push([0.0, 0.0]);
-	}
-	for q in [[0, 2, 3, 1], [4, 5, 7, 6], [0, 1, 5, 4], [2, 6, 7, 3], [0, 4, 6, 2], [1, 3, 7, 5]] {
-		m.faces.push((texture, [q[0], q[1], q[2]]));
-		m.faces.push((texture, [q[0], q[2], q[3]]));
-	}
-	m
-}
-
-struct HudState {
-	health: i32,
-	bolts: u32,
-	clock: f32,
-	/// Bolt counter and nanotech opacity.
-	alpha: (f32, f32),
-	/// Nanotech fade bytes (f1 bar, f2 orbs).
-	nano: (u8, u8),
-	/// The ammo HUD: weapon shown, ammo, cap, fades f1 (bar, icon) and f2 (text); and the lock-on
-	/// target in NDC.
-	ammo: Option<(u8, u16, u16, f32, f32)>,
-	reticle: Option<[f32; 2]>,
-	/// NOV-14.2 RC range static: alpha and this tick's tile offsets.
-	rc_static: Option<(u8, Vec<[u8; 2]>)>,
-	/// NOV-14.2b marker prompt widget: ramps (a, b) and the frame counter.
-	marker: (u8, u8, u32),
-	/// HERO-3a: the breath meter's copied slot state (BRIDGE-14); None when nothing is installed.
-	breath: Option<game::breath_hud::BreathSnapshot>,
-	/// ARI-15b: Skid's counter widgets, slots 5 / 7: (display, max, f1, f2) while drawn.
-	counters: [Option<(i32, i32, u8, u8)>; 2],
-	/// WPN-6.2g2 / BRIDGE-39: this frame's screen sprites (FUN_0020fb40), each with its centre in window pixels.
-	sprites: Vec<(crate::game::ScreenSprite, [f32; 2])>,
-	/// ARI-42c: the Trespasser puzzle HUD strips of this tick.
-	pad: Vec<crate::game::PadPrim>,
-}
-
-/// Hidden appended vertices (a held model not in hand): all collapsed, so their triangles vanish.
-/// BRIDGE-21: append one back object (`n` vertices) through the shared back matrix; collapsed when there is none
-/// (`clank_hidden`, no joint). `posed` is its skinned (positions, normals).
-fn append_back_object(ps: &mut Vec<[f32; 3]>, ns: &mut Vec<[f32; 3]>, n: usize, posed: (Vec<[f32; 3]>, Vec<[f32; 3]>), bj: Option<&[f32; 12]>) {
-	let Some(bj) = bj else { return hide(ps, ns, n) };
-	let (mut gp, mut gn) = posed;
-	gp.resize(n, [0.0; 3]);
-	gn.resize(n, [0.0, 0.0, 1.0]);
-	ps.extend(gp.iter().map(|&v| apply(bj, v, 1.0)));
-	ns.extend(gn.iter().map(|&v| apply(bj, v, 0.0)));
-}
-
-fn hide(ps: &mut Vec<[f32; 3]>, ns: &mut Vec<[f32; 3]>, n: usize) {
-	ps.extend(std::iter::repeat([0.0; 3]).take(n));
-	ns.extend(std::iter::repeat([0.0, 0.0, 1.0]).take(n));
-}
-
-/// Clip-space projection of a world point; None behind the camera.
-fn project(m: &[[f32; 4]; 4], p: [f32; 3]) -> Option<[f32; 2]> {
-	let c: Vec<f32> = (0..4).map(|r| m[0][r] * p[0] + m[1][r] * p[1] + m[2][r] * p[2] + m[3][r]).collect();
-	(c[3] > 0.1).then(|| [c[0] / c[3], c[1] / c[3]])
-}
-
-fn sprite(slot: usize, rect: [f32; 4], flip: bool, a: f32) -> Quad {
-	Quad { tex: slot, rect, uv: if flip { [1.0, 0.0, 0.0, 1.0] } else { [0.0, 0.0, 1.0, 1.0] }, colour: [1.0, 1.0, 1.0, a], angle: 0.0, corners: None }
-}
-
-
-/// Skinned model-space positions and normals.
-type Posed = (Vec<[f32; 3]>, Vec<[f32; 3]>);
-
-/// Ratchet's sequences by hero state (SetState, decomp/notes/veldin_enemies.md section 5).
-const IDLE: usize = 0;
-/// The joint that holds the wrench (right wrist), and the wrench's in-hand sequence.
-/// Preview key of the posed hero (+ item id for the hero with that item attached): the pause menu's big panel
-/// (decomp/notes/ingame_pause_menu.md "Item previews").
-const HERO_PREVIEW: u32 = 0x10000;
-/// Gold bolt class 1134, shown on the Galactic details page (frontend.rs `gold_preview`).
-const GOLD_BOLT_PREVIEW: u32 = 1134;
-/// Vertical tan-half-FOV a pause panel of w x h (512x448 units) shows (decomp/notes/ingame_pause_menu.md "Menu
-/// camera"): the frozen pause matrix maps 224 px to 0.63 * 0.756 (PAL); FUN_00276c50 renders into a pow2 target
-/// (u = 7 up to 128, else the next power; v likewise; v shrinks while u + v > 17) centred on the view, then blits
-/// the fit-aspect crop (flag 4) into the panel.
-/// Pause aux clip table 0x1b9ad8 by aux index: (class, sequence slot) the clip is installed in (FUN_00284028).
-const MENU_AUX: [(u32, usize); 17] = [
-	(168, 5), (657, 1), (74, 3), (497, 1), (497, 2), (497, 3), (203, 3), (186, 8), (186, 9), (186, 10), (483, 3), (634, 8), (188, 3),
-	(433, 3), (163, 4), (619, 3), (270, 4),
-];
-
-/// Hero record 0x1b93e8 (0x30 per item id; decomp/notes/ingame_pause_menu.md "Hero preview records") for the items
-/// with extra actors: (item, aux start +0x00, aux count +0x04, actors (class, sequence) from +0x18..+0x2c). Items 8
-/// and 0x1e also list class 0 with sequence 0, left out [I].
-const MENU_ACTORS: [(u8, usize, usize, &[(u32, usize)]); 6] = [
-	(0x0a, 1, 1, &[(657, 1)]),
-	(0x11, 2, 1, &[(74, 3)]),
-	(0x14, 7, 3, &[(186, 8), (186, 9), (186, 10)]),
-	(0x15, 16, 1, &[(270, 4)]),
-	(0x19, 6, 1, &[(203, 3)]),
-	(0x1f, 10, 2, &[(634, 8)]),
-];
-
-/// Level-light slot 14, filled at pause open for the menu mobies (FUN_0028ba40; decomp/notes/lighting_fog.md
-/// "Reserved level-light slots 12-14"): colour, wrap -0.25, the direction it travels; slot B zero.
-const MENU_LIGHT_SLOT: usize = 14;
-const MENU_LIGHT_COLOUR: [f32; 3] = [0.9, 0.9, 0.6];
-const MENU_LIGHT_DIR: [f32; 3] = [0.7155, 0.5367, -0.4472];
-
-/// LIT-7a: the owned gold weapon in pause panel 3 is lit by level-light slot 12 (FUN_00206e78 with the frame moby's light
-/// as B, decomp/notes/lighting_fog.md "LIT-7a port spec"). Ambient bytes (R, G) = (n * 4 / 10, n * 3 / 10) for n = 3 x 0x20 = 96
-/// (integer divisions), blue 0; slot 12 colour A = (s / 2, 0.4 s, 0) with s the sum of slot 14's colour, wrap -0.3, slot 14's direction.
-const GOLD_LIGHT_SLOT: usize = 12;
-const GOLD_AMBIENT: [f32; 3] = [(96 * 4 / 10) as f32 / 128.0, (96 * 3 / 10) as f32 / 128.0, 0.0];
-const GOLD_LIGHT_WRAP: f32 = -0.3;
-
-/// Slot 12's colour A.
-fn gold_light_colour() -> [f32; 3] {
-	let s = MENU_LIGHT_COLOUR[0] + MENU_LIGHT_COLOUR[1] + MENU_LIGHT_COLOUR[2];
-	[s * 0.5, s * 0.4, s * 0.0]
-}
-
-/// Whether panel-3 item `id` gets the gold light: a gold gadget that is not a kind 1-3 item (ids 1-7, 0x1c-0x1e) and not 0x18.
-fn gold_lit(id: u8, golds: &[u8]) -> bool {
-	golds.contains(&id) && !(1..=7).contains(&id) && !(0x1c..=0x1e).contains(&id) && id != 0x18
-}
-
-/// Panel-3 item view table 0x1c4488 by item id (decomp/notes/ingame_pause_menu.md "Panel 3 item model"):
-/// (distance when flags bit 0, distance otherwise, y, z, rot x, rot y, a, b). The Weapons / Quick Select /
-/// Gadgets panel item 0x1b4f28 has flags 0.
-const PANEL3_VIEW: [[f32; 8]; 0x24] = {
-	const H: f32 = -1.5708;
-	[
-		[6.0, 6.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-		[3.0, 5.0, 0.0, 0.0, 0.0, 0.2, 0.2, 0.0],
-		[3.0, 5.0, 0.0, 0.0, 0.0, 0.2, 0.2, 0.0],
-		[3.0, 5.0, 0.0, 0.0, 0.0, 0.2, 0.2, 0.0],
-		[3.0, 5.0, 0.0, 0.0, 0.0, 0.2, 0.2, 0.0],
-		[2.0, 3.0, 0.0, -0.2, 0.0, 0.0, 0.0, 0.0],
-		[2.0, 3.0, 0.0, -0.2, 0.0, 0.0, 0.0, 0.0],
-		[2.0, 3.0, 0.0, -0.2, 0.0, 0.0, 0.0, 0.0],
-		[6.0, 6.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-		[4.0, 4.0, 0.0, 0.0, 0.0, H, 0.0, 0.5],
-		[2.5, 2.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.2],
-		[5.0, 5.0, 0.0, -0.2, 0.0, H, 0.0, 0.4],
-		[2.0, 3.0, 0.0, -0.1, 0.0, 0.0, 0.0, 0.1],
-		[4.0, 4.0, 0.0, -0.05, 0.0, H, 0.0, 0.45],
-		[6.0, 6.0, 0.0, -0.15, 0.0, H, 0.0, 0.3],
-		[5.0, 5.0, 0.0, -0.18, 0.0, H, 0.0, 0.3],
-		[6.0, 6.0, 0.0, -0.1, 0.0, H, 0.0, 0.5],
-		[2.5, 2.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.2],
-		[3.0, 3.0, 0.0, -0.05, 0.0, 0.0, 0.0, 0.3],
-		[5.0, 5.0, 0.0, -0.1, 0.0, H, 0.0, 0.3],
-		[2.5, 2.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.2],
-		[4.0, 4.0, 0.0, -0.1, 0.0, H, 0.0, 0.3],
-		[4.5, 6.0, 0.0, 0.0, 0.0, H, 0.0, 0.75],
-		[7.0, 7.0, 0.0, -0.3, 0.0, H, 0.0, 0.3],
-		[2.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-		[2.5, 2.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.2],
-		[3.0, 6.0, 0.0, -0.52, -1.5708, 0.0, 0.0, 0.0],
-		[2.0, 5.0, 0.0, 0.45, 1.5708, 0.0, 0.2, 0.0],
-		[2.0, 3.0, 0.0, 0.2, 0.0, 0.5, 0.0, 0.0],
-		[2.0, 3.0, 0.0, 0.2, 0.0, 0.5, 0.0, 0.0],
-		[6.0, 6.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-		[2.5, 5.0, 0.0, -0.25, 0.0, H, 0.0, 0.18],
-		[1.2, 2.4, 0.0, -0.1, 0.0, H, -0.05, 0.15],
-		[6.0, 6.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-		[6.0, 6.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-		[6.0, 6.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-	]
-};
-
-fn menu_tan_half_y(w: f32, h: f32) -> f32 {
-	let (w, h) = (w.round().max(1.0) as i32, h.round().max(1.0) as i32);
-	let lg = |x: i32| if x <= 128 { 7 } else { (8..31).find(|&n| 1 << n >= x).unwrap_or(30) };
-	let (u, mut v) = (lg(w), lg(h));
-	while u + v > 17 {
-		v -= 1;
-	}
-	let rh = 1 << v;
-	let src_h = if w < h { rh } else { rh - 2 * (rh / 2 - (h * rh) / (2 * w)) };
-	src_h as f32 / 2.0 / 224.0 * 0.63 * 0.756
-}
-
-/// Pause hero clip table 0x1b93f0 (0x30-byte rows, indexed by item id; decomp/notes/ingame_pause_menu.md "Hero
-/// preview clips"): (clip, loops, item seq, clip2). The clip plays `loops` times then clip2 loops; loops 0 loops
-/// the clip. Rows 0 and >= 0x24 change nothing.
-const MENU_CLIP_ROWS: [(u8, u8, u8, u8); 0x24] = [
-	(0, 0, 0, 0), (7, 1, 1, 7), (7, 1, 1, 7), (7, 1, 1, 7), (7, 1, 1, 7), (0x19, 1, 1, 7), (0x1a, 1, 1, 7), (0x15, 1, 1, 7),
-	(7, 1, 1, 7), (0x16, 1, 1, 6), (4, 1, 1, 7), (0, 1, 1, 6), (8, 1, 1, 7), (0xf, 1, 4, 7), (0xe, 1, 1, 7), (3, 1, 5, 7),
-	(0xa, 1, 1, 6), (5, 0, 1, 7), (2, 0, 1, 7), (1, 1, 1, 7), (0xd, 1, 1, 7), (0x17, 1, 1, 7), (0x12, 1, 1, 6), (9, 1, 1, 6),
-	(0x11, 1, 1, 7), (0x10, 1, 1, 7), (0x18, 1, 3, 7), (0x1b, 1, 1, 6), (0xb, 1, 1, 7), (0xc, 1, 1, 7), (6, 1, 1, 6), (0x13, 1, 3, 7),
-	(0x14, 1, 1, 7), (6, 1, 1, 6), (6, 1, 1, 6), (6, 1, 1, 6),
-];
-
-/// A pause hero preview item: the hero joint it rides, its bind mesh in the joint frame, its class and the view
-/// row's mode (0 = pose-copy from the hero, else own itemseq pose with normalised attach columns).
-struct HeroItem {
-	joint: usize,
-	mesh: Mesh,
-	class: u32,
-	mode: u8,
-}
-
-/// Preview key of the worn-item batch (boots, back item, extra items), drawn over the hero panel.
-const HERO_WORN: u32 = 0x20000;
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum WornKind {
-	/// Boot moby at hero attach point 2 / 3 (feet slot).
-	BootA,
-	BootB,
-	/// The back item (attach point 5).
-	Back,
-	/// An extra item by id (35 / 33 / 34).
-	Extra(u8),
-}
-
-/// One candidate moby of the worn batch: its vertices are `range` of the batch mesh (collapsed to a point while the
-/// part is not worn).
-struct WornPart {
-	kind: WornKind,
-	class: u32,
-	joint: usize,
-	range: std::ops::Range<usize>,
-	mesh: Mesh,
-}
-
-/// The worn batch of a level: every candidate part in batch order, and the hero joints of attach points 0x16 / 0x17
-/// whose scale is zeroed while boots are worn.
-#[derive(Default)]
-struct WornSet {
-	parts: Vec<WornPart>,
-	total: usize,
-	scale_joints: [Option<usize>; 2],
-}
-
-/// Hero joint lists the two boot mobies copy their pose from (dat 0x17a650 / 0x17a668).
-const BOOT_COPY: [[usize; 5]; 2] = [[99, 100, 101, 102, 103], [93, 94, 95, 96, 97]];
-
-/// Hero record 0x1b93e8 (+0x00, +0x04): the aux clip range (start, count) in `MENU_AUX` per item id.
-const ITEM_AUX: [(u8, u8); 37] = [
-	(0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (1, 1), (0, 0), (0, 0), (14, 1), (0, 0), (0, 1), (0, 0), (2, 1), (0, 0), (0, 0), (7, 3), (16, 1), (0, 0), (0, 0), (0, 0), (6, 1), (12, 1), (0, 0), (0, 0), (0, 0), (0, 0), (10, 2), (15, 1), (0, 0), (0, 0), (0, 0), (0, 0),
-];
-
-/// The pause hero preview's clock: a new item's clip fades in over 10 ticks from the pose at the switch
-/// (FUN_002575d8(hero, clip, 0, 10, 5)); the clip plays `loops` times (0 = forever) then clip2 fades in from its end.
-/// Stepped at 50 Hz from the time the item was selected.
-struct MenuHero {
-	id: u8,
-	pa: anim::PropAnim,
-	/// The item's own clock (hand or head moby, BRIDGE-19): its requested itemseq, then sequence 1 once it ends.
-	item: Option<anim::PropAnim>,
-	start: f32,
-	ticks: u32,
-	plays: u32,
-	second: bool,
-}
-
-/// (clip sequence, loops, clip2 sequence) of item `id`'s row; `base` = seq index of menu clip 0.
-fn menu_clip(base: usize, id: u8) -> Option<(usize, u8, usize)> {
-	MENU_CLIP_ROWS.get(id as usize).filter(|_| id != 0).map(|&(clip, loops, _, clip2)| (base + clip as usize, loops, base + clip2 as usize))
-}
-const WRIST: usize = 56;
-const WRENCH_HELD: usize = 1;
-/// The Bomb Glove model, the hero joint it rides (54, not the wrench's wrist 56), its draw sequence
-/// (0, then 1 idle) and the glove joint holding the bomb with the bomb's offset in it.
-const GLOVE_CLASS: u32 = 192;
-const GLOVE_JOINT: usize = 54;
-const GLOVE_BOMB_JOINT: usize = 2;
-const GLOVE_BOMB_OFFSET: [f32; 3] = [0.0, -0.0856, -0.0199];
-
-
-
-/// Animated props pose by (class, clock state), so props in step share one skinning (props fading from a snapshot are
-/// posed on their own, handler.rs).
-type PoseKey = (u32, usize, u8, i32, i32, u32);
-fn pose_key(p: &Prop) -> PoseKey {
-	(p.class_id, p.anim.seq, p.anim.clock.old_seq, p.anim.clock.cur, p.anim.clock.next, p.anim.clock.p.to_bits())
-}
-
-/// The game's HUD art as overlay slots: (slot, width, height) per frame.
-#[derive(Default)]
-struct HudArt {
-	bolt: Vec<(usize, f32, f32)>,
-	/// The breath meter's sheet 0x753f frames 0..2 (aquarium, low-air aquarium, bubble).
-	breath: Vec<(usize, f32, f32)>,
-	/// The Morph-o-Ray meter's sheet 0x7533 frames 0..1 (tank, bubble), WPN-6.7e4 (decomp/notes/weapons_framework.md).
-	morph: Vec<(usize, f32, f32)>,
-	bar: Vec<(usize, f32, f32)>,
-	orb: Vec<(usize, f32, f32)>,
-	/// The Bomb Glove's item icon (0xea60 + item 10) [I].
-	glove: Vec<(usize, f32, f32)>,
-	/// Ammo HUD weapon icons: frame 3 of 0xea60+id (hud.md "Ammo HUD").
-	weapon_icons: HashMap<u8, (usize, f32, f32)>,
-	/// The memory-card save icon 0x755d (decomp/notes/ingame_save_quit.md s6).
-	save: Vec<(usize, f32, f32)>,
-	/// Sound page volume fill 0xe99e frames 8/9, Quick Select backdrop 0xe934 frame 0 and highlight
-	/// 0xe99c frame 0 (decomp/notes/ingame_menu_leftovers.md P1-d, ingame_other_screens.md s2).
-	vol: [Option<(usize, f32, f32)>; 2],
-	/// Menu panel art: underlay 0xe99e frame 7, fx 0x1a, 0x1c, 0x19 (frontend::Art::frame).
-	frame: Option<[(usize, f32, f32); 4]>,
-	/// Map hero marker 0xe99a frame 5 (decomp/notes/ingame_other_screens.md s1).
-	marker: Option<(usize, f32, f32)>,
-	/// ARI-15b: Skid's counter icons, HUD sheets 2000 (sharks) / 2001 (nests) frame 0.
-	counters: [Option<(usize, f32, f32)>; 2],
-	wheel_bg: Option<(usize, f32, f32)>,
-	wheel_sel: Option<(usize, f32, f32)>,
-	/// HelpDesk icon: fx texture record 4 (help.rs).
-	help_icon: Option<usize>,
-	/// NOV-14.2 RC static: fx texture 0x1e (slot, width, height).
-	static_tex: Option<(usize, f32, f32)>,
-	/// WPN-6.2g2: the screen-sprite fx textures 0x21..=0x27 (slot, width, height).
-	screen_fx: [Option<(usize, f32, f32)>; 7],
-	/// ARI-42c: the Trespasser puzzle HUD fx textures 7, 16, 104, 105 (slot, width, height).
-	pad_fx: [Option<(usize, f32, f32)>; 4],
-	/// Pause-menu pictures: help_ss / options_ss, the L1/R1 arrow, the map globe (frontend::Pics).
-	pics: frontend::Pics,
-	/// Item icons 0xea60 + id, for the Quick Select wheel [I] and the shop's weapon rows.
-	items: HashMap<u8, (usize, f32, f32)>,
-	/// Frame 2 of 0xea60 + id: the shop's ammo-row icon (FUN_002b1540).
-	ammo_items: HashMap<u8, (usize, f32, f32)>,
-	/// HUD sprite 0xe935 frame 0: the shop's LED ticker sheet (FUN_002b1168).
-	led: Option<(usize, f32, f32)>,
-	font: Option<(usize, Vec<art::Glyph>)>,
-	/// Level font 3 (the marker prompt's "!", NOV-14.2b).
-	font3: Option<(usize, Vec<art::Glyph>)>,
-	/// Level font 2 (the shop panels' text, table boot 0x1df370).
-	font2: Option<(usize, Vec<art::Glyph>)>,
-}
-
-
-/// The level's decoded samples and which one the game plays for each event (sound::events, read
-/// from the game's play calls and animation triggers; decomp/notes/sound.md "Event table").
-#[derive(Default)]
-struct Sfx {
-	clips: Vec<Option<audio::Clip>>,
-	ev: sound::Events,
-	/// False until the ambient loop's tone format is decoded.
-	ambient_ok: bool,
-}
-
-/// Mix level of the music: the settings default 0x2cc of the 0x400 full scale (music.md; the
-/// Settings gain scales it from there).
-const MUSIC_VOLUME: f32 = 0x2cc as f32 / 1024.0;
-
-/// A cue as (bank sound, volume) for the mixer.
-fn cue(c: Option<&sound::Cue>) -> (Option<usize>, f32) {
-	c.map_or((None, 0.0), |c| (Some(c.sound), c.volume))
-}
-
-fn load_sfx(l: &Level) -> Sfx {
-	let clips = match sound::level_sounds(l) {
-		Ok(samples) => samples
-			.into_iter()
-			.map(|s| (!s.pcm.is_empty()).then(|| audio::Clip { rate: s.rate, pcm: Arc::new(s.pcm), loop_start: s.loop_start, reverb: s.reverb }))
-			.collect(),
-		Err(e) => {
-			eprintln!("sounds: {e}");
-			return Sfx::default();
-		}
-	};
-	let ev = sound::events(l).unwrap_or_else(|e| {
-		eprintln!("sound events: {e}");
-		sound::Events::default()
-	});
-	Sfx { clips, ev, ambient_ok: true }
-}
-
-/// The resident global bank (front-end and menu sounds), without level events.
-fn global_sfx(disc: &mut iso::Disc) -> Sfx {
-	match sound::global_sounds(disc) {
-		Ok(samples) => Sfx {
-			clips: samples.into_iter().map(|s| (!s.pcm.is_empty()).then(|| audio::Clip { rate: s.rate, pcm: Arc::new(s.pcm), loop_start: s.loop_start, reverb: s.reverb })).collect(),
-			ev: sound::Events::default(),
-			ambient_ok: true,
-		},
-		Err(e) => {
-			eprintln!("global sounds: {e}");
-			Sfx::default()
-		}
-	}
-}
-
-/// RNG-4b: which voice a request-point draw belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum VoiceKey {
-	/// A wanted loop (`loop_want` owner).
-	Loop(usize),
-	/// An animation cue a prop's clock fired: (prop index, ordinal of the cue within the frame's list).
-	EnemyCue(usize, usize),
-	/// The looping sound of a prop's sequence.
-	EnemyLoop(usize),
-	Suck,
-	Pyro,
-}
-
-/// RNG-4b / BRIDGE-24: the def's pitch draw of a voice is made when the voice is requested (in the tick, FUN_002a0cd0)
-/// and kept in `pending` until the post-loop drain starts it; `rand` keeps the draw of a running voice for its updates.
-#[derive(Default)]
-struct VoiceBook {
-	pending: HashMap<VoiceKey, i32>,
-	rand: HashMap<VoiceKey, i32>,
-}
-
-impl VoiceBook {
-	/// The draw a starting voice uses: the one made at its request point, else (no tick ran) drawn now.
-	fn start(&mut self, key: VoiceKey, c: &sound::Cue) -> i32 {
-		let r = self.pending.remove(&key).unwrap_or_else(|| c.random_shift(|n| particles::Rng::shared().small(n)));
-		self.rand.insert(key, r);
-		r
-	}
-
-	/// The draw of the running voice (updates draw nothing).
-	fn current(&self, key: VoiceKey) -> i32 {
-		self.rand.get(&key).copied().unwrap_or(0)
-	}
-}
-
-/// Animation-driven sound state of one enemy prop: sequence and the loop voice (id, class sound).
-struct EnemySfx {
-	seq: usize,
-	voice: Option<(u64, usize)>,
-}
-
-/// Retail start gate (FUN_002a0cd0) and out-of-range loop stop (FUN_0029ff68): a voice is audible while its
-/// def's distance gain is at least 0x20 (decomp/notes/sound.md AUD-11h).
-fn audible(c: &sound::Cue, dist: f32) -> bool {
-	c.fall.level(dist) != 0
-}
-
-/// Position of a voice owned by a moby: its position raised one unit (OV:101080 / OV:100699).
-fn voice_at(pos: [f32; 3]) -> [f32; 3] {
-	[pos[0], pos[1], pos[2] + 1.0]
-}
-
-/// Distance from the listener (the camera) to `at`.
-fn listener_dist(cam: &Camera, at: [f32; 3]) -> f32 {
-	let d = [at[0] - cam.pos[0], at[1] - cam.pos[1], at[2] - cam.pos[2]];
-	(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
-}
-
-/// Volume scale (relative to the cue's own volume), pan and pitch shift (1/128 semitones) of a sound at `at`
-/// heard from the camera: the def's retail falloff (FUN_0029fc10 via `Cue::level`), the retail pan curve
-/// (FUN_0029fd48), Doppler, underwater and occlusion effects and the def's random pitch (sound.md "Voice
-/// update", FUN_0029ff68 / FUN_002a0cd0).
-fn spatial(cam: &Camera, at: [f32; 3], cue: Option<&sound::Cue>, ln: &sound::ListenerVelocity) -> (f32, f32, i32) {
-	spatial_for(cam, at, cue, ln, None)
-}
-
-/// `spatial` for a voice owned by prop `owner`, whose own solid its occlusion line skips (FUN_0029fb70).
-fn spatial_for(cam: &Camera, at: [f32; 3], cue: Option<&sound::Cue>, ln: &sound::ListenerVelocity, owner: Option<usize>) -> (f32, f32, i32) {
-	spatial_rand(cam, at, cue, ln, owner, None)
-}
-
-/// `spatial_for` with the def's random pitch already drawn at the request point (BRIDGE-24, `Game.sound_requests`);
-/// `None` draws it here.
-fn spatial_rand(cam: &Camera, at: [f32; 3], cue: Option<&sound::Cue>, ln: &sound::ListenerVelocity, owner: Option<usize>, drawn: Option<i32>) -> (f32, f32, i32) {
-	let d = [at[0] - cam.pos[0], at[1] - cam.pos[1], at[2] - cam.pos[2]];
-	let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-	let right = [cam.yaw.sin(), -cam.yaw.cos()];
-	let fwd = [cam.yaw.cos(), cam.yaw.sin()];
-	let pan = sound::pan_of(d[0] * right[0] + d[1] * right[1], d[0] * fwd[0] + d[1] * fwd[1]);
-	// Only the pan is wanted of a def-less call (ambience emitters, which do their own gain).
-	let Some(c) = cue else { return (1.0, pan, 0) };
-	let scale = if c.volume > 0.0 { c.level(l) / c.volume } else { 0.0 };
-	let (vf, shift) = ln.effects(cam.pos, at, [0.0; 3], c.fall.flags);
-	// Start-time occlusion test (six probes, def flag 2 exempts) when the def attenuates by distance.
-	let occ = if scale > 0.0 { ln.occlusion(None, cam.pos, at, c.fall.flags, c.looped, owner) } else { 1.0 };
-	let random = drawn.unwrap_or_else(|| c.random_shift(|n| particles::Rng::shared().small(n)));
-	(scale * vf * occ, pan, shift + random)
-}
-
-/// An event-site one-shot that is re-evaluated every frame with the live listener (gain, pan, Doppler and
-/// the occlusion history; FUN_0029ff68 re-runs every voice each update), decomp/notes/sound.md.
-struct LiveShot {
-	id: u64,
-	at: [f32; 3],
-	cue: sound::Cue,
-	owner: Option<usize>,
-	/// The def's random pitch drawn at the start (1/128 semitones).
-	random: i32,
-	/// ARI-27b: a flags-0x10 voice's fixed level (1/1024): no falloff, no occlusion.
-	level: Option<i32>,
-}
-
-/// Per-frame gain, pan and pitch shift of a running one-shot (`random` is added to the Doppler shift).
-fn live_shot(cam: &Camera, s: &LiveShot, at: [f32; 3], ln: &sound::ListenerVelocity) -> (f32, f32, i32) {
-	let d = [at[0] - cam.pos[0], at[1] - cam.pos[1], at[2] - cam.pos[2]];
-	let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-	let right = [cam.yaw.sin(), -cam.yaw.cos()];
-	let fwd = [cam.yaw.cos(), cam.yaw.sin()];
-	let pan = sound::pan_of(d[0] * right[0] + d[1] * right[1], d[0] * fwd[0] + d[1] * fwd[1]);
-	let c = &s.cue;
-	let (vf, shift) = ln.effects(cam.pos, at, [0.0; 3], c.fall.flags);
-	if let Some(level) = s.level {
-		return (level as f32 / 1024.0 * vf, pan, shift + s.random);
-	}
-	let scale = if c.volume > 0.0 { c.level(l) / c.volume } else { 0.0 };
-	let occ = if scale > 0.0 { ln.occlusion(Some(s.id as u32), cam.pos, at, c.fall.flags, false, s.owner) } else { 1.0 };
-	(c.volume * scale * vf * occ, pan, shift + s.random)
-}
-
-/// 3x4 row-major transform of a point (`t` = 1) or a direction (`t` = 0).
-/// Area-weighted vertex normals (the same sum `Gpu::batch` uses).
-/// A decoded moby mesh gives its stored vertex normals instead (`Mesh::vertex_normals`).
-fn face_normals(m: &Mesh) -> Vec<[f32; 3]> {
-	m.vertex_normals()
-}
-
-/// Normalises each rotation column `(m[i], m[4+i], m[8+i])` to unit length (HeroItemsAttach basis fix, HERO-7.1).
-fn norm_cols(mut m: [f32; 12]) -> [f32; 12] {
-	for i in 0..3 {
-		let l = (m[i] * m[i] + m[4 + i] * m[4 + i] + m[8 + i] * m[8 + i]).sqrt();
-		if l != 0.0 && l.is_finite() {
-			m[i] /= l;
-			m[4 + i] /= l;
-			m[8 + i] /= l;
-		}
-	}
-	m
-}
-
-
-/// The attach joint matrix with its three axis columns scaled to unit length (view rows with mode != 0).
-fn normalise_columns(mut m: [f32; 12]) -> [f32; 12] {
-	for c in 0..3 {
-		let l = (m[c] * m[c] + m[4 + c] * m[4 + c] + m[8 + c] * m[8 + c]).sqrt();
-		if l > 1e-6 {
-			for r in 0..3 {
-				m[4 * r + c] /= l;
-			}
-		}
-	}
-	m
-}
-
-fn apply(m: &[f32; 12], v: [f32; 3], t: f32) -> [f32; 3] {
-	[
-		m[0] * v[0] + m[1] * v[1] + m[2] * v[2] + m[3] * t,
-		m[4] * v[0] + m[5] * v[1] + m[6] * v[2] + m[7] * t,
-		m[8] * v[0] + m[9] * v[1] + m[10] * v[2] + m[11] * t,
-	]
-}
-
-fn gpu_has_preview(scene: &Option<Scene>, key: u32) -> bool {
-	scene.as_ref().is_some_and(|s| s.previews.contains_key(&key))
-}
-
-fn length2(v: [f32; 3]) -> f32 {
-	(v[0] * v[0] + v[1] * v[1]).sqrt()
-}
-
-/// Model-space box of a mesh.
-fn bounds(m: &Mesh) -> ([f32; 3], [f32; 3]) {
-	let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
-	for p in &m.positions {
-		for j in 0..3 {
-			lo[j] = lo[j].min(p[j]);
-			hi[j] = hi[j].max(p[j]);
-		}
-	}
-	if m.positions.is_empty() {
-		return ([-0.5; 3], [0.5; 3]);
-	}
-	(lo, hi)
-}
-
-fn forward(cam: &Camera) -> [f32; 3] {
-	[cam.yaw.cos() * cam.pitch.cos(), cam.yaw.sin() * cam.pitch.cos(), cam.pitch.sin()]
-}
-
-/// Column-major perspective * look-at, Z up, depth 0..1. The world passes (RETAIL_NEAR, RETAIL_FAR); the vertical
-/// tan is `cam.tan_half` and the horizontal follows the window aspect [PC] (REN-7a).
-fn view_proj(cam: &Camera, aspect: f32, near: f32, far: f32) -> [[f32; 4]; 4] {
-	let f = forward(cam);
-	let up = cam.up;
-	let norm = |v: [f32; 3]| {
-		let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-9);
-		[v[0] / l, v[1] / l, v[2] / l]
-	};
-	let cross = |a: [f32; 3], b: [f32; 3]| [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
-	let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-	let s = norm(cross(f, up));
-	let u = cross(s, f);
-	let e = cam.pos;
-	// View matrix rows: s, u, -f.
-	let view = [
-		[s[0], u[0], -f[0], 0.0],
-		[s[1], u[1], -f[1], 0.0],
-		[s[2], u[2], -f[2], 0.0],
-		[-dot(s, e), -dot(u, e), dot(f, e), 1.0],
-	];
-	let t = 1.0 / cam.tan_half;
-	let proj = [
-		[t / aspect, 0.0, 0.0, 0.0],
-		[0.0, t, 0.0, 0.0],
-		[0.0, 0.0, far / (near - far), -1.0],
-		[0.0, 0.0, near * far / (near - far), 0.0],
-	];
-	let mut out = [[0f32; 4]; 4];
-	for c in 0..4 {
-		for r in 0..4 {
-			out[c][r] = (0..4).map(|k| proj[k][r] * view[c][k]).sum();
-		}
-	}
-	out
-}
-
-
-
-/// SCN-3: the scene actors' light, captured once when a scene starts (the hero's at that instant) and held until it ends.
-fn scene_light_snapshot(held: &mut Option<[f32; 4]>, active: bool, now: impl FnOnce() -> [f32; 4]) -> Option<[f32; 4]> {
-	if !active {
-		*held = None;
-		return None;
-	}
-	Some(*held.get_or_insert_with(now))
-}
-
-#[cfg(test)]
-mod scene_light_tests {
-	use super::*;
-
-	/// HERO-AFTERIMAGE-15 test 4: the two afterimage alpha bytes encode as the spec's fractions and flag translucent.
-	#[test]
-	fn afterimage_alpha_encoding() {
-		assert_eq!(moby_alpha_encoding(0.0, 0x30), (0.15625, true));
-		assert_eq!(moby_alpha_encoding(0.0, 0x17), (0.20507812, true));
-	}
-
-	/// LIT-7a tests 1-3: ambient bytes (38, 28, 0), slot 12 colour (1.2, 0.96, 0) wrap -0.3, the item gate.
-	#[test]
-	fn gold_light_constants_and_gate() {
-		assert_eq!(GOLD_AMBIENT, [0.296875, 0.21875, 0.0]);
-		assert_eq!(((96 * 4 / 10) as u32, (96 * 3 / 10) as u32), (38, 28));
-		assert_eq!(gold_light_colour(), [1.2f32, 0.96000004, 0.0]);
-		assert_eq!(GOLD_LIGHT_WRAP, -0.3);
-		assert_eq!(Gpu::pack_light(GOLD_AMBIENT, GOLD_LIGHT_SLOT, GOLD_LIGHT_SLOT, 0.0)[3], 204.0);
-		assert!(gold_lit(0x10, &[0x10, 3]));
-		assert!(!gold_lit(0x18, &[0x18]));
-		assert!(!gold_lit(3, &[3]));
-		assert!(!gold_lit(0x10, &[]));
-	}
-
-	#[test]
-	fn snapshot_is_taken_once_per_scene() {
-		let mut held = None;
-		assert_eq!(scene_light_snapshot(&mut held, true, || [1.0, 2.0, 3.0, 4.0]), Some([1.0, 2.0, 3.0, 4.0]));
-		assert_eq!(scene_light_snapshot(&mut held, true, || [9.0; 4]), Some([1.0, 2.0, 3.0, 4.0]));
-		scene_light_snapshot(&mut held, false, || [0.0; 4]);
-		assert_eq!(scene_light_snapshot(&mut held, true, || [5.0; 4]), Some([5.0; 4]));
-	}
-}
-
-#[cfg(test)]
-mod attach_tests {
-	use super::*;
-	#[test]
-	fn norm_cols_normalises_columns_not_rows() {
-		let m = norm_cols([2.0, 3.0, 0.0, 0.0, 0.0, 4.0, 0.0, 5.0, 0.0, 0.0, 1.0, 6.0]);
-		let e = [1.0, 0.6, 0.0, 0.0, 0.0, 0.8, 0.0, 5.0, 0.0, 0.0, 1.0, 6.0];
-		for i in 0..12 {
-			assert!((m[i] - e[i]).abs() < 1e-6, "{i}: {m:?}");
-		}
-	}
-}
 
 #[cfg(test)]
 mod shader_tests {
@@ -3072,7 +1855,7 @@ mod shader_tests {
 	/// The main WGSL shader parses and validates (pipeline creation would fail at startup otherwise).
 	#[test]
 	fn shader_validates() {
-		let m = naga::front::wgsl::parse_str(super::SHADER).expect("wgsl parse");
+		let m = naga::front::wgsl::parse_str(&super::volfog::soft::level_source(super::SHADER, false)).expect("wgsl parse");
 		naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).expect("wgsl validate");
 	}
 
@@ -3090,247 +1873,3 @@ mod shader_tests {
 	}
 }
 
-#[cfg(test)]
-mod proj_tests {
-	use super::*;
-
-	fn clip(m: &[[f32; 4]; 4], p: [f32; 3]) -> [f32; 4] {
-		std::array::from_fn(|r| m[0][r] * p[0] + m[1][r] * p[1] + m[2][r] * p[2] + m[3][r])
-	}
-
-	// REN-7a tests 1, 2, 4, 5 (camera at the origin looking +X, so world x is depth, y is -right, z is up).
-	#[test]
-	fn retail_projection() {
-		let cam = Camera { pos: [0.0; 3], yaw: 0.0, pitch: 0.0, tan_half: TAN_HALF_FOV, up: [0.0, 0.0, 1.0] };
-		assert!((1.0 / (0.63f32 * 0.756f32) - 2.0996053).abs() < 1e-6);
-		assert_eq!(TAN_HALF_FOV, 0.47627997);
-		for (aspect, p00) in [(16.0 / 9.0, 1.181028f32), (512.0 / 448.0, 1.8371546)] {
-			let m = view_proj(&cam, aspect, RETAIL_NEAR, RETAIL_FAR);
-			assert!((m[1][0].abs() - p00).abs() < 1e-6, "{aspect}");
-			assert!((m[0][2] - 1.0000429).abs() < 1e-6);
-			assert!((m[3][2] + 0.03125134).abs() < 1e-7);
-			let ndc_y = |vz: f32| {
-				let c = clip(&m, [vz, 0.0, TAN_HALF_FOV * vz]);
-				c[1] / c[3]
-			};
-			assert!((ndc_y(1.0) - 1.0).abs() < 1e-6 && (ndc_y(37.0) - 1.0).abs() < 1e-6);
-		}
-		let m = view_proj(&cam, 512.0 / 448.0, RETAIL_NEAR, RETAIL_FAR);
-		let c = clip(&m, [1.0, -0.63, 0.0]);
-		assert!((c[0] / c[3] - 1.1574).abs() < 1e-4);
-		let depth = |vz: f32| {
-			let c = clip(&m, [vz, 0.0, 0.0]);
-			c[2] / c[3]
-		};
-		assert!((depth(1.0) - 0.96879154).abs() < 1e-6);
-		assert!((depth(10.0) - 0.9969178).abs() < 1e-6);
-		assert!(depth(RETAIL_NEAR).abs() < 1e-6);
-		assert!((depth(RETAIL_FAR) - 1.0).abs() < 1e-6);
-		// REN-7a test 3: the same depth from the retail GS z mapping.
-		let zs = |raw: f32| -224.0f32 + 536860160.0 / raw;
-		assert_eq!(zs(32.0), 16776656.0);
-		assert!(((16776656.0 - zs(1024.0)) / (16776656.0 - 496.0) - 0.96879154f32).abs() < 1e-6);
-	}
-
-	// REN-7b test 2: the scene key scalar converts to the vertical tan.
-	#[test]
-	fn proj_scalar_sources() {
-		assert_eq!(crate::camera::PROJ_SCALAR.to_bits(), 0x3f2147ae);
-		assert!((0.597f32 * PROJ_Y_RATIO - 0.451332).abs() < 1e-6);
-	}
-}
-
-#[cfg(test)]
-mod audible_tests {
-	use super::*;
-
-	// AUD-11h tests 1 and 2: the start gate edge and the owner voice offset.
-	#[test]
-	fn start_gate_and_voice_at() {
-		let c = sound::Cue { fall: sound::Falloff { min_range: 0.0, max_range: 100.0, min_vol: 0, max_vol: 1228, min_pitch: 0, max_pitch: 0, flags: 0 }, sound: 0, volume: 1.0, looped: true, bend: (0, 0) };
-		assert_eq!(c.fall.level(97.0), 36);
-		assert!(audible(&c, 97.0));
-		assert_eq!(c.fall.level(97.39), 32);
-		assert!(audible(&c, 97.39));
-		assert!(!audible(&c, 97.4));
-		assert!(!audible(&c, 98.0));
-		assert_eq!(c.fall.level(50.0), 614);
-		assert!(audible(&c, 50.0));
-		assert_eq!(voice_at([1.0, 2.0, 3.0]), [1.0, 2.0, 4.0]);
-	}
-}
-
-#[cfg(test)]
-mod moby_matrix_tests {
-	use super::*;
-
-	#[test]
-	fn moby_matrix_scales_rows() {
-		let at = scale_rows(place([1.0, 2.0, 3.0], [0.0, 0.0, 0.0]), 2.0);
-		assert_eq!((at[0], at[5], at[10]), (2.0, 2.0, 2.0));
-		assert_eq!(&at[12..], &[1.0, 2.0, 3.0, 1.0]);
-		assert_eq!(at.iter().filter(|v| **v == 0.0).count(), 9);
-		let base = place([1.0, 2.0, 3.0], [0.3, 0.2, 0.1]);
-		assert_eq!(scale_rows(base, 1.0), base);
-	}
-
-	#[test]
-	fn mirrored_placement_reflects_model_y_only() {
-		let (pos, rot) = ([1.0, 2.0, 3.0], [0.3, 0.2, 0.1]);
-		let (a, m) = (place(pos, rot), place_mirrored(pos, rot, true));
-		assert_eq!(place_mirrored(pos, rot, false), a);
-		assert_eq!((&m[0..4], &m[8..16]), (&a[0..4], &a[8..16]));
-		assert_eq!(m[4..8], a[4..8].iter().map(|v| -v).collect::<Vec<_>>()[..]);
-		// Left-handed: column 0 x column 1 . column 2 < 0 (a plain placement is right-handed).
-		let det = |m: &[f32; 16]| m[0] * (m[5] * m[10] - m[6] * m[9]) - m[1] * (m[4] * m[10] - m[6] * m[8]) + m[2] * (m[4] * m[9] - m[5] * m[8]);
-		assert!(det(&a) > 0.99 && det(&m) < -0.99);
-	}
-}
-
-#[cfg(test)]
-mod tint_tests {
-	use super::*;
-
-	#[test]
-	fn tint_override_starts_at_colour_start() {
-		let t = Some(([0.5, 0.5, 0.5], 23));
-		assert_eq!(tint_override([1.0, 1.0, 1.0, 0.25], 22, t, 0x80), [1.0, 1.0, 1.0, 0.25]);
-		assert_eq!(tint_override([1.0, 1.0, 1.0, 0.25], 23, t, 0x80), [0.5, 0.5, 0.5, -2.0]);
-		assert_eq!(tint_override([1.0, 1.0, 1.0, 0.25], 99, None, 0x80), [1.0, 1.0, 1.0, 0.25]);
-		// CLASS-tint-alpha test 3: a faded prop (alpha 64) carries its alpha in the tail code.
-		assert_eq!(tint_override([1.0; 4], 23, t, 64)[3], -2.125);
-	}
-
-	// MOBY-FADE tests 1-6.
-	#[test]
-	fn moby_fade_distance_terms() {
-		assert_eq!(moby_fade(64, 50.0 * 1024.0), Some(112));
-		assert_eq!(moby_fade(64, 48.0 * 1024.0), Some(128));
-		assert_eq!(moby_fade(64, 64.001 * 1024.0), None);
-		assert_eq!(moby_fade(600, 490.0 * 1024.0), Some(80));
-		assert_eq!(moby_fade(64, 63.95 * 1024.0), Some(0));
-		assert_eq!((moby_draw_alpha(112, 0x80), moby_draw_alpha(64, 64)), (112, 32));
-	}
-
-	// SCH-6b: the deferred-list fade uses the unclamped distance and the radius (integers).
-	#[test]
-	fn moby_fade_alt_uses_radius_and_unclamped_distance() {
-		assert_eq!(moby_fade_alt(64, 50.0 * 1024.0, 1024.0), 120);
-		assert_eq!(moby_fade_alt(64, 0.0, 0.0), 0x80);
-		// L = 600 is not clamped to 500: (600 << 10) - 490 * 1024 = 110 * 1024 -> capped.
-		assert_eq!(moby_fade_alt(600, 490.0 * 1024.0, 0.0), 0x80);
-		assert_eq!(moby_fade_alt(64, 63.0 * 1024.0, 0.0), 8);
-	}
-
-	// SCH-6b: effect mobys and debris pieces (draw 255) take the moby draw-distance verdict, centre pos * 1024.
-	#[test]
-	fn effect_fade_culls_past_255_metres() {
-		let view = Some(([0.0; 3], [1.0, 0.0, 0.0]));
-		assert_eq!(effect_fade(view, Some(255), [10.0, 0.0, 0.0]), Some(0x80));
-		assert_eq!(effect_fade(view, Some(255), [256.0, 0.0, 0.0]), None);
-		assert_eq!(effect_fade(view, Some(255), [254.5, 0.0, 0.0]), Some(4));
-		assert_eq!(effect_fade(view, None, [900.0, 0.0, 0.0]), Some(0x80));
-		assert_eq!(effect_fade(None, Some(255), [900.0, 0.0, 0.0]), Some(0x80));
-	}
-
-	// CLASS-tint-alpha tests 1 and 2.
-	#[test]
-	fn baked_alpha_encoding_round_trips() {
-		for (a, e) in [(0x80u8, -2.0f32), (96, -2.0625), (64, -2.125), (0, -2.25)] {
-			assert_eq!(moby_baked_encoding(a), e);
-			assert_eq!(128.0 - ((e - (e + 0.5).floor()).abs() * 512.0).round(), a as f32);
-		}
-		let lit = 3.0625f32;
-		assert_eq!(128.0 - ((lit - (lit + 0.5).floor()).abs() * 512.0).round(), 96.0);
-	}
-}
-
-#[cfg(test)]
-mod item_panel_tests {
-	use super::*;
-
-	fn proj() -> [[f32; 4]; 4] {
-		let cam = Camera { pos: [0.0; 3], yaw: 0.0, pitch: 0.0, tan_half: TAN_HALF_FOV * PANEL_TAN_SCALE, up: [0.0, 0.0, 1.0] };
-		view_proj(&cam, PANEL_ASPECT, RETAIL_NEAR, RETAIL_FAR)
-	}
-
-	fn target_px(p: [f32; 4]) -> (f32, f32) {
-		let m = proj();
-		let c: Vec<f32> = (0..4).map(|r| (0..4).map(|k| m[k][r] * p[k]).sum()).collect();
-		let (nx, ny) = (c[0] / c[3], c[1] / c[3]);
-		let (w, h) = (ITEM_PANEL_SIZE.0 as f32, ITEM_PANEL_SIZE.1 as f32);
-		((nx + 1.0) * 0.5 * w, (1.0 - ny) * 0.5 * h)
-	}
-
-	#[test]
-	fn item_panel_projection_constants() {
-		let m = proj();
-		// NOV-30a: main projection on the target, out[column][row]: x row = -y column scaled by 1/0.63,
-		// y row = z column scaled by 224/64 / 0.47628.
-		assert!((TAN_HALF_FOV * PANEL_TAN_SCALE - 0.13608).abs() < 1e-6);
-		assert!((PANEL_ASPECT - 4.6296296).abs() < 1e-5);
-		assert!((m[1][0] + 1.5873016).abs() < 1e-5, "{}", m[1][0]);
-		assert!((m[2][1] - 7.3486185).abs() < 1e-4, "{}", m[2][1]);
-		assert!((m[0][3] - 1.0).abs() < 1e-6);
-	}
-
-	#[test]
-	fn item_panel_projects_view_point() {
-		// View point right 1, up 0.5, depth 4 (camera at origin looking +x: right = -y).
-		let (px, py) = target_px([4.0, -1.0, 0.5, 1.0]);
-		assert!((px - 357.5873).abs() < 1e-2, "{px}");
-		assert!((py - 5.211052).abs() < 1e-2, "{py}");
-		// Item 16 pivot (right -3.75, up -0.03, depth 7.2) lands in the left third of the source box.
-		let (px, py) = target_px([7.2, 3.75, -0.03, 1.0]);
-		assert!((px - 44.35977).abs() < 1e-2, "{px}");
-		assert!((py - 65.95963).abs() < 1e-2, "{py}");
-		// NOV-30d test 2: the bolt icon pivot (depth 3.8 + 10.2, right -4.25, up -1.5) sits right of the price, low in the box.
-		let (px, py) = target_px([14.0, 4.25, -1.5, 1.0]);
-		assert!((px - 132.64398).abs() < 1e-2, "{px}");
-		assert!((py - 114.39053).abs() < 1e-2, "{py}");
-	}
-
-	#[test]
-	fn item_poses_split_by_destination() {
-		use game::vendor::{ItemDest, ItemPose};
-		let pose = |class, dest| ItemPose { class, pos: [0.0; 3], rot: [0.0; 3], dest };
-		let (world, panel) = split_item_poses(&[pose(1, ItemDest::World), pose(2, ItemDest::Panel), pose(3, ItemDest::World)]);
-		assert_eq!(world.iter().map(|p| p.0).collect::<Vec<_>>(), [1, 3]);
-		assert_eq!(panel.iter().map(|p| p.0).collect::<Vec<_>>(), [2]);
-	}
-}
-
-#[cfg(test)]
-mod back_object_tests {
-	use super::*;
-
-	#[test]
-	fn back_object_uses_shared_matrix_and_hides() {
-		let bj = norm_cols([2.0, 0.0, 0.0, 1.0, 0.0, 2.0, 0.0, 2.0, 0.0, 0.0, 2.0, 3.0]);
-		let posed = (vec![[1.0, 2.0, 3.0]], vec![[0.0, 0.0, 1.0]]);
-		let (mut ps, mut ns) = (Vec::new(), Vec::new());
-		append_back_object(&mut ps, &mut ns, 1, posed.clone(), Some(&bj));
-		assert_eq!(ps[0], apply(&bj, [1.0, 2.0, 3.0], 1.0));
-		append_back_object(&mut ps, &mut ns, 1, posed, None);
-		assert_eq!(ps[1], [0.0; 3]);
-		assert_eq!(ps.len(), 2);
-	}
-
-	#[test]
-	fn clank_light_glow_constants_and_hide() {
-		assert_eq!(CLANK_LIGHT_GLOW, (0.057, 0.08, 0x280000c0));
-		assert_eq!(CLANK_LIGHT_GLOW_Z, 0.015);
-		// Hidden (no back matrix): the light range collapses like the back objects.
-		let (mut ps, mut ns) = (Vec::new(), Vec::new());
-		append_back_object(&mut ps, &mut ns, 3, (vec![[1.0; 3]; 3], vec![[0.0; 3]; 3]), None);
-		assert!(ps.iter().all(|p| *p == [0.0; 3]) && ps.len() == 3);
-	}
-
-	#[test]
-	fn back_pulse_is_not_clamped() {
-		let m = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
-		let o = crate::player::pulse_item(m, 1.3, false, [0.0; 3]);
-		assert!((o[0] - 1.3).abs() < 1e-6 && (o[5] - 1.3).abs() < 1e-6);
-		assert_eq!(crate::player::pulse_item(m, 1.3, true, [0.0; 3])[0], 1.0);
-	}
-}

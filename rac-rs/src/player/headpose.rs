@@ -112,19 +112,19 @@ impl Player {
 			.blocks
 			.iter()
 			.filter(|b| b.active && b.slot == slot)
-			.filter_map(|b| Some(crate::anim::JointFx { joint: joint(b.joint)?, rot: block_quat(b.ang), scale: [b.rec_scale; 3], off: b.off, blend: None, reg: b.reg }))
+			.filter_map(|b| Some(crate::anim::JointFx { joint: joint(b.joint)?, rot: block_quat(b.ang), scale: [b.rec_scale; 3], off: b.off, blend: None, reg: b.reg, mirror: None }))
 			.collect();
 		if slot == 0 && self.blink != 0 {
 			for i in 0..7 {
 				if let (Some(reg), Some(j)) = (self.eyelid[i], joint(EYELID_JOINTS[i])) {
-					v.push(crate::anim::JointFx { joint: j, rot: [0.0, 0.0, 0.0, 1.0], scale: EYELID_SCALE[i], off: EYELID_OFF[i], blend: Some(EYELID_W[self.blink as usize]), reg });
+					v.push(crate::anim::JointFx { joint: j, rot: [0.0, 0.0, 0.0, 1.0], scale: EYELID_SCALE[i], off: EYELID_OFF[i], blend: Some(EYELID_W[self.blink as usize]), reg, mirror: None });
 				}
 			}
 		}
 		if slot == 1 && self.clank_blink != 0 {
 			for i in 0..4 {
 				if let (Some(reg), Some(j)) = (self.clank_rec[i], joint(CLANK_JOINTS[i])) {
-					v.push(crate::anim::JointFx { joint: j, rot: CLANK_Q[i], scale: [1.0; 3], off: CLANK_OFF[i].map(|c| c * self.clank_scale), blend: Some(CLANK_W[self.clank_blink as usize]), reg });
+					v.push(crate::anim::JointFx { joint: j, rot: CLANK_Q[i], scale: [1.0; 3], off: CLANK_OFF[i].map(|c| c * self.clank_scale), blend: Some(CLANK_W[self.clank_blink as usize]), reg, mirror: None });
 				}
 			}
 		}

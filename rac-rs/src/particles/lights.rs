@@ -1,3 +1,6 @@
+//! Point-light slots of the effect pool (8 slots): allocation (FUN_002522c0), `hold_light`, the level's wandering lights and the
+//! slot tables handed to the renderer.
+//! Leftover from the retired hand port; still compiled because retail mode and the renderer still use parts of `particles` (`Rng`, sprite and quad types). Do not extend.
 use super::*;
 
 impl Particles {

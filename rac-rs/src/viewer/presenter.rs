@@ -42,6 +42,23 @@ struct Job {
 	parts: Vec<mpsc::Receiver<wgpu::CommandBuffer>>,
 	last: Option<wgpu::CommandBuffer>,
 	frame: wgpu::SurfaceTexture,
+	/// [PC] ReShade add-on: where the frame's submit is split and the hook that runs there (`Cuts::split`).
+	mid: Option<(usize, Hook)>,
+}
+
+/// [PC] ReShade add-on (gpu/reshade.rs): runs on the submitting thread between the two halves of a frame's submit.
+pub(super) type Hook = Box<dyn FnOnce() + Send>;
+
+/// Submits `cmds`; with `mid` = (n, hook): the first n, then the hook, then the rest (the hook's work lands between them on the queue).
+fn submit_parts(q: &wgpu::Queue, mut cmds: Vec<wgpu::CommandBuffer>, mid: Option<(usize, Hook)>) {
+	let Some((n, hook)) = mid else {
+		q.submit(cmds);
+		return;
+	};
+	let rest = cmds.split_off(n.min(cmds.len()));
+	q.submit(cmds);
+	hook();
+	q.submit(rest);
 }
 
 /// True while a frame's command buffers are handed over but not yet submitted.
@@ -123,13 +140,13 @@ impl Presenter {
 					let (mut n, mut ns) = (0u64, 0u64);
 					let mut sub = (0u64, 0u64);
 					while let Ok(job) = rx.recv() {
-						let Job { parts, last, frame } = job;
+						let Job { parts, last, frame, mid } = job;
 						if let Some(last) = last {
 							let t0 = Instant::now();
 							let mut cmds: Vec<wgpu::CommandBuffer> = parts.into_iter().filter_map(|rx| rx.recv().ok()).collect();
 							cmds.push(last);
 							let t1 = t0.elapsed().as_nanos() as u64;
-							q.submit(cmds);
+							submit_parts(&q, cmds, mid);
 							sub = (sub.0 + t1, sub.1 + t0.elapsed().as_nanos() as u64 - t1);
 							g.clear();
 						}
@@ -176,7 +193,7 @@ impl Presenter {
 			self.flush();
 		}
 		*self.busy.0.lock().unwrap() = true;
-		if let Err(mpsc::SendError(job)) = tx.send(Job { parts: Vec::new(), last: None, frame }) {
+		if let Err(mpsc::SendError(job)) = tx.send(Job { parts: Vec::new(), last: None, frame, mid: None }) {
 			*self.busy.0.lock().unwrap() = false;
 			self.queue.present(job.frame);
 		}
@@ -187,7 +204,7 @@ impl Presenter {
 	/// viewer's `GatedQueue` meanwhile waits for the submit. Otherwise submit here and present as `present`.
 	pub(super) fn present_frame(&self, cuts: Cuts, last: wgpu::CommandBuffer, frame: wgpu::SurfaceTexture) {
 		let Some((tx, _)) = self.worker.as_ref().filter(|_| self.defer && cuts.mode == 2) else {
-			self.queue.submit(cuts.take(last));
+			cuts.submit(&self.queue, last);
 			self.present(frame);
 			return;
 		};
@@ -197,11 +214,11 @@ impl Presenter {
 		}
 		*self.busy.0.lock().unwrap() = true;
 		self.gate.set();
-		let job = Job { parts: cuts.parts, last: Some(last), frame };
-		if let Err(mpsc::SendError(Job { parts, last, frame })) = tx.send(job) {
+		let job = Job { parts: cuts.parts, last: Some(last), frame, mid: cuts.mid };
+		if let Err(mpsc::SendError(Job { parts, last, frame, mid })) = tx.send(job) {
 			let mut cmds: Vec<wgpu::CommandBuffer> = parts.into_iter().filter_map(|rx| rx.recv().ok()).collect();
 			cmds.extend(last);
-			self.queue.submit(cmds);
+			submit_parts(&self.queue, cmds, mid);
 			self.gate.clear();
 			*self.busy.0.lock().unwrap() = false;
 			self.queue.present(frame);
@@ -226,6 +243,8 @@ impl Drop for Presenter {
 pub(super) struct Cuts {
 	mode: u8,
 	parts: Vec<mpsc::Receiver<wgpu::CommandBuffer>>,
+	/// [PC] ReShade add-on: (parts before the split, hook), set by `split`.
+	mid: Option<(usize, Hook)>,
 }
 
 impl Cuts {
@@ -234,7 +253,29 @@ impl Cuts {
 		// Fewer than 3 hardware threads: nothing to run the finishes on, keep the single encoder.
 		let few = std::thread::available_parallelism().map_or(false, |n| n.get() < 3);
 		let mode = *MODE.get_or_init(|| std::env::var("RAC_ENC_SPLIT").ok().and_then(|v| v.parse().ok()).unwrap_or(if few { 0 } else { 2 }));
-		Cuts { mode, parts: Vec::new() }
+		Cuts { mode, parts: Vec::new(), mid: None }
+	}
+
+	/// [PC] ReShade add-on: ends the current encoder like `cut` (also in mode 0, finishing it here when not in mode 2) and
+	/// makes the submit of the frame two: everything up to here, then `hook`, then the rest.
+	pub(super) fn split(&mut self, device: &wgpu::Device, enc: &mut wgpu::CommandEncoder, hook: Hook) {
+		let old = std::mem::replace(enc, device.create_command_encoder(&Default::default()));
+		let (tx, rx) = mpsc::channel();
+		if self.mode == 2 {
+			finish_pool().spawn(move || {
+				let _ = tx.send(old.finish());
+			});
+		} else {
+			let _ = tx.send(old.finish());
+		}
+		self.parts.push(rx);
+		self.mid = Some((self.parts.len(), hook));
+	}
+
+	/// Submits the frame's command buffers (`take`), in two halves with the hook between them when `split` was used.
+	pub(super) fn submit(mut self, q: &wgpu::Queue, last: wgpu::CommandBuffer) {
+		let mid = self.mid.take();
+		submit_parts(q, self.take(last), mid);
 	}
 
 	/// Ends the current encoder (no open pass allowed) and continues with a fresh one in `enc`.

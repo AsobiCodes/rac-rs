@@ -1,3 +1,5 @@
+//! Test helpers (a jump state, a water world) and notes for the hero sound-cue tests (AUD-11e, HERO-23).
+//! Test-only (`cfg(test)`) leftover from the retired hand port; the test bodies are gone. Do not extend.
 use super::*;
 
 // AUD-11e test 2: coming up from under water (prev group 0x11) into the surface state queues the breath cues.

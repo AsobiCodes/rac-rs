@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.4.0
+
+- Updating from v0.3.1 takes about 2 to 10 minutes (only the parts that changed are rebuilt). Your saves and settings are kept.
+- New: the RAC-RS Launcher (its own download, github.com/AsobiCodes/rac-rs-launcher; Setup offers to install it). Play, change every option, manage texture packs and mods, keep several game versions side by side, profiles, updates with a backup of your current version first.
+- New: mods. Script mods run through the OmniLoader mod loader, which now comes with the game. Turn mods on or off in the launcher's Mods page or on the title screen under Options > Mods (not in the pause menu). With no mod switched on the game plays exactly as before.
+- New: Arsenal Mastery comes preinstalled, switched off. A fan-remaster style mod: weapons level up like in Ratchet & Clank 3, Nanotech levels raise Ratchet's health, enemies are rebalanced to match. Turn it on in the launcher (Mods page) when you want it; its own settings are there too.
+- New: PCSX2 texture packs. Add a pack made for PCSX2 (folder or .zip) in the launcher, or import it from your PCSX2 texture folder. Packs work on world textures, water, sky, chrome and glass, the ship, particles, grass, and the HUD and menus. A pack made for the other disc region mostly works too. Title screen Options > Mods turns packs on or off; while one is on, Pause > Options > Mods has the switches in game too.
+- New: DirectX 12 option (Options > Graphics > Screen > Renderer), with HUD Sharp. Vulkan stays the default.
+- New: ReShade works with the game (Vulkan and DirectX 12), with depth, and its effects stay under the HUD.
+- New: Setup can add the game to Steam.
+- Graphics (Enhanced lighting): volumetric fog and 3D clouds per planet, shining stars in starry skies, Gemlik's animated star with its own light and shadows, water seen from above and from below, tides, waves that move around Ratchet and water that rises and falls smoothly, Enhanced water on Kalebo III, smoother texture detail changes, Veldin's light follows the painted sun, more grass and plants on Umbris and in swamps.
+- New: Graphics Preset row in Pause > Options (Low / Medium / High / Custom, the same presets as the launcher).
+- Culling Off (Options > Graphics) now also draws far-away objects past the draw distance and lets off-screen things cast shadows.
+- Debug mode (Pause > Options > Controls, last page): F10 shows the original look and the new one side by side in a split screen (with a texture pack on, the original half keeps the disc's own textures), F11 hides the HUD.
+- Strafing while aiming now feels like Ratchet & Clank 2 (start, stop and turn). Clank, the Pyrocitor and the gloves stay in place while you walk backwards.
+- Camera: a Mouse speed row next to Camera speed (Camera speed now sets the right stick only). The Modern camera turns with the stick like with the mouse.
+- New: Skip intro (Options > Graphics, page System, or in the launcher): starts straight at the title screen without the logo movie (about 4 seconds instead of 18). Off by default.
+- Fixed: in 16:9 the HUD no longer smears into the side margins. RivaTuner no longer freezes the game on Vulkan. Setup now works on exFAT drives (and other drives that cannot make file links, such as many USB sticks and SD cards): it installs Rust there without rustup, everything stays inside the game folder.
+- Fixed: playing with a controller, the mouse pointer no longer appears in the middle of the screen when you pause; it shows only when you move the mouse. Setup now fits on screen at large Windows display scales (up to 300%).
+- Fixed: the oxygen tank no longer shows as a pink block at the screen edge, no smoke trail when wading, no sunlight in roofed caves or under water where the sun cannot reach, and Kerwan's city chasm shows fog again instead of water.
+- Fixed: the Enhanced sea surface no longer jiggles near Ratchet (worst at lower frame rates). Mods work on the USA disc too.
+- Speed: the busiest game functions run as native PC code: the game logic needs about 9% less CPU time. It plays exactly the same.
+- Speed: the graphics need less GPU time: the sea skips wave work far from any shore (Umbris about 30% more fps), the HUD capture no longer waits for the GPU, High fog and clouds use a cheaper grid with the same look (about 10-15 fps more), and fog no longer shades plants hidden behind walls (Vulkan).
+- Thank you: the garage on Veldin shows drawings for the project's first supporters.
+
 ## v0.3.1
 
 - Fixed: on some AMD graphics cards (reported on a Radeon RX 9070 XT) the game window stayed white and "Not Responding" at the start. On AMD and Intel graphics the HUD capture runs on the processor again, as in v0.2.2, and the game hands its pictures to the screen the way v0.2.2 did. NVIDIA cards keep the faster way from v0.3.0. Because of this, on AMD and Intel graphics HUD Sharp only sharpens the title screen and main menu for now; in game, the on-screen text, icons, menus and shop keep the Original look.

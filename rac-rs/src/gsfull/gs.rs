@@ -15,6 +15,8 @@ use super::gs_queue::{Queue, RasterStats};
 use super::gs_raster::{Ctx, Prim};
 use std::collections::HashMap;
 
+mod texname;
+
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct Vtx {
     pub x: u16,
@@ -425,6 +427,7 @@ impl Gs {
     }
 
     fn trx_start(&mut self) {
+        texname::bump();
         let (bb, pos, rr) = (self.r[0x50], self.r[0x51], self.r[0x52]);
         let (dbp, dbw, dpsm) = (((bb >> 32) & 0x3fff) as u32, ((bb >> 48) & 0x3f) as u32, ((bb >> 56) & 0x3f) as u32);
         let (dx, dy) = (((pos >> 32) & 0x7ff) as u32, ((pos >> 48) & 0x7ff) as u32);
@@ -541,6 +544,7 @@ impl Gs {
     }
 
     fn local_copy(&mut self) {
+        texname::bump();
         let (bb, pos, rr) = (self.r[0x50], self.r[0x51], self.r[0x52]);
         self.queue.copy(bb, pos, rr);
         self.stats.local_copies += 1;
@@ -742,6 +746,9 @@ impl Gs {
     fn draw(&mut self, ty: u32, vs: &[Vtx; 3]) {
         if self.skip_prog == Some(self.prog) {
             return;
+        }
+        if crate::texpack::discover::on().is_some() {
+            self.note_texture(ty, vs); // [PC] DEV RAC_TEXNAMES (gs/texname.rs)
         }
         let at = self.attrs();
         let mut vs = *vs;

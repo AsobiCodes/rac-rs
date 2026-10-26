@@ -1,3 +1,6 @@
+//! Bomb Glove helpers of the old hand-port `Game`: the held bomb's grey pulse (`bomb_held_tint`) and the landing-marker reticle
+//! quads (spin and placement, `reticle_quads`).
+//! Leftover from the retired hand port; still compiled because retail mode uses part of `game::Game` (the prop pools). Do not extend.
 use super::*;
 
 impl Game {

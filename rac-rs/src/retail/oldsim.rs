@@ -1,4 +1,4 @@
-//! Effects the mirror draws from rac-rs's OLD simulation state, read from retail RAM instead (lane "old").
+//! Effects the mirror draws from rac-rs's OLD simulation state, read from retail RAM instead.
 //!
 //! In retail mode `Game::update` never runs, so every draw state that only the old tick advanced stayed frozen: the
 //! level frame counter (`Game.frames`: ocean texture blend, sky shell spin, waterfall, Clank pulse), the glint pool

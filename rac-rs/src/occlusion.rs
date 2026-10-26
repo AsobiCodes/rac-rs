@@ -79,6 +79,36 @@ pub fn occ_pass(mask: &[u8; 128], occ: u16) -> bool {
 	occ as u8 & mask[(occ >> 8) as usize & 0x7f] != 0
 }
 
+/// The OR of the 128-byte masks of every cell the grid indexes (z rows, y columns, x cells; 0xffff = empty).
+fn grid_union(d: &[u8]) -> [u8; 128] {
+	let mut ever = [0u8; 128];
+	let rd = |o: usize| u16_at(d, o).ok().map(|v| v as usize);
+	let (Some(base), Some(nz)) = (u32_at(d, 0).ok().map(|v| v as usize), rd(6)) else { return [0xff; 128] };
+	let mut seen = std::collections::HashSet::new();
+	for z in 0..nz {
+		let Some(row) = rd(8 + 2 * z).filter(|&r| r != 0).map(|r| r * 4) else { continue };
+		let Some(ny) = rd(row + 2) else { continue };
+		for y in 0..ny {
+			let Some(col) = rd(row + 4 + 2 * y).filter(|&c| c != 0).map(|c| c * 4) else { continue };
+			let Some(nx) = rd(col + 2) else { continue };
+			for x in 0..nx {
+				if let Some(idx) = rd(col + 4 + 2 * x).filter(|&i| i != 0xffff) {
+					seen.insert(idx);
+				}
+			}
+		}
+	}
+	for idx in seen {
+		if let Some(m) = d.get(base + 128 * idx..base + 128 * idx + 128) {
+			for (a, b) in ever.iter_mut().zip(m) {
+				*a |= b;
+			}
+		}
+	}
+	ever[0x7f] |= 0x80;
+	ever
+}
+
 #[derive(Clone)]
 pub struct Occlusion {
 	grid: Option<Vec<u8>>,
@@ -91,12 +121,16 @@ pub struct Occlusion {
 	/// Retail mode: the mask retail itself built this field (RAM 0x174100 + level shift). Used as is instead of the grid lookup,
 	/// which disagrees with retail where the camera leaves the grid (the Drek's Fleet ship fight).
 	pub forced: Option<[u8; 128]>,
+	/// [PC] The union of every grid cell's mask: a bit clear here is visible from no camera cell (hidden by design). Under
+	/// Culling Off such an object stays hidden (`ever_visible`).
+	ever: [u8; 128],
 }
 
 impl Occlusion {
 	pub fn new(grid: Option<Vec<u8>>, map: Option<&OccMap>) -> Occlusion {
 		let enabled = grid.as_ref().is_some_and(|g| !g.is_empty()) && map.is_some();
-		Occlusion { grid, enabled, mode: 0, last: None, mask: [0xff; 128], forced: None }
+		let ever = if enabled { grid.as_deref().map_or([0xff; 128], grid_union) } else { [0xff; 128] };
+		Occlusion { grid, enabled, mode: 0, last: None, mask: [0xff; 128], forced: None, ever }
 	}
 
 	/// The level's grid (core index +0x0c; the title scene has none) and mapping block.
@@ -200,6 +234,17 @@ impl Occlusion {
 			}
 		}
 		self.mask[0x7f] |= 0x80;
+	}
+
+	/// [PC] Whether some camera cell of the level shows an object with `bytes`. Unmapped objects test bit 1023, which every mask
+	/// keeps set, so they are always visible (retail draws them too); with no occlusion data everything is.
+	pub fn ever_visible(&self, bytes: (u8, u8)) -> bool {
+		!self.enabled || bytes.0 & self.ever[bytes.1 as usize & 0x7f] != 0
+	}
+
+	/// `ever_visible` for a moby's occlusion u16 (mask byte low, index byte high).
+	pub fn ever_visible_moby(&self, occ: u16) -> bool {
+		self.ever_visible((occ as u8, (occ >> 8) as u8))
 	}
 
 	/// Whether an object with `bytes` is drawn under the current mask.
@@ -307,6 +352,51 @@ mod tests {
 		assert!(o.passes((1, 0)) && o.passes(UNMAPPED));
 	}
 
+	/// A two-cell grid (masks 0x01 and 0x02 in byte 0): the union of its cells is what some camera cell can see.
+	fn two_cells() -> Vec<u8> {
+		let mut g = vec![0u8; 32 + 256];
+		g[0..4].copy_from_slice(&32u32.to_le_bytes());
+		for (at, v) in [(6, 1u16), (8, 3), (14, 1), (16, 5), (22, 2), (24, 0), (26, 1)] {
+			g[at..at + 2].copy_from_slice(&v.to_le_bytes());
+		}
+		g[32] = 0x01;
+		g[32 + 128] = 0x02;
+		g
+	}
+
+	#[test]
+	fn ever_visible_is_the_union_of_every_cell() {
+		let g = two_cells();
+		assert_eq!(&grid_union(&g)[..2], &[0x03, 0]);
+		let mut map = OccMap::default();
+		map.ties.push((0, 1));
+		let o = Occlusion::new(Some(g), Some(&map));
+		assert!(o.enabled);
+		// Bits 0 and 1 of byte 0 are set in some cell, bit 2 in none; byte 0x7f keeps the always-visible bit 7 (unmapped objects).
+		assert!(o.ever_visible((0x01, 0)) && o.ever_visible((0x02, 0)));
+		assert!(!o.ever_visible((0x04, 0)) && !o.ever_visible((0x01, 1)));
+		assert!(o.ever_visible(UNMAPPED) && o.ever_visible_moby(MOBY_UNMAPPED));
+		assert!(o.ever_visible_moby(0x0001) && !o.ever_visible_moby(0x0004));
+		// No occlusion data: every object is visible.
+		assert!(Occlusion::new(None, None).ever_visible((0x04, 0)));
+	}
+
+	/// Veldin (disc): 25 ties and 16 terrain fragments are set in no grid cell (hidden by design), every moby pair is.
+	#[test]
+	fn veldin_objects_no_cell_sees() {
+		let l = veldin();
+		let o = Occlusion::from_level(&l);
+		let map = OccMap::new(&l.gameplay).unwrap();
+		let (_, tfrags) = crate::terrain::terrain_lods(l.terrain_block().unwrap(), None, Some(&map)).unwrap();
+		let never: Vec<usize> = (0..tfrags.len()).filter(|&i| !o.ever_visible(tfrags[i].cull.occ)).collect();
+		assert_eq!(never.len(), 16);
+		assert!(never.contains(&407), "the big piece at (173, 282, 26)");
+		let ids: Vec<u32> = map.ties.iter().map(|p| p.1).collect();
+		assert_eq!(tie_bytes(&map, &ids).into_iter().filter(|&b| !o.ever_visible(b)).count(), 25);
+		let seen = |m: &(u32, u32)| o.ever_visible(bit_bytes(m.0));
+		assert!(map.mobys.iter().all(seen));
+	}
+
 	/// REN-CULL-OCC-M1 tests (1)-(2) on a one-cell grid: outside it with no neighbour, mode 1 gives all 0xff instead of
 	/// `last`, and the mode is 0 again after the update.
 	#[test]
@@ -321,7 +411,8 @@ mod tests {
 		w(&mut g, 22, 1);
 		w(&mut g, 24, 0);
 		g[32..].fill(1);
-		let mut o = Occlusion { grid: Some(g), enabled: true, mode: 0, last: None, mask: [0xff; 128], forced: None };
+		let ever = grid_union(&g);
+		let mut o = Occlusion { grid: Some(g), enabled: true, mode: 0, last: None, mask: [0xff; 128], forced: None, ever };
 		o.update([1.0, 1.0, 1.0]);
 		assert_eq!(o.mask[0], 1);
 		o.update([100.0, 100.0, 100.0]);

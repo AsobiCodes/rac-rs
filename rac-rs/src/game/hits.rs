@@ -1,3 +1,6 @@
+//! Hit and attack code of the old hand-port `Game`: only an empty `impl Game` and an empty `attack` module (the collector-query
+//! (radius, mask) table per owner) are left.
+//! Leftover from the retired hand port; still compiled because retail mode uses part of `game::Game` (the prop pools). Do not extend.
 use super::*;
 
 

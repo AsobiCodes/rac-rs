@@ -9,6 +9,9 @@
 
 use crate::mesh::Mesh;
 
+mod soft;
+pub(super) use self::soft::soft_keys;
+
 /// Which Graphics row turns the ice on (`ICE_GATE`; Water = only while Water is Enhanced too).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Gate {
@@ -60,15 +63,16 @@ pub(super) fn ice_keys(level: usize) -> (&'static [u32], &'static [u32]) {
 const HOVEN_TIES: &[u32] = &[0x2002f, 0x20031];
 const HOVEN_SHRUBS: &[u32] = &[0x30008];
 
-/// Marks the vertices of class `base` (-3 tie, -2 shrub) whose key is in `ice` and clears the rest; true when any changed.
-pub(super) fn retag(verts: &mut [super::Vertex], keys: &[u32], ice: &[u32], base: f32) -> bool {
+/// Marks the vertices of class `base` (-3 tie, -2 shrub) whose key is in `ice` (the ice mark) or in `soft` (the soft-alpha mark of
+/// `soft.rs`, no ice look and no crisp alpha) and clears the rest; true when any changed.
+pub(super) fn retag(verts: &mut [super::Vertex], keys: &[u32], ice: &[u32], soft: &[u32], base: f32) -> bool {
 	let mut changed = false;
 	for (v, k) in verts.iter_mut().zip(keys) {
 		let w = v.light[3];
 		if (w - base).abs() > 0.4 {
 			continue;
 		}
-		let want = if ice.contains(k) { base - MARK } else { base };
+		let want = if ice.contains(k) { base - MARK } else if soft.contains(k) { base - soft::SOFT_MARK } else { base };
 		if w != want {
 			v.light[3] = want;
 			changed = true;
@@ -88,5 +92,5 @@ pub(super) fn flag(level: usize) -> f32 {
 		Gate::Lighting => g.enhanced(),
 		Gate::Water => g.enhanced() && g.water,
 	};
-	if on { 1.0 + ICE_LOOK } else { 1.0 }
+	if crate::retail::splitview::fx(on) { 1.0 + ICE_LOOK } else { 1.0 }
 }

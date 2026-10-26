@@ -1,4 +1,4 @@
-//! The SPU2 effect (reverb) unit, integer-exact, one instance per core (stage 10c).
+//! The SPU2 effect (reverb) unit, integer-exact, one instance per core.
 //!
 //! Behaviour written from the documented SPU2 effect network (PCSX2 SPU2 Reverb.cpp / ReverbResample.cpp are a
 //! behaviour reference only; nothing is copied): the unit runs on every output sample but computes the network at 24 kHz

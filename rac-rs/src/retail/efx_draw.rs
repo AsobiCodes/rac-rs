@@ -1,4 +1,4 @@
-//! EFFECTS LAYER (stage 3): every owned draw-queue callback whose packets are PATH2 DIRECT GIF only (the EE built the
+//! EFFECTS LAYER: every owned draw-queue callback whose packets are PATH2 DIRECT GIF only (the EE built the
 //! GS packets itself, no VU1 program) is drawn in the mirror from its own GS data, with no per-effect code.
 //!
 //! Source of each part [C]:
@@ -89,6 +89,8 @@ struct View {
 	cy: f32,
 	za: f32,
 	zb: f32,
+	/// [PC] Added to every world point (`shifted`).
+	shift: [f32; 3],
 }
 
 impl View {
@@ -97,7 +99,7 @@ impl View {
 		let v3 = |i: usize| [f(i), f(i + 1), f(i + 2)];
 		let left = v3(6);
 		let near = f(12);
-		let v = View { eye: v3(0), f: v3(3), r: left.map(|x| -x), u: v3(9), near, sx: f(13) * near, sy: f(14) * near, cx: f(17), cy: f(18), za: f(19) + near * f(15), zb: near * f(16) };
+		let v = View { eye: v3(0), f: v3(3), r: left.map(|x| -x), u: v3(9), near, sx: f(13) * near, sy: f(14) * near, cx: f(17), cy: f(18), za: f(19) + near * f(15), zb: near * f(16), shift: [0.0; 3] };
 		(v.sx > 0.0 && v.sy > 0.0 && v.zb > 0.0 && near > 0.0).then_some(v)
 	}
 
@@ -107,7 +109,13 @@ impl View {
 		let vz = if dz > 0.0 && z <= 16_776_656.0 { self.zb / dz } else if q > 0.0 { self.near / q } else { return None };
 		let d = vz / 1024.0;
 		let (a, b) = ((x - self.cx) / self.sx * d, -(y - self.cy) / self.sy * d);
-		Some([0, 1, 2].map(|k| self.eye[k] + self.f[k] * d + self.r[k] * a + self.u[k] * b))
+		Some([0, 1, 2].map(|k| self.eye[k] + self.f[k] * d + self.r[k] * a + self.u[k] * b + self.shift[k]))
+	}
+
+	/// [PC] This view with its world points moved by `d` (BuildIn `shift`: the Thruster-Pack's flames while strafing).
+	fn shifted(mut self, d: Option<[f32; 3]>) -> View {
+		self.shift = d.unwrap_or([0.0; 3]);
+		self
 	}
 }
 
@@ -405,7 +413,7 @@ fn fog_tex(tex: usize, f: [u8; 3], fogcol: Option<u32>) -> usize {
 }
 
 /// `tex` of an FGE 0 FIX strip: not fogged at all.
-fn fog_off(tex: usize) -> usize {
+pub(crate) fn fog_off(tex: usize) -> usize {
 	tex | FOG_OFF
 }
 
@@ -477,6 +485,10 @@ pub struct BuildIn {
 	env: Vec<(u8, u64)>,
 	slots: Vec<u64>,
 	level: u32,
+	/// [PC] Per owner: the move its world points get (retail/strafe.rs `exhaust_shift`), None for most.
+	shift: Vec<Option<[f32; 3]>>,
+	/// [PC] Free camera: Hoven's abyss water built for any view (retail/free_water.rs; empty with the game camera).
+	pub free_water: Vec<WorldStrip>,
 }
 
 /// `BuildIn` of the field the machine has just ended (reads RAM).
@@ -493,7 +505,9 @@ fn capture_inner(m: &Machine, level: u32, own: &[Own]) -> BuildIn {
 	let env = (0..10).map(|k| DRAW_ENV + 16 * k).map(|a| (m.rd32(a + 8) as u8, m.rd32(a) as u64 | (m.rd32(a + 4) as u64) << 32)).collect();
 	let tbl = va(SLOT_TABLE.wrapping_add_signed(*super::LEVEL_SHIFT.get(level as usize).unwrap_or(&0)));
 	let slots = (0..SLOTS).map(|n| tbl + 16 * n).map(|a| m.rd32(a) as u64 | (m.rd32(a + 4) as u64) << 32).collect();
-	BuildIn { own: own.to_vec(), pkts, env, slots, level }
+	let shift = own.iter().map(|o| super::strafe::exhaust_shift(m, o.arg)).collect();
+	let free_water = super::free_water::capture(m, level, own);
+	BuildIn { own: own.to_vec(), pkts, env, slots, level, shift, free_water }
 }
 
 /// `build` from a captured `BuildIn` (no machine access: any thread).
@@ -508,7 +522,7 @@ pub fn build_in(b: &BuildIn, vu: &super::efx_vu::VuOut, out: &mut Vec<WorldQuad>
 			st.skip[0] += 1;
 			continue;
 		};
-		let view = View::new(&o.view);
+		let view = View::new(&o.view).map(|v| v.shifted(b.shift[k]));
 		let (Some(view), true) = (view, p.ok) else {
 			st.skip[2] += 1;
 			continue;

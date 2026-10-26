@@ -7,6 +7,9 @@ use rayon::prelude::*;
 
 pub(super) mod pmemo;
 pub(super) mod gpu;
+pub(super) mod gpu_shared;
+#[cfg(test)]
+mod gpu_shared_tests;
 
 #[derive(Clone, Copy)]
 struct St {
@@ -309,6 +312,11 @@ impl Gs {
     }
 
     fn raster(&mut self, st: &St, ty: u32, vs: &[Vtx]) {
+        if st.ov && matches!(ty, 3..=6) {
+            let n = if ty == 6 { 2 } else { 3 };
+            let v: Vec<(f32, f32)> = vs.iter().take(n).map(|v| (v.x as f32 / 16.0 - st.ofx, v.y as f32 / 16.0 - st.ofy)).collect();
+            super::edge_cut::note(st.sc, &v);
+        }
         if self.gpu.is_some() {
             self.gpu_raster(st, ty, vs);
             return;
@@ -351,6 +359,7 @@ impl Gs {
 
     /// Ends the overlay frame: the finished overlay becomes `done`.
     fn publish(&mut self) {
+        super::edge_cut::publish();
         let t0 = self.prof.is_some().then(std::time::Instant::now);
         let gpu = self.gpu.is_some();
         let mut rows = self.cur.rows;
@@ -433,6 +442,7 @@ impl Gs {
         self.copied = false;
         self.to_disp = false;
         let Some(px) = self.dcur.take() else { return };
+        super::edge_cut::publish();
         let t0 = self.prof.is_some().then(std::time::Instant::now);
         if self.gpu.is_some() {
             let o = gpu::meta(self.cur.w, self.cur.h, self.held_rows, false, true);

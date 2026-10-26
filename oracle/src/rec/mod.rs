@@ -58,6 +58,38 @@ pub fn register_hand(set: &'static [Hand]) {
     }
 }
 
+static RELOC_HANDS: std::sync::Mutex<Vec<&'static crate::hs_reloc::RelocHand>> = std::sync::Mutex::new(Vec::new());
+
+/// Adds a relocatable speed hand (S2i, hs_reloc.rs; once per hand). `Table::build` installs it at the entry of EVERY recompiled function
+/// (any level, either disc) whose code words equal its template with the relocated fields masked. ORACLE_HAND=0 leaves them out.
+pub fn register_reloc_hand(h: &'static crate::hs_reloc::RelocHand) {
+    let mut s = RELOC_HANDS.lock().unwrap();
+    if !s.iter().any(|x| std::ptr::eq(*x, h)) {
+        s.push(h);
+    }
+}
+
+/// S4: are the relocatable speed hands (built-in ones in `hs_hands::reloc_all` and registered ones) installed? `RAC_HS=0` turns them all off (A/B against
+/// the recompiled code; ORACLE_HAND=0 turns off every hand incl. PC hooks). Read once per process.
+pub fn speed_hands_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    match HS_FORCE.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => true,
+        2 => false,
+        _ => *ON.get_or_init(|| !std::env::var("RAC_HS").is_ok_and(|v| v == "0")),
+    }
+}
+static HS_FORCE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+/// Tools (hsbench): overrides RAC_HS for the following `Table::build` calls (None = back to the environment).
+pub fn speed_hands_force(on: Option<bool>) {
+    HS_FORCE.store(match on { None => 0, Some(true) => 1, Some(false) => 2 }, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The registered relocatable speed hands (tools).
+pub fn reloc_hands() -> Vec<&'static crate::hs_reloc::RelocHand> {
+    RELOC_HANDS.lock().unwrap().clone()
+}
+
 /// The registered hand-written functions (tools).
 pub fn hands() -> Vec<&'static Hand> {
     HANDS.lock().unwrap().iter().flat_map(|s| s.iter()).collect()
@@ -92,6 +124,8 @@ pub struct Table {
     /// changed rebuilds the table (`Cpu::rec_flushed`).
     probe: Vec<(u32, u32)>,
     hand: std::collections::HashMap<u32, (fn(&mut Cpu) -> bool, u64)>,
+    /// The same hands as a short list for `run_hand` (a linear scan of a few entries beats a SipHash lookup: ~14 ns per hand call).
+    hlin: Vec<(u32, fn(&mut Cpu) -> bool, u64)>,
     /// (entry, end) of every function in the sets used, by entry (`gap_frame`).
     spans: Vec<(u32, u32)>,
 }
@@ -112,6 +146,7 @@ impl Table {
             probe: Vec::new(),
             hand_bits: vec![0; ((hi - lo) / 4 / 64) as usize],
             hand: std::collections::HashMap::new(),
+            hlin: Vec::new(),
             spans: Vec::new(),
         };
         if (1..=6).contains(&loader) {
@@ -152,7 +187,10 @@ impl Table {
                 if h.entry >= lo && h.end <= hi && hash(mem, h.entry, h.end) == h.hash {
                     let i = ((h.entry - lo) / 4) as usize;
                     t.hand_bits[i >> 6] |= 1 << (i & 63);
-                    t.hand.insert(h.entry, (h.f, if scale == 100 { h.est } else { h.est * scale / 100 }));
+                    let est = if scale == 100 || h.est == crate::hs::EXACT { h.est } else { h.est * scale / 100 };
+                    t.hand.insert(h.entry, (h.f, est));
+                    t.hlin.retain(|x| x.0 != h.entry);
+                    t.hlin.push((h.entry, h.f, est));
                     // A hand in use also probes its entry words: changed code under a hand rebuilds the table.
                     for a in [h.entry, h.entry + 4] {
                         if a < h.end {
@@ -160,6 +198,37 @@ impl Table {
                         }
                     }
                 }
+            }
+        }
+        // Relocatable speed hands (S2i): every recompiled function of the sets in use whose code matches the template is a hand entry.
+        if !std::env::var("ORACLE_HAND").is_ok_and(|v| v == "0") && speed_hands_on() {
+            let spans = t.spans.clone();
+            let mut all = crate::hs_hands::reloc_all();
+            for rh in reloc_hands() {
+                if !all.iter().any(|x| std::ptr::eq(*x, rh)) {
+                    all.push(rh);
+                }
+            }
+            let mut n_hs = 0u32;
+            for rh in all {
+                let r = (rh.reloc)();
+                for &(e, en) in &spans {
+                    if e >= lo && en <= hi && en - e == r.len && r.matches(mem, e) {
+                        let i = ((e - lo) / 4) as usize;
+                        t.hand_bits[i >> 6] |= 1 << (i & 63);
+                        t.hand.insert(e, (rh.f, rh.est));
+                        t.hlin.retain(|x| x.0 != e);
+                        t.hlin.push((e, rh.f, rh.est));
+                        for a in [e, e + 4] {
+                            t.probe.push((a, rd(mem, a)));
+                        }
+                        n_hs += 1;
+                    }
+                }
+            }
+            if n_hs > 0 {
+                // One line per table build, so a run log shows the speed hands are live (RAC_HS=0 turns them off).
+                eprintln!("rec: {n_hs} speed hand(s) installed (RAC_HS=0 = off)");
             }
         }
         // `stale` tests whether any probe differs: a sorted, deduplicated list gives the same answer with fewer
@@ -315,7 +384,11 @@ impl Cpu {
     #[inline(never)]
     #[doc(hidden)]
     pub fn run_hand(&mut self, entry: u32) -> bool {
-        let Some(&(f, est)) = self.rec.as_ref().and_then(|t| t.hand.get(&entry)) else { return false };
+        let Some(&(_, f, est)) = self.rec.as_ref().and_then(|t| t.hlin.iter().find(|h| h.0 == entry)) else { return false };
+        // A speed hand (lane hs, hs.rs) counts its own instructions and sets the PC itself.
+        if est == crate::hs::EXACT {
+            return f(self);
+        }
         let ra = self.g(31) as u32;
         if !f(self) {
             return false;

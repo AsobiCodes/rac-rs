@@ -1,3 +1,5 @@
+//! Region-5 waterfall particles (types 0x38 mist and 0x39 flow): their state structs and `waterfall_sprites`.
+//! Leftover from the retired hand port; still compiled because retail mode and the renderer still use parts of `particles` (`Rng`, sprite and quad types). Do not extend.
 // NOV-20.4: region-5 waterfall particles (types 0x38 and 0x39).
 use super::*;
 

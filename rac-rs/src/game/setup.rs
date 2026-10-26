@@ -1,3 +1,6 @@
+//! `Game` setup of the old hand port: `with_story` (story bytes in place, then actors and prop pools are built), load-time instance
+//! references, `give` / `resume` (debug and save-anywhere) and what a level change keeps.
+//! Leftover from the retired hand port; still compiled because retail mode uses part of `game::Game` (the prop pools). Do not extend.
 use super::*;
 
 impl Game {
@@ -23,7 +26,7 @@ impl Game {
 		// (FUN_00241528 -> FUN_00250a08); after every pool so no earlier prop index moves. They draw nothing (the class
 		// stays in the baked scenery) and Barrier has no update.
 		for m in instances.iter().filter(|m| levels::static_solids(level).contains(&m.class_id) && !actors.is_dynamic(m.class_id)) {
-			props.push(Prop { class_id: m.class_id, pos: m.pos, rot: m.rot, mirror: false, shown: m.in_phase(&mission), anim: crate::anim::PropAnim::new(0), scale: m.scale, tint: None, light: Some((m.col, m.light)), index: Some(m.index), sched: sched::Sched { dist: m.place.dist, over: 0,  rank: m.place.class_rank,  flags: sched::placed_flags(m.class_id),  draw: m.place.draw, occ: m.occ },  kind: Kind::Scenery });
+			props.push(Prop { class_id: m.class_id, pos: m.pos, rot: m.rot, mirror: false, shown: m.in_phase(&mission), cast: false, anim: crate::anim::PropAnim::new(0), scale: m.scale, tint: None, light: Some((m.col, m.light)), index: Some(m.index), sched: sched::Sched { dist: m.place.dist, over: 0,  rank: m.place.class_rank,  flags: sched::placed_flags(m.class_id),  draw: m.place.draw, occ: m.occ },  kind: Kind::Scenery });
 		}
 		let mut player = Player::new(add(spawn.0, [0.0, 0.0, 0.05]), spawn.1);
 		player.slope_push_on = level == 0; // HERO-2: the downhill push exists on Veldin only

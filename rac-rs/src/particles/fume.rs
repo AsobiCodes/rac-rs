@@ -1,3 +1,5 @@
+//! The fume effect: `FumeParams` (acceleration, size and colour ramps) and `Fume`, a drifting sprite particle built from them.
+//! Leftover from the retired hand port; still compiled because retail mode and the renderer still use parts of `particles` (`Rng`, sprite and quad types). Do not extend.
 use super::*;
 use std::rc::Rc;
 #[derive(Clone,Debug)]

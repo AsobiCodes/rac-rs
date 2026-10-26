@@ -1,3 +1,5 @@
+//! Test helpers (pool and deep-pool worlds, an underwater player) for the hero swim tests.
+//! Test-only (`cfg(test)`) leftover from the retired hand port; the test bodies are gone. Do not extend.
 use super::*;
 
 fn quad(z: f32, h: f32, kind: u8) -> Vec<([V3; 3], u8)> {

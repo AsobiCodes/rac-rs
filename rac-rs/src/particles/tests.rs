@@ -1,3 +1,5 @@
+//! Test helpers for the old `Particles` pool (counting effects, comparing vectors, reading puff / glow / flash effects).
+//! Test-only (`cfg(test)`) leftover from the retired hand port; the test bodies are gone. Do not extend.
 use super::*;
 
 fn count(p: &Particles, f: impl Fn(&Effect) -> bool) -> usize {

@@ -30,6 +30,9 @@ const HERO_YAW: u32 = 0x13f3e8;
 /// The hero's heading vector (cos yaw, sin yaw, 0, 0): the direction the Pyrocitor flame leaves along.
 const HERO_HEADING: u32 = 0x13f9c0;
 const HERO_MOBY: u32 = 0x1413d0;
+/// The hero glow list (fx_queue.rs `hero_glows`): 8 positions 0x10 apart, count i16 at `HERO_GLOW_COUNT`.
+const HERO_GLOWS: u32 = 0x141120;
+const HERO_GLOW_COUNT: u32 = 0x141200;
 const BODY_FORM: u32 = 0x1413f4;
 const GAME_MODE: u32 = 0x15f5a4;
 /// Bomb Glove lock-on target word (hero state 0x23's entry turns the hero toward it).
@@ -113,6 +116,11 @@ pub fn lockon_wide() -> bool {
 	*W.get_or_init(|| super::pcext::enabled() && !std::env::var("RAC_LOCKON_CLASSIC").is_ok_and(|v| v != "0" && !v.is_empty()))
 }
 
+/// `lockon_wide()` at the hand: not cached, so a mod that replaces the lock-on (omni/clash.rs, decided after the hands are registered) is honoured.
+fn wide_now() -> bool {
+	lockon_wide() && !crate::omni::clash::off(crate::omni::clash::LOCKON)
+}
+
 // ---- the aim point ----------------------------------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug)]
@@ -142,6 +150,24 @@ struct S {
 }
 
 static ST: Mutex<S> = Mutex::new(S { field: u32::MAX, aim: None, tick: 0, track: 0, track_left: 0, victim: 0, lock: u32::MAX, slot: (0, 0), slock: None, log: None, log_tried: false });
+
+/// [PC] What the Pyrocitor's held updater placed in the yaw the hook posed the weapon to this field (`pyro_held_any`).
+pub struct PyroFrame {
+	/// The pilot moby (class 179) retail put at the nozzle.
+	pub pilot: u32,
+	/// That yaw: the aim yaw it turned the held pose to, or retail's rows yaw when it did not turn it.
+	pub yaw: f32,
+	/// The hero glow list entries retail queued during the call.
+	pub glows: Vec<[f32; 3]>,
+}
+
+static PYRO_FRAME: Mutex<Option<PyroFrame>> = Mutex::new(None);
+
+/// This field's `PyroFrame` (taken: None the next field unless the hook ran again), for strafe.rs `turn_parts`: the hero's rows
+/// lag his drawn yaw by the field's turn while he turns, so these turn by (drawn - their yaw), not by the rows'.
+pub fn take_pyro_frame() -> Option<PyroFrame> {
+	PYRO_FRAME.lock().ok().and_then(|mut f| f.take())
+}
 
 /// Whether the log (RAC_AIM_LOG=path, tests) is on; opens it on the first call.
 fn log_on(s: &mut S) -> bool {
@@ -551,7 +577,7 @@ fn blaster_search_any(c: &mut Cpu) -> bool {
 	if active() {
 		// The Lock-on row (pcext.rs camopts section): Off, or Auto with the keyboard, leaves the green crosshair centred and the
 		// shot flies to the aim point.
-		if lockon_wide() && super::pcext::lockon_on() {
+		if wide_now() && super::pcext::lockon_on() {
 			strafe_lock(c);
 		} else if let Ok(mut s) = ST.lock() {
 			s.slock = None;
@@ -560,7 +586,7 @@ fn blaster_search_any(c: &mut Cpu) -> bool {
 		return true;
 	}
 	let ab = std::env::var_os("RAC_LOCKON_AB").is_some();
-	if !lockon_wide() && !ab {
+	if !wide_now() && !ab {
 		return false;
 	}
 	let Some(_g) = Guard::take(&G_LOCK) else { return false };
@@ -1022,7 +1048,11 @@ fn pyro_held_any(c: &mut Cpu) -> bool {
 	let Some(aim) = aim_point(c) else { return false };
 	// (address, value before, value written) of every turned word.
 	let mut put: Vec<(u32, u32, u32)> = Vec::new();
+	let h = c.mem.rd32(HERO_MOBY) & PTR;
+	let r0 = rv(c, h + 0xc0);
+	let mut frame = r0[1].atan2(r0[0]);
 	if let Some((sn, cs, hp)) = drawn_turn(c) {
+		frame += sn.atan2(cs);
 		let p = rv(c, held + 0x10);
 		let (x, y) = (p[0] - hp[0], p[1] - hp[1]);
 		let mut w = vec![(held + 0x10, hp[0] + cs * x - sn * y), (held + 0x14, hp[1] + sn * x + cs * y)];
@@ -1047,7 +1077,10 @@ fn pyro_held_any(c: &mut Cpu) -> bool {
 		s.victim = aim.moby;
 		s.track_left = 3;
 	}
+	let glow_count = |c: &mut Cpu| (c.mem.rd16(HERO_GLOW_COUNT) as i16).clamp(0, 8) as u32;
+	let g0 = glow_count(c);
 	c.call(entry);
+	let glows: Vec<[f32; 3]> = (g0..glow_count(c)).map(|i| rv(c, HERO_GLOWS + 0x10 * i)).collect();
 	for (i, x) in saved.iter().enumerate() {
 		c.mem.wr32(HERO_HEADING + 4 * i as u32, *x);
 	}
@@ -1057,12 +1090,17 @@ fn pyro_held_any(c: &mut Cpu) -> bool {
 			c.mem.wr32(a, old);
 		}
 	}
-	// Log only: the pilot moby (*held+0x78) retail placed at the nozzle it used.
+	// The pilot moby (*held+0x78) retail placed at the nozzle it used (logged, and kept in `PyroFrame`).
 	let pv = c.mem.rd32(held + 0x78) & PTR;
 	let pilot = c.mem.rd32(pv) & PTR;
 	let pp = if pilot != 0 { rv(c, pilot + 0x10) } else { [0.0; 3] };
 	let (od, op) = (off_drawn(c, mu), off_drawn(c, pp));
-	trace("pyro_held", format!("nozzle {:.2} {:.2} {:.2} yaw {yaw:.3} elev {elev:.3} state {} turned {} off_drawn {:.2} {:.2} pilot {pilot:#x} off_drawn {:.2} {:.2} dz {:.2}", mu[0], mu[1], mu[2], c.mem.rd8(held + 0x20), !put.is_empty(), od.0, od.1, op.0, op.1, pp[2] - mu[2]));
+	trace("pyro_held", format!("nozzle {:.2} {:.2} {:.2} yaw {yaw:.3} elev {elev:.3} state {} turned {} off_drawn {:.2} {:.2} pilot {pilot:#x} off_drawn {:.2} {:.2} dz {:.2} frame {frame:.3} glows {}", mu[0], mu[1], mu[2], c.mem.rd8(held + 0x20), !put.is_empty(), od.0, od.1, op.0, op.1, pp[2] - mu[2], glows.len()));
+	if h != 0 {
+		if let Ok(mut f) = PYRO_FRAME.lock() {
+			*f = Some(PyroFrame { pilot, yaw: frame, glows });
+		}
+	}
 	true
 }
 

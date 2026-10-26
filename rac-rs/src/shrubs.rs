@@ -289,6 +289,23 @@ impl ShrubCull {
 		}
 		Some(s)
 	}
+
+	/// [PC] Culling Off (viewer/gpu/culling.rs `cull_shrubs`): `state_cap` with no draw distance. The mesh stays opaque up to
+	/// the billboard switch and cross-fades into the billboard there as retail does; the billboard (a class without one: the
+	/// mesh) then stays opaque at any depth instead of fading out and vanishing at the draw distance.
+	pub fn state_open(&self, pz: f32) -> ShrubState {
+		let mut s = ShrubState { mesh: Some(0x80), bb: 0 };
+		if let Some(b) = self.bb {
+			let (from, z) = (b as i32 * 4096, (pz.max(0.0) * 4096.0) as i32);
+			if z >= from {
+				s.bb = ((z - from).min(0x8000) >> 8) as u8;
+				if s.bb == 0x80 {
+					s.mesh = None;
+				}
+			}
+		}
+		s
+	}
 }
 
 /// The camera-facing quad of a far-LOD shrub (REN-CULL-SHRUB-BB): corner k = origin + u (y_k 2 half_w) + up (z_k h + z0), with

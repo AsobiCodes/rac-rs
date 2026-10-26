@@ -1,3 +1,5 @@
+//! [PC] Sharp title / main menu: with the sharp HUD on, the front end's PS2 art quads are sampled with the edge-aware HUD shader
+//! (`fs_hud_sharp`, hudsharp.wgsl) instead of nearest; same positions and blending. Off, nothing changes.
 // [PC] Sharp title / main menu (lane G2, plan_title.md option M-A). The front end the mirror draws (viewer/front_mirror.rs: logo,
 // PRESS START, button text and panel plates, `frontend.rs Menu::draw`) is PS2-native art, 512x448, drawn as HUD quads magnified to the
 // window and sampled nearest: blocky at 1080p. With the sharp HUD on (`retail::ui_sharp`: the option, the extension, a window at least

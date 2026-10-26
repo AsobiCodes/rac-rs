@@ -1,4 +1,4 @@
-//! PC perf (speed lane A, B2 + B3): "same inputs as last frame" keys for `Gpu::set_marker` and `Gpu::cull_ties`, and their
+//! [PC] perf: "same inputs as last frame" keys for `Gpu::set_marker` and `Gpu::cull_ties`, and their
 //! off-by-default check modes (RAC_MARKER_CHECK=1 / RAC_CULL_CHECK=1: do the full work every frame as before, and compare the
 //! result with what the skipped path would have kept, byte for byte; stderr `marker_check:` / `cull_check:` lines count mismatches).
 use super::clip::ClipView;
@@ -47,12 +47,14 @@ impl MarkerKey {
 	}
 }
 
-/// What `cull_ties` reads that can change between frames: the clip view, the occlusion mask, the draw distance mode.
+/// What `cull_ties` reads that can change between frames: the clip view, the occlusion mask, the draw distance mode and
+/// Culling (Off drops the draw distances).
 #[derive(Clone, PartialEq)]
 pub(super) struct TiePassKey {
 	pub view: Option<[u32; 14]>,
 	pub mask: [u8; 128],
 	pub far: Option<super::fardraw::Level>,
+	pub cull: bool,
 }
 
 pub(super) fn view_bits(v: &ClipView) -> [u32; 14] {

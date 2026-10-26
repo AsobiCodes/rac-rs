@@ -1,0 +1,4 @@
+# Enabled mods, one id per line, highest priority first. Written by the RAC-RS Launcher.
+b
+a
+ghost

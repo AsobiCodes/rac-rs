@@ -616,7 +616,7 @@ pub fn bar_fx(off: f32, slot_map: &[Option<usize>]) -> Vec<crate::anim::JointFx>
 		.filter_map(|i| {
 			let joint = slot_map.get(20 + i).copied().flatten()?;
 			let y = if i % 2 == 0 { off } else { -off };
-			Some(crate::anim::JointFx { joint, rot: [0.0, 0.0, 0.0, 1.0], scale: [1.0; 3], off: [0.0, y, 0.0], blend: None, reg: 0 })
+			Some(crate::anim::JointFx { joint, rot: [0.0, 0.0, 0.0, 1.0], scale: [1.0; 3], off: [0.0, y, 0.0], blend: None, reg: 0, mirror: None })
 		})
 		.collect()
 }

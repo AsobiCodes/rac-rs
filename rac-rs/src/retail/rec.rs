@@ -8,6 +8,10 @@
 //!   is the 16-bit active-high mask (4 hex digits; Select 0x100, Start 0x800, d-pad 0x1000 up 0x2000 right 0x4000 down
 //!   0x8000 left, L2 1, R2 2, L1 4, R1 8, Triangle 0x10, Circle 0x20, Cross 0x40, Square 0x80). Sticks are the report
 //!   bytes in decimal, 0..255, 128 = centred;
+//!   Modern-camera runs add columns after RY, only when nonzero: 5 more (mouse x, mouse y, right mouse button, wheel, F7 toggle;
+//!   11 columns in all) and, since 2026-10-23, 2 more (13 columns: the camera keys' share of the right stick, Q/E and Z/X, offset
+//!   from 0x80; modcam_turn.rs `stick_axes` needs it to tell the keys from the controller's stick). Readers take 6, 11 or 13;
+//!   an older file without the key columns replays Q/E/Z/X as the physical stick (the view then turns the other way);
 //! - `FIELD<TAB>!EVENT<TAB>ARGS`: anything that is not a pad read but changes the run. It applies before that field's
 //!   pad is set. `!TRAVEL<TAB>LEVEL` pokes the level-travel request (0x15f5a0 = level, 0x15f5b8 = 1, 0x15f550 = 1);
 //!   `0<TAB>!LOAD<TAB>DIR` starts a new segment: the machine is reloaded from savestate DIR and FIELD restarts at 0
@@ -102,6 +106,10 @@ pub fn field(n: u32, f: &FieldIn) {
 	// Modern camera input (retail/modcam.rs): five extra columns only when nonzero (mouse x, y, RMB, wheel, F7).
 	if !f.mc.is_zero() {
 		s += &format!("\t{}\t{}\t{}\t{}\t{}", f.mc.look[0], f.mc.look[1], f.mc.aim as u8, f.mc.zoom, f.mc.toggle as u8);
+		// The camera keys' share of the right stick (modcam_turn.rs): two more columns only when a key is held.
+		if f.mc.keys != [0; 2] {
+			s += &format!("\t{}\t{}", f.mc.keys[0], f.mc.keys[1]);
+		}
 	}
 	s.push('\n');
 	put(&mut r.pad, &mut r.failed, &s);
@@ -182,14 +190,14 @@ pub fn parse(text: &str) -> Result<Replay, String> {
 			}
 			continue;
 		}
-		if (f.len() != 6 && f.len() != 11) || n != fields.len() {
-			return Err(at(&format!("want field {} with 6 (or 11) columns", fields.len())));
+		if (f.len() != 6 && f.len() != 11 && f.len() != 13) || n != fields.len() {
+			return Err(at(&format!("want field {} with 6 (or 11, 13) columns", fields.len())));
 		}
 		let b = u16::from_str_radix(f[1].trim_start_matches("0x"), 16).map_err(|_| at("bad buttons"))?;
 		let s = |k: usize| f[k].parse::<u8>().map_err(|_| at("bad stick"));
 		let num = |k: usize| f.get(k).and_then(|x| x.parse::<i32>().ok()).unwrap_or(0);
-		let mc = super::modcam::Input { look: [num(6) as i16, num(7) as i16], aim: num(8) != 0, zoom: num(9) as i8, toggle: num(10) != 0 };
-		fields.push(FieldIn { buttons: b, sticks: [s(4)?, s(5)?, s(2)?, s(3)?], travel: travel.take(), mc });
+		let mc = super::modcam::Input { look: [num(6) as i16, num(7) as i16], aim: num(8) != 0, zoom: num(9) as i8, toggle: num(10) != 0, keys: [num(11) as i8, num(12) as i8] };
+		fields.push(FieldIn { buttons: b, sticks: [s(4)?, s(5)?, s(2)?, s(3)?], travel: travel.take(), mc, omni: Default::default() });
 	}
 	if travel.is_some() {
 		return Err("a !TRAVEL after the last field".into());
@@ -207,7 +215,7 @@ mod tests {
 		let r = parse(t).unwrap();
 		assert_eq!(r.state, "x/a b/s07");
 		assert_eq!(r.fields.len(), 3);
-		assert_eq!(r.fields[1], FieldIn { buttons: 0x800, sticks: [30, 40, 10, 20], travel: Some(5), mc: Default::default() });
+		assert_eq!(r.fields[1], FieldIn { buttons: 0x800, sticks: [30, 40, 10, 20], travel: Some(5), mc: Default::default(), omni: Default::default() });
 		assert_eq!(r.fields[2].sticks, [128, 128, 0, 255]);
 		assert!(parse("0\t0000\t1\t1\t1\t1\n").is_err());
 		assert!(parse("# racpad 1 state=x\n1\t0000\t1\t1\t1\t1\n").is_err());

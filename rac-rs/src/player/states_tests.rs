@@ -1,3 +1,5 @@
+//! Test helpers and notes for the hero state tests (wall and landing worlds, landing counts); one test is left, `exit_blend_counts_scale`.
+//! Test-only (`cfg(test)`) leftover from the retired hand port; the test bodies are gone. Do not extend.
 use super::*;
 
 fn quad(z: f32, h: f32, kind: u8) -> Vec<([V3; 3], u8)> {

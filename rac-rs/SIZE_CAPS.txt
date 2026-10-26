@@ -1,0 +1,67 @@
+# Size caps of the hand-written files and fns that were over the limits on 2026-10-22 (file 1500 lines, fn 150 lines).
+# Kept by rac-rs/src/size_limits_tests.rs: growing past a cap fails the unit tests; new big files or fns are not allowed.
+# A cap only goes down: after shrinking one, run  RAC_SIZE_CAPS_WRITE=1 cargo test --lib size_limits  (lowers caps, drops the
+# ones back within the limit). Never raise a cap or add a line by hand: split the file (ARCHITECTURE.md "Where to change X") or
+# break the fn into named steps (scratch_perf_rf\FUNC_RULES.md). A pure move of a capped item: change its path here by hand.
+# Paths are relative to the project folder (rac-rs's parent).
+file oracle/src/snd989/handler.rs 1679
+file rac-rs/src/anim.rs 2384
+file rac-rs/src/frontend.rs 2139
+file rac-rs/src/retail/gscap/draw/gpu.rs 1636
+file rac-rs/src/retail/modcam.rs 1800
+file rac-rs/src/retail/pcext.rs 1679
+file rac-rs/src/sound.rs 1668
+file rac-rs/src/viewer.rs 1875
+file rac-rs/src/viewer/app.rs 1703
+file rac-rs/src/viewer/vegfx.rs 2417
+file rac-rs/src/viewer/waterfx/shader.rs 1780
+fn oracle/src/cpu.rs exec_body 156
+fn oracle/src/gate.rs run 205
+fn oracle/src/gs/draw.rs pixel 151
+fn oracle/src/hle.rs rpc_reply 176
+fn oracle/src/mc.rs mc_rpc 177
+fn oracle/src/snd989/handler.rs exec 219
+fn oracle/src/vu.rs vu0_exec_interp 155
+fn oracle/src/vu.rs vu_lower 217
+fn rac-rs/src/audio.rs mixer 156
+fn rac-rs/src/frontend.rs draw 381
+fn rac-rs/src/game/setup.rs with_story 162
+fn rac-rs/src/gsfull/gs_raster.rs shade 163
+fn rac-rs/src/gsfull/vu1.rs lower 220
+fn rac-rs/src/mobies.rs decode_class 194
+fn rac-rs/src/particles.rs sprites_keyed 171
+fn rac-rs/src/retail/efx_draw.rs build_in 242
+fn rac-rs/src/retail/gscap/draw.rs draw_in 227
+fn rac-rs/src/retail/gscap/draw/gpu.rs gpu_raster 227
+fn rac-rs/src/retail/modcam.rs step 248
+fn rac-rs/src/retail/pcext.rs eudora_graphics_page 230
+fn rac-rs/src/retail/snapshot.rs snap 217
+fn rac-rs/src/retail/test_suite.rs retail_mouse_menus 163
+fn rac-rs/src/shop.rs draw 197
+fn rac-rs/src/sound.rs tone_pitch_matches_the_retail_driver 192
+fn rac-rs/src/viewer/app.rs load_level_from 1177
+fn rac-rs/src/viewer/app.rs toggle_play 182
+fn rac-rs/src/viewer/gpu/culling.rs cull_ties 155
+fn rac-rs/src/viewer/gpu/draw/pass_world.rs pass_world 165
+fn rac-rs/src/viewer/gpu/draw/passes.rs draw_passes 162
+fn rac-rs/src/viewer/gpu/marker.rs set_marker 205
+fn rac-rs/src/viewer/gpu/particle_fx.rs set_particles 151
+fn rac-rs/src/viewer/gpu/props_layout.rs append_props 165
+fn rac-rs/src/viewer/gpu/props_set.rs set_props 178
+fn rac-rs/src/viewer/gpu/scene_build.rs build_scene 228
+fn rac-rs/src/viewer/gpu/setup.rs new 450
+fn rac-rs/src/viewer/handler/frame_audio.rs frame_audio_anim 171
+fn rac-rs/src/viewer/handler/frame_audio.rs frame_audio_music 153
+fn rac-rs/src/viewer/handler/frame_hero.rs frame_hero 390
+fn rac-rs/src/viewer/handler/frame_hero.rs frame_hero_scene 185
+fn rac-rs/src/viewer/handler/frame_hud.rs frame_hud_draw 293
+fn rac-rs/src/viewer/handler/frame_post.rs frame_sound_events 187
+fn rac-rs/src/viewer/handler/frame_render.rs frame_render 236
+fn rac-rs/src/viewer/handler/frame_ticks.rs frame_ticks 154
+fn rac-rs/src/viewer/handler/frame_upload.rs frame_upload 232
+fn rac-rs/src/viewer/hud.rs hud 201
+fn rac-rs/src/viewer/hudart.rs hud_art 170
+fn rac-rs/src/viewer/startup.rs new_app 213
+fn rac-rs/src/viewer/vegfx.rs plan_cpu 318
+fn rac-rs/src/viewer/waterfx/passes.rs positions 191
+fn rac-rs/src/viewer/waterfx/setup.rs new 220

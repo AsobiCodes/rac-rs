@@ -10,6 +10,8 @@
 //!   classification (HeroClassifyStick, stick against facing) picks the variant relative to the aim. Anything else runs retail.
 //!   The flip is 360 degrees: the nearest flip type is picked (keyboard diagonals: side flips) and the flip travels along the
 //!   stick, without the carry of the run before it bending it toward the old path (`FLIP_CARRY`).
+//! - Feel (logic, strafe_feel.rs): while aiming, the run starts, stops and turns around with R&C2's strafe numbers and the
+//!   flips move at R&C2's flip speed and chain from the landing field.
 //! - Torso twist and backpedal (draw only): after each field `post_field` measures the hero's ground path (retail's move
 //!   vector 0x13f430) against the drawn yaw (moby +0x48, which modcam sets to the camera yaw while aiming) and publishes
 //!   `Draw`: the legs' twist toward the path (at most 90 degrees: past that the legs face the path + 180 and the run clip
@@ -23,6 +25,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use crate::retail::disc::va;
 
+mod chain;
+mod pack_fx;
+pub use pack_fx::exhaust_shift;
+#[cfg(test)]
+mod clock_tests;
+
 /// RAC_MOVE_CLASSIC=1 keeps the classic (retail) movement. A later options row ("Controls: Classic / Modern") replaces the
 /// env read here; everything else asks `enabled()`.
 fn classic() -> bool {
@@ -31,7 +39,7 @@ fn classic() -> bool {
 }
 
 /// The switch: the modern camera is enabled (`--modern-cam`, or the PC options) and the movement is not set to classic, and the
-/// PC options' Strafe aiming row is On with Camera Modern (pcext.rs; always true with `RAC_PC_EXT=0`). Read at run time.
+/// PC options' Strafe aiming row is On, with either camera (pcext.rs; always true with `RAC_PC_EXT=0`). Read at run time.
 pub fn enabled() -> bool {
 	modcam::enabled() && !classic() && super::pcext::strafe_on()
 }
@@ -140,10 +148,11 @@ static HANDS: [Hand; 19] = [
 ];
 
 /// Registers the hands (Retail::load); nothing when the movement is classic or the modern camera is off. The hands exist even
-/// while the PC options say Strafe Off or Camera Classic: they check `enabled()` per call, so the rows can switch them on later.
+/// while the PC options say Strafe Off: they check `enabled()` per call, so the row can switch them on later.
 pub fn register() {
 	if modcam::enabled() && !classic() {
 		register_hand(crate::retail::disc::hands(&HANDS));
+		register_hand(chain::hands());
 	}
 }
 
@@ -154,7 +163,7 @@ pub fn register() {
 pub struct Draw {
 	/// Legs twist in radians about the vertical (positive = toward +yaw), |twist| <= 90 degrees.
 	pub twist: f32,
-	/// Play the run clip reversed (backpedal).
+	/// Play the run clip reversed (backpedal): the path is behind the legs.
 	pub rev: bool,
 	/// How far retail's leg rotation overrides are faded out (0 = as retail, 1 = none; `leg_fx`): eased in and out with `rev`.
 	pub leg_off: f32,
@@ -176,16 +185,17 @@ struct S {
 	hi: usize,
 	cand: u8,
 	draw: Draw,
+	/// The drawn yaw of the last field and whether it is known: a camera turn keeps the legs' world heading (`post_field`).
+	drawn: f32,
+	have_drawn: bool,
 	flips: u32,
-	/// Entry speed (u per field) of the strafe flip in the air (0 = none, or a standing flip) and whether it is a back flip
-	/// (`pre_field`).
-	flip: f32,
-	back: bool,
+	/// Start, stop and flip speeds while aiming (strafe_feel.rs).
+	feel: super::strafe_feel::Feel,
 	log: Option<std::fs::File>,
 	log_tried: bool,
 }
 
-static ST: Mutex<S> = Mutex::new(S { field: 0, pos: [0.0; 2], have_pos: false, twist: 0.0, rev: false, dir: 0.0, have_dir: false, hist: [[0.0; 2]; AVG], hn: 0, hi: 0, cand: 0, draw: Draw { twist: 0.0, rev: false, leg_off: 0.0 }, flips: 0, flip: 0.0, back: false, log: None, log_tried: false });
+static ST: Mutex<S> = Mutex::new(S { field: 0, pos: [0.0; 2], have_pos: false, twist: 0.0, rev: false, dir: 0.0, have_dir: false, hist: [[0.0; 2]; AVG], hn: 0, hi: 0, cand: 0, draw: Draw { twist: 0.0, rev: false, leg_off: 0.0 }, drawn: 0.0, have_drawn: false, flips: 0, feel: super::strafe_feel::Feel::new(), log: None, log_tried: false });
 static IN: AtomicBool = AtomicBool::new(false);
 
 /// The twist / reverse state of the last field (`retail::snap` copies it into the hero parts).
@@ -251,13 +261,6 @@ fn stick_class(d: f32) -> u8 {
 /// 0x13f7a4 is carried along it, times sin of its angle to the flip heading), hero_air_states.md.
 const FLIP_HEAD: u32 = 0x13f788;
 const FLIP_CARRY: u32 = 0x13f78c;
-/// State 0xb's entry speed (u per field; 0 below 1.5 u/s), its speed ramp along the flip heading (approaches 4.2 u/s at 8 u/s2,
-/// and 0 once descending late in the flip), its variant (3 = back flip) and the hero's run speed, which the flip physics sets
-/// to the entry speed every tick (0 for a back flip) and the run after the landing starts from (Eudora OV:29718-29757).
-const FLIP_ENTRY: u32 = 0x13f7a4;
-const FLIP_RAMP: u32 = 0x13f7a8;
-const FLIP_VARIANT: u32 = 0x13f7a0;
-const RUN_SPEED: u32 = 0x13f4e4;
 /// Jump landing count (0 in the air, 1 on the touchdown field, then counting while the landing lasts), hero_air_states.md.
 const FLIP_LANDED: u32 = 0x13f768;
 
@@ -273,6 +276,7 @@ fn jump(c: &mut Cpu, r: &'static Row) -> bool {
 	if enabled() {
 		if let Some(aim) = modcam::aim_yaw() {
 			let state = c.mem.rd32(HERO_STATE);
+			// (A flip's touchdown with Cross pressed is retail's own landing jump, not a chooser call: chain.rs.)
 			if FLIP_STATES.contains(&state) && c.mem.rd8(BODY_FORM) == 0 && c.mem.rd32(va(GAME_MODE)) == 0 {
 				let window = c.g(4);
 				let (x, y) = (f32::from_bits(c.mem.rd32(STICK_X)), f32::from_bits(c.mem.rd32(STICK_Y)));
@@ -303,33 +307,7 @@ fn jump(c: &mut Cpu, r: &'static Row) -> bool {
 						c.s(2, 0);
 						return true;
 					}
-					// Retail's variant (HeroClassifyStick: wish yaw against the logic facing) gets the facing that puts the stick
-					// exactly on the chosen flip direction (side +-90, back 180), then the facing is the aim again.
-					let side = if class == 1 { std::f32::consts::FRAC_PI_2.copysign(d) } else { std::f32::consts::PI };
-					c.mem.wr32(HERO_YAW, wrap(wish - side).to_bits());
-					c.s(4, 0xb);
-					c.s(5, 1);
-					c.call(r.set_state);
-					c.mem.wr32(HERO_YAW, wrap(aim).to_bits());
-					// 360 degree flips: retail's flip runs along the stick (FLIP_HEAD), but the run before it is carried along the
-					// facing of 8 ticks ago (strafing: the old path), which bends a flip across the run toward the old path. The
-					// carry heading on the flip heading makes the carry 0 (sin 0) and turns the logic facing to the flip: the flip
-					// travels along the stick like retail's flip in the run direction (speed ramp and height unchanged).
-					// Momentum: retail's flip starts its ramp from 0 (a run drops from 5.7 to 0.16 u/s at the press and builds back to
-					// 4.2 over 27 fields, then eases toward 0 while descending: 2.6 at the landing, scratch_strafe2 b1_fh_90), and a
-					// back flip zeroes the run speed, so the run after its landing starts from 0 (38 fields to full speed, b1_fh_180).
-					// The ramp starts at the entry speed instead and `pre_field` holds it there through the flip, and a back flip lands
-					// into the run at the entry speed like a side flip does. A standing flip has entry speed 0: unchanged.
-					if c.mem.rd32(HERO_STATE) == 0xb {
-						let head = c.mem.rd32(FLIP_HEAD);
-						c.mem.wr32(FLIP_CARRY, head);
-						let entry = c.mem.rd32(FLIP_ENTRY);
-						c.mem.wr32(FLIP_RAMP, entry);
-						if let Ok(mut s) = ST.lock() {
-							s.flip = f32::from_bits(entry);
-							s.back = c.mem.rd32(FLIP_VARIANT) == 3;
-						}
-					}
+					start_flip(c, r, wish, aim, d, class);
 					c.s(2, 1);
 					return true;
 				}
@@ -340,41 +318,47 @@ fn jump(c: &mut Cpu, r: &'static Row) -> bool {
 	true
 }
 
-/// Worker, before each field: the field counter of the log lines, and the momentum of a strafe flip out of a run: in the air
-/// its speed ramp is held at the entry speed, and a back flip that touches down with the stick held lands into the run at the
-/// entry speed (the run speed retail's flip physics zeroed for the back flip every tick), so it flows on like the side flips.
-pub fn pre_field(m: &mut ee_oracle::Machine, _fin: &super::FieldIn) {
+/// Starts a strafe flip toward `class` (1 side, 2 back) of the stick heading `wish` (`d` = wish - aim, radians): retail's
+/// SetState(0xb, 1) under the jump hands' guard (`IN` set), with the ramp at R&C2's flip speed. Leaves SetState's answer in v0.
+fn start_flip(c: &mut Cpu, r: &Row, wish: f32, aim: f32, d: f32, class: u8) {
+	// Retail's variant (HeroClassifyStick: wish yaw against the logic facing) gets the facing that puts the stick
+	// exactly on the chosen flip direction (side +-90, back 180), then the facing is the aim again.
+	let side = if class == 1 { std::f32::consts::FRAC_PI_2.copysign(d) } else { std::f32::consts::PI };
+	c.mem.wr32(HERO_YAW, wrap(wish - side).to_bits());
+	c.s(4, 0xb);
+	c.s(5, 1);
+	c.call(r.set_state);
+	c.mem.wr32(HERO_YAW, wrap(aim).to_bits());
+	// 360 degree flips: retail's flip runs along the stick (FLIP_HEAD), but the run before it is carried along the
+	// facing of 8 ticks ago (strafing: the old path), which bends a flip across the run toward the old path. The
+	// carry heading on the flip heading makes the carry 0 (sin 0) and turns the logic facing to the flip: the flip
+	// travels along the stick like retail's flip in the run direction (height unchanged).
+	// Momentum: retail's flip starts its ramp from 0 (a run drops from 5.7 to 0.16 u/s at the press and builds back to
+	// 4.2 over 27 fields, then eases toward 0 while descending: 2.6 at the landing, scratch_strafe2 b1_fh_90), and a
+	// back flip zeroes the run speed, so the run after its landing starts from 0 (38 fields to full speed, b1_fh_180).
+	// R&C2's strafe flip moves at 5 u/s from the press instead, standing flips too, and lands into the run at that
+	// speed: strafe_feel.rs sets the ramp from here on.
+	if c.mem.rd32(HERO_STATE) == 0xb {
+		let head = c.mem.rd32(FLIP_HEAD);
+		c.mem.wr32(FLIP_CARRY, head);
+		if let Ok(mut s) = ST.lock() {
+			super::strafe_feel::flip_start(&mut c.mem, &mut s.feel);
+		}
+	}
+}
+
+/// Worker, before each field: the field counter of the log lines, and the strafe feel (strafe_feel.rs: R&C2's start, stop and
+/// flip speeds while aiming, written between two fields).
+pub fn pre_field(m: &mut ee_oracle::Machine, fin: &super::FieldIn) {
 	if !enabled() {
 		return;
 	}
+	let aiming = modcam::aim_yaw().is_some() && m.cpu.mem.rd8(BODY_FORM) == 0 && m.rd32(va(GAME_MODE)) == 0;
 	if let Ok(mut s) = ST.lock() {
 		s.field = s.field.wrapping_add(1);
-		if s.flip > 0.0 {
-			let state = m.rd32(HERO_STATE);
-			let (x, y) = (m.rdf(STICK_X), m.rdf(STICK_Y));
-			let held = (x * x + y * y).sqrt() > 0.5;
-			let speed = s.flip;
-			if state == 0xb {
-				// In the air: the flip keeps the run's speed (the ramp eases one retail step, 0.16 u/s, toward 4.2 or 0 per field).
-				if m.rdf(FLIP_RAMP) < speed {
-					m.cpu.mem.wr32(FLIP_RAMP, speed.to_bits());
-				}
-				// Touched down with the stick held: the next field goes from the flip into the run (state 2) and runs the run's
-				// physics with the run speed retail's back flip zeroed every tick: one field at speed 0, then the run from 0. The
-				// side flips keep the entry speed there (measured: b2_fh_90 field 152 5.56 u/s, b3_fh_180 field 149 0).
-				if s.back && held && m.rd32(FLIP_LANDED) != 0 && m.rdf(RUN_SPEED) < speed {
-					m.cpu.mem.wr32(RUN_SPEED, speed.to_bits());
-					let line = format!("back_flip_touchdown field {} run speed {speed:.4}", s.field);
-					log(&mut s, &line);
-				}
-			} else {
-				if s.back && (state == 2 || state == 0x73) && m.rdf(RUN_SPEED) < speed {
-					m.cpu.mem.wr32(RUN_SPEED, speed.to_bits());
-					let line = format!("back_flip_landing field {} state {state:#x} run speed {speed:.4}", s.field);
-					log(&mut s, &line);
-				}
-				(s.flip, s.back) = (0.0, false);
-			}
+		if let Some(line) = super::strafe_feel::pre_field(m, (fin.sticks[2], fin.sticks[3]), aiming, &mut s.feel) {
+			let line = format!("{line} field {}", s.field);
+			log(&mut s, &line);
 		}
 	}
 }
@@ -422,7 +406,7 @@ const STALL_STATES: [u32; 2] = [2, 0x73];
 /// changes. Reset (anything else: standing, skid, flips, attacks, no aim): the twist eases to 0, the run goes forward.
 pub fn post_field(m: &ee_oracle::Machine) {
 	if !enabled() {
-		// The Strafe aiming row went Off (or Camera Classic) while the legs were twisted: draw straight again.
+		// The Strafe aiming row went Off while the legs were twisted: draw straight again.
 		if let Ok(mut s) = ST.lock() {
 			if s.draw != Draw::default() || s.twist != 0.0 {
 				(s.twist, s.rev, s.draw, s.have_pos, s.have_dir, s.hn, s.hi, s.cand) = (0.0, false, Draw::default(), false, false, 0, 0, 0);
@@ -440,6 +424,14 @@ pub fn post_field(m: &ee_oracle::Machine) {
 	let aim = modcam::aim_yaw();
 	let moby = m.rd32(HERO_MOBY) & 0x01ff_ffff;
 	let drawn = if moby != 0 { m.rdf(moby + 0x48) } else { 0.0 };
+	// The camera turned since the last field (the drawn yaw is the aim): the path direction and the legs keep their world heading
+	// instead of turning with the camera and swinging back at the twist's rate (a fast mouse turn read as a foot jump).
+	let dd = if s.have_drawn && moby != 0 { wrap(drawn - s.drawn) } else { 0.0 };
+	(s.drawn, s.have_drawn) = (drawn, moby != 0);
+	if s.have_dir {
+		s.dir = wrap(s.dir - dd);
+		s.twist = (s.twist - dd).clamp(-LIMIT, LIMIT);
+	}
 	let inst = raw[0].hypot(raw[1]);
 	let ok = aim.is_some() && m.rd8(BODY_FORM) == 0 && m.rd32(va(GAME_MODE)) == 0;
 	let min = if state == 0 { MIN_STEP } else { MIN_WALK };
@@ -462,7 +454,14 @@ pub fn post_field(m: &ee_oracle::Machine) {
 	let mode;
 	if track {
 		let wish_rel = wrap(m.rdf(HERO_WISH) - drawn);
-		let d = if speed < SETTLE { wish_rel } else { wrap(mv[1].atan2(mv[0]) - drawn) };
+		let path = wrap(mv[1].atan2(mv[0]) - drawn);
+		// The stick against the path: a reversal, which the feel turns round at once (strafe_feel.rs). The legs take the stick's
+		// heading now and the old path stops counting, instead of pointing back for the fields the average takes to turn.
+		let turn = s.have_dir && wrap(wish_rel - path).abs() > SNAP;
+		if turn {
+			(s.hn, s.hi) = (0, 0);
+		}
+		let d = if speed < SETTLE || turn { wish_rel } else { path };
 		d_log = d;
 		let e = wrap(d - s.dir);
 		let fresh = !s.have_dir;
@@ -503,13 +502,15 @@ pub fn post_field(m: &ee_oracle::Machine) {
 		}
 		mode = 'R';
 	}
-	let rev = s.rev && (track || hold);
+	// The clip plays reversed while the path is behind the legs (over 90 degrees from them): at a switch the clip turns round
+	// half way through the legs' swing, and a reversal (W <-> S) runs forward at once instead of backwards for the `LATCH` fields.
+	let rev = if track { wrap(s.dir - s.twist).abs() > LIMIT } else { hold && s.draw.rev };
 	let leg_off = (s.draw.leg_off + if rev { LEG_FADE } else { -LEG_FADE }).clamp(0.0, 1.0);
 	s.draw = Draw { twist: s.twist, rev, leg_off };
 	if s.log.is_some() || !s.log_tried {
 		let (seq, cur, nxt, old, ph) = if moby != 0 { (m.rd8(moby + 0x53), m.rd8(moby + 0x50), m.rd8(moby + 0x51), m.rd8(moby + 0x52), m.rdf(moby + 0x54)) } else { (0, 0, 0, 0, 0.0) };
 		// Leg direction against the path (0 = the legs point along the path, forward or reversed).
-		let err = if track { wrap(mv[1].atan2(mv[0]) - drawn - s.twist - if s.rev { std::f32::consts::PI } else { 0.0 }).to_degrees() } else { f32::NAN };
+		let err = if track { wrap(mv[1].atan2(mv[0]) - drawn - s.twist - if rev { std::f32::consts::PI } else { 0.0 }).to_degrees() } else { f32::NAN };
 		// The hero +0x60 layer list (retail.rs `layer_list`): seq, frame, from seq / frame, t, weight, joints (count, min..max).
 		let mut lay = String::new();
 		let mut o = if moby != 0 { m.rd32(moby + 0x60) & 0x01ff_ffff } else { 0 };
@@ -549,13 +550,49 @@ const ATTACH_1204: u32 = 1204;
 /// aiming (before, only the body was drawn toward the aim and the helmet stayed on retail's logic facing: desynced strafing).
 const HEAD_ITEMS: [u32; 3] = [433, 1289, 1290];
 
+/// The Glove of Doom capsule (class 230, weapons_framework.md lane 6): state 1 while prepared in the glove, placed at the glove's
+/// hand point (held joint 0 rows, the logic pose) every tick; 2 once thrown.
+const DOOM_CAPSULE: u32 = 230;
+
+/// The Magneboots (class 173, one moby per foot; corrected 2026-10-24: was taken for Clank's legs): placed by retail at the feet of
+/// the logic pose like the parts above, so turned with them, then carried onto the drawn legs (viewer/smooth.rs `attach`,
+/// `PoseFix::place_leg`; before, they kept retail's leg direction while the drawn legs twisted toward the path).
+const MAGNEBOOTS: u32 = 173;
+
+/// How near the held Pyrocitor's grip (held +0x10) a hero glow other than Clank's bulb counts as its pilot light
+/// (`RetailFx::gun_glows`; the light sits 0.88 from it, fixed on the gun's basis, runs/pyro_ad10 2026-10-24).
+const GUN_GLOW_REACH: f32 = 1.2;
+
+/// How far from the hero (horizontally) a moby counts as one of his parts.
+const ATTACH_REACH: f32 = 1.5;
+
+/// The turn `turn_parts` gives the hero's parts this field (drawn - rows yaw) and the hero's origin; None while not aiming.
+fn part_turn(m: &ee_oracle::Machine) -> Option<(f32, [f32; 3])> {
+	let hero = m.rd32(HERO_MOBY) & 0x01ff_ffff;
+	if !modcam::enabled() || modcam::aim_yaw().is_none() || hero == 0 {
+		return None;
+	}
+	let r0 = m.rdv3(hero + 0xc0);
+	(r0[0] != 0.0 || r0[1] != 0.0).then(|| (wrap(m.rdf(hero + 0x48) - r0[1].atan2(r0[0])), m.rdv3(hero + 0x10)))
+}
+
 /// Hero-attached props drawn from RAM (modcam): retail places Clank (`*0x1404d4`, class 601), the back object (`*0x1404d0`,
-/// class 607), the bomb waiting in the Bomb Glove (class 121, +0x20 == 0), the class 1204 attachment and a held moby on a hero
-/// joint (+0x34 bit 0x100)
-/// at the joints of ITS hero matrix (rows +0xc0, the logic yaw), while modcam turns only the drawn yaw +0x48 of the hero. They
-/// are turned about the hero by (drawn - rows yaw) so they ride with the drawn Ratchet. Draw only; RAM is not written.
-pub fn turn_parts(m: &ee_oracle::Machine, hero: u32, held: u32, mobys: &mut [super::Moby], glows: &mut [([f32; 3], f32, f32, u32)]) {
+/// class 607), the bomb waiting in the Bomb Glove (class 121, +0x20 == 0), the class 1204 attachment, the held moby and the Glove
+/// of Doom capsule in the glove within `ATTACH_REACH` at the joints of ITS hero matrix (rows +0xc0, the logic yaw), while modcam
+/// turns only the drawn yaw +0x48 of the hero. They are turned about the hero by (drawn - rows yaw) so they ride with the drawn
+/// Ratchet, and with them the hero glows (`fx.glows[..hero_glows]`) and the pool sprites a turned part owns (the capsule's glow).
+/// The Pyrocitor's pilot flame (class 179) and any glow retail queued in the same call are placed by its held updater in the yaw
+/// the aim hook posed the weapon to (aim.rs `take_pyro_frame`), so they turn by (drawn - that yaw) instead: nothing while strafing
+/// (turned by the full turn too it floated off to the side, runs/strafe.log 2026-10-24), the field's turn while Ratchet turns (the
+/// rows lag the drawn yaw by it; unturned the flame trailed the nozzle). The parts are listed in `fx.hero_parts`: the renderer
+/// also carries them from retail's pose onto the drawn one (viewer/smooth.rs `attach`, `PoseFix`), and the Thruster-Pack's exhaust
+/// particles and flames are carried with the pack (pack_fx.rs). Draw only; RAM is not written.
+pub fn turn_parts(m: &ee_oracle::Machine, hero: u32, held: u32, mobys: &mut [super::Moby], fx: Option<&mut super::RetailFx>) {
+	let hook = super::aim::take_pyro_frame();
 	if !modcam::enabled() || modcam::aim_yaw().is_none() {
+		if let Some(fx) = fx {
+			pack_fx::carry(m, m.rdv3(hero + 0x10), 0.0, fx, &[]);
+		}
 		return;
 	}
 	let drawn = m.rdf(hero + 0x48);
@@ -579,33 +616,58 @@ pub fn turn_parts(m: &ee_oracle::Machine, hero: u32, held: u32, mobys: &mut [sup
 			log(&mut s, &l);
 		}
 	}
-	if delta.abs() < 1e-4 {
-		return;
-	}
+	// Facing the drawn way already (e.g. strafing forward): nothing to turn, but the parts are still listed for the pose fix.
+	let turn = |p: &mut [f32; 3], a: f32| {
+		if a.abs() >= 1e-4 {
+			let ((sn, cs), x, y) = (a.sin_cos(), p[0] - hp[0], p[1] - hp[1]);
+			p[0] = hp[0] + cs * x - sn * y;
+			p[1] = hp[1] + sn * x + cs * y;
+		}
+	};
 	let (d0, d4) = (m.rd32(0x1404d0) & 0x01ff_ffff, m.rd32(0x1404d4) & 0x01ff_ffff);
-	let (sn, cs) = delta.sin_cos();
+	let (pilot, hook_turn) = hook.as_ref().map_or((0, 0.0), |h| (h.pilot, wrap(drawn - h.yaw)));
+	let angle = |a: u32| if a == pilot && pilot != 0 { hook_turn } else { delta };
+	let gun_at = (held != 0 && m.rd16(held + 0xa6) as u32 == crate::game::pyro::PYRO_CLASS).then(|| m.rdv3(held + 0x10));
+	let mut turned = Vec::new();
 	for mb in mobys.iter_mut() {
+		let near = (mb.pos[0] - hp[0]).hypot(mb.pos[1] - hp[1]) < ATTACH_REACH;
 		let part = (mb.addr == d0 && d0 != 0)
 			|| (mb.addr == d4 && d4 != 0)
+			|| (mb.addr == pilot && pilot != 0)
 			|| (mb.class == crate::game::BOMB && m.rd8(mb.addr + 0x20) == 0)
-			|| (mb.class == ATTACH_1204 && (mb.pos[0] - hp[0]).hypot(mb.pos[1] - hp[1]) < 1.5)
-			|| (HEAD_ITEMS.contains(&mb.class) && (mb.pos[0] - hp[0]).hypot(mb.pos[1] - hp[1]) < 1.5)
-			|| (mb.addr == held && held != 0 && m.rd16(held + 0x34) & 0x100 != 0);
+			|| (near && (mb.class == ATTACH_1204 || mb.class == MAGNEBOOTS || HEAD_ITEMS.contains(&mb.class) || (mb.addr == held && held != 0)))
+			|| (near && mb.class == DOOM_CAPSULE && m.rd8(mb.addr + 0x20) < 2);
 		if !part {
 			continue;
 		}
-		let (x, y) = (mb.pos[0] - hp[0], mb.pos[1] - hp[1]);
-		mb.pos[0] = hp[0] + cs * x - sn * y;
-		mb.pos[1] = hp[1] + sn * x + cs * y;
-		mb.rot[2] = wrap(mb.rot[2] + delta);
+		let a = angle(mb.addr);
+		turn(&mut mb.pos, a);
+		if a.abs() >= 1e-4 {
+			mb.rot[2] = wrap(mb.rot[2] + a);
+		}
+		turned.push(mb.addr);
 	}
-	// Clank's bulb glow (retail's slot-3 item light, queue_fx `hero_glows`) is placed from the logic-yaw joints like the bulb mesh
-	// (class 1204) above: turned with it, so it stays on the bulb.
-	for g in glows.iter_mut().filter(|g| super::is_bulb_glow(g)) {
-		let (x, y) = (g.0[0] - hp[0], g.0[1] - hp[1]);
-		g.0[0] = hp[0] + cs * x - sn * y;
-		g.0[1] = hp[1] + sn * x + cs * y;
+	let Some(fx) = fx else { return };
+	// Every hero glow (queue_fx `hero_glows`: Clank's bulb, the weapons' lights such as the Pyrocitor's pilot light, the pack's
+	// glows) is placed from the logic-yaw joints like the parts above: turned with them (before, only the bulb was, and a weapon
+	// light sat on the far side of Ratchet while backpedaling); one the Pyrocitor's updater queued turns like its pilot. The world
+	// glows after them stay.
+	let n = fx.hero_glows.min(fx.glows.len());
+	let in_hook = |p: &[f32; 3]| hook.as_ref().is_some_and(|h| h.glows.iter().any(|q| q.map(f32::to_bits) == p.map(f32::to_bits)));
+	let at_gun = |g: &([f32; 3], f32, f32, u32)| !super::is_bulb_glow(g) && gun_at.is_some_and(|q| (0..3).map(|k| (g.0[k] - q[k]).powi(2)).sum::<f32>() < GUN_GLOW_REACH * GUN_GLOW_REACH);
+	fx.gun_glows = (0..n).filter(|&i| in_hook(&fx.glows[i].0) || at_gun(&fx.glows[i])).collect();
+
+	fx.glows[..n].iter_mut().for_each(|g| {
+		let a = if in_hook(&g.0) { hook_turn } else { delta };
+		turn(&mut g.0, a);
+	});
+	for (s, o) in fx.sprites.iter_mut().zip(&fx.sprite_owners) {
+		if turned.contains(o) {
+			turn(&mut s.pos, angle(*o));
+		}
 	}
+	pack_fx::carry(m, hp, delta, fx, &turned);
+	fx.hero_parts = turned;
 }
 
 // ---- renderer side ----------------------------------------------------------------------------------------------------
@@ -654,6 +716,102 @@ pub fn twist_mats(mats: &mut [[f32; 12]], anim: &crate::anim::Animated, theta: f
 	}
 }
 
+/// Retail hangs Clank, the back object, the head items, the bulb mesh and the hero glows on ITS pose of the hero (the clip
+/// playing forward, no twist, its leg bends), `turn_parts` only turns them to the drawn yaw. While the strafe draw changes the
+/// pose (the backpedal plays the run clip reversed, so the whole upper body bobs and leans at another phase) they floated off
+/// the drawn body: Clank low on the back. `PoseFix` holds, per joint the twist leaves alone (the upper body), where retail's pose
+/// has it and its move onto the drawn pose (hero model space, 3x4 row major like the skin matrices); a part follows the move of
+/// its nearest such joint (viewer/smooth.rs `attach`, `hero_point`). The leg joints are kept apart (`legs`): only the Magneboots
+/// ride them (`place_leg`), the parts near the hips (Clank, the pack) stay on the upper body. Draw only.
+pub struct PoseFix {
+	joints: Vec<([f32; 3], [f32; 12])>,
+	legs: Vec<([f32; 3], [f32; 12])>,
+}
+
+/// The move of the joint in `joints` nearest `p`.
+fn nearest(joints: &[([f32; 3], [f32; 12])], p: [f32; 3]) -> Option<&[f32; 12]> {
+	let d2 = |a: &[f32; 3]| (a[0] - p[0]).powi(2) + (a[1] - p[1]).powi(2) + (a[2] - p[2]).powi(2);
+	joints.iter().min_by(|a, b| d2(&a.0).total_cmp(&d2(&b.0))).map(|j| &j.1)
+}
+
+impl PoseFix {
+	fn near(&self, p: [f32; 3]) -> Option<&[f32; 12]> {
+		nearest(&self.joints, p)
+	}
+
+	/// A part retail placed on a leg (a Magneboot on its foot, hero model space), carried onto the drawn leg by the leg joint
+	/// nearest its origin: the strafe draw twists the legs toward the path and plays its own leg clip.
+	pub fn place_leg(&self, rel: [f32; 16]) -> [f32; 16] {
+		nearest(&self.legs, [rel[12], rel[13], rel[14]]).map_or(rel, |m| place34(m, rel))
+	}
+
+	/// A point retail placed on the hero (hero model space), carried onto the drawn pose.
+	pub fn point(&self, p: [f32; 3]) -> [f32; 3] {
+		self.near(p).map_or(p, |m| mul34(m, p, 1.0))
+	}
+
+	/// A part's placement (column-major 4x4, hero model space), carried onto the drawn pose by the joint nearest its origin.
+	pub fn place(&self, rel: [f32; 16]) -> [f32; 16] {
+		self.near([rel[12], rel[13], rel[14]]).map_or(rel, |m| place34(m, rel))
+	}
+}
+
+/// `m * rel` of a 3x4 row-major affine matrix and a column-major 4x4 placement.
+pub fn place34(m: &[f32; 12], rel: [f32; 16]) -> [f32; 16] {
+	let mut o = rel;
+	for c in 0..4 {
+		let v = mul34(m, [rel[c * 4], rel[c * 4 + 1], rel[c * 4 + 2]], if c == 3 { 1.0 } else { 0.0 });
+		o[c * 4..c * 4 + 3].copy_from_slice(&v);
+	}
+	o
+}
+
+/// `m * (v, w)` of a 3x4 row-major affine matrix.
+pub fn mul34(m: &[f32; 12], v: [f32; 3], w: f32) -> [f32; 3] {
+	std::array::from_fn(|r| m[r * 4] * v[0] + m[r * 4 + 1] * v[1] + m[r * 4 + 2] * v[2] + m[r * 4 + 3] * w)
+}
+
+/// `a * inverse(b)` of two 3x4 row-major affine matrices (None when `b` is singular).
+pub fn mul_inv34(a: &[f32; 12], b: &[f32; 12]) -> Option<[f32; 12]> {
+	let (p, q, r, s, t, u, v, w, x) = (b[0], b[1], b[2], b[4], b[5], b[6], b[8], b[9], b[10]);
+	let det = p * (t * x - u * w) - q * (s * x - u * v) + r * (s * w - t * v);
+	if det.abs() < 1e-12 {
+		return None;
+	}
+	let k = 1.0 / det;
+	let i = [(t * x - u * w) * k, (r * w - q * x) * k, (q * u - r * t) * k, (u * v - s * x) * k, (p * x - r * v) * k, (r * s - p * u) * k, (s * w - t * v) * k, (q * v - p * w) * k, (p * t - q * s) * k];
+	let mut inv = [0.0; 12];
+	for row in 0..3 {
+		inv[row * 4..row * 4 + 3].copy_from_slice(&i[row * 3..row * 3 + 3]);
+		inv[row * 4 + 3] = -(i[row * 3] * b[3] + i[row * 3 + 1] * b[7] + i[row * 3 + 2] * b[11]);
+	}
+	Some(std::array::from_fn(|n| {
+		let (row, col) = (n / 4, n % 4);
+		a[row * 4] * inv[col] + a[row * 4 + 1] * inv[4 + col] + a[row * 4 + 2] * inv[8 + col] + if col == 3 { a[row * 4 + 3] } else { 0.0 }
+	}))
+}
+
+/// This tick's `PoseFix`: `drawn` = the skin matrices as drawn (after `twist_mats`), `logic` poses retail's own (called only while
+/// the strafe draw is on). Joint j moves by drawn_j * inverse(logic_j): the bind matrix cancels.
+pub fn pose_fix(d: Draw, anim: &crate::anim::Animated, drawn: &[[f32; 12]], logic: impl FnOnce() -> Vec<[f32; 12]>) -> Option<PoseFix> {
+	if (d == Draw::default() && !clock_custom()) || drawn.len() < 111 {
+		return None;
+	}
+	let logic = logic();
+	if logic.len() != drawn.len() {
+		return None;
+	}
+	let moves = |js: &mut dyn Iterator<Item = usize>| -> Vec<([f32; 3], [f32; 12])> {
+		js.filter_map(|j| {
+			let w = anim.joint_world(&logic, j);
+			Some(([w[3], w[7], w[11]], mul_inv34(&drawn[j], &logic[j])?))
+		})
+		.collect()
+	};
+	let joints = moves(&mut (0..*LEG_JOINTS.start()).filter(|&j| twist_share(j) == 0.0));
+	Some(PoseFix { joints, legs: moves(&mut LEG_JOINTS.clone()) })
+}
+
 /// Hero leg joints (`twist_share`: 92..97 one leg, 98..103 the other).
 const LEG_JOINTS: std::ops::RangeInclusive<usize> = 92..=103;
 
@@ -677,24 +835,82 @@ pub fn leg_fx(fx: &mut [crate::anim::JointFx], d: Draw) {
 	}
 }
 
-/// Renderer side of the drawn hero clock: (the last drawn clock was a reversed run / walk clip, the clock was fading, the fade
-/// running now started from a reversed pose).
-static CLK: Mutex<(bool, bool, bool)> = Mutex::new((false, false, false));
+/// Renderer side of the drawn hero clock (`draw_clock`).
+struct Clk {
+	/// The last drawn clock was not retail's (reversed or shifted by `k`), the clock was fading, the fade running now started
+	/// from a pose that was not retail's, and the last field's `rev`.
+	custom: bool,
+	was_fading: bool,
+	from_custom: bool,
+	rev: bool,
+	/// The drawn run / walk phase is `k + phase` forward and `k - phase` reversed (frames mod N, phase = retail's cur + p);
+	/// 0 = retail's phase or its mirror (`reverse_clock`).
+	k: f32,
+	/// The last settled run / walk clock drawn: sequence, frame count, retail's phase and the drawn phase.
+	last: Option<(u8, usize, f32, f32)>,
+}
+
+static CLK: Mutex<Clk> = Mutex::new(Clk { custom: false, was_fading: false, from_custom: false, rev: false, k: 0.0, last: None });
+
+/// After a switch the drawn phase eases back to retail's (`k` -> 0) by at most this share of the clip's own step per field:
+/// the legs play up to 20 % faster or slower for about a second (half a cycle off at most: 11.5 of 23 frames).
+const K_EASE: f32 = 0.2;
 
 /// The hero clock as drawn, once per field after retail's clock was mirrored (viewer/handler.rs): with `rev` (backpedal) the
-/// run / walk cycle plays backwards, including the target frame of a fade into it (`reverse_target`). Returns true while a fade
-/// runs that started from a reversed pose: retail's FROM frame (hero +0x68) is then its FORWARD pose of that field, so the
-/// renderer fades from its own snapshot of the drawn (reversed) pose instead. Before, every fade out of a backpedal (walk <->
-/// run, stop skid) started from the forward frame and every fade into one aimed at the forward frame: a leg pop at each
-/// change (scratch_strafe2 bk1: fields 58, 65, 162).
-pub fn draw_clock(c: &mut crate::anim::AnimClock, frames: usize, rev: bool) -> bool {
-	let Ok(mut k) = CLK.lock() else { return false };
-	let (last_rev, was_fading, from_rev) = *k;
+/// run / walk cycle plays backwards, including the target frame of a fade into it (`reverse_target`). At a switch forward <->
+/// reversed of a settled cycle the drawn phase carries on from the pose drawn the field before (`Clk::k`) and only its
+/// direction turns round: before, the phase jumped to its mirror N - phase (e.g. frame 15.3 to 6.9 of 23), the legs snapped to
+/// another stride (runs/strafe.log 2026-10-24, backpedal <-> strafe). Returns (a fade runs that started from a pose that was not
+/// retail's, the pose jumped this field): retail's FROM frame (hero +0x68) is then its own pose of that field, so the renderer
+/// fades from its own snapshot of the drawn pose instead. Before, every fade out of a backpedal (walk <-> run, stop skid) started
+/// from the forward frame and every fade into one aimed at the forward frame: a leg pop at each change (scratch_strafe2 bk1:
+/// fields 58, 65, 162). A fade or another clip starts again from retail's phase (`k` = 0).
+pub fn draw_clock(c: &mut crate::anim::AnimClock, frames: usize, rev: bool) -> (bool, bool) {
+	let Ok(mut k) = CLK.lock() else { return (false, false) };
 	let fading = c.old_seq == 0xff;
-	let from_rev = fading && if was_fading { from_rev } else { last_rev };
-	let changed = rev && if fading { reverse_target(c, frames) } else { reverse_clock(c, frames) };
-	*k = (changed, fading, from_rev);
-	from_rev
+	let from_custom = fading && if k.was_fading { k.from_custom } else { k.custom };
+	let settled = !fading && frames >= 2 && RUN_SEQS.contains(&c.new_seq) && c.cur >= 0 && (c.cur as usize) < frames;
+	let mut jumped = false;
+	let changed = if !settled {
+		(k.k, k.last) = (0.0, None);
+		rev && fading && reverse_target(c, frames)
+	} else {
+		let n = frames as f32;
+		let phase = c.cur as f32 + c.p.clamp(0.0, 1.0);
+		match k.last.filter(|l| l.0 == c.new_seq && l.1 == frames) {
+			Some((_, _, was, drawn)) => {
+				// Retail's step this field (-N/2..N/2), drawn in the new direction from the last drawn pose at a switch.
+				let adv = (phase - was + n / 2.0).rem_euclid(n) - n / 2.0;
+				if rev != k.rev {
+					k.k = if rev { drawn - adv + phase } else { drawn + adv - phase }.rem_euclid(n);
+				}
+				let off = if k.k > n / 2.0 { k.k - n } else { k.k };
+				let ease = K_EASE * adv.abs();
+				k.k = (off - off.clamp(-ease, ease)).rem_euclid(n);
+			}
+			None => {
+				jumped = rev != k.rev;
+				k.k = 0.0;
+			}
+		}
+		let shown = if rev { k.k - phase } else { k.k + phase }.rem_euclid(n);
+		k.last = Some((c.new_seq, frames, phase, shown));
+		if k.k == 0.0 {
+			rev && reverse_clock(c, frames)
+		} else {
+			c.cur = (shown.floor() as i32).clamp(0, frames as i32 - 1);
+			c.p = (shown - c.cur as f32).clamp(0.0, 1.0);
+			c.next = (c.cur + 1) % frames as i32;
+			true
+		}
+	};
+	(k.custom, k.was_fading, k.from_custom, k.rev) = (changed, fading, from_custom, rev);
+	(from_custom, jumped)
+}
+
+/// Whether the hero clock drawn this field is not retail's (reversed, shifted, or fading from the rig's own snapshot).
+fn clock_custom() -> bool {
+	CLK.lock().is_ok_and(|k| k.custom || k.from_custom)
 }
 
 /// A fade (snapshot -> frame `next` of a run / walk cycle) into a reversed cycle: the target frame `next` becomes `N - next`,

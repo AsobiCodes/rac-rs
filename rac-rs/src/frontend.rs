@@ -253,21 +253,6 @@ pub enum Page {
 	GalacticInfo,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Key {
-	Up,
-	Down,
-	Left,
-	Right,
-	/// Cross.
-	Confirm,
-	/// Triangle.
-	Back,
-	Circle,
-	/// Start (and Select/R3 on the map): closes the pause menu from any page.
-	Start,
-}
-
 /// What the mouse pointer is over on a page (port extra, `Menu::point`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Point {
@@ -1033,7 +1018,7 @@ impl Menu {
 			Page::Options => OPTIONS,
 			Page::Language => LANGUAGE,
 			Page::Video => VIDEO_OPTIONS,
-			Page::Graphics => crate::retail::pcext::ID_GRAPHICS_HDR,
+			Page::Graphics => if crate::retail::pcmods::title_open() { crate::retail::pcmods::ID_HEADER } else { crate::retail::pcext::ID_GRAPHICS_HDR },
 			Page::Sound => SOUND_OPTIONS,
 			Page::Weapons => WEAPONS,
 			Page::Gadgets => GADGETS,

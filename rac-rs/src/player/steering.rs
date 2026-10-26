@@ -1,3 +1,5 @@
+//! Hero steering: empty apart from two empty test modules (`spring_tests`, `state_row_tests`).
+//! Leftover from the retired hand port; still compiled because the old `Game` and the viewer still use the player types. Do not extend.
 
 
 

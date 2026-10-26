@@ -11,6 +11,8 @@
 //! is drawn into VRAM so later prims can sample it.
 
 mod draw;
+pub(crate) mod edge_cut;
+mod texname;
 
 use crate::gsfull::vif::{Out, Vif1};
 use crate::gsfull::vu1::Vu1;
@@ -310,9 +312,25 @@ pub fn gpu_prestart(idle: fn()) {
     draw::gpu::Gpu::prestart(idle);
 }
 
-/// Whether the GPU capture is on without RAC_GSCAP_GPU (draw/gpu.rs `set_default`).
-pub fn gpu_default(on: bool) {
-    draw::gpu::set_default(on);
+/// The window's device is ready (draw/gpu_shared.rs `window_ready`): the capture shares it when it is Vulkan, and the default of
+/// RAC_GSCAP_GPU follows the window.
+pub fn gpu_window(dev: &wgpu::Device, q: &wgpu::Queue, info: &wgpu::AdapterInfo) {
+    draw::gpu_shared::window_ready(dev, q, info);
+}
+
+/// A window is starting (draw/gpu_shared.rs `expect_window`): the capture waits for its device instead of opening one of its own.
+pub fn gpu_expect_window() {
+    draw::gpu_shared::expect_window();
+}
+
+/// The features the window's device asks for so the capture can share it (draw/gpu_shared.rs `window_features`).
+pub fn gpu_window_features(adapter: &wgpu::Adapter) -> wgpu::Features {
+    draw::gpu_shared::window_features(adapter)
+}
+
+/// Held by the window around `Surface::configure` (draw/gpu_shared.rs `submit_lock`).
+pub fn gpu_submit_lock() -> std::sync::MutexGuard<'static, ()> {
+    draw::gpu_shared::submit_lock()
 }
 
 /// Opens a GPU capture and drops it (`rac-rs warm-gpu`): false without one.
@@ -438,6 +456,9 @@ impl Gs {
         }
         if self.gpu.is_some() {
             self.gpu_end_job(end);
+            if end {
+                crate::gscap_guard::field_done();
+            }
         }
         if end {
             self.ends_run += 1;
@@ -945,6 +966,9 @@ impl Gs {
                 vs.get(1).map(|v| v.rgba)
             );
         }
+        if draw {
+            self.note_texture(vs); // [PC] DEV RAC_TEXNAMES (gscap/texname.rs): one bool test when off
+        }
         if draw && !self.no_draw {
             self.draw(ty as u32, vs);
         }
@@ -1153,6 +1177,7 @@ impl Gs {
     /// them, so a transfer waits in `pend` until a draw, CLUT load or copy touches its blocks; uploads into the
     /// main buffer go through at once (they mark the overlay).
     fn trx_start(&mut self) {
+        texname::bump();
         let (bb, pos, rr) = (self.r[0x50], self.r[0x51], self.r[0x52]);
         let (dbp, dbw, dpsm) = (((bb >> 32) & 0x3fff) as u32, ((bb >> 48) & 0x3f) as u32, ((bb >> 56) & 0x3f) as u32);
         let (dx, dy) = (((pos >> 32) & 0x7ff) as u32, ((pos >> 48) & 0x7ff) as u32);
@@ -1323,6 +1348,7 @@ impl Gs {
 
     /// TRXDIR 2: local -> local copy.
     fn local_copy(&mut self) {
+        texname::bump();
         let bb = self.r[0x50];
         let (sbp, sbw, spsm) = ((bb & 0x3fff) as u32, ((bb >> 16) & 0x3f) as u32, ((bb >> 24) & 0x3f) as u32);
         let (dbp, dbw, dpsm) = (((bb >> 32) & 0x3fff) as u32, ((bb >> 48) & 0x3f) as u32, ((bb >> 56) & 0x3f) as u32);

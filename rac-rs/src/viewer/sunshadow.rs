@@ -1,4 +1,4 @@
-//! [PC] Dynamic shadows (Pause -> Options -> Graphics -> Dynamic shadows On, with Lighting Enhanced; retail/pcext.rs
+//! [PC] Dynamic shadows (Split view: hangs on `DrawFrame.sun`, made only under `post_on` = `splitview::fx`) (Pause -> Options -> Graphics -> Dynamic shadows On, with Lighting Enhanced; retail/pcext.rs
 //! `graphics`; no retail counterpart). Off, or with Lighting Classic, nothing here runs.
 //!
 //! - The light: the level's own outdoor light, light row 0 (the pair a hero or moby outside every light zone takes; on all 19
@@ -15,7 +15,8 @@
 //! - Casters: the static world (terrain fragments and ties with the LOD mesh the frame drew them with, so a surface never
 //!   shadows itself through a coarser copy of its own mesh; undrawn ones with the full mesh; the merged world) culled per cascade by their
 //!   bounding spheres, and every moby of this frame (the props batch as `vs_props` poses it, the hero, debris and the clipped
-//!   props; not see-through shells such as blast domes and glows, nor a moby faded below alpha 0x60). Depth, cut by texel alpha
+//!   props, and the mobys retail's draw culled for the game camera alone: `gpuskin::KIND_CAST`, so a caster beside or behind the
+//!   view keeps its shadow; not see-through shells such as blast domes and glows, nor a moby faded below alpha 0x60). Depth, cut by texel alpha
 //!   where the main pass cuts (shrubs, terrain below 96/128, ties below 64/128: a see-through overlay casts nothing), both
 //!   faces, slope-scaled depth bias; one multi-draw per batch per cascade.
 //! - Receivers (viewer.rs SHADER `sun_occ`): every opaque world, shrub, terrain and moby fragment, 4x4 hardware PCF, the light's
@@ -72,7 +73,8 @@ struct SU { vp: mat4x4<f32> };
 	return su.vp * vec4<f32>(p, 1.0);
 }
 
-// vs_props' placement (viewer.rs SHADER), position only; a hidden or faded slot casts nothing.
+// vs_props' placement (viewer.rs SHADER), position only; a hidden or faded slot casts nothing. Kind 4 (`gpuskin::KIND_CAST`):
+// a moby the game camera alone culled, placed as a prop (kind 1) and drawn by this pass only.
 struct PropInst { m0: vec4<f32>, m1: vec4<f32>, m2: vec4<f32>, m3: vec4<f32>, light: vec4<f32>, tint: vec4<f32>, ptint: vec4<f32>, a: vec4<f32>, k: vec4<u32> };
 @group(1) @binding(0) var<storage, read> insts: array<PropInst>;
 @group(1) @binding(1) var<storage, read> poses: array<f32>;
@@ -88,9 +90,9 @@ struct PropInst { m0: vec4<f32>, m1: vec4<f32>, m2: vec4<f32>, m3: vec4<f32>, li
 	}
 	// A faded moby (draw alpha below 0x60, `moby_alpha` in viewer.rs: an explosion or glow fading out) casts nothing.
 	let alpha = 128.0 - round(abs(s.a.y - floor(s.a.y + 0.5)) * 512.0);
-	if ((kind == 1u || kind == 2u) && (s.k.x & 0x100u) == 0u && alpha >= 96.0) {
+	if ((kind == 1u || kind == 2u || kind == 4u) && (s.k.x & 0x100u) == 0u && alpha >= 96.0) {
 		var pos = q + s.m3.xyz;
-		if (kind == 1u) {
+		if (kind != 2u) {
 			let a = q * s.a.x;
 			pos = s.m0.xyz * a.x + s.m1.xyz * a.y + s.m2.xyz * a.z + s.m3.xyz;
 		}
@@ -304,6 +306,8 @@ pub(super) struct SunShadow {
 	dir: Option<([f32; 3], f32)>,
 	scene_id: usize,
 	last: Option<std::time::Instant>,
+	/// [PC] Group 0 binding 3 of the mirrors, previews and bed: the fog's no-Z texel buffer of size 0 (volfog/soft.rs `off_buffer`).
+	soft_off: wgpu::Buffer,
 }
 
 impl SunShadow {
@@ -386,15 +390,22 @@ impl SunShadow {
 			})
 		});
 		let (pipeline_shrub, pipeline_tfrag, pipeline_tie) = (make_cut("fs_sh_shrub"), make_cut("fs_sh_tfrag"), make_cut("fs_sh_tie"));
-		SunShadow { tex, layers, array, cmp, ubuf, ubind, pipeline, pipeline_props, pipeline_shrub, pipeline_tfrag, pipeline_tie, indirect: None, cap: 0, dir: None, scene_id: 0, last: None }
+		SunShadow { tex, layers, array, cmp, ubuf, ubind, pipeline, pipeline_props, pipeline_shrub, pipeline_tfrag, pipeline_tie, indirect: None, cap: 0, dir: None, scene_id: 0, last: None, soft_off: super::volfog::soft::off_buffer(device) }
 	}
 
-	/// The level's group-0 entries: `ubuf` at binding 0, the cascades and their compare sampler at 1 and 2.
-	pub(super) fn entries<'a>(&'a self, ubuf: &'a wgpu::Buffer) -> [wgpu::BindGroupEntry<'a>; 3] {
+	/// The level's group-0 entries: `ubuf` at binding 0, the cascades and their compare sampler at 1 and 2, at 3 the fog's no-Z
+	/// texel buffer of size 0 (the level pass binds the real one: `entries_soft`).
+	pub(super) fn entries<'a>(&'a self, ubuf: &'a wgpu::Buffer) -> [wgpu::BindGroupEntry<'a>; 4] {
+		self.entries_soft(ubuf, &self.soft_off)
+	}
+
+	/// `entries` with the fog's no-Z texel buffer `soft` (volfog/soft.rs `Soft::prepare`) at binding 3.
+	pub(super) fn entries_soft<'a>(&'a self, ubuf: &'a wgpu::Buffer, soft: &'a wgpu::Buffer) -> [wgpu::BindGroupEntry<'a>; 4] {
 		[
 			wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() },
 			wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.array) },
 			wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.cmp) },
+			wgpu::BindGroupEntry { binding: 3, resource: soft.as_entire_binding() },
 		]
 	}
 
@@ -402,7 +413,7 @@ impl SunShadow {
 	/// `scene_id` tells a new level (the light snaps instead of easing).
 	pub(super) fn frame(&mut self, cam: &Camera, aspect: f32, rows: &[[[f32; 4]; 4]; 16], scene_id: usize, q: Quality) -> Option<SunFrame> {
 		let now = std::time::Instant::now();
-		let dt = self.last.map_or(0.0, |t| now.duration_since(t).as_secs_f32()).min(0.1);
+		let dt = self.last.map_or(0.0, |t| crate::viewer::test_clock::dt(crate::viewer::test_clock::Site::Sun, || now.duration_since(t).as_secs_f32())).min(0.1);
 		self.last = Some(now);
 		let (target, luma) = match key_light(rows, 0, 0, 0.0) {
 			Some(k) => k,
@@ -465,7 +476,7 @@ impl SunShadow {
 			}
 		};
 		// Terrain and ties carry their texture slot when they cast by texel alpha (`shrub_shader`).
-		let cut = self.pipeline_tfrag.is_some() && scene.tex_array.is_some();
+		let cut = self.pipeline_tfrag.is_some() && scene.tex_array.is_some() && !super::gfxq::sun_plain();
 		let fi = |d: &Draw| if cut { super::bindless::first_instance(d) } else { 0 };
 		for (k, c) in f.cascades.iter().enumerate().take(f.q.cascades) {
 			// tfrag_ranges[i]: 0 far, 1 mid, 2 near. A fragment casts with the LOD `Gpu::cull_tfrags` drew it with this frame (its
@@ -495,7 +506,7 @@ impl SunShadow {
 				let sh = scene.shrub_cull.iter().enumerate().filter(|(_, s)| c.touches(s.centre, s.radius)).flat_map(|(i, _)| scene.shrubs.draws[scene.shrub_ranges[i].0.clone()].iter().map(|d| (d.start, d.count, super::bindless::first_instance(d))));
 				push(&mut args, &mut runs, k, Src::Shrubs, &mut sh.collect::<Vec<_>>().into_iter());
 			}
-			if scene.props_shown {
+			if scene.props_shown && !super::gfxq::sun_nodyn() {
 				// See-through shells (blast domes, glows) cast nothing (`clear_tex`).
 				let solid = |d: &&Draw| !scene.clear_tex.get(d.texture).copied().unwrap_or(false);
 				push(&mut args, &mut runs, k, Src::Props, &mut scene.props.draws.iter().filter(solid).map(|d| (d.start, d.count, 0)));
@@ -521,7 +532,7 @@ impl SunShadow {
 				label: Some("sun shadow"),
 				color_attachments: &[],
 				depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: &self.layers[k], depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }), stencil_ops: None }),
-				timestamp_writes: None,
+				timestamp_writes: crate::viewer::passtime::rw(["sun shadow c0", "sun shadow c1", "sun shadow c2"][k]),
 				occlusion_query_set: None,
 				multiview_mask: None,
 			});

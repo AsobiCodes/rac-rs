@@ -6,3 +6,9 @@
 members = ["rac-rs", "rac-rs/exe"]
 default-members = ["rac-rs", "rac-rs/exe"]
 resolver = "3"
+
+# wgpu-hal 30.0.1 with one change (rac-rs/vendor/wgpu-hal/README_RAC_RS.txt): its DirectX 12 start-up does not create
+# IDXGIFactoryMedia, which ReShade's DXGI hook crashes on. Cargo reads [patch] only here at the workspace root (the same line in
+# rac-rs/Cargo.toml is ignored in this layout).
+[patch.crates-io]
+wgpu-hal = { path = "rac-rs/vendor/wgpu-hal" }

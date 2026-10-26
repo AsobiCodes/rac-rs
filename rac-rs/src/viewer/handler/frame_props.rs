@@ -1,0 +1,75 @@
+//! RedrawRequested: props phase (prop poses).
+
+use super::*;
+
+impl App {
+	pub(super) fn frame_props(&mut self, f: &mut Frame) {
+		let flight_pose = f.flight_pose;
+		if let (Some(game), Some(w)) = (&mut self.game, &self.world) {
+			let p = &game.player;
+			let mut posed: HashMap<PoseKey, Posed> = HashMap::new();
+			// Vendor and orb: blend / joint-spin poses (vendor.rs vendor_fx), one skinning per prop.
+			let mut fx_posed: HashMap<usize, Posed> = HashMap::new();
+			for (pi, pr) in game.props.iter().enumerate().filter(|(_, p)| p.shown) {
+				// SCN-4.3c: the flying ship blends sequence 1 frame 0 into sequence 2 by the flight's +0x54.
+				if let (Some(fp), Some((class, a))) = (flight_pose.filter(|fp| fp.prop == pi), self.prop_anims.get(&pr.class_id)) {
+					if a.sequences.len() > 2 && !a.sequences[1].frames.is_empty() && !a.sequences[2].frames.is_empty() {
+						let (f0, f1) = game::transit::ship_blend_frames(a.sequences[1].frames.len());
+						fx_posed.insert(pi, anim::skin_all(class, &a.pose_frames(&a.sequences[1].frames[f0], &a.sequences[2].frames[f1.min(a.sequences[2].frames.len() - 1)], fp.blend)));
+						continue;
+					}
+				}
+				// Vendor/orb spins, and any prop fading from a snapshot (its pose is its own).
+				let spins = game.vendor_fx.poses.get(&pi).map(|fx| fx.spins.as_slice());
+				if let Some((class, a)) = self.prop_anims.get(&pr.class_id) {
+					// NOV-14.8e: the Plumber's head-look joint overrides.
+					// KER-1a: the Kerwan walker's blocks drive the attach slot 2 / 3 joints.
+					let mut fx: Vec<anim::JointFx> = Vec::new();
+					// NOV-30c: the shop vendor's icon bar corner records.
+					fx.extend(game.shop_bar_fx(pi, &a.slot_map));
+					// M3a, retail mode: the moby's own +0x64 records (e.g. Clank's blink), as the evaluator FUN_00268a80 applies them.
+					if let Some(r) = &self.retail {
+						fx.extend(r.prop_fx(pi).iter().cloned());
+					}
+					if spins.is_some() || pr.anim.fading() || !fx.is_empty() {
+						fx_posed.insert(pi, anim::skin_all(class, &pr.anim.pose_fx_full(a, spins.unwrap_or(&[]), &fx)));
+					}
+				}
+			}
+			// PC perf: no game tick since the last frame's poses (same stamp): the anim states are unchanged, so each
+			// pose key's skinning is moved over from that frame instead of recomputed.
+			let stamp = (game.frames, game.props.as_ptr() as usize, game.props.len());
+			let mut last = if self.smooth.ticks == 0 && self.pose_stamp == Some(stamp) { self.smooth.take_posed() } else { HashMap::new() };
+			self.pose_stamp = Some(stamp);
+			// [PC] perf: the joint matrices per new key here, the skinning on the frame worker pool; the keys go into
+			// `posed` in first-seen order as before.
+			let mut todo: Vec<(PoseKey, Result<Posed, (&mobies::MobyClass, Vec<[f32; 12]>)>)> = Vec::new();
+			for pr in game.props.iter().filter(|p| p.shown) {
+				if let Some((class, a)) = self.prop_anims.get(&pr.class_id) {
+					let key = pose_key(pr);
+					if !posed.contains_key(&key) {
+						todo.push((key, last.remove(&key).ok_or_else(|| (class, pr.anim.pose(a, &[])))));
+						posed.insert(key, Default::default());
+					}
+				}
+			}
+			drop(last);
+			{
+				use rayon::prelude::*;
+				let _s = profile::span("prop_skin");
+				let done: Vec<Posed> = todo.par_iter_mut().map(|(_, job)| match job {
+					Ok(p) => std::mem::take(p),
+					Err((class, mats)) => anim::skin_all(class, mats),
+				}).collect();
+				for ((key, _), p) in todo.iter().zip(done) {
+					posed.insert(*key, p);
+				}
+			}
+			// PC-FPS-1: blended poses join `fx_posed`, blended placements go to `smooth::PROP_XF`.
+			{ let _s = profile::span("sm_props"); self.smooth.props(&game.props, posed, &mut fx_posed); }
+			profile::lap(profile::Phase::Props);
+			f.fx_posed = fx_posed;
+		}
+		self.apply_follow(f.at, f.tilt);
+	}
+}

@@ -1,3 +1,5 @@
+//! Test helpers (a floor world, a position check) for the hero pad-movement tests.
+//! Test-only (`cfg(test)`) leftover from the retired hand port; the test bodies are gone. Do not extend.
 use super::*;
 use crate::camera::TICK;
 fn floor() -> World {

@@ -1,4 +1,4 @@
-//! Lane fxb: ribbon trails of flying mobys (Rilgar class 79 FUN_002d72b0, Pokitaru class 1319 FUN_00318bf8), queue A.
+//! Ribbon trails of flying mobys (Rilgar class 79 FUN_002d72b0, Pokitaru class 1319 FUN_00318bf8), queue A.
 //!
 //! Same method as `queue_q2`: the callback's data (history ring, ST table, colours) is read from the RAM snapshot taken after the field drew,
 //! so the update function's ring buffer and the gp words are their draw-time values. Retail facts: decomp/notes/draw_producers.md

@@ -1,4 +1,4 @@
-//! NOV-14.5 (B) / NOV-15.1b: the Novalis strip-surface actors 678 / 1225 / 761 and the environment-map passes of class
+//! The Novalis strip-surface actors 678 / 1225 / 761 and the environment-map passes of class
 //! 1848: overlay table loaders, the scroll step, the strip wave and the sphere-map UV (decomp/notes/novalis_environment.md
 //! "NOV-15.1b port spec").
 

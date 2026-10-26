@@ -2,6 +2,7 @@
 //! the level change at the end. From decomp/notes/veldin_flow.md: the tutorial helper is class 1413,
 //! the cutscene and level-end controller is class 834. Scenes 1-4 play from scene.wad (scene.rs, driven
 //! from viewer.rs); the FMV (movie 0x4001) plays through scene::movie.
+//! Leftover from the retired hand port; still compiled because the viewer still holds a `Flow`. Do not extend.
 
 use crate::game::{self};
 use crate::gameplay::{Cuboid, Help, MobyInstance};

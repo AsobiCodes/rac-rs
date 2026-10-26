@@ -1,3 +1,5 @@
+//! `jet_debris_quad`: the camera-facing billboard of one jet debris piece (FUN_0030b8d8) for the old hand-port jets.
+//! Leftover from the retired hand port; still compiled because retail mode uses part of `game::Game` (the prop pools). Do not extend.
 use super::*;
 
 

@@ -1,3 +1,5 @@
+//! [PC] Dev-only tuning without a rebuild: `RAC_WGSL_DIR` (shader modules read from a folder) and `RAC_TUNE` (named values read by
+//! `devtune::f32`). Off unless those environment variables are set; players never set them.
 // [PC] Dev-only tuning without a rebuild. Off unless the env vars are set (players never set them).
 // RAC_WGSL_DIR=DIR: each shader module reads DIR/<label>.wgsl when that file exists; otherwise it writes its built-in source
 // there (so the first run fills DIR) and uses the built-in one. Edit the file and restart the game: no build.

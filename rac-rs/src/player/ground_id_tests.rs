@@ -1,3 +1,5 @@
+//! Notes for the hero ground-face-id and free-look tests (NOV-12b): imports and comments only.
+//! Test-only (`cfg(test)`) leftover from the retired hand port; the test bodies are gone. Do not extend.
 use super::*;
 use crate::gameplay::PAL_DT;
 

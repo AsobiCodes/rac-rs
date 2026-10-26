@@ -6,6 +6,7 @@
 
 mod ambience;
 mod anim;
+mod anim_pose;
 mod audio;
 mod gauss;
 mod bytes;
@@ -25,6 +26,7 @@ mod help;
 mod hud;
 mod inventory;
 mod iso;
+mod kofi;
 mod level;
 mod loadlog;
 mod runlog;
@@ -34,11 +36,15 @@ mod mobies;
 mod particles;
 mod music;
 mod occlusion;
+mod omni;
 mod overlay;
 mod physics;
 mod player;
 mod render;
 mod retail;
+mod gscap_guard;
+mod rtss_crash;
+mod rtss_layer;
 mod save;
 mod scene;
 mod settings;
@@ -53,6 +59,7 @@ mod sound;
 mod spumix;
 mod spurev;
 mod terrain;
+mod texpack;
 mod ties;
 mod toc;
 mod viewer;
@@ -228,6 +235,8 @@ fn launch_args() -> Result<Vec<String>, String> {
 
 pub fn main() -> ExitCode {
 	loadlog::init();
+	// [PC] RivaTuner's Vulkan layer off before the first Vulkan call (rtss_layer.rs).
+	rtss_layer::apply();
 	#[cfg(feature = "windows_gui")]
 	std::panic::set_hook(Box::new(|info| {
 		let thread = std::thread::current();
@@ -277,6 +286,7 @@ pub fn main() -> ExitCode {
 	};
 	match result {
 		Ok(()) => {
+			gscap_guard::quit();
 			runlog::end();
 			ExitCode::SUCCESS
 		}

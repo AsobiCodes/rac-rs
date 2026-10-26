@@ -1,4 +1,4 @@
-//! [PC] Water Enhanced: the planar mirror (no retail counterpart; Water Classic never runs it). Flat water shows a true
+//! [PC] Water Enhanced: the planar mirror (no retail counterpart; Water Classic never runs it; Split view: hangs on `DrawFx.water_on`, from `post_on` = `splitview::fx`). Flat water shows a true
 //! mirror image instead of the screen-space reflection, which can only reflect what is already on screen and smears at its
 //! edges: once a frame the level is drawn a second time, mirrored about the height of the nearest flat water plane below
 //! the eye, at half the window size, into the water pass's mirror target (`waterfx::WaterFx::mirror_target`). Drawn: the
@@ -244,11 +244,14 @@ impl Gpu {
 	/// The water bed: the level as the camera sees it, without its water (sky, world, ties, tfrags, hero, mobies), into
 	/// `target` (MSAA colour, its resolve, MSAA depth, kept for the water pass); then the geometric sea waves (waterfx.rs
 	/// `sea_waves`: the shore map from the bed's depth, the sea's grid). [PC] The moving mobys (waterfx.rs `track_props`) draw
-	/// after the shore map, so it holds the still ground only (a fish bobbing at the surface made surf that came and went
+	/// after the shore map, and so does the hero, so it holds the still ground only (a fish bobbing at the surface made surf that came and went
 	/// every frame); the bed itself is the same.
 	pub(super) fn draw_bed(&self, enc: &mut wgpu::CommandEncoder, scene: &Scene, u: &Uniforms, target: (&wgpu::TextureView, &wgpu::TextureView, &wgpu::TextureView), ties: Option<&super::bindless::Runs>) {
 		let movers = self.waterfx.shore_movers();
 		let split = (scene.props_shown && !movers.is_empty()).then(|| super::shadowvol::split_late(&scene.props.draws, &scene.slot_runs, movers)).filter(|(_, moving)| !moving.is_empty());
+		// [PC] The hero (the marker batch, drawn in the second pass) stays out of the shore map too: as ground at the surface he
+		// calmed the sea for SHORE_D1 round him wherever no bed is seen, so no wave ever reached him (Pokitaru, user 2026-10-24).
+		let split = split.or_else(|| (scene.marker_shown && self.waterfx.shore_split()).then(|| (if scene.props_shown { scene.props.draws.clone() } else { Vec::new() }, Vec::new())));
 		match &split {
 			Some((still, moving)) => {
 				self.draw_copy(enc, scene, &self.bed, u, target, ties, false, Part::Still(still));
@@ -278,46 +281,22 @@ impl Gpu {
 				depth_ops: Some(wgpu::Operations { load: if first { wgpu::LoadOp::Clear(1.0) } else { wgpu::LoadOp::Load }, store: if mirror { wgpu::StoreOp::Discard } else { wgpu::StoreOp::Store } }),
 				stencil_ops: Some(wgpu::Operations { load: if first { wgpu::LoadOp::Clear(super::shadowvol::STENCIL_CLEAR) } else { wgpu::LoadOp::Load }, store: if last { wgpu::StoreOp::Discard } else { wgpu::StoreOp::Store } }),
 			}),
-			timestamp_writes: None,
+			timestamp_writes: crate::viewer::passtime::rw(if mirror { "water mirror" } else { "water bed" }),
 			occlusion_query_set: None,
 			multiview_mask: None,
 		});
 		pass.set_bind_group(0, &with.bind, &[]);
 		// The mirror flips the winding: front-face culling becomes back-face culling and back.
 		let flip = |c: u8| if mirror { 2 - c as usize } else { c as usize - 1 };
-		if let Some(sky) = scene.sky.as_ref().filter(|_| first) {
-			let split = scene.sky_shells.as_ref().map_or(sky.draws.len(), |s| s.split.min(sky.draws.len()));
-			let shells = |pass: &mut wgpu::RenderPass, draws: &[Draw]| {
-				pass.set_pipeline(&self.sky_pipeline);
-				pass.set_vertex_buffer(0, sky.vbuf.slice(..));
-				pass.set_index_buffer(sky.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-				for d in draws {
-					pass.set_bind_group(1, &scene.bind_groups[d.texture], &[]);
-					pass.draw_indexed(d.start..d.start + d.count, 0, d.inst..d.inst + 1);
-				}
-			};
-			shells(&mut pass, &sky.draws[..split]);
-			if let Some(sp) = scene.sky_sprites.as_ref().filter(|sp| sp.counts.iter().any(|&c| c > 0)) {
-				pass.set_pipeline(&self.sky_add_pipeline);
-				pass.set_vertex_buffer(0, sp.vbuf.slice(..));
-				pass.set_index_buffer(sp.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-				let mut first = 0;
-				for (k, &n) in sp.counts.iter().enumerate() {
-					if n > 0 {
-						pass.set_bind_group(1, &scene.bind_groups[sp.bind[k]], &[]);
-						pass.draw_indexed(first * 6..(first + n) * 6, 0, 0..1);
-					}
-					first += n;
-				}
-			}
-			shells(&mut pass, &sky.draws[split..]);
+		if first {
+			self.pass_sky(&mut pass, scene, false, self.volclouds.sky.skip(), false);
 		}
 		let marker = scene.marker_shown.then_some(&scene.marker);
 		let props = scene.props_shown.then_some(&scene.props);
 		let skinned = scene.props_sj.as_ref().map(|sj| (&self.props_gpu, sj));
 		let array = self.bindless.as_ref().zip(scene.tex_array.as_ref());
 		// (Which pass draws it: 1 the first, 2 the second, 3 both: the props split into the still and the moving.)
-		for (pipeline, batch, when) in [(&self.pipeline, Some(&scene.world), 1), (&self.pipeline, Some(&scene.ties), 1), (&self.tfrag_pipeline, Some(&scene.tfrags), 1), (&self.pipeline, marker, 1), (&self.pipeline, props, 3), (&self.tfrag_pipeline_lt, Some(&scene.tfrags), 2)] {
+		for (pipeline, batch, when) in [(&self.pipeline, Some(&scene.world), 1), (&self.pipeline, Some(&scene.ties), 1), (&self.tfrag_pipeline, Some(&scene.tfrags), 1), (&self.pipeline, marker, 2), (&self.pipeline, props, 3), (&self.tfrag_pipeline_lt, Some(&scene.tfrags), 2)] {
 			let Some(batch) = batch else { continue };
 			if !((first || when & 2 != 0) && (last || when & 1 != 0)) {
 				continue;

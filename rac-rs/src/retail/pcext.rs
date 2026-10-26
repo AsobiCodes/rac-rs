@@ -3,8 +3,8 @@
 //!
 //! - `Camera: Classic / Static / Smooth`: Static and Smooth = the mouse-driven modern camera (modcam.rs; Smooth is its dynamic layer,
 //!   Static the plain Modern camera of before), Classic = retail's camera and controls. A new player starts with Smooth.
-//! - `Strafe aiming: On / Off`: the right mouse button's strafe mode (modcam's aim mode, strafe.rs). It only matters while the
-//!   camera is Modern; with Classic strafe aiming is off whatever the row says. A new player starts with On.
+//! - `Strafe aiming: On / Off`: the right mouse button's strafe mode (modcam's aim mode, strafe.rs). With Camera Classic the
+//!   modern camera drives only while it is held (user 2026-10-23). A new player starts with On.
 //!
 //! How (design: scratch_race/OPTIONS_DESIGN.md): the retail multi-choice item (update 0x27e898 / draw 0x27ea40 on every level)
 //! reads its rows from a table of 6-word records `{label id, byte*, choice0..3}` ended by a zero word, so a row is data:
@@ -33,10 +33,16 @@
 //!   the byte order puts the default Medium at 0 and still cycles Low -> Medium -> High); a new player sees the retail lighting
 //!   (Original) with today's Medium draw distance. The picture of the row is help_ss 5 (the lit planet), from the same ToC.
 //! - Paged Graphics / Controls (pcctl.rs): in a level the pause pages show at most 7 rows, row 0 is a "Page" selector (Left / Right
-//!   or Cross steps and wraps): Graphics has 3 sections (Picture: Lighting, Ambient occlusion, Dynamic shadows, Global
-//!   illumination, Sun rays, HUD; Effects: Water, Waves, Particles, Vegetation; Screen: Display mode, Frame smoothing, Draw
-//!   distance, Culling), Controls 9 (pcctl.rs). `HUD: Sharp / Original` is a byte of the pcctl block that `sync` applies to
-//!   `hud_sharp_now()` and `hud=` in the file. The title's Graphics page keeps its 13 rows and has no HUD row.
+//!   or Cross steps and wraps): Graphics has 3 sections (Picture: Preset, Lighting, Ambient occlusion, Dynamic shadows, Global
+//!   illumination, Sun rays; Effects: Water, Waves, Particles, Vegetation; Screen: Display mode, Frame smoothing, Draw
+//!   distance, Culling, Renderer, HUD), Controls 9 (pcctl.rs). `HUD: Sharp / Original` is a byte of the pcctl block that `sync` applies
+//!   to `hud_sharp_now()` and `hud=` in the file. The title's Graphics page keeps its 13 rows and has no HUD and no Preset row.
+//! - Preset row (Graphics -> Picture, `presets.rs`): Low / Medium / High / Custom from ONE data file, `assets/gfx_presets.txt`
+//!   (the RAC-RS Launcher shows the same table). `sync` calls `presets::choose` before the rows are stepped (a chosen preset writes its
+//!   values into the rows and the HUD row) and `presets::show` at its end (the row shows the preset that matches the rows now, else
+//!   Custom). A preset never touches camera, controls, language, display mode, culling or the renderer; High is today's default picture.
+//! - Mods page (`pcmods.rs`): Pause -> Options -> Mods = the 10th row, only while a mod is on in `active.txt` (`pcmods::load_store`);
+//!   packs On/Off + running script mods' settings. Title -> Options -> Mods (`build_title`): mod On/Off + settings + packs.
 //! - Title screen: Options -> Graphics (`title_options`, a hand on the front end's Options list set-up) shows the same rows on
 //!   a copy of the Video Options page; `front_field` applies and remembers them, the mirror draws them (viewer/front_mirror.rs,
 //!   frontend.rs `Page::Graphics`). The Options rows themselves are retail's of the disc's region (USA: no Video row).
@@ -55,7 +61,12 @@ use ee_oracle::rec::{register_hand, Hand};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
-
+mod cloudopt;
+pub mod texfilter;
+pub mod fogopt;
+mod presets;
+mod texts;
+use texts::{NEW_IDS, TEXTS};
 /// Reserved RAM: all zero in every savestate scanned, below the ELF image (0x100000) and outside the rec/hand range.
 pub const BASE: u32 = 0xB0000;
 /// "PCX1": the region has been set up (fresh RAM after a start, a savestate load or a cold boot reads 0 here).
@@ -97,21 +108,26 @@ pub const WAVES: u32 = BASE + 19;
 /// so a new player's byte is the zero RAM held there before the row existed (today's Enhanced distances).
 pub const DRAW: u32 = BASE + 20;
 /// The Graphics page's row bytes in row order.
-const GROWS: [u32; 13] = [LIGHT, AO, SHADOWS, DISPLAY, WATER, PARTICLES, SUNRAYS, SMOOTH, VEG, CULL, GI, WAVES, DRAW];
-/// The copy of the row table (5 records + the zero record).
-const TAB: u32 = BASE + 0x40;
+const GROWS: [u32; 15] = [LIGHT, AO, SHADOWS, DISPLAY, WATER, PARTICLES, SUNRAYS, SMOOTH, VEG, CULL, GI, WAVES, DRAW, fogopt::FOG, cloudopt::CLOUDS];
+/// The copy of the Camera Options row table (8 rows + the zero record = 9 records of 24 bytes, ending at BASE + 0x12d8): in the
+/// camopts section's block after its text slots (BASE + 0x1000..0x1800); BASE + 0x40..0x100, where the 7-row copy was, is unused now.
+const TAB: u32 = BASE + 0x1200;
 /// String pool: one 0x40-byte slot per new text (`NEW_IDS` order; 28 slots end at BASE + 0x800, the rest from `POOL2`).
 const POOL: u32 = BASE + 0x100;
 const POOL_SLOTS: usize = 28;
 /// The string pool's second part: after the title's Graphics rows (they end at BASE + 0xef8), before prompts.rs (4 slots).
 const POOL2: u32 = BASE + 0xf00;
-/// Graphics page (`patch_graphics`): the Options list records (8 + the zero record, 12 bytes each), its row descriptions (8 + 0),
-/// its row pictures (8 ToC records {sector, sectors}), the page (a copy of Camera Options; 0x100 bytes, zero after its 0x60:
+/// The string pool's third part (the 33rd text on; the 4 slots of `POOL2` were full): in the Camera Options block (BASE + 0x1000..0x1800,
+/// skipped by prompts.rs' canary), after the row-table copy `TAB` (ends BASE + 0x12d8) and clear of every other section.
+const POOL3: u32 = BASE + 0x1300;
+const POOL2_SLOTS: usize = 4;
+/// Graphics page (`patch_graphics`): the Options list records (10 + the zero record, 12 bytes each), its row descriptions (10 + 0),
+/// its row pictures (10 ToC records {sector, sectors}), the page (a copy of Camera Options; 0x100 bytes, zero after its 0x60:
 /// the menu engine reads item slots past the page's zero item, retail's own pages are followed by zeros there), its header
 /// item, its multi-choice item and that item's rows (13 + the zero record, 24 bytes each, ending at BASE + 0xbf0; prompts.rs starts at
 /// BASE + 0x1000).
 const OPT_RECS: u32 = BASE + 0x800;
-const OPT_DESC: u32 = BASE + 0x880;
+const OPT_DESC: u32 = BASE + 0x890;
 /// The Options pictures (9 records now: Graphics and Controls) live in the Controls block (`pcctl.rs`): 0x48 bytes here would reach GPAGE.
 const OPT_PICS: u32 = super::pcctl::PICS;
 pub const GPAGE: u32 = BASE + 0x900;
@@ -130,7 +146,7 @@ const TGTAB: u32 = BASE + 0xde0;
 /// record holds four choices). The pause page's multi-choice item cycles a row through its values; the title's value item only
 /// flips a byte, so `sync` steps the rows with more than two values on.
 #[rustfmt::skip]
-const ROWS: [[u32; 6]; 13] = [
+const ROWS: [[u32; 6]; 15] = [
 	[ID_LIGHTING, LIGHT, ID_LIGHT_CLASSIC, ID_ENHANCED, 0, 0],
 	[ID_AO, AO, ID_OFF, ID_HIGH, ID_MEDIUM, ID_LOW],
 	[ID_SHADOWS, SHADOWS, ID_OFF, ID_HIGH, ID_MEDIUM, ID_LOW],
@@ -144,8 +160,9 @@ const ROWS: [[u32; 6]; 13] = [
 	[ID_GI, GI, ID_OFF, ID_HIGH, ID_MEDIUM, ID_LOW],
 	[ID_WAVES, WAVES, ID_ON, ID_OFF, 0, 0],
 	[ID_DRAW, DRAW, ID_MEDIUM, ID_HIGH, ID_LOW, 0],
+	[ID_FOG, fogopt::FOG, ID_CLASSIC, ID_HIGH, ID_MEDIUM, ID_LOW],
+	[ID_CLOUDS, cloudopt::CLOUDS, ID_CLASSIC, ID_HIGH, ID_MEDIUM, ID_LOW],
 ];
-
 /// How many values row `i` of `ROWS` has (2, 3 or 4).
 fn row_values(i: usize) -> u8 {
 	ROWS[i][2..].iter().take_while(|&&v| v != 0).count() as u8
@@ -204,87 +221,8 @@ pub const ID_CULLING: u32 = 0x7f1e;
 pub const ID_GI: u32 = 0x7f1f;
 pub const ID_WAVES: u32 = 0x7f20;
 pub const ID_DRAW: u32 = 0x7f21;
-const NEW_IDS: [u32; 31] = [
-	ID_CLASSIC,
-	ID_MODERN,
-	ID_STRAFE,
-	ID_BUYALL,
-	ID_BUYALL_PROMPT,
-	ID_GRAPHICS,
-	ID_GRAPHICS_HDR,
-	ID_GRAPHICS_DESC,
-	ID_LIGHTING,
-	ID_LIGHT_CLASSIC,
-	ID_ENHANCED,
-	ID_AO,
-	ID_SHADOWS,
-	ID_DISPLAY,
-	ID_WINDOWED,
-	ID_FULLSCREEN,
-	ID_WATER,
-	ID_PARTICLES,
-	ID_SUNRAYS,
-	ID_PART_CLASSIC,
-	ID_SMOOTHING,
-	ID_VEGETATION,
-	ID_VEG_MODERATE,
-	ID_VEG_LUSH,
-	ID_LOW,
-	ID_MEDIUM,
-	ID_HIGH,
-	ID_CULLING,
-	ID_GI,
-	ID_WAVES,
-	ID_DRAW,
-];
-
-/// New texts per language (En, Fr, De, Es, It) in the game's font bytes: a-acute 0x84, e-acute 0x8c, e-grave 0x8d, a-umlaut 0x87,
-/// o-acute 0x9c, e-circumflex 0x8e. Short like the retail labels (the German ones are abbreviated to fit). [I] wording, native review wanted. The
-/// Graphics header and description follow the retail Camera Options ones ("Options cam\x8cra", "Adjust camera control settings").
-static TEXTS: [[&[u8]; 5]; 31] = [
-	[b"Classic", b"Classique", b"Klassisch", b"Cl\x84sica", b"Classica"],
-	[b"Modern", b"Moderne", b"Modern", b"Moderna", b"Moderna"],
-	[b"Strafe aiming", b"Vis\x8ce lat\x8crale", b"Strafe-Zielen", b"Apuntado lateral", b"Mira laterale"],
-	[b"Refill all ammo", b"Tout remplir", b"Alles f\xa7llen", b"Llenar todo", b"Ricarica tutto"],
-	// The Buy plate: retail's own "[Cross] Buy" (id 0x5234), a newline (byte 1), the Square glyph (0x13) and a one-word label that fits
-	// the plate on one line (vendor.rs test `plate_text_is_two_lines`; the plate holds about 7 letters after a glyph).
-	[b"\x10 Buy\x01\x13 Refill", b"\x10 Acheter\x01\x13 Remplir", b"\x10 Kaufen\x01\x13 F\xa7llen", b"\x10 Comprar\x01\x13 Llenar", b"\x10 Compra\x01\x13 Ricarica"],
-	[b"Graphics", b"Graphismes", b"Grafik", b"Gr\x84ficos", b"Grafica"],
-	[b"Graphics Options", b"Options graphismes", b"Grafik-Optionen", b"Opciones de gr\x84ficos", b"Opzioni grafica"],
-	[b"Adjust lighting and shadow settings", b"R\x8cgler l'\x8cclairage et les ombres", b"Beleuchtung und Schatten \x87ndern", b"Ajusta la iluminaci\x9cn y las sombras", b"Regola illuminazione e ombre"],
-	[b"Lighting", b"Lumi\x8dre", b"Beleuchtung", b"Iluminaci\x9cn", b"Illuminazione"],
-	// Lighting values (masculine: "le rendu", "el modo"; the Camera row's Classic text 0x7f01 is feminine in Es / It).
-	[b"Classic", b"Classique", b"Klassisch", b"Cl\x84sico", b"Classico"],
-	[b"Enhanced", b"Am\x8clior\x8c", b"Verbessert", b"Mejorado", b"Migliorato"],
-	[b"Ambient occlusion", b"Occlusion ambiante", b"Umgebungsverdeckung", b"Oclusi\x9cn ambiental", b"Occlusione ambientale"],
-	[b"Dynamic shadows", b"Ombres dynamiques", b"Dynamische Schatten", b"Sombras din\x84micas", b"Ombre dinamiche"],
-	[b"Display mode", b"Affichage", b"Anzeige", b"Pantalla", b"Schermo"],
-	[b"Windowed", b"Fen\x8etre", b"Fenster", b"Ventana", b"Finestra"],
-	[b"Fullscreen", b"Plein \x8ccran", b"Vollbild", b"Completa", b"Intero"],
-	[b"Water", b"Eau", b"Wasser", b"Agua", b"Acqua"],
-	// Spanish "Efectos": "Part\xedculas" needs an i-acute the font table notes do not list.
-	[b"Particles", b"Particules", b"Partikel", b"Efectos", b"Particelle"],
-	[b"Sun rays", b"Rayons de soleil", b"Sonnenstrahlen", b"Rayos de sol", b"Raggi di sole"],
-	[b"Classic", b"Classiques", b"Klassisch", b"Cl\x84sicos", b"Classiche"],
-	[b"Frame smoothing", b"Lissage d'image", b"Bildgl\x87ttung", b"Suavizado de imagen", b"Movimento fluido"],
-	[b"Vegetation", b"V\x8cg\x8ctation", b"Vegetation", b"Vegetaci\x9cn", b"Vegetazione"],
-	[b"Moderate", b"Mod\x8cr\x8ce", b"Mittel", b"Moderada", b"Moderata"],
-	// German "Dicht": "Uppig" needs a capital U-umlaut the font table notes do not list.
-	[b"Lush", b"Luxuriante", b"Dicht", b"Exuberante", b"Rigogliosa"],
-	// Quality levels. French High is "Haut": the font table notes list no capital E-acute for "\xc9lev\xe9".
-	[b"Low", b"Bas", b"Niedrig", b"Bajo", b"Basso"],
-	[b"Medium", b"Moyen", b"Mittel", b"Medio", b"Medio"],
-	[b"High", b"Haut", b"Hoch", b"Alto", b"Alto"],
-	// [PC] Culling: hiding what is out of view or behind walls.
-	[b"Culling", b"Masquage", b"Culling", b"Ocultaci\x9cn", b"Occultamento"],
-	// [PC] Global illumination: light bounced off nearby surfaces (viewer/post.rs `fs_gi`).
-	[b"Global illumination", b"Illumination globale", b"Globale Beleuchtung", b"Iluminaci\x9cn global", b"Illuminazione globale"],
-	// [PC] Waves: the sea's rolling waves (viewer/waterfx.rs `geo_look`).
-	[b"Waves", b"Vagues", b"Wellen", b"Olas", b"Onde"],
-	// [PC] Draw distance: how far the world is drawn (viewer/fardraw.rs).
-	[b"Draw distance", b"Distance d'affichage", b"Sichtweite", b"Distancia de dibujado", b"Distanza visiva"],
-];
-
+pub const ID_FOG: u32 = 0x7f22;
+pub const ID_CLOUDS: u32 = 0x7f23;
 /// The retail Camera Options row table per level (index = level byte 0x15ed84): `{0x4fa2, 0x15ede0, 0x4fa5, 0x4fa4, 0, 0}` is its
 /// first record; the item (+0x34 = table pointer) follows at +0x60, so the pointer to patch is at +0x94. Computed from
 /// extracted/levels/N_*/overlay.elf (test `tables_match_the_overlays`).
@@ -356,7 +294,7 @@ static GFX: AtomicU32 = AtomicU32::new(pack_gfx(DEFAULT_ROWS));
 /// The row bytes of a new player (`PcOptions::graphics_rows` of no file): Classic lighting, the effect rows at High, Windowed,
 /// frame smoothing On, Moderate vegetation, culling On, global illumination Off (a new look and GPU cost the player opts into),
 /// waves On, draw distance Medium (byte 0).
-const DEFAULT_ROWS: [u8; 13] = [0, 1, 1, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0];
+const DEFAULT_ROWS: [u8; 15] = [0, 1, 1, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1];
 /// The Display mode row as last applied (true = Fullscreen).
 static FULLSCREEN: AtomicBool = AtomicBool::new(false);
 
@@ -404,10 +342,14 @@ pub struct Graphics {
 	/// Draw distance (viewer/fardraw.rs, with either Lighting): 0 Low (retail's distances and PS2 far LODs), 1 Medium (the
 	/// default), 2 High (`draw_q`).
 	pub draw: u8,
+	/// Fog (viewer/volfog.rs, with Lighting Enhanced): 0 Classic (the retail fog only), 1 Low, 2 Medium, 3 High (retail/pcext/fogopt.rs).
+	pub fog_q: u8,
+	/// Volumetric clouds (viewer/volclouds.rs, with Lighting Enhanced): 0 Classic (the retail sky only), 1 Low, 2 Medium, 3 High (retail/pcext/cloudopt.rs).
+	pub clouds_q: u8,
 }
 
 impl Graphics {
-	pub const CLASSIC: Graphics = Graphics { lighting: 0, ao: false, shadows: false, water: false, particles: false, sun_rays: false, smoothing: false, veg: 0, culling: true, ao_q: 0, shadows_q: 0, water_q: 0, particles_q: 0, sun_q: 0, gi_q: 0, waves: true, draw: 0 };
+	pub const CLASSIC: Graphics = Graphics { lighting: 0, ao: false, shadows: false, water: false, particles: false, sun_rays: false, smoothing: false, veg: 0, culling: true, ao_q: 0, shadows_q: 0, water_q: 0, particles_q: 0, sun_q: 0, gi_q: 0, waves: true, draw: 0, fog_q: 0, clouds_q: 0 };
 
 	/// Enhanced: the post-processing runs.
 	pub fn enhanced(self) -> bool {
@@ -434,13 +376,15 @@ const fn swap_level(v: u8) -> u8 {
 }
 
 /// `g` (`GROWS` order, bytes or levels) with the six effect rows through `swap_level`.
-const fn swap_rows(mut g: [u8; 13]) -> [u8; 13] {
+const fn swap_rows(mut g: [u8; 15]) -> [u8; 15] {
 	g[1] = swap_level(g[1]);
 	g[2] = swap_level(g[2]);
 	g[4] = swap_level(g[4]);
 	g[5] = swap_level(g[5]);
 	g[6] = swap_level(g[6]);
 	g[10] = swap_level(g[10]);
+	g[13] = swap_level(g[13]);
+	g[14] = swap_level(g[14]);
 	g
 }
 
@@ -450,7 +394,7 @@ const fn swap_rows(mut g: [u8; 13]) -> [u8; 13] {
 /// in bit 26, the global illumination level in bits 27..28 (no "on" bit: 0 = Off), waves Off in bit 29 and the draw distance
 /// byte (0 Medium, 1 High, 2 Low) in bits 30..31. A word with an "on" bit and a zero level (the packing before the levels
 /// existed) reads as High (`unpack_gfx`).
-const fn pack_gfx(g: [u8; 13]) -> u32 {
+const fn pack_gfx(g: [u8; 15]) -> u32 {
 	let veg = if g[8] > 2 { 2 } else { g[8] } as u32;
 	let draw = if g[12] > 2 { 2 } else { g[12] } as u32;
 	let g = swap_rows(g);
@@ -484,8 +428,8 @@ fn gfx_level(g: u32, bit: u32, shift: u32) -> u8 {
 }
 
 /// `pack_gfx`'s inverse: the row bytes (display mode not in the word: 0).
-fn unpack_gfx(g: u32) -> [u8; 13] {
-	swap_rows([(g & 0xff).min(1) as u8, gfx_level(g, 8, 16), gfx_level(g, 9, 18), 0, gfx_level(g, 10, 20), gfx_level(g, 11, 22), gfx_level(g, 12, 24), (g >> 13 & 1) as u8, (g >> 14 & 3).min(2) as u8, (g >> 26 & 1) as u8, (g >> 27 & 3) as u8, (g >> 29 & 1) as u8, (g >> 30 & 3).min(2) as u8])
+fn unpack_gfx(g: u32) -> [u8; 15] {
+	swap_rows([(g & 0xff).min(1) as u8, gfx_level(g, 8, 16), gfx_level(g, 9, 18), 0, gfx_level(g, 10, 20), gfx_level(g, 11, 22), gfx_level(g, 12, 24), (g >> 13 & 1) as u8, (g >> 14 & 3).min(2) as u8, (g >> 26 & 1) as u8, (g >> 27 & 3) as u8, (g >> 29 & 1) as u8, (g >> 30 & 3).min(2) as u8, 0, 0])
 }
 
 /// The Graphics page's verdict (render thread, every frame). Classic with the extension off (`RAC_PC_EXT=0`, the smoke path).
@@ -494,7 +438,7 @@ pub fn graphics() -> Graphics {
 		return Graphics::CLASSIC;
 	}
 	let r = swap_rows(unpack_gfx(GFX.load(Ordering::Relaxed)));
-	Graphics { lighting: r[0], ao: r[1] != 0, shadows: r[2] != 0, water: r[4] != 0, particles: r[5] != 0, sun_rays: r[6] != 0, smoothing: r[7] != 0, veg: r[8], culling: r[9] == 0, ao_q: r[1], shadows_q: r[2], water_q: r[4], particles_q: r[5], sun_q: r[6], gi_q: r[10], waves: r[11] == 0, draw: pcopts::draw_level(r[12]) }
+	super::splitview::pass(Graphics { lighting: r[0], ao: r[1] != 0, shadows: r[2] != 0, water: r[4] != 0, particles: r[5] != 0, sun_rays: r[6] != 0, smoothing: r[7] != 0, veg: r[8], culling: r[9] == 0, ao_q: r[1], shadows_q: r[2], water_q: r[4], particles_q: r[5], sun_q: r[6], gi_q: r[10], waves: r[11] == 0, draw: pcopts::draw_level(r[12]), fog_q: fogopt::level(), clouds_q: cloudopt::level() })
 }
 
 /// The Vegetation row for a level load (viewer/vegfx.rs `plan_veg`): the first level is built before `init` reads the file.
@@ -509,14 +453,15 @@ pub fn veg_for_load() -> u8 {
 }
 
 /// The one gate of the right-mouse-button strafe mode (modcam's aim mode and strafe.rs): the menu's verdict. With the extension
-/// on it is true only while Camera is Modern and Strafe aiming is On. With `RAC_PC_EXT=0` there is no menu, the old switches
-/// (`--modern-cam` / RAC_MODERN_CAM, RAC_MOVE_CLASSIC) decide as before and this answers true.
+/// on it is true while Strafe aiming is On, with either camera (Classic: modcam drives while the aim is held). With `RAC_PC_EXT=0`
+/// there is no menu, the old switches (`--modern-cam` / RAC_MODERN_CAM, RAC_MOVE_CLASSIC) decide as before and this answers true.
+/// False when a mod replaces it (omni/clash.rs).
 pub fn strafe_on() -> bool {
-	gate(enabled(), CAM_MODERN.load(Ordering::Relaxed), STRAFE_ON.load(Ordering::Relaxed))
+	gate(enabled(), STRAFE_ON.load(Ordering::Relaxed)) && !crate::omni::clash::off(crate::omni::clash::STRAFE_AIM)
 }
 
-fn gate(ext: bool, camera_modern: bool, strafe: bool) -> bool {
-	!ext || (camera_modern && strafe)
+fn gate(ext: bool, strafe: bool) -> bool {
+	!ext || strafe
 }
 
 /// Registers the text hands (Retail::load, after modcam's, so a hand of the swarm on the same entry is replaced).
@@ -535,7 +480,7 @@ struct St {
 	/// The row bytes last seen in RAM (None: the region was not set up yet).
 	last: Option<(u8, u8, u8)>,
 	/// The Graphics row bytes last seen in RAM (`GROWS` order).
-	glast: Option<[u8; 13]>,
+	glast: Option<[u8; 15]>,
 	/// The language word last seen by the watcher.
 	lang_seen: Option<u32>,
 	/// A failed write was reported.
@@ -585,7 +530,11 @@ pub fn init(cold: bool) {
 	STRAFE_ON.store(opts.strafe_on(), Ordering::Relaxed);
 	BUYALL_ON.store(opts.buyall_on(), Ordering::Relaxed);
 	HUD_SHARP.store(opts.hud_sharp(), Ordering::Relaxed);
+	super::pcrender::init(&opts); super::pcintro::init(&opts);
 	GFX.store(pack_gfx(swap_rows(opts.graphics_rows())), Ordering::Relaxed);
+	fogopt::set(opts.graphics_rows()[13]);
+	cloudopt::set(opts.graphics_rows()[14]);
+	texfilter::set(opts.texfilter.unwrap_or(true));
 	FULLSCREEN.store(opts.fullscreen_on(), Ordering::Relaxed);
 	modcam::set_active(opts.camera_modern());
 	modcam::set_smooth(opts.camfeel_smooth());
@@ -616,6 +565,7 @@ pub fn pre_field(m: &mut ee_oracle::Machine, fin: &FieldIn) -> FieldIn {
 		camopts_field(&mut m.cpu.mem, level, fin.buttons, &mut s);
 	}
 	super::pcctl::field(&mut m.cpu.mem, level, fin.buttons, &ROWS, GTAB);
+	super::pcmods::field(&mut m.cpu.mem, level, fin.buttons);
 	out
 }
 
@@ -667,12 +617,14 @@ fn sync(mem: &mut Mem, level: u32, toggle: bool, s: &mut St) -> bool {
 		s.last = Some((c, t, b));
 		apply(s, c, t, b, true);
 	}
+	// The Preset row (presets.rs): a preset the player chose becomes the rows' bytes before they are read.
+	presets::choose(mem, s);
 	let mut g = GROWS.map(|a| mem.rd8(a));
 	g[0] = g[0].min(1);
 	// Ambient occlusion, shadows, water, particles, sun rays and global illumination have four values, vegetation and draw
 	// distance three: the pause page cycles a row (+1 mod values), the title's value item only flips the byte; any change is one
 	// press, so the row steps on from its last value on both pages.
-	for i in [1, 2, 4, 5, 6, 8, 10, 12] {
+	for i in [1, 2, 4, 5, 6, 8, 10, 12, 13, 14] {
 		let n = row_values(i);
 		if let Some(last) = s.glast.filter(|l| l[i] != g[i]) {
 			g[i] = (last[i] + 1) % n;
@@ -688,13 +640,13 @@ fn sync(mem: &mut Mem, level: u32, toggle: bool, s: &mut St) -> bool {
 	patch_graphics(mem, level);
 	// The Controls page (pcctl.rs): the rows the player pressed, and a changed binding goes into the file.
 	super::pcctl::sync(mem);
-	if let Some(sharp) = super::pcctl::hud_sharp(mem) {
-		if HUD_SHARP.swap(sharp, Ordering::Relaxed) != sharp {
-			eprintln!("retail: PC options: HUD {}", if sharp { "Sharp" } else { "Original" });
-			s.opts.hud = Some(sharp);
-			s.save();
-		}
+	super::pcmods::sync(mem, level);
+	if let Some(sharp) = super::pcctl::hud_sharp(mem).filter(|&h| HUD_SHARP.swap(h, Ordering::Relaxed) != h) {
+		eprintln!("retail: PC options: HUD {}", if sharp { "Sharp" } else { "Original" });
+		s.opts.hud = Some(sharp);
+		s.save();
 	}
+	if super::pcrender::sync(mem, &mut s.opts) | super::pcintro::sync(mem, &mut s.opts) { s.save(); } // Renderer row (pcrender.rs), Skip intro row (pcintro.rs); no short circuit
 	// Debug mode (Controls -> Debug): the row's byte opens / closes the dev tools and debug keys at once and is remembered (`debug=on`).
 	if let Some(on) = super::pcctl::debug_on(mem) {
 		if super::devtools::set_menu(on, true) {
@@ -709,19 +661,23 @@ fn sync(mem: &mut Mem, level: u32, toggle: bool, s: &mut St) -> bool {
 		s.opts.extra_set("pad", pad);
 		s.save();
 	}
+	presets::show(mem, s);
 	toggle
 }
 
 /// A Graphics byte changed (or the region was set up): the renderer follows (`graphics`); a change is remembered.
-fn apply_graphics(s: &mut St, g: [u8; 13], changed: bool) {
+fn apply_graphics(s: &mut St, g: [u8; 15], changed: bool) {
 	GFX.store(pack_gfx(g), Ordering::Relaxed);
+	fogopt::set(swap_level(g[13]));
+	cloudopt::set(swap_level(g[14]));
+	texfilter::set(s.opts.texfilter.unwrap_or(true));
 	FULLSCREEN.store(g[3] == 1, Ordering::Relaxed);
 	if changed {
 		let on = |v: u8| if v == 1 { "On" } else { "Off" };
 		let lv = |v: u8| pcopts::LEVELS[swap_level(v) as usize];
 		let lvc = |v: u8| pcopts::LEVELS_CLASSIC[swap_level(v) as usize];
 		eprintln!(
-			"retail: PC options: lighting {}, ambient occlusion {}, dynamic shadows {}, display {}, water {}, particles {}, sun rays {}, frame smoothing {}, vegetation {}, culling {}, global illumination {}, waves {}, draw distance {}",
+			"retail: PC options: lighting {}, ambient occlusion {}, dynamic shadows {}, display {}, water {}, particles {}, sun rays {}, frame smoothing {}, vegetation {}, culling {}, global illumination {}, waves {}, draw distance {}, volumetric fog {}, volumetric clouds {}",
 			pcopts::LIGHTING[g[0] as usize],
 			lv(g[1]),
 			lv(g[2]),
@@ -734,7 +690,9 @@ fn apply_graphics(s: &mut St, g: [u8; 13], changed: bool) {
 			if g[9] == 1 { "Off" } else { "On" },
 			lv(g[10]),
 			if g[11] == 1 { "Off" } else { "On" },
-			pcopts::DRAW[pcopts::draw_level(g[12]) as usize]
+			pcopts::DRAW[pcopts::draw_level(g[12]) as usize],
+			fogopt::name(swap_level(g[13])),
+			fogopt::name(swap_level(g[14]))
 		);
 		s.opts.set_graphics_rows(swap_rows(g));
 		s.save();
@@ -775,10 +733,11 @@ fn patch_rows_at(mem: &mut Mem, t: u32) -> bool {
 		return false;
 	}
 	// The retail records Left / Right and Up / Down, then the Camera speed row (the retail Slow / Medium / Fast record is replaced
-	// by the percent row, camopts section), Camera, Strafe, Buy all and Lock-on, then the zero record: 7 rows + 1 = the 8 records
-	// that fit between `TAB` and `POOL`.
+	// by the percent row, camopts section), the Mouse speed row (mousespeed.rs), Camera, Strafe, Buy all and Lock-on, then the zero
+	// record: 8 rows + 1 = the 9 records (216 bytes) at `TAB`.
 	let mut w: Vec<u32> = (0..12).map(|i| mem.rd32(t + 4 * i)).collect();
 	w.extend([mem.rd32(t + 48), CAMSEL, ID_PCT, ID_PCT, 0, 0]);
+	w.extend([ID_MOUSE, MOUSESEL, ID_MPCT, ID_MPCT, 0, 0]);
 	w.extend([ID_CAMERA, CAM, ID_CLASSIC, ID_STATIC, ID_SMOOTH, 0]);
 	w.extend([ID_STRAFE, STRAFE, ID_OFF, ID_ON, 0, 0]);
 	w.extend([ID_BUYALL, BUYALL, ID_OFF, ID_ON, 0, 0]);
@@ -834,18 +793,18 @@ fn patch_graphics(mem: &mut Mem, level: u32) -> bool {
 	if !(0x10_0000..0x200_0000).contains(&src) || pics.iter().chain([&planet]).any(|p| p[1] == 0) {
 		return false;
 	}
-	pics.insert(GRAPHICS_ROW, planet);
-	// Controls (pcctl.rs) follows Graphics and wears the Camera row's picture.
-	pics.insert(GRAPHICS_ROW + 1, pics[4]);
-	// The list rows and their descriptions with Graphics before Quit Game.
+	// Before Quit Game: Graphics (the planet picture), Controls (the Camera row's picture) and, only when a mod is switched on
+	// (`load_store`, once per planet load), Mods (Graphics' planet again): `n` rows, each with its record, description and picture.
+	let store = super::pcmods::load_store();
+	let n = 2 + store.is_some() as usize;
+	pics.splice(GRAPHICS_ROW..GRAPHICS_ROW, [planet, pics[4], planet].into_iter().take(n));
 	let (recs, descs) = (mem.rd32(list + 0x34), mem.rd32(text + 0x34));
 	let mut rows: Vec<[u32; 3]> = (0..7).map(|i| [mem.rd32(recs + 12 * i), mem.rd32(recs + 12 * i + 4), mem.rd32(recs + 12 * i + 8)]).collect();
-	rows.insert(GRAPHICS_ROW, [ID_GRAPHICS | 3 << 16, GPAGE, 0]);
-	rows.insert(GRAPHICS_ROW + 1, [super::pcctl::ID_CONTROLS | 3 << 16, super::pcctl::PAGE_AT, 0]);
+	let new_rows = [[ID_GRAPHICS | 3 << 16, GPAGE, 0], [super::pcctl::ID_CONTROLS | 3 << 16, super::pcctl::PAGE_AT, 0], [super::pcmods::ID_MODS | 3 << 16, super::pcmods::PAGE_AT, 0]];
+	rows.splice(GRAPHICS_ROW..GRAPHICS_ROW, new_rows.into_iter().take(n));
 	rows.push([0; 3]);
 	let mut desc: Vec<u32> = (0..7).map(|i| mem.rd32(descs + 4 * i)).collect();
-	desc.insert(GRAPHICS_ROW, ID_GRAPHICS_DESC);
-	desc.insert(GRAPHICS_ROW + 1, super::pcctl::ID_DESC);
+	desc.splice(GRAPHICS_ROW..GRAPHICS_ROW, [ID_GRAPHICS_DESC, super::pcctl::ID_DESC, super::pcmods::ID_DESC].into_iter().take(n));
 	desc.push(0);
 	for (i, r) in rows.iter().enumerate() {
 		for (k, w) in r.iter().enumerate() {
@@ -896,9 +855,13 @@ fn patch_graphics(mem: &mut Mem, level: u32) -> bool {
 	mem.wr32(GVAL + 0x38, 0);
 	mem.wr32(GVAL + 0x3c, 0);
 	// 6-word rows {label, byte, value 0, value 1, value 2 or 0, value 3 or 0} and the zero record.
-	super::pcctl::build_gfx(mem, GTAB, &ROWS, HUD_SHARP.load(Ordering::Relaxed));
+	super::pcctl::build_gfx(mem, GTAB, &ROWS, HUD_SHARP.load(Ordering::Relaxed), super::pcrender::wanted_dx12());
 	// The Controls page, from the same Camera Options items.
 	super::pcctl::build_page(mem, cp, hdr, val, sound_seq);
+	// The Mods page (pcmods.rs), likewise, only when its row is in the list.
+	if let Some(store) = store {
+		super::pcmods::build_page(mem, cp, hdr, val, sound_seq, store);
+	}
 	mem.wr32(text + 0x34, OPT_DESC);
 	mem.wr32(pic + 0x30, OPT_PICS);
 	mem.wr32(list + 0x34, OPT_RECS);
@@ -993,11 +956,13 @@ fn build_title(mem: &mut Mem, pc: u32, item: u32, s: &mut St) -> Option<u64> {
 	let (Some(hdr), Some(val)) = (hdr, val) else { return None };
 	setup(mem, s);
 	recs.push([ID_GRAPHICS | 3 << 16, TGPAGE, 0]);
-	let same = recs.iter().enumerate().all(|(i, r)| mem.rd32(TRECS + 12 * i as u32) == r[0] && mem.rd32(TRECS + 12 * i as u32 + 4) == r[1]) && mem.rd32(TRECS + 12 * recs.len() as u32) == 0;
+	let seq = mem.rd32(sound + 0xc);
+	let trecs = super::pcmods::title_extend(mem, [video, hdr, val], seq, &mut recs, TRECS);
+	let same = recs.iter().enumerate().all(|(i, r)| mem.rd32(trecs + 12 * i as u32) == r[0] && mem.rd32(trecs + 12 * i as u32 + 4) == r[1]) && mem.rd32(trecs + 12 * recs.len() as u32) == 0;
 	if !same {
 		for (i, r) in recs.iter().chain([&[0u32; 3]]).enumerate() {
 			for (k, w) in r.iter().enumerate() {
-				mem.wr32(TRECS + 12 * i as u32 + 4 * k as u32, *w);
+				mem.wr32(trecs + 12 * i as u32 + 4 * k as u32, *w);
 			}
 		}
 	}
@@ -1007,7 +972,6 @@ fn build_title(mem: &mut Mem, pc: u32, item: u32, s: &mut St) -> Option<u64> {
 	for o in (0x88..0x100).step_by(4) {
 		mem.wr32(TGPAGE + o, 0);
 	}
-	let seq = mem.rd32(sound + 0xc);
 	mem.wr32(TGPAGE + 0xc, seq);
 	for o in (0x40..0x80).step_by(4) {
 		match mem.rd32(TGPAGE + o) {
@@ -1023,20 +987,21 @@ fn build_title(mem: &mut Mem, pc: u32, item: u32, s: &mut St) -> Option<u64> {
 	mem.wr32(TGVAL + 0x38, 0);
 	mem.wr32(TGVAL + 0x3c, 0);
 	// 5-word rows {label, byte, value 0, value 1, flags 0 (Cross flips the byte; Video's 1 = the keep-mode prompt)}, the zero record.
-	let tab: Vec<u32> = ROWS.iter().flat_map(|r| [r[0], r[1], r[2], r[3], 0]).chain([0; 5]).collect();
+	let tab: Vec<u32> = ROWS[..fogopt::TITLE_ROWS].iter().flat_map(|r| [r[0], r[1], r[2], r[3], 0]).chain([0; 5]).collect();
 	for (i, w) in tab.iter().enumerate() {
 		mem.wr32(TGTAB + 4 * i as u32, *w);
 	}
-	mem.wr32(item + 0x34, TRECS);
+	mem.wr32(item + 0x34, trecs);
 	Some(if is_pal { 9 } else { 8 })
 }
 
 /// The title's Graphics page as the mirror draws it (viewer/front_mirror.rs): each row's label and value text ids, for the
 /// values last applied.
 pub fn title_rows() -> Vec<(u32, u32)> {
+	if let Some(r) = super::pcmods::title_rows() { return r; }
 	let mut v = unpack_gfx(GFX.load(Ordering::Relaxed));
 	v[3] = FULLSCREEN.load(Ordering::Relaxed) as u8;
-	ROWS.iter().zip(v).map(|(r, v)| (r[0], r[2 + v as usize])).collect()
+	ROWS[..fogopt::TITLE_ROWS].iter().zip(v).map(|(r, v)| (r[0], r[2 + v as usize])).collect()
 }
 
 /// The new texts in `lang` (0 En .. 4 It) as the mirror's strings (font bytes as chars, like the disc's texts).
@@ -1049,13 +1014,18 @@ pub fn texts(lang: usize) -> impl Iterator<Item = (u32, String)> {
 fn text_hook(c: &mut Cpu) -> bool {
 	let id = c.g(4) as u32;
 	// The Lock-on / Camera speed rows' texts (camopts section below): own pool, one slot per id.
-	if (ID_LOCKON..=ID_SMOOTH).contains(&id) {
+	if (ID_LOCKON..=ID_MPCT).contains(&id) {
 		return camopt_text(c, id);
 	}
 	// The Controls page's texts (pcctl.rs): they follow the bindings at every look; the Debug section's ids have a pool of their own.
 	if (0x7f40..super::pcctl::ID_LAST).contains(&id) || (super::pcctl::ID_DBG0..super::pcctl::ID_DBG_END).contains(&id) {
 		let lang = Lang::from_word(c.mem.rd32(LANG_WORD)).map_or(0, |l| l as usize);
 		return super::pcctl::text_hook(c, id, lang);
+	}
+	// The Mods page's texts (pcmods.rs).
+	if (super::pcmods::ID_FIRST..super::pcmods::ID_END).contains(&id) {
+		let lang = Lang::from_word(c.mem.rd32(LANG_WORD)).map_or(0, |l| l as usize);
+		return super::pcmods::text_hook(c, id, lang);
 	}
 	// Not one of ours: the keyboard's button prompts (prompts.rs) or retail's own lookup.
 	let Some(k) = NEW_IDS.iter().position(|&n| n == id) else { return super::prompts::lookup(c) };
@@ -1072,11 +1042,12 @@ fn text_hook(c: &mut Cpu) -> bool {
 	true
 }
 
-/// The string pool slot of new text `k` (`NEW_IDS` order): `POOL`, then `POOL2`.
+/// The string pool slot of new text `k` (`NEW_IDS` order): `POOL`, `POOL2`, then `POOL3`.
 fn pool_slot(k: usize) -> u32 {
-	match k < POOL_SLOTS {
-		true => POOL + 0x40 * k as u32,
-		false => POOL2 + 0x40 * (k - POOL_SLOTS) as u32,
+	match k {
+		_ if k < POOL_SLOTS => POOL + 0x40 * k as u32,
+		_ if k < POOL_SLOTS + POOL2_SLOTS => POOL2 + 0x40 * (k - POOL_SLOTS) as u32,
+		_ => POOL3 + 0x40 * (k - POOL_SLOTS - POOL2_SLOTS) as u32,
 	}
 }
 
@@ -1107,562 +1078,16 @@ pub fn watch_language(m: &ee_oracle::Machine, field: u32, in_front: bool) {
 	}
 }
 
-// ---- Camera Options: Lock-on and Camera speed rows ---------------------------------------------------------------------------
-//
-// Two rows of the Camera Options page (see `patch_rows_at`; the page then has 7 rows):
-//
-// - Camera speed (row 2, replaces retail's Slow / Medium / Fast row): a value row in percent, 10..200 in steps of 10, shown as
-//   `< 50 >` in retail's font (no percent sign: the font's code 0x25 is the Cross button glyph). Retail has no slider item the page could reuse (the only bars are the Sound page's own item,
-//   per-level code), so it is a multi-choice row whose two choices are the same dynamic text (`ID_PCT`): retail's update toggles
-//   the row's byte `CAMSEL` on Cross, which the host reads as "+10" (200 wraps to 10); Left / Right (pad bits of the field, also
-//   the mouse wheel) are read by the host while this row is the page's cursor row: -10 / +10 with the menu's auto-repeat.
-//   50 % is retail's Fast exactly. The percent is the player's own key `camspeed` (pcopts.rs); without the key nothing is
-//   written: retail's row decides (Slow 30 / Medium 40 / Fast 50 is only what the row shows). With the key, all three entries of
-//   retail's follow-camera rate table (1.0 / 1.3 / 1.6 degrees a tick, found by value in the overlay's data, per level) are
-//   written to Fast * percent / 50 every field and retail's own byte 0x15ede4 gets the nearest preset (so the save stays valid);
-//   the Modern camera (modcam.rs) scales its mouse and stick turn by percent / 50.
-// - Lock-on (row 6): Auto / On / Off for the strafe aim's lock-on (aim.rs `blaster_search_any`: with it off the green crosshair
-//   stays centred and the shot flies to the aim point). Auto = on with a pad, off with keyboard and mouse (`prompts::keyboard_now`).
-//
-// Reserved RAM: the row bytes `LOCKON` / `CAMSEL`, the three text slots from `CO_POOL` (BASE + 0x1000..0x1800 is this section's,
-// prompts.rs' canary skips it) and the texts' ids 0x7f80..0x7f82.
-
-/// Lock-on row: 0 Auto, 1 On, 2 Off (the retail update cycles it). Zero RAM is Auto.
-pub const LOCKON: u32 = BASE + 0x38;
-/// The camera speed row's byte: retail toggles it 0 <-> 1 on every Cross; the host reads each change as one +10 step.
-const CAMSEL: u32 = BASE + 0x39;
-pub const ID_LOCKON: u32 = 0x7f80;
-pub const ID_AUTO: u32 = 0x7f81;
-/// The camera speed row's value text, "< 50 >" (built from the current percent on every lookup).
-pub const ID_PCT: u32 = 0x7f82;
-/// The Camera row's two feels (Static = the plain Modern camera, Smooth = the dynamic one; the third value is `ID_CLASSIC`).
-pub const ID_STATIC: u32 = 0x7f83;
-pub const ID_SMOOTH: u32 = 0x7f84;
-/// This section's string pool: one 0x40-byte slot per id (`ID_LOCKON`..=`ID_SMOOTH`); the range is skipped by prompts.rs' canary.
-const CO_POOL: u32 = BASE + 0x1000;
-pub const CO_POOL_END: u32 = BASE + 0x1800;
-/// Retail's camera speed byte (save struct): 0 Slow, 1 Medium, 2 Fast.
-const RETAIL_SPEED: u32 = 0x15ede4;
-/// The page-menu mode word (mouse_menu::MODE while a pause page is open) and the row index of the camera speed row.
-const MENU_MODE: u32 = 0x15f5a4;
-const SPEED_ROW: u32 = 2;
-/// The Camera Options page id (the Graphics page is a copy with the same id: told apart by the page address).
-const CAMERA_PAGE: u32 = 0x1d;
-/// Retail's follow-camera turn rates (radians a tick: 1.0, 1.3, 1.6 degrees) indexed by `RETAIL_SPEED`; the Fast bits are 50 %.
-const RATE_RETAIL: [u32; 3] = [0x3c8e_fa35, 0x3cb9_dede, 0x3ce4_c388];
-/// Where the overlay's data holds that table on every level of both discs (PAL 0x161d70..0x1626e8).
-const RATE_SCAN: std::ops::Range<u32> = 0x15_ef00..0x17_0000;
-
-/// Lock-on texts per language (En, Fr, De, Es, It) and the Auto value.
-#[rustfmt::skip]
-static CO_TEXTS: [[&[u8]; 5]; 4] = [
-	[b"Lock-on", b"Verrouillage", b"Zielerfassung", b"Fijar objetivo", b"Aggancio"],
-	[b"Auto", b"Auto", b"Auto", b"Auto", b"Auto"],
-	// The Camera row's feels (Es: a-acute 0x84). [I] wording, native review wanted.
-	[b"Static", b"Statique", b"Statisch", b"Est\x84tica", b"Statica"],
-	[b"Smooth", b"Fluide", b"Weich", b"Suave", b"Fluida"],
-];
-
-/// The Lock-on row as last applied (0 Auto, 1 On, 2 Off).
-static LOCKON_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-/// The player's camera speed in percent (`camspeed` key); 0 = never set, retail's row decides and nothing is written.
-static CAMSPEED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-/// The percent the row shows now (the key, else retail's byte as 30 / 40 / 50).
-static CAMSHOW: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(50);
-/// `CAMSEL` as last seen (0xff: not known yet, the next look is the baseline).
-static CAMSEL_SEEN: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0xff);
-/// Where the rate table was found (0: not yet) and the bits the host last wrote into it (0: nothing).
-static RATE_AT: AtomicU32 = AtomicU32::new(0);
-static RATE_SET: AtomicU32 = AtomicU32::new(0);
-/// Fields Left / Right have been held (auto-repeat).
-static HELD: [AtomicU32; 2] = [AtomicU32::new(0), AtomicU32::new(0)];
-
-/// The Lock-on decision of the strafe aim (aim.rs): On, Off, or Auto = on while the last real input came from a pad.
-pub fn lockon_on() -> bool {
-	lockon_decide(LOCKON_MODE.load(Ordering::Relaxed), super::prompts::keyboard_now())
-}
-
-fn lockon_decide(mode: u8, keyboard: bool) -> bool {
-	match mode {
-		1 => true,
-		2 => false,
-		_ => !keyboard,
-	}
-}
-
-/// The Modern camera's turn scale (modcam.rs `step`): the camera speed row's percent / 50, exactly 1.0 without the key.
-pub fn camspeed_scale() -> f32 {
-	camspeed_factor(CAMSPEED.load(Ordering::Relaxed))
-}
-
-fn camspeed_factor(pct: u8) -> f32 {
-	if pct == 0 {
-		1.0
-	} else {
-		pct as f32 / 50.0
-	}
-}
-
-/// The turn rate (radians a tick) for `pct` percent: Fast * pct / 50, so 50 is retail's Fast bits exactly.
-pub fn camspeed_rate_bits(pct: u8) -> u32 {
-	(f32::from_bits(RATE_RETAIL[2]) * (pct as f32 / 50.0)).to_bits()
-}
-
-/// What retail's byte shows as a percent (Slow, Medium, Fast).
-fn preset_pct(byte: u8) -> u8 {
-	[30, 40, 50][byte.min(2) as usize]
-}
-
-/// Retail's byte for the nearest preset of `pct` (the save keeps a valid Slow / Medium / Fast).
-fn preset_byte(pct: u8) -> u8 {
-	match pct {
-		..=35 => 0,
-		36..=45 => 1,
-		_ => 2,
-	}
-}
-
-/// A button of the row.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Step {
-	Left,
-	Right,
-	Cross,
-}
-
-/// The row's value after one `step` from `cur`: Left -10 and Right +10 stop at the ends, Cross +10 wraps from 200 to 10.
-fn camspeed_step(cur: u8, step: Step) -> u8 {
-	use pcopts::{CAMSPEED_MAX as MAX, CAMSPEED_MIN as MIN, CAMSPEED_STEP as STEP};
-	let cur = pcopts::snap_camspeed(cur);
-	match step {
-		Step::Left => cur.saturating_sub(STEP).max(MIN),
-		Step::Right => (cur + STEP).min(MAX),
-		Step::Cross => {
-			if cur >= MAX {
-				MIN
-			} else {
-				cur + STEP
-			}
-		}
-	}
-}
-
-/// Whether a held direction steps in this field: on the press, then after 12 fields every 4 (the menu's own auto-repeat feel).
-fn repeat_due(held: u32) -> bool {
-	held == 1 || (held >= 13 && (held - 13) % 4 == 0)
-}
-
-/// The row's text: "< 50 >" in retail's font (`<` and `>` are glyphs of all three fonts; a `%` is not: its code 0x25 draws the
-/// Cross button, so the unit is left out).
-fn pct_text(pct: u8) -> Vec<u8> {
-	format!("< {pct} >").into_bytes()
-}
-
-/// The string of new text `id` in language `lang` (0 En, 1 Fr, 2 De, 3 Es, 4 It); the percent row uses `pct`.
-fn camopt_string(id: u32, lang: usize, pct: u8) -> Option<Vec<u8>> {
-	match id {
-		ID_LOCKON => Some(CO_TEXTS[0][lang.min(4)].to_vec()),
-		ID_AUTO => Some(CO_TEXTS[1][lang.min(4)].to_vec()),
-		ID_PCT => Some(pct_text(pct)),
-		ID_STATIC => Some(CO_TEXTS[2][lang.min(4)].to_vec()),
-		ID_SMOOTH => Some(CO_TEXTS[3][lang.min(4)].to_vec()),
-		_ => None,
-	}
-}
-
-/// Text hook, ids `ID_LOCKON..=ID_SMOOTH`: the string goes to its pool slot and the lookup returns it.
-fn camopt_text(c: &mut Cpu, id: u32) -> bool {
-	let lang = Lang::from_word(c.mem.rd32(LANG_WORD)).map_or(0, |l| l as usize);
-	let Some(s) = camopt_string(id, lang, CAMSHOW.load(Ordering::Relaxed)) else { return super::prompts::lookup(c) };
-	let at = CO_POOL + 0x40 * (id - ID_LOCKON);
-	for (i, b) in s.iter().enumerate() {
-		c.mem.wr8(at + i as u32, *b);
-	}
-	c.mem.wr8(at + s.len() as u32, 0);
-	c.s(2, at as u64);
-	true
-}
-
-/// `init`: the options file's rows are known before the first field.
-fn camopts_init(opts: &PcOptions) {
-	LOCKON_MODE.store(opts.lockon_mode(), Ordering::Relaxed);
-	CAMSPEED.store(opts.camspeed.map_or(0, pcopts::snap_camspeed), Ordering::Relaxed);
-	CAMSEL_SEEN.store(0xff, Ordering::Relaxed);
-	RATE_AT.store(0, Ordering::Relaxed);
-	RATE_SET.store(0, Ordering::Relaxed);
-	eprintln!(
-		"retail: PC options: lock-on {}, camera speed {}",
-		pcopts::LOCKON[opts.lockon_mode() as usize],
-		opts.camspeed.map_or("(retail row)".to_string(), |p| format!("{}%", pcopts::snap_camspeed(p)))
-	);
-}
-
-/// Fresh RAM (`setup`): the row bytes take the file's values; the rate table is looked for again.
-fn camopts_setup(mem: &mut Mem, s: &St) {
-	let l = s.opts.lockon_mode();
-	mem.wr8(LOCKON, l);
-	mem.wr8(CAMSEL, 0);
-	LOCKON_MODE.store(l, Ordering::Relaxed);
-	CAMSPEED.store(s.opts.camspeed.map_or(0, pcopts::snap_camspeed), Ordering::Relaxed);
-	CAMSEL_SEEN.store(0xff, Ordering::Relaxed);
-	RATE_AT.store(0, Ordering::Relaxed);
-	RATE_SET.store(0, Ordering::Relaxed);
-	for h in &HELD {
-		h.store(0, Ordering::Relaxed);
-	}
-}
-
-/// Whether the camera speed row is the cursor row of the open Camera Options page (not the Graphics copy) of `level`, idle.
-fn on_speed_row(mem: &mut Mem, level: u32) -> bool {
-	if mem.rd32(crate::retail::disc::va(MENU_MODE)) != super::mouse_menu::MODE {
-		return false;
-	}
-	let Some(&t) = (*crate::retail::disc::pick(&TABLES, &TABLES_USA)).get(level as usize) else { return false };
-	let (cp, item) = (t - 0xe0, t + 0x60);
-	let ram = &mem.ram;
-	let rd = |a: u32| -> u32 {
-		let i = (a & 0x01ff_ffff) as usize;
-		ram.get(i..i + 4).map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()))
-	};
-	if rd(item + 0x34) != TAB {
-		return false;
-	}
-	match super::mouse_menu::read(&rd, level, super::mouse_menu::MODE) {
-		Some(snap) => snap.page == cp && snap.id == CAMERA_PAGE && snap.state == CAMERA_PAGE && snap.cur == item && rd(item + 0x38) == SPEED_ROW,
-		None => false,
-	}
-}
-
-/// Finds retail's rate table (the three turn rates in a row) in the overlay's data.
-fn find_rate_table(mem: &mut Mem) -> Option<u32> {
-	RATE_SCAN.step_by(4).find(|&a| RATE_RETAIL.iter().enumerate().all(|(k, &w)| mem.rd32(a + 4 * k as u32) == w))
-}
-
-/// Writes `bits` into all three entries of the rate table (found on first use, looked for again when a level load put other data
-/// there). Only entries that differ are written.
-fn set_rate_table(mem: &mut Mem, bits: u32) -> bool {
-	let applied = RATE_SET.load(Ordering::Relaxed);
-	let mut at = RATE_AT.load(Ordering::Relaxed);
-	let words = |mem: &mut Mem, a: u32| [mem.rd32(a), mem.rd32(a + 4), mem.rd32(a + 8)];
-	if at == 0 || !(words(mem, at) == RATE_RETAIL || (applied != 0 && words(mem, at) == [applied; 3])) {
-		let Some(found) = find_rate_table(mem) else {
-			RATE_AT.store(0, Ordering::Relaxed);
-			return false;
-		};
-		at = found;
-		RATE_AT.store(at, Ordering::Relaxed);
-	}
-	for k in 0..3 {
-		if mem.rd32(at + 4 * k) != bits {
-			mem.wr32(at + 4 * k, bits);
-		}
-	}
-	RATE_SET.store(bits, Ordering::Relaxed);
-	true
-}
-
-/// The player set the camera speed to `pct`: remembered, retail's byte follows with the nearest preset.
-fn set_camspeed(mem: &mut Mem, s: &mut St, pct: u8) {
-	CAMSPEED.store(pct, Ordering::Relaxed);
-	CAMSHOW.store(pct, Ordering::Relaxed);
-	mem.wr8(RETAIL_SPEED, preset_byte(pct));
-	s.opts.camspeed = Some(pct);
-	s.save();
-	eprintln!("retail: PC options: camera speed {pct}%");
-}
-
-/// Worker, each field of a level, after `sync`: the Lock-on byte, the camera speed row's steps and the rate table.
-fn camopts_field(mem: &mut Mem, level: u32, buttons: u16, s: &mut St) {
-	// Lock-on: the retail update cycles the byte; a change is applied and remembered.
-	let l = mem.rd8(LOCKON).min(2);
-	if LOCKON_MODE.swap(l, Ordering::Relaxed) != l {
-		eprintln!("retail: PC options: lock-on {}", pcopts::LOCKON[l as usize]);
-		s.opts.lockon = Some(l);
-		s.save();
-	}
-	// Camera speed: the percent the row shows, then the steps (Cross: retail toggled CAMSEL; Left / Right: the pad bits).
-	let key = CAMSPEED.load(Ordering::Relaxed);
-	let mut shown = if key != 0 { key } else { preset_pct(mem.rd8(RETAIL_SPEED)) };
-	let sel = mem.rd8(CAMSEL);
-	let seen = CAMSEL_SEEN.swap(sel, Ordering::Relaxed);
-	let cross = seen != 0xff && seen != sel;
-	let mut dir = [false; 2];
-	for (i, bit) in [super::mouse_menu::LEFT, super::mouse_menu::RIGHT].into_iter().enumerate() {
-		let held = if buttons & bit != 0 { HELD[i].load(Ordering::Relaxed).saturating_add(1) } else { 0 };
-		HELD[i].store(held, Ordering::Relaxed);
-		dir[i] = repeat_due(held);
-	}
-	if (cross || dir[0] != dir[1]) && on_speed_row(mem, level) {
-		let step = if cross {
-			Step::Cross
-		} else if dir[0] {
-			Step::Left
-		} else {
-			Step::Right
-		};
-		let next = camspeed_step(shown, step);
-		if next != shown {
-			set_camspeed(mem, s, next);
-			shown = next;
-		}
-	}
-	CAMSHOW.store(shown, Ordering::Relaxed);
-	let key = CAMSPEED.load(Ordering::Relaxed);
-	if key != 0 {
-		set_rate_table(mem, camspeed_rate_bits(key));
-	}
-}
+mod camopts;
+mod mousespeed;
+pub use camopts::*;
+pub use mousespeed::*;
 
 #[cfg(test)]
-mod camopts_tests {
-	use super::*;
+mod camopts_tests;
 
-	/// The tests below set process-wide state (CAMSPEED, CAMSHOW ..): they take turns.
-	static TURN: Mutex<()> = Mutex::new(());
-
-	fn turn() -> std::sync::MutexGuard<'static, ()> {
-		TURN.lock().unwrap_or_else(|e| e.into_inner())
-	}
-
-	fn reset_statics() {
-		CAMSPEED.store(0, Ordering::Relaxed);
-		CAMSHOW.store(50, Ordering::Relaxed);
-		LOCKON_MODE.store(0, Ordering::Relaxed);
-		CAMSEL_SEEN.store(0xff, Ordering::Relaxed);
-		RATE_AT.store(0, Ordering::Relaxed);
-		RATE_SET.store(0, Ordering::Relaxed);
-	}
-
-	/// The retail Camera Options records at the table: Left / Right, Up / Down, Slow / Medium / Fast.
-	const RETAIL_RECS: [[u32; 6]; 3] = [[0x4fa2, 0x15ede0, 0x4fa5, 0x4fa4, 0, 0], [0x4fa3, 0x15eddc, 0x4fa5, 0x4fa4, 0, 0], [0x521b, 0x15ede4, 0x521a, 0x5219, 0x5218, 0]];
-
-	fn rec(mem: &mut Mem, i: u32) -> [u32; 6] {
-		let mut r = [0u32; 6];
-		for (k, w) in r.iter_mut().enumerate() {
-			*w = mem.rd32(TAB + 24 * i + 4 * k as u32);
-		}
-		r
-	}
-
-	/// The row table of every level of both discs: the retail records, the Camera speed row in place of Slow / Medium / Fast, the
-	/// three PC rows, Lock-on, and the zero record; patched once; 8 records fit between TAB and POOL.
-	#[test]
-	fn camera_rows_of_every_level_pal_and_usa() {
-		assert_eq!(POOL - TAB, 8 * 24, "7 rows and the zero record fill the copy exactly");
-		for (name, tables) in [("PAL", &TABLES), ("USA", &TABLES_USA)] {
-			for (lv, &t) in tables.iter().enumerate() {
-				let mut mem = Mem::new();
-				for (i, r) in RETAIL_RECS.iter().enumerate() {
-					for (k, w) in r.iter().enumerate() {
-						mem.wr32(t + 24 * i as u32 + 4 * k as u32, *w);
-					}
-				}
-				assert!(!patch_rows_at(&mut mem, t), "{name} level {lv}: no item pointer yet");
-				mem.wr32(t + PTR_OFF, t);
-				assert!(patch_rows_at(&mut mem, t), "{name} level {lv}");
-				assert_eq!(mem.rd32(t + PTR_OFF), TAB, "{name} level {lv}: item repointed");
-				assert_eq!(rec(&mut mem, 0), RETAIL_RECS[0], "{name} level {lv}: Left / Right as retail");
-				assert_eq!(rec(&mut mem, 1), RETAIL_RECS[1], "{name} level {lv}: Up / Down as retail");
-				assert_eq!(rec(&mut mem, 2), [0x521b, CAMSEL, ID_PCT, ID_PCT, 0, 0], "{name} level {lv}: camera speed row (retail's label)");
-				assert_eq!(rec(&mut mem, 3), [ID_CAMERA, CAM, ID_CLASSIC, ID_STATIC, ID_SMOOTH, 0], "{name} level {lv}");
-				assert_eq!(rec(&mut mem, 4), [ID_STRAFE, STRAFE, ID_OFF, ID_ON, 0, 0], "{name} level {lv}");
-				assert_eq!(rec(&mut mem, 5), [ID_BUYALL, BUYALL, ID_OFF, ID_ON, 0, 0], "{name} level {lv}");
-				assert_eq!(rec(&mut mem, 6), [ID_LOCKON, LOCKON, ID_AUTO, ID_ON, ID_OFF, 0], "{name} level {lv}: lock-on row");
-				assert_eq!(rec(&mut mem, 7), [0; 6], "{name} level {lv}: zero record");
-				// The retail table itself is left alone, and a patched item is not patched again.
-				assert_eq!(mem.rd32(t + 4), 0x15ede0);
-				assert!(!patch_rows_at(&mut mem, t), "{name} level {lv}: idempotent");
-			}
-		}
-		// The bytes and the text ids do not collide with the other rows or the pools.
-		let rows = [CAM, STRAFE, BUYALL, LOCKON, CAMSEL].into_iter().chain(GROWS);
-		let mut v: Vec<u32> = rows.collect();
-		v.sort();
-		v.dedup();
-		assert_eq!(v.len(), 5 + GROWS.len(), "row bytes are distinct");
-		assert!((ID_LOCKON..=ID_SMOOTH).all(|id| !NEW_IDS.contains(&id)));
-		assert!(CO_POOL >= POOL2 + 0x100 && CO_POOL + 0x40 * (ID_SMOOTH - ID_LOCKON + 1) <= CO_POOL_END);
-	}
-
-	#[test]
-	fn camera_speed_steps_and_ends() {
-		use Step::*;
-		assert_eq!(camspeed_step(50, Right), 60);
-		assert_eq!(camspeed_step(50, Left), 40);
-		assert_eq!(camspeed_step(10, Left), 10, "Left stops at 10");
-		assert_eq!(camspeed_step(200, Right), 200, "Right stops at 200");
-		assert_eq!(camspeed_step(190, Right), 200);
-		assert_eq!(camspeed_step(50, Cross), 60);
-		assert_eq!(camspeed_step(200, Cross), 10, "Cross wraps");
-		assert_eq!(camspeed_step(10, Cross), 20);
-		// 20 presses of Cross visit every value once and come back.
-		let mut v = 10;
-		let mut seen = Vec::new();
-		for _ in 0..20 {
-			seen.push(v);
-			v = camspeed_step(v, Cross);
-		}
-		assert_eq!((v, seen.len(), seen.first(), seen.last()), (10, 20, Some(&10), Some(&200)));
-		// Retail's three presets show as 30 / 40 / 50 and a percent maps back to the nearest one.
-		assert_eq!([0u8, 1, 2, 7].map(preset_pct), [30, 40, 50, 50]);
-		assert_eq!([10u8, 30, 35, 36, 40, 45, 46, 50, 200].map(preset_byte), [0, 0, 0, 1, 1, 1, 2, 2, 2]);
-		for b in 0..3u8 {
-			assert_eq!(preset_byte(preset_pct(b)), b, "the shown value of a preset maps back to it");
-		}
-		// Auto-repeat: the press, then from the 13th field every 4th.
-		let due: Vec<u32> = (0..30).filter(|&h| repeat_due(h)).collect();
-		assert_eq!(due, [1, 13, 17, 21, 25, 29]);
-	}
-
-	#[test]
-	fn camera_speed_rate_maths() {
-		assert_eq!(camspeed_rate_bits(50), 0x3ce4_c388, "50 % is retail's Fast exactly");
-		assert_eq!(f32::from_bits(camspeed_rate_bits(100)), 2.0 * f32::from_bits(0x3ce4_c388), "100 % doubles the turn per tick");
-		assert_eq!(f32::from_bits(camspeed_rate_bits(10)), f32::from_bits(0x3ce4_c388) * (10.0 / 50.0));
-		let rates: Vec<f32> = (1..=20).map(|k| f32::from_bits(camspeed_rate_bits(10 * k))).collect();
-		assert!(rates.windows(2).all(|w| w[1] > w[0]), "monotonic");
-		assert_eq!(camspeed_factor(0), 1.0, "no key: the Modern camera is untouched");
-		assert_eq!(camspeed_factor(50), 1.0);
-		assert_eq!(camspeed_factor(100), 2.0);
-		assert_eq!(camspeed_factor(10), 0.2);
-		// Retail's three rates are 1.0, 1.3 and 1.6 degrees.
-		let deg: Vec<f32> = RATE_RETAIL.iter().map(|&b| f32::from_bits(b).to_degrees()).collect();
-		assert!((deg[0] - 1.0).abs() < 1e-3 && (deg[1] - 1.3).abs() < 1e-3 && (deg[2] - 1.6).abs() < 1e-3, "{deg:?}");
-	}
-
-	#[test]
-	fn lockon_truth_table() {
-		// Auto follows the device (pad: on, keyboard: off); On and Off do not care.
-		assert!(lockon_decide(0, false));
-		assert!(!lockon_decide(0, true));
-		assert!(lockon_decide(1, true) && lockon_decide(1, false));
-		assert!(!lockon_decide(2, true) && !lockon_decide(2, false));
-		assert!(lockon_decide(9, false) && !lockon_decide(9, true), "a stray byte acts as Auto");
-	}
-
-	#[test]
-	fn camera_option_texts() {
-		for lang in 0..5 {
-			for id in ID_LOCKON..=ID_SMOOTH {
-				let s = camopt_string(id, lang, 70).unwrap();
-				assert!(!s.is_empty() && s.len() < 0x3f);
-				assert!(s.iter().all(|&b| (0x20..0x7f).contains(&b) || b == 0x84), "printable ASCII (and the a-acute 0x84) in the font: {s:?}");
-			}
-		}
-		assert_eq!(camopt_string(ID_LOCKON, 0, 0).unwrap(), b"Lock-on");
-		assert_eq!(camopt_string(ID_LOCKON, 2, 0).unwrap(), b"Zielerfassung");
-		assert_eq!(camopt_string(ID_AUTO, 3, 0).unwrap(), b"Auto");
-		assert_eq!(camopt_string(ID_PCT, 1, 50).unwrap(), b"< 50 >");
-		assert_eq!(camopt_string(ID_PCT, 4, 200).unwrap(), b"< 200 >");
-		assert_eq!(camopt_string(ID_STATIC, 0, 0).unwrap(), b"Static");
-		assert_eq!(camopt_string(ID_SMOOTH, 0, 0).unwrap(), b"Smooth");
-		assert_eq!(camopt_string(ID_STATIC, 1, 0).unwrap(), b"Statique");
-		assert_eq!(camopt_string(ID_SMOOTH, 1, 0).unwrap(), b"Fluide");
-		assert_eq!(camopt_string(ID_STATIC, 2, 0).unwrap(), b"Statisch");
-		assert_eq!(camopt_string(ID_SMOOTH, 2, 0).unwrap(), b"Weich");
-		assert_eq!(camopt_string(ID_STATIC, 3, 0).unwrap(), b"Est\x84tica");
-		assert_eq!(camopt_string(ID_SMOOTH, 3, 0).unwrap(), b"Suave");
-		assert_eq!(camopt_string(ID_STATIC, 4, 0).unwrap(), b"Statica");
-		assert_eq!(camopt_string(ID_SMOOTH, 4, 0).unwrap(), b"Fluida");
-		assert_eq!(camopt_string(ID_SMOOTH + 1, 0, 50), None);
-		assert_eq!(camopt_string(ID_LOCKON - 1, 0, 50), None);
-	}
-
-	fn state_dir(name: &str) -> Option<String> {
-		[concat!(env!("CARGO_MANIFEST_DIR"), "/../oracle/states/")].iter().map(|b| format!("{b}{name}")).find(|p| std::path::Path::new(p).join("eeMemory.bin").exists())
-	}
-
-	/// On the loaded Eudora state: the rate table is found by value; without the key nothing at all is written; with the key all
-	/// three entries take the rate, again after a level reload; the texts come out of the new pool through the real lookup.
-	#[test]
-	fn eudora_rate_table_texts_and_no_key_no_write() {
-		let _t = turn();
-		let Some(dir) = state_dir("fg1/4_0159") else { return };
-		let mut m = ee_oracle::Machine::load(&dir);
-		ee_game::register();
-		register_hand(crate::retail::disc::hands(&HANDS));
-		m.enable_rec();
-		assert_eq!(m.level(), 4);
-		reset_statics();
-		assert_eq!(find_rate_table(&mut m.cpu.mem), Some(0x161ea0), "the Eudora overlay's table, found by its three values");
-		let mut guard = ST.lock().unwrap_or_else(|e| e.into_inner());
-		let s: &mut St = &mut guard;
-		let file = std::env::temp_dir().join(format!("pcext_camopts_{}.txt", std::process::id()));
-		let _ = std::fs::remove_file(&file);
-		s.opts = PcOptions::default();
-		s.path = Some(file.clone());
-		// No key: setup, then a field with nothing pressed changes no byte of RAM at all.
-		camopts_setup(&mut m.cpu.mem, s);
-		let before = m.cpu.mem.ram.clone();
-		camopts_field(&mut m.cpu.mem, 4, 0, s);
-		camopts_field(&mut m.cpu.mem, 4, 0x2000, s);
-		assert!(m.cpu.mem.ram == before, "no camspeed key: the field writes nothing");
-		assert!(!file.exists(), "nothing is remembered until the player changes a row");
-		assert_eq!(CAMSHOW.load(Ordering::Relaxed), preset_pct(m.cpu.mem.rd8(RETAIL_SPEED)), "the row shows retail's own preset");
-		// Lock-on: the retail update cycles the byte, the host applies and remembers it.
-		m.cpu.mem.wr8(LOCKON, 2);
-		camopts_field(&mut m.cpu.mem, 4, 0, s);
-		assert_eq!(LOCKON_MODE.load(Ordering::Relaxed), 2);
-		assert!(!lockon_decide(LOCKON_MODE.load(Ordering::Relaxed), false));
-		assert_eq!(PcOptions::load(&file).lockon, Some(2));
-		// Key 100: all three entries take the doubled Fast rate; an unchanged table is not rewritten; a level reload (retail data
-		// again) is written again; the retail byte is not touched by the key alone.
-		let at = 0x161ea0;
-		let byte = m.cpu.mem.rd8(RETAIL_SPEED);
-		CAMSPEED.store(100, Ordering::Relaxed);
-		camopts_field(&mut m.cpu.mem, 4, 0, s);
-		let w = |m: &mut ee_oracle::Machine| [m.cpu.mem.rd32(at), m.cpu.mem.rd32(at + 4), m.cpu.mem.rd32(at + 8)];
-		assert_eq!(w(&mut m), [camspeed_rate_bits(100); 3]);
-		assert_eq!(f32::from_bits(w(&mut m)[0]), 2.0 * f32::from_bits(0x3ce4_c388));
-		assert_eq!(m.cpu.mem.rd8(RETAIL_SPEED), byte);
-		camopts_field(&mut m.cpu.mem, 4, 0, s);
-		assert_eq!(w(&mut m), [camspeed_rate_bits(100); 3]);
-		for (k, v) in RATE_RETAIL.iter().enumerate() {
-			m.cpu.mem.wr32(at + 4 * k as u32, *v);
-		}
-		camopts_field(&mut m.cpu.mem, 4, 0, s);
-		assert_eq!(w(&mut m), [camspeed_rate_bits(100); 3], "rewritten after a level reload");
-		// A new value: the doubled rate gives way to the new one.
-		CAMSPEED.store(50, Ordering::Relaxed);
-		camopts_field(&mut m.cpu.mem, 4, 0, s);
-		assert_eq!(w(&mut m), [0x3ce4_c388; 3], "50 % writes retail's Fast into all three entries");
-		// The row's step: the player sets 120: remembered, retail's byte follows with the nearest preset (Fast).
-		set_camspeed(&mut m.cpu.mem, s, 120);
-		assert_eq!((CAMSPEED.load(Ordering::Relaxed), CAMSHOW.load(Ordering::Relaxed), m.cpu.mem.rd8(RETAIL_SPEED)), (120, 120, 2));
-		assert_eq!(PcOptions::load(&file).camspeed, Some(120));
-		set_camspeed(&mut m.cpu.mem, s, 30);
-		assert_eq!(m.cpu.mem.rd8(RETAIL_SPEED), 0);
-		// The texts through the real lookup: the language word decides, the percent row shows the current value.
-		let look = |m: &mut ee_oracle::Machine, id: u32, word: u32| -> (u32, String) {
-			m.cpu.mem.wr32(LANG_WORD, word);
-			m.cpu.s(4, id as u64);
-			m.cpu.call(0x1f6b80);
-			let p = m.cpu.g(2) as u32;
-			let mut out = Vec::new();
-			let mut a = p;
-			while m.cpu.mem.rd8(a) != 0 {
-				out.push(m.cpu.mem.rd8(a));
-				a += 1;
-			}
-			(p, out.iter().map(|&b| b as char).collect())
-		};
-		let (p, text) = look(&mut m, ID_LOCKON, 2);
-		assert_eq!((p, text.as_str()), (CO_POOL, "Verrouillage"));
-		let (p, text) = look(&mut m, ID_LOCKON, 3);
-		assert_eq!((p, text.as_str()), (CO_POOL, "Zielerfassung"));
-		let (p, text) = look(&mut m, ID_AUTO, 5);
-		assert_eq!((p, text.as_str()), (CO_POOL + 0x40, "Auto"));
-		CAMSHOW.store(170, Ordering::Relaxed);
-		let (p, text) = look(&mut m, ID_PCT, 0);
-		assert_eq!((p, text.as_str()), (CO_POOL + 0x80, "< 170 >"));
-		// A retail id still declines to retail's lookup (German state: 'Kamera').
-		assert_eq!(look(&mut m, ID_CAMERA, 3).1, "Kamera");
-		let _ = std::fs::remove_file(&file);
-		s.path = None;
-		s.opts = PcOptions::default();
-		reset_statics();
-	}
-}
+#[cfg(test)]
+mod gfx_word_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1678,17 +1103,15 @@ mod tests {
 		d
 	}
 
-	static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+	pub(super) static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 	#[test]
 	fn strafe_gate_truth_table() {
-		// Extension on: only Modern + On.
-		assert!(gate(true, true, true));
-		assert!(!gate(true, true, false));
-		assert!(!gate(true, false, true), "Classic camera: strafe is off whatever the row says");
-		assert!(!gate(true, false, false));
+		// Extension on: the Strafe aiming row decides, with either camera.
+		assert!(gate(true, true));
+		assert!(!gate(true, false));
 		// Extension off: the old switches decide, the menu does not restrict.
-		assert!(gate(false, false, false));
+		assert!(gate(false, false));
 	}
 
 	#[test]
@@ -1769,7 +1192,7 @@ mod tests {
 				out.push(m.cpu.mem.rd8(a));
 				a += 1;
 			}
-			assert!((POOL..POOL + 0x140).contains(&p) || (POOL2..POOL2 + 0x100).contains(&p) || id < 0x7f00, "pool pointer for {id:#x}: {p:#x}");
+			assert!((POOL..POOL + 0x140).contains(&p) || (POOL2..POOL2 + 0x100).contains(&p) || (POOL3..POOL3 + 0x80).contains(&p) || id < 0x7f00, "pool pointer for {id:#x}: {p:#x}");
 			out.iter().map(|&b| b as char).collect()
 		};
 		for (word, expect) in [(0u32, "Modern"), (2, "Moderne"), (3, "Modern"), (4, "Moderna"), (5, "Moderna")] {
@@ -1792,12 +1215,13 @@ mod tests {
 		assert_eq!((m.cpu.mem.rd8(CAM), m.cpu.mem.rd8(STRAFE), m.cpu.mem.rd8(BUYALL)), (2, 1, 1), "new player: Modern Smooth, strafe On, buy all On");
 		let rec = |mem: &mut Mem, i: u32| -> Vec<u32> { (0..6).map(|k| mem.rd32(TAB + 24 * i + 4 * k)).collect() };
 		assert_eq!(rec(&mut m.cpu.mem, 0), [0x4fa2, 0x15ede0, 0x4fa5, 0x4fa4, 0, 0]);
-		assert_eq!(rec(&mut m.cpu.mem, 3), [ID_CAMERA, CAM, ID_CLASSIC, ID_STATIC, ID_SMOOTH, 0]);
-		assert_eq!(rec(&mut m.cpu.mem, 4), [ID_STRAFE, STRAFE, ID_OFF, ID_ON, 0, 0]);
+		assert_eq!(rec(&mut m.cpu.mem, 4), [ID_CAMERA, CAM, ID_CLASSIC, ID_STATIC, ID_SMOOTH, 0]);
+		assert_eq!(rec(&mut m.cpu.mem, 5), [ID_STRAFE, STRAFE, ID_OFF, ID_ON, 0, 0]);
 		assert_eq!(rec(&mut m.cpu.mem, 2), [0x521b, CAMSEL, ID_PCT, ID_PCT, 0, 0], "camera speed row in place of Slow / Medium / Fast");
-		assert_eq!(rec(&mut m.cpu.mem, 5), [ID_BUYALL, BUYALL, ID_OFF, ID_ON, 0, 0]);
-		assert_eq!(rec(&mut m.cpu.mem, 6), [ID_LOCKON, LOCKON, ID_AUTO, ID_ON, ID_OFF, 0]);
-		assert_eq!(rec(&mut m.cpu.mem, 7), [0; 6]);
+		assert_eq!(rec(&mut m.cpu.mem, 3), [ID_MOUSE, MOUSESEL, ID_MPCT, ID_MPCT, 0, 0], "mouse speed row right below camera speed");
+		assert_eq!(rec(&mut m.cpu.mem, 6), [ID_BUYALL, BUYALL, ID_OFF, ID_ON, 0, 0]);
+		assert_eq!(rec(&mut m.cpu.mem, 7), [ID_LOCKON, LOCKON, ID_AUTO, ID_ON, ID_OFF, 0]);
+		assert_eq!(rec(&mut m.cpu.mem, 8), [0; 6]);
 		sync(&mut m.cpu.mem, 4, false, &mut s);
 		assert_eq!(m.cpu.mem.rd32(t + PTR_OFF), TAB);
 		assert!(!dirp.join("pc_options.txt").exists(), "nothing is written until the player changes something");
@@ -1945,17 +1369,7 @@ mod tests {
 		assert_eq!(mem.rd32(list + 0x34), OPT_RECS);
 		assert_eq!(mem.rd32(text + 0x34), OPT_DESC);
 		assert_eq!(mem.rd32(pic + 0x30), OPT_PICS);
-		let ids: Vec<u32> = (0..10).map(|i| mem.rd32(OPT_RECS + 12 * i) & 0xffff).collect();
-		assert_eq!(ids, [0x4f1e, 0x4f1f, 0x4f20, 0x4f22, 0x4f23, 0x4f24, ID_GRAPHICS, super::super::pcctl::ID_CONTROLS, 0x4f26, 0]);
-		assert_eq!((mem.rd32(OPT_RECS + 84) >> 16, mem.rd32(OPT_RECS + 88)), (3, super::super::pcctl::PAGE_AT), "type 3: go to the Controls page");
-		assert_eq!((mem.rd32(OPT_RECS + 72) >> 16, mem.rd32(OPT_RECS + 76)), (3, GPAGE), "type 3: go to the Graphics page");
-		let desc: Vec<u32> = (0..10).map(|i| mem.rd32(OPT_DESC + 4 * i)).collect();
-		assert_eq!(desc, [0x4f31, 0x4f32, 0x4f33, 0x4f35, 0x4f36, 0x4f37, ID_GRAPHICS_DESC, super::super::pcctl::ID_DESC, 0x4f39, 0]);
-		// Pictures: the retail seven around help_ss 5 (the record just below options_ss 0 is help_ss 6) and the Camera row's picture for Controls.
-		assert_eq!(mem.rd32(OPT_PICS + 8 * 8), mem.rd32(0x138040 + 8 * 6));
-		assert_eq!((mem.rd32(OPT_PICS + 8 * 7), mem.rd32(OPT_PICS + 8 * 7 + 4)), (mem.rd32(OPT_PICS + 8 * 4), mem.rd32(OPT_PICS + 8 * 4 + 4)));
-		assert_eq!(mem.rd32(OPT_PICS + 8 * 6), mem.rd32(0x138040 - 0x10));
-		assert_ne!(mem.rd32(OPT_PICS + 8 * 6 + 4), 0);
+		camopts_tests::options_records_hold_the_new_rows(mem, false);
 		// The page: id 0x1d, parent Options, current item = our value item, items = ours where Camera Options has its own.
 		assert_eq!((mem.rd32(GPAGE + 0x38), mem.rd32(GPAGE + 0x3c), mem.rd32(GPAGE + 0x40)), (opt, 0x1d, GVAL));
 		// Panel sequences: Camera Options' except the value panel, which plays the Sound page's (Options row 3) taller one.
@@ -1985,37 +1399,40 @@ mod tests {
 		assert_eq!(mem.rd32(citems[0] + 0x34), 0x7f71);
 		assert_eq!((mem.rd32(GHDR + 0x34), mem.rd32(GVAL + 0x34), mem.rd32(GVAL)), (ID_GRAPHICS_HDR, GTAB, mem.rd32(t + 0x60)));
 		let row = |mem: &mut Mem, i: u32| -> Vec<u32> { (0..6).map(|k| mem.rd32(GTAB + 24 * i + 4 * k)).collect() };
-		// Section 0 (Picture): the selector, Lighting, Ambient occlusion, Dynamic shadows, Global illumination, Sun rays, HUD.
+		// Section 0 (Picture): the selector, Preset, Lighting, Ambient occlusion, Dynamic shadows, Global illumination, Sun rays.
 		let gb = cb + 0x10;
 		assert_eq!(row(mem, 0), [0x7f73, gb, 0x7f75, 0x7f75, 0, 0]);
-		assert_eq!(row(mem, 1), [ID_LIGHTING, LIGHT, ID_LIGHT_CLASSIC, ID_ENHANCED, 0, 0]);
-		assert_eq!(row(mem, 2), [ID_AO, AO, ID_OFF, ID_HIGH, ID_MEDIUM, ID_LOW]);
-		assert_eq!(row(mem, 3), [ID_SHADOWS, SHADOWS, ID_OFF, ID_HIGH, ID_MEDIUM, ID_LOW]);
-		assert_eq!(row(mem, 4), [ID_GI, GI, ID_OFF, ID_HIGH, ID_MEDIUM, ID_LOW]);
-		assert_eq!(row(mem, 5), [ID_SUNRAYS, SUNRAYS, ID_OFF, ID_HIGH, ID_MEDIUM, ID_LOW]);
-		assert_eq!(row(mem, 6), [0x7f76, gb + 1, 0x7f77, 0x7f78, 0, 0]);
+		assert_eq!(row(mem, 1), [0x7f7c, gb + 4, ID_LOW, ID_MEDIUM, ID_HIGH, 0], "a new player reads High, so no Custom choice");
+		assert_eq!(mem.rd8(gb + 4), 2, "the Preset row reads High for the default picture");
+		assert_eq!(row(mem, 2), [ID_LIGHTING, LIGHT, ID_LIGHT_CLASSIC, ID_ENHANCED, 0, 0]);
+		assert_eq!(row(mem, 3), [ID_AO, AO, ID_OFF, ID_HIGH, ID_MEDIUM, ID_LOW]);
+		assert_eq!(row(mem, 4), [ID_SHADOWS, SHADOWS, ID_OFF, ID_HIGH, ID_MEDIUM, ID_LOW]);
+		assert_eq!(row(mem, 5), [ID_GI, GI, ID_OFF, ID_HIGH, ID_MEDIUM, ID_LOW]);
+		assert_eq!(row(mem, 6), [ID_SUNRAYS, SUNRAYS, ID_OFF, ID_HIGH, ID_MEDIUM, ID_LOW]);
 		assert_eq!(row(mem, 7), [0; 6]);
-		// Section 1 (Effects): Water, Waves, Particles, Vegetation; section 2 (Screen): Display mode, Frame smoothing, Draw distance, Culling.
+		// Section 1 (Effects): Water, Waves, Particles, Vegetation, Volumetric fog, Volumetric clouds; section 2 (Screen): Display mode, Frame smoothing, Draw distance, Culling, Renderer, HUD.
 		super::super::pcctl::test_gfx_section(mem, 1, &ROWS, GTAB);
 		assert_eq!(row(mem, 0), [0x7f73, gb, 0x7f75, 0x7f75, 0, 0]);
 		assert_eq!(row(mem, 1), [ID_WATER, WATER, ID_CLASSIC, ID_HIGH, ID_MEDIUM, ID_LOW]);
 		assert_eq!(row(mem, 2), [ID_WAVES, WAVES, ID_ON, ID_OFF, 0, 0]);
 		assert_eq!(row(mem, 3), [ID_PARTICLES, PARTICLES, ID_PART_CLASSIC, ID_HIGH, ID_MEDIUM, ID_LOW]);
 		assert_eq!(row(mem, 4), [ID_VEGETATION, VEG, ID_OFF, ID_VEG_MODERATE, ID_VEG_LUSH, 0]);
-		assert_eq!(row(mem, 5), [0; 6]);
+		assert_eq!((row(mem, 5), row(mem, 6), row(mem, 7)), (vec![ID_FOG, fogopt::FOG, ID_CLASSIC, ID_HIGH, ID_MEDIUM, ID_LOW], vec![ID_CLOUDS, cloudopt::CLOUDS, ID_CLASSIC, ID_HIGH, ID_MEDIUM, ID_LOW], vec![0; 6]));
 		super::super::pcctl::test_gfx_section(mem, 2, &ROWS, GTAB);
 		assert_eq!(row(mem, 1), [ID_DISPLAY, DISPLAY, ID_WINDOWED, ID_FULLSCREEN, 0, 0]);
 		assert_eq!(row(mem, 2), [ID_SMOOTHING, SMOOTH, ID_OFF, ID_ON, 0, 0]);
 		assert_eq!(row(mem, 3), [ID_DRAW, DRAW, ID_MEDIUM, ID_HIGH, ID_LOW, 0]);
 		assert_eq!(row(mem, 4), [ID_CULLING, CULL, ID_ON, ID_OFF, 0, 0]);
-		assert_eq!(row(mem, 5), [0; 6]);
+		let rend = row(mem, 5); assert_eq!((rend[0], rend[2], rend[3], rend[4], rend[5], row(mem, 6) == [0; 6]), (0x7f79, 0x7f7a, 0x7f7b, 0, 0, false)); // Renderer (pcrender.rs): label, menu byte, Vulkan, DirectX 12
+		assert_eq!(row(mem, 6), [0x7f76, gb + 1, 0x7f77, 0x7f78, 0, 0], "the HUD row closes the Screen page");
+		assert_eq!(row(mem, 7), [0; 6]);
 		super::super::pcctl::test_gfx_section(mem, 0, &ROWS, GTAB);
 		assert_eq!(GROWS.map(|a| mem.rd8(a)), DEFAULT_ROWS, "new player: Classic, the effect rows at High, Windowed, smoothing On, Moderate, culling On, GI Off, waves On, draw distance Medium");
-		assert_eq!(DEFAULT_ROWS, [0, 1, 1, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0], "today's menu bytes (culling On = 0, global illumination Off = 0, waves On = 0, draw distance Medium = 0)");
+		assert_eq!(DEFAULT_ROWS, [0, 1, 1, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1], "today's menu bytes (culling On = 0, global illumination Off = 0, waves On = 0, draw distance Medium = 0, fog and clouds High = 1)");
 		assert!(!fullscreen());
 		assert_eq!(
 			graphics(),
-			Graphics { lighting: 0, ao: true, shadows: true, water: true, particles: true, sun_rays: true, smoothing: true, veg: 1, culling: true, ao_q: 3, shadows_q: 3, water_q: 3, particles_q: 3, sun_q: 3, gi_q: 0, waves: true, draw: 1 }
+			Graphics { lighting: 0, ao: true, shadows: true, water: true, particles: true, sun_rays: true, smoothing: true, veg: 1, culling: true, ao_q: 3, shadows_q: 3, water_q: 3, particles_q: 3, sun_q: 3, gi_q: 0, waves: true, draw: 1 , fog_q: 3, clouds_q: 3 }
 		);
 		// Idempotent; a level reload (fresh overlay data) patches again.
 		assert!(!patch_graphics(mem, 4));
@@ -2165,50 +1582,6 @@ mod tests {
 		FULLSCREEN.store(false, Ordering::Relaxed);
 	}
 
-	/// The packed Graphics word: every level of every effect row round-trips, a word from before the levels existed (an "on" bit
-	/// and no level) reads as High, and the effect rows have the right number of values.
-	#[test]
-	fn gfx_word_packs_levels_and_reads_the_old_packing() {
-		let _turn = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-		for lvl in 0..4u8 {
-			for row in [1usize, 2, 4, 5, 6, 10] {
-				let mut g = DEFAULT_ROWS;
-				g[row] = lvl;
-				g[3] = 0;
-				assert_eq!(unpack_gfx(pack_gfx(g)), g, "row {row} level {lvl}");
-			}
-		}
-		let all = [1, 2, 3, 0, 1, 2, 3, 1, 2, 1, 2, 1, 2];
-		assert_eq!(unpack_gfx(pack_gfx(all)), all);
-		for b in 0..3u8 {
-			let mut g = DEFAULT_ROWS;
-			g[12] = b;
-			assert_eq!(unpack_gfx(pack_gfx(g)), g, "draw distance byte {b}");
-			assert_eq!(pack_gfx(g) >> 30, b as u32);
-		}
-		// The old word: lighting 1, "on" bits for AO, shadows, water, particles, sun rays and smoothing, vegetation Lush, no levels.
-		let old = 1 | 0x3f << 8 | 2 << 14;
-		assert_eq!(unpack_gfx(old), [1, 1, 1, 0, 1, 1, 1, 1, 2, 0, 0, 0, 0], "old on = High = byte 1");
-		// An old word with some rows off.
-		assert_eq!(unpack_gfx(1 | 1 << 8 | 1 << 11 | 1 << 14), [1, 1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0]);
-		// The new default packs to the same flags as the old default plus the High levels.
-		assert_eq!(pack_gfx([0, 1, 1, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0]) & 0xffff, pack_gfx(DEFAULT_ROWS) & 0xffff, "flag bits are unchanged");
-		assert_eq!(pack_gfx(DEFAULT_ROWS) >> 16, 3 | 3 << 2 | 3 << 4 | 3 << 6 | 3 << 8, "the word holds levels: bytes of 1 are High = 3");
-		assert_eq!([0u8, 1, 2, 3].map(swap_level), [0, 3, 2, 1]);
-		let counts: Vec<u8> = (0..13).map(row_values).collect();
-		assert_eq!(counts, [2, 4, 4, 2, 4, 4, 4, 2, 3, 2, 4, 2, 3]);
-		// Every value of every row has a text, and the new level texts are in the pool.
-		for r in ROWS {
-			assert!(r[2..].iter().filter(|&&v| v != 0).all(|v| *v < 0x7f00 || NEW_IDS.contains(v)), "row {:#x}", r[0]);
-		}
-		let slots: std::collections::HashSet<u32> = NEW_IDS.iter().copied().collect();
-		assert_eq!(slots.len(), NEW_IDS.len(), "no id twice");
-		assert_eq!(NEW_IDS.len(), TEXTS.len());
-		assert!(POOL + 0x40 * POOL_SLOTS as u32 <= OPT_RECS, "the string pool ends before the Graphics page copies");
-		assert!(TGTAB + 20 * (ROWS.len() as u32 + 1) <= POOL2 && GTAB + 24 * (ROWS.len() as u32 + 1) <= TRECS, "the row tables end before the next copies");
-		assert!(pool_slot(NEW_IDS.len() - 1) + 0x40 <= BASE + 0x1000, "the second pool ends before prompts.rs");
-	}
-
 	/// The title's Options list set-up as the PAL boot ELF holds it (0x219ca8, region word 0x15ee90, lists 0x1d4790 / 0x1d47c0) with
 	/// its Options, Video and Sound pages: the hook pattern matches it, PAL gains Graphics after Language, Video, Sound and USA after
 	/// Language, Sound; the Graphics page is Video Options' with our items and Sound's value panel; the menu's word survives a
@@ -2270,7 +1643,7 @@ mod tests {
 		assert_eq!((m.rd32(TGHDR + 0x34), m.rd32(TGVAL), m.rd32(TGVAL + 0x34), m.rd32(TGVAL + 0x38)), (ID_GRAPHICS_HDR, 0x1234, TGTAB, 0));
 		let row = |m: &mut Mem, i: u32| -> Vec<u32> { (0..5).map(|k| m.rd32(TGTAB + 20 * i + 4 * k)).collect() };
 		assert_eq!(row(&mut m, 0), [ID_LIGHTING, LIGHT, ID_LIGHT_CLASSIC, ID_ENHANCED, 0]);
-		for (i, r) in ROWS.iter().enumerate() {
+		for (i, r) in ROWS[..fogopt::TITLE_ROWS].iter().enumerate() {
 			assert_eq!(row(&mut m, i as u32), [r[0], r[1], r[2], r[3], 0], "the title's value item flips between the first two values");
 		}
 		assert_eq!(row(&mut m, 12), [ID_DRAW, DRAW, ID_MEDIUM, ID_HIGH, 0]);

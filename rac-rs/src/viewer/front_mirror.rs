@@ -25,7 +25,7 @@ fn page_of(m: Option<&MenuSnap>) -> Option<frontend::Page> {
 	use frontend::Page::*;
 	let Some(m) = m else { return Some(Title) };
 	// The PC Graphics page lives in reserved RAM (retail/pcext.rs `title_options`), the same address on both discs.
-	if m.page == crate::retail::pcext::TGPAGE {
+	if m.page == crate::retail::pcext::TGPAGE || m.page == crate::retail::pcmods::TPAGE {
 		return Some(Graphics);
 	}
 	Some(match crate::retail::disc::unva(m.page) {
@@ -107,6 +107,11 @@ impl App {
 	pub(super) fn front_mirror_tick(&mut self, dt: f32) {
 		let (Some(r), Some(fe)) = (self.retail.as_mut(), self.front.as_mut()) else { return };
 		fe.acc = (fe.acc + dt).min(crate::retail::disc::field_dt2());
+		// [PC] TEST ONLY: RAC_TEST_UNPACED runs one front-end field per frame as well (viewer/test_clock.rs); under RAC_TEST_CLOCK
+		// `dt` only moves once fields do, so without this the cold boot never left its first field.
+		if super::test_clock::unpaced() {
+			fe.acc = crate::retail::disc::field_dt();
+		}
 		// The front end's level-load loop (retail.rs `in_load_loop`) takes no pace from the wall clock: fields run back to back for
 		// up to `TURBO_BUDGET` of this frame (the window stays alive), the same fields as at 50 Hz.
 		let t0 = std::time::Instant::now();
@@ -116,6 +121,7 @@ impl App {
 			self.play_ticks += 1;
 			let keys = &self.keys;
 			r.tick_keys(|k| keys.contains(&k), false, false);
+			super::test_clock::set_fields(r.shown_field());
 			// The attract movie and the New Game intro (retail/fmv_bridge.rs): streamed from the disc, skipped like retail's (any pad press).
 			if let Some(q) = r.take_movie() {
 				let m = scene::Movie { lba: q.lba, bytes: q.bytes as u64, fps: crate::retail::disc::movie_fps(q.lba) };
@@ -163,7 +169,11 @@ impl App {
 			let keys = &self.keys;
 			if let Some(r) = self.retail.as_mut() {
 				let skip = r.movie_pressed(|k| keys.contains(&k));
-				if skip || self.movie.as_ref().is_some_and(|p| p.finished) {
+				// [PC] TEST ONLY: under RAC_TEST_CLOCK (viewer/test_clock.rs) a front-end movie ends at once: the game thread is parked
+				// for the whole movie, so its wall time only slowed the gate's cold-boot cases (RAM identical, gate/README.md).
+				// [PC] The Skip intro row (retail/pcintro.rs): the boot logo movie, which nothing skips in retail, ends at once.
+				let intro_cut = r.movie_is_logo() && crate::retail::pcintro::skip();
+				if skip || self.movie.as_ref().is_some_and(|p| p.finished) || super::test_clock::clock_on() || intro_cut {
 					self.movie = None;
 					if let Some(a) = &mut self.audio {
 						a.pause_all(false);
@@ -175,7 +185,7 @@ impl App {
 					} else if let Some(g) = &mut self.gpu {
 						g.movie.clear();
 					}
-					eprintln!("retail: front end movie {} at field {}", if skip { "skipped" } else { "finished" }, r.field_count());
+					eprintln!("retail: front end movie {} at field {}", if skip { "skipped" } else if intro_cut { "skipped (Skip intro)" } else { "finished" }, r.field_count());
 					r.end_movie();
 				}
 			}
@@ -229,6 +239,12 @@ impl App {
 		// The PC options' texts (the Graphics row and page) join the language's strings.
 		if fe.text.get(crate::retail::pcext::ID_GRAPHICS).is_empty() {
 			for (id, s) in crate::retail::pcext::texts(lang) {
+				fe.text.insert(id, s);
+			}
+		}
+		// The title's Mods page (retail/pcmods.rs): its texts follow the mods and settings, so they are refreshed while it is open.
+		if crate::retail::pcmods::title_open() || fe.text.get(crate::retail::pcmods::ID_MODS).is_empty() {
+			for (id, s) in crate::retail::pcmods::texts(lang) {
 				fe.text.insert(id, s);
 			}
 		}

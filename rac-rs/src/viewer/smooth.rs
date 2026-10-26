@@ -1,4 +1,4 @@
-//! PC-FPS-1 [PC] (port extra, user request 2026-10-06): render interpolation for displays faster than the 50 Hz game.
+//! [PC] Render interpolation for displays faster than the 50 Hz game (port extra, user request 2026-10-06).
 //!
 //! The simulation keeps its fixed 0.02 s steps; this module only changes what is drawn. Each display frame draws the
 //! hero, the props, their skinned poses and the pool sprites between the state before the newest tick and the state
@@ -94,7 +94,7 @@ pub(super) fn slerp(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
 }
 
 /// A mirrored prop's blended rotation with model Y reflected again (`place_mirrored`: column 1 negated).
-fn mirror_column(mut m: [f32; 16], mirror: bool) -> [f32; 16] {
+pub(super) fn mirror_column(mut m: [f32; 16], mirror: bool) -> [f32; 16] {
 	if mirror {
 		for v in &mut m[4..8] {
 			*v = -*v;
@@ -145,6 +145,8 @@ pub(super) struct PropXf {
 	pub rot: V3,
 	pub mirror: bool,
 	pub scale: f32,
+	/// Drawn, or a retail moby culled for the game camera alone (`Prop::cast`: the sun shadow pass and Culling Off pose it, so it
+	/// blends too; before, such a crane stepped once per field in the shadow and with Culling Off).
 	pub shown: bool,
 	pub class: u32,
 	pub key: PoseKey,
@@ -152,7 +154,7 @@ pub(super) struct PropXf {
 
 impl PropXf {
 	pub(super) fn of(p: &Prop) -> PropXf {
-		PropXf { pos: p.pos, rot: p.rot, mirror: p.mirror, scale: p.scale, shown: p.shown, class: p.class_id, key: pose_key(p) }
+		PropXf { pos: p.pos, rot: p.rot, mirror: p.mirror, scale: p.scale, shown: p.shown || p.cast, class: p.class_id, key: pose_key(p) }
 	}
 }
 
@@ -162,13 +164,21 @@ pub(super) fn prop_blends(prev: &PropXf, cur: &PropXf) -> bool {
 }
 
 /// Moby classes drawn on the hero: Clank 601, the back packs 607 / 608 / 609, the head items 433 / 1289 / 1290 (hero item table rows
-/// 1-7, collision_and_gameplay.md) and the class 1204 bulb mesh; only while within `ATTACH_REACH` of him (strafe.rs `turn_parts`).
-const ATTACHED: [u32; 8] = [601, 607, 608, 609, 433, 1289, 1290, ATTACH_BULB];
+/// 1-7, collision_and_gameplay.md), the class 1204 bulb mesh, the Pyrocitor's pilot flame 179 (on the held gun) and the Magneboots 173
+/// (on the feet); only while within `ATTACH_REACH` of him (strafe.rs `turn_parts`).
+const ATTACHED: [u32; 10] = [601, 607, 608, 609, 433, 1289, 1290, ATTACH_BULB, PYRO_PILOT, MAGNEBOOTS];
+/// The Magneboots, one moby per foot (carried with the drawn legs, `PoseFix::place_leg`).
+const MAGNEBOOTS: u32 = 173;
+/// The Pyrocitor's pilot flame moby (on the held gun's nozzle).
+const PYRO_PILOT: u32 = 179;
 const ATTACH_BULB: u32 = 1204;
 const ATTACH_REACH: f32 = 1.5;
+/// How close to a hero part's origin a hero glow counts as sitting on it (`hero_glow`; Ratchet is about 1.2 tall, the glove's bomb
+/// sits 0.13 from the glove: runs/strafe.log 2026-10-24).
+const GLOW_ON_PART: f32 = 0.15;
 
 /// The hero's model frame as a column-major placement: feet `pos`, columns = the hero rows of BRIDGE-75 (yaw only when untilted).
-fn hero_frame(pos: V3, yaw: f32, tilt: [f32; 2]) -> [f32; 16] {
+pub(super) fn hero_frame(pos: V3, yaw: f32, tilt: [f32; 2]) -> [f32; 16] {
 	let r = if tilt == [0.0; 2] {
 		let (s, c) = yaw.sin_cos();
 		[[c, s, 0.0], [-s, c, 0.0], [0.0, 0.0, 1.0]]
@@ -226,6 +236,15 @@ pub(super) struct Smooth {
 	hero_now: Option<[f32; 16]>,
 	drawn: Option<(V3, f32, [f32; 2])>,
 	attached: Vec<Option<([f32; 16], f32)>>,
+	/// [PC] Modern controls: the hero parts' move from retail's pose onto the drawn one (retail/strafe.rs `PoseFix`) of the newest
+	/// tick and the one before, and the (drawn, ticked) hero frames `attach` used this frame (for `hero_point`, also without a fix).
+	fix_now: Option<crate::retail::strafe::PoseFix>,
+	fix_was: Option<crate::retail::strafe::PoseFix>,
+	fix_frames: Option<([f32; 16], [f32; 16])>,
+	/// [PC] Modern controls: the held Pyrocitor's move from retail's held basis onto the drawn hand (handler/hero_rows.rs
+	/// `pyro_basis`, hero model space, 3x4 row major) of the newest tick and the one before; its pilot moby rides with it.
+	gun_now: Option<[f32; 12]>,
+	gun_was: Option<[f32; 12]>,
 	/// Skinned poses: the last computed (state after the newest tick seen) and the one before it.
 	hero_last: Option<Posed>,
 	hero_before: Option<Posed>,
@@ -266,7 +285,7 @@ impl Smooth {
 	/// After the game ticks of a display frame: the blend factor and whether to blend.
 	pub(super) fn frame(&mut self, on: bool, accum: f32) {
 		// The field time of the disc (USA 59.94 Hz: PAL_DT left alpha at 0.83 and jumped back every field).
-		self.alpha = (accum / crate::retail::disc::field_dt()).clamp(0.0, 1.0);
+		self.alpha = crate::viewer::test_clock::alpha((accum / crate::retail::disc::field_dt()).clamp(0.0, 1.0));
 		self.active = on;
 	}
 
@@ -348,35 +367,62 @@ impl Smooth {
 	/// (blended, Modern-strafe turned) times `rel`, blended between the two ticks only while the hero's own pose blends (so Clank sits at
 	/// the joint of the pose that is drawn). They stay glued to Ratchet whatever the smoothing, the speed or the turn: the prop path
 	/// (blend in world space from `props_prev`) and the hero path (own pose blend, dropped when a frame runs several ticks) disagreed.
-	/// Called with the final drawn `at` / `tilt` before the glows and `props`; fills `attached`. Not blended (Smoothing off, a
-	/// placement other than the plain gameplay one): nothing, so the props are drawn as the game ticked them.
-	pub(super) fn attach(&mut self, props: &[Prop], at: Option<(V3, f32)>, tilt: [f32; 2]) {
+	/// Called with the final drawn `at` / `tilt` before the glows and `props`; fills `attached`. `parts` = more props on the hero
+	/// this tick (Modern strafe, retail/strafe.rs `turn_parts`: the bomb in the Bomb Glove, the Glove of Doom capsule). With a Modern-strafe pose fix
+	/// (`set_pose_fix`) `rel` is also carried from retail's pose onto the drawn one, then also unblended (Smoothing off). Otherwise
+	/// not blended (Smoothing off, a placement other than the plain gameplay one): nothing, the props are drawn as the game ticked them.
+	pub(super) fn attach(&mut self, props: &[Prop], parts: &[usize], at: Option<(V3, f32)>, tilt: [f32; 2]) {
 		self.attached.clear();
-		if !self.active {
-			return;
-		}
-		let (Some(drawn), Some(at), Some(now)) = (self.drawn, at, self.hero_now) else { return };
-		if drawn != (at.0, at.1, tilt) {
+		self.fix_frames = None;
+		let (Some(at), Some(now)) = (at, self.hero_now) else { return };
+		let d = hero_frame(at.0, at.1, tilt);
+		let blended = self.active && self.drawn == Some((at.0, at.1, tilt));
+		if !blended && ((self.fix_now.is_none() && self.gun_now.is_none()) || d != now) {
 			return;
 		}
 		let was = self.hero_was.unwrap_or(now);
-		let blend = self.hero_before.is_some();
+		let blend = blended && self.hero_before.is_some();
 		let t = self.alpha;
-		let d = hero_frame(at.0, at.1, tilt);
+		let fixed = |f: &Option<crate::retail::strafe::PoseFix>, class: u32, rel: [f32; 16]| f.as_ref().map_or(rel, |f| if class == MAGNEBOOTS { f.place_leg(rel) } else { f.place(rel) });
+		let gun = |g: &Option<[f32; 12]>, class: u32, rel: [f32; 16]| g.filter(|_| class == PYRO_PILOT).map_or(rel, |m| crate::retail::strafe::place34(&m, rel));
+		self.fix_frames = Some((d, now));
 		let near_hero = |h: &[f32; 16], p: V3| (p[0] - h[12]).hypot(p[1] - h[13]) < ATTACH_REACH && (p[2] - h[14]).abs() < 3.0;
 		self.attached.resize(props.len(), None);
 		for (pi, p) in props.iter().enumerate() {
-			if !p.shown || !ATTACHED.contains(&p.class_id) || !near_hero(&now, p.pos) {
+			if !p.shown || !(ATTACHED.contains(&p.class_id) || parts.contains(&pi)) || !near_hero(&now, p.pos) {
 				continue;
 			}
-			let rel_now = rel_place(&now, &place(p.pos, p.rot));
+			let rel_now = gun(&self.gun_now, p.class_id, fixed(&self.fix_now, p.class_id, rel_place(&now, &place(p.pos, p.rot))));
 			let prev = self.props_prev.get(pi).filter(|pv| blend && prop_blends(pv, &PropXf::of(p)) && near_hero(&was, pv.pos));
 			let (rel, scale) = match prev {
-				Some(pv) => (blend_place(&rel_place(&was, &place(pv.pos, pv.rot)), &rel_now, t), pv.scale + (p.scale - pv.scale) * t),
+				Some(pv) => (blend_place(&gun(&self.gun_was, p.class_id, fixed(&self.fix_was, p.class_id, rel_place(&was, &place(pv.pos, pv.rot)))), &rel_now, t), pv.scale + (p.scale - pv.scale) * t),
 				None => (rel_now, p.scale),
 			};
 			self.attached[pi] = Some((mirror_column(compose(&d, &rel), p.mirror), scale));
 		}
+	}
+
+	/// The pose fix of the newest tick (frame_hero.rs, once per computed hero pose; None while the strafe draw is off).
+	pub(super) fn set_pose_fix(&mut self, fix: Option<crate::retail::strafe::PoseFix>) {
+		self.fix_was = std::mem::replace(&mut self.fix_now, fix);
+		self.gun_was = self.gun_now.take();
+	}
+
+	/// The newest tick's held-Pyrocitor move (`gun_now`), after `set_pose_fix` of the same pose.
+	pub(super) fn put_gun_fix(&mut self, fix: Option<[f32; 12]>) {
+		self.gun_now = fix;
+	}
+
+	/// A point retail placed on the hero this tick (a hero glow, as the game ticked it), as this frame draws it: kept where it sits
+	/// on the ticked hero and carried with his drawn placement (and the pose fix, if any) like the props in `attach`. None when
+	/// `attach` draws the hero neither blended nor fixed.
+	fn hero_point(&self, p: V3, gun: bool) -> Option<V3> {
+		let (d, now) = self.fix_frames?;
+		let w = [p[0] - now[12], p[1] - now[13], p[2] - now[14]];
+		let l = std::array::from_fn(|k| now[k * 4] * w[0] + now[k * 4 + 1] * w[1] + now[k * 4 + 2] * w[2]);
+		let m = self.fix_now.as_ref().map_or(l, |f| f.point(l));
+		let m = self.gun_now.filter(|_| gun).map_or(m, |g| crate::retail::strafe::mul34(&g, m, 1.0));
+		Some(std::array::from_fn(|i| d[12 + i] + d[i] * m[0] + d[4 + i] * m[1] + d[8 + i] * m[2]))
 	}
 
 	/// The placement `attach` made for prop `pi` this frame, if it is hero-attached and the hero is blended.
@@ -384,15 +430,45 @@ impl Smooth {
 		self.attached.get(pi).copied().flatten()
 	}
 
-	/// Clank's bulb glow as this frame draws it: `raw` (the glow as the game ticked it) kept at its offset from the bulb mesh
-	/// (class 1204) and carried along with the mesh's drawn placement (`attach`). None when the mesh is not drawn by `attach`.
-	pub(super) fn bulb_glow(&self, props: &[Prop], raw: V3) -> Option<V3> {
-		let (pi, p) = props.iter().enumerate().find(|&(pi, p)| p.class_id == ATTACH_BULB && p.shown && !p.mirror && self.attached_xf(pi).is_some())?;
+	/// A point retail placed on hero part `pi` this tick (`raw`, as the game ticked it), as this frame draws it: kept at its offset
+	/// from the part and carried with the part's drawn placement (`attach`). None when `attach` does not draw that part.
+	fn carry(&self, props: &[Prop], pi: usize, raw: V3) -> Option<V3> {
+		let p = props.get(pi).filter(|p| p.shown && !p.mirror)?;
 		let (m, _) = self.attached_xf(pi)?;
 		let r = place(p.pos, p.rot);
 		let d = [raw[0] - p.pos[0], raw[1] - p.pos[1], raw[2] - p.pos[2]];
 		let off: V3 = std::array::from_fn(|k| r[k * 4] * d[0] + r[k * 4 + 1] * d[1] + r[k * 4 + 2] * d[2]);
 		Some(std::array::from_fn(|i| m[12 + i] + m[i] * off[0] + m[4 + i] * off[1] + m[8 + i] * off[2]))
+	}
+
+	/// A hero glow as this frame draws it (`raw` = as the game ticked it, `blended` = as the field blend gives it): carried with the
+	/// hero part it sits on (`carry`: Clank's bulb glow, `bulb`, on the bulb mesh; any other on the nearest part `attach` draws within
+	/// `GLOW_ON_PART`), else from where the game ticked it with the drawn hero (`hero_point`); as blended only when the hero is not
+	/// drawn blended. Before, the field blend of the glow and the hero's own blend added up (or, for a glow whose colour changes
+	/// every field such as the Pyrocitor's pilot light, the glow was not blended at all): the pilot light and the thruster pack's
+	/// flames trailed or led the drawn Ratchet while he turned or strafed. A glow of the held Pyrocitor (`gun`) rides the drawn gun
+	/// (`gun_now`) from where the game ticked it: its pilot moby is hidden while it does not fire.
+	pub(super) fn hero_glow(&self, props: &[Prop], raw: V3, blended: V3, bulb: bool, gun: bool) -> V3 {
+		let dist = |pi: &usize| (0..3).map(|k| (props[*pi].pos[k] - raw[k]).powi(2)).sum::<f32>();
+		let mut on = (0..props.len()).filter(|&pi| !(gun && self.gun_now.is_some()) && self.attached_xf(pi).is_some() && if bulb { props[pi].class_id == ATTACH_BULB } else { dist(&pi) < GLOW_ON_PART * GLOW_ON_PART });
+		let part = if bulb { on.next() } else { on.min_by(|a, b| dist(a).total_cmp(&dist(b))) };
+		part.and_then(|pi| self.carry(props, pi, raw)).or_else(|| self.hero_point(raw, gun)).unwrap_or(blended)
+	}
+
+	/// The newest tick's strafe pose fix (None while the strafe draw leaves retail's pose as it is).
+	pub(super) fn pose_fix_now(&self) -> Option<&crate::retail::strafe::PoseFix> {
+		self.fix_now.as_ref()
+	}
+
+	/// The effect pool's sprites (`fx`, field-blended) into `out`; a sprite a hero part owns (`RetailFx::sprite_owners`, the Glove
+	/// of Doom capsule's glow) is carried with that part's drawn placement (`carry`, from the same sprite of `tick`, the unblended
+	/// field; `prop` = the prop index of a moby address). Before, the capsule's glow sat off the drawn glove while strafing.
+	pub(super) fn pool_sprites(&self, props: &[Prop], fx: &crate::retail::RetailFx, tick: Option<&crate::retail::RetailFx>, prop: impl Fn(u32) -> Option<usize>, out: &mut Vec<particles::Sprite>) {
+		out.extend(fx.sprites.iter().enumerate().map(|(i, s)| {
+			let owned = fx.sprite_owners.get(i).filter(|o| fx.hero_parts.contains(o)).and_then(|&o| prop(o));
+			let raw = tick.and_then(|t| t.sprites.get(i)).map_or(s.pos, |t| t.pos);
+			owned.and_then(|pi| self.carry(props, pi, raw)).map_or(*s, |pos| particles::Sprite { pos, ..*s })
+		}));
 	}
 
 	/// Props: keeps the pose history, adds the blended poses to `fx_posed` (they take precedence in `set_props`) and

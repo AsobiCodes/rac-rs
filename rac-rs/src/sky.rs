@@ -35,13 +35,18 @@ pub struct Sky {
 	pub sprite_max: u16,
 }
 
-/// The sky of a level, or None when its core index has no sky block.
-pub fn sky(level: &Level) -> R<Option<Sky>> {
+/// The sky block of a level's core, or None when its core index has none.
+pub fn block_of(level: &Level) -> R<Option<&[u8]>> {
 	let start = u32_at(&level.index, if level.title { 0x14 } else { SKY_OFFSET })? as usize;
 	if start == 0 {
 		return Ok(None);
 	}
-	sky_block(level.block(start)?).map(Some)
+	level.block(start).map(Some)
+}
+
+/// The sky of a level, or None when its core index has no sky block.
+pub fn sky(level: &Level) -> R<Option<Sky>> {
+	block_of(level)?.map(sky_block).transpose()
 }
 
 /// An 8-bit texture with a CSM1 RGBA32 palette (index bits 3 and 4 swapped, alpha doubled).
@@ -59,18 +64,16 @@ fn texture(w: usize, h: usize, pixels: &[u8], palette: &[u8]) -> R<Texture> {
 	Ok(Texture { w, h, rgba: pixels.iter().map(|&p| colours[p as usize]).collect() })
 }
 
-pub fn sky_block(data: &[u8]) -> R<Sky> {
-	crate::viewer::gs_state::guard_path("sky");
-	let shell_count = i16_at(data, 6)?;
-	let texture_count = i16_at(data, 0xc)?;
-	if !(0..=8).contains(&shell_count) || !(0..=256).contains(&texture_count) {
+/// The 8-bit textures of a sky block as stored: (key `4 << 16 | i`, w, h, CSM1 palette (1024 bytes), index bytes).
+pub fn raw_textures(data: &[u8]) -> R<Vec<(u32, usize, usize, &[u8], &[u8])>> {
+	let count = i16_at(data, 0xc)?;
+	if !(0..=256).contains(&count) {
 		return Err("invalid sky shell or texture count".into());
 	}
-	let (shell_count, texture_count) = (shell_count as usize, texture_count as usize);
 	let defs = u32_at(data, 0x10)? as usize;
 	let texture_data = u32_at(data, 0x14)? as usize;
-	let mut textures = HashMap::new();
-	for i in 0..texture_count {
+	let mut out = Vec::new();
+	for i in 0..count as usize {
 		let at = defs.checked_add(i * 16).ok_or("invalid sky texture table")?;
 		let palette = u32_at(data, at)? as usize;
 		let pixels = u32_at(data, at + 4)? as usize;
@@ -80,7 +83,22 @@ pub fn sky_block(data: &[u8]) -> R<Sky> {
 		}
 		let pixel_data = span(data, texture_data.checked_add(pixels).ok_or("invalid sky texture")?, w * h)?;
 		let palette_data = span(data, texture_data.checked_add(palette).ok_or("invalid sky palette")?, 1024)?;
-		textures.insert(4 << 16 | i as u32, texture(w, h, pixel_data, palette_data)?);
+		out.push((4 << 16 | i as u32, w, h, palette_data, pixel_data));
+	}
+	Ok(out)
+}
+
+pub fn sky_block(data: &[u8]) -> R<Sky> {
+	crate::viewer::gs_state::guard_path("sky");
+	let shell_count = i16_at(data, 6)?;
+	let texture_count = i16_at(data, 0xc)?;
+	if !(0..=8).contains(&shell_count) || !(0..=256).contains(&texture_count) {
+		return Err("invalid sky shell or texture count".into());
+	}
+	let (shell_count, texture_count) = (shell_count as usize, texture_count as usize);
+	let mut textures = HashMap::new();
+	for (key, w, h, palette_data, pixel_data) in raw_textures(data)? {
+		textures.insert(key, texture(w, h, pixel_data, palette_data)?);
 	}
 	let head = span(data, 0, 3)?;
 	let mut result = Sky {

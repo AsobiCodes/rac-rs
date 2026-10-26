@@ -1,4 +1,4 @@
-//! Lane fxa: draw-queue B callbacks of the later planets that the mirror did not draw (fx_census rows 16-17).
+//! Draw-queue B callbacks of the later planets that the mirror did not draw (fx_census rows 16-17).
 //!
 //! Same method as `queue_q2`: the callback's own code in RAM gives its data addresses (lui/addiu pairs, gp-relative loads), so
 //! twin levels share one port; code of another shape draws nothing.

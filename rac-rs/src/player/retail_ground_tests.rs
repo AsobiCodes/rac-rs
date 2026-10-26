@@ -1,3 +1,5 @@
+//! Test helpers (floor, wall and mud worlds) for the hero ground tests.
+//! Test-only (`cfg(test)`) leftover from the retired hand port; the test bodies are gone. Do not extend.
 use super::*;
 
 fn floor(x0: f32, x1: f32) -> World {

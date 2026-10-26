@@ -363,6 +363,14 @@ pub fn keyboard_now() -> bool {
 
 // ---- device ---------------------------------------------------------------------------------------------------------
 
+/// Real pad input since the last `take_pad_pulse` (the viewer's cursor visibility, viewer/handler/cursor_vis.rs).
+static PAD_PULSE: AtomicBool = AtomicBool::new(false);
+
+/// True once per pad input seen by `poll_pad` since the last call (window thread).
+pub fn take_pad_pulse() -> bool {
+	PAD_PULSE.swap(false, Ordering::Relaxed)
+}
+
 /// A key or mouse button went down, or the mouse moved clearly (window thread).
 pub fn note_keyboard() {
 	HOST.store(KB, Ordering::Relaxed);
@@ -435,9 +443,16 @@ pub fn note_window_event(e: &winit::event::WindowEvent) {
 	}
 }
 
+/// Agent test runs (RAC_TEST_WINDOW=hidden, RAC_RETAIL_SMOKE) never read a real controller: a pad plugged into the PC (or a
+/// drifting stick) would steer the replay and change the gate's RAM hashes and pictures run to run (2026-10-23).
+pub(crate) fn real_pads_off() -> bool {
+	static OFF: OnceLock<bool> = OnceLock::new();
+	*OFF.get_or_init(|| std::env::var_os("RAC_TEST_WINDOW").map_or(false, |v| v == "hidden") || std::env::var_os("RAC_RETAIL_SMOKE").is_some())
+}
+
 /// Start of the run (Retail::load): says which pad is there (the device stays the keyboard until the pad is used).
 pub fn init() {
-	if super::pcext::enabled() && (xinput::connected() | super::pspad::connected()) {
+	if super::pcext::enabled() && !real_pads_off() && (xinput::connected() | super::pspad::connected()) {
 		eprintln!("retail: prompts: gamepad found, keyboard prompts until it is used");
 	}
 }
@@ -507,7 +522,7 @@ fn canary(mem: &mut Mem, field: u32) {
 	static ARMED: AtomicBool = AtomicBool::new(false);
 	static BAD: Mutex<u32> = Mutex::new(0);
 	if !ARMED.swap(true, Ordering::Relaxed) {
-		for a in (LO..HI).filter(|a| !super::pcctl::RANGE.contains(a) && !super::pcctl::DBG_RANGE.contains(a)) {
+		for a in (LO..HI).filter(|a| !super::pcctl::RANGE.contains(a) && !super::pcctl::DBG_RANGE.contains(a) && !super::pcmods::RANGE.contains(a)) {
 			mem.wr8(a, 0xa5);
 		}
 		eprintln!("retail: canary armed {LO:#x}..{HI:#x} at field {field}");
@@ -518,8 +533,8 @@ fn canary(mem: &mut Mem, field: u32) {
 	let co = super::pcext::BASE + 0x1000..super::pcext::CO_POOL_END;
 	let mut bad = BAD.lock().unwrap();
 	for a in LO..HI {
-		// The Controls page (pcctl.rs) lives in the range too and writes its own bytes, and so does its Debug section's text pool.
-		if (own_lo..own_hi).contains(&a) || co.contains(&a) || super::pcctl::RANGE.contains(&a) || super::pcctl::DBG_RANGE.contains(&a) || mem.rd8(a) == 0xa5 {
+		// The Controls page (pcctl.rs) lives in the range too and writes its own bytes, and so does its Debug section's text pool; the Mods page (pcmods.rs) likewise.
+		if (own_lo..own_hi).contains(&a) || co.contains(&a) || super::pcctl::RANGE.contains(&a) || super::pcctl::DBG_RANGE.contains(&a) || super::pcmods::RANGE.contains(&a) || mem.rd8(a) == 0xa5 {
 			continue;
 		}
 		*bad += 1;
@@ -731,6 +746,9 @@ pub fn pad_activity(prev: &PadState, now: &PadState) -> bool {
 /// Every connected pad as one: the XInput controller and the PlayStation controller (pspad.rs), merged as `merge` does; also
 /// the physical buttons pressed on either (`binds::PHYS` masks, for the Controls page's "press a button").
 fn pad_read() -> Option<(PadState, u32)> {
+	if real_pads_off() {
+		return None;
+	}
 	let (xr, pr) = (xinput::raw(), super::pspad::state());
 	if xr.is_none() && pr.is_none() {
 		return None;
@@ -782,13 +800,16 @@ pub fn poll_pad(buttons: &mut u16, sticks: &mut [u8; 4]) {
 	if let Ok(mut prev) = PREV.lock() {
 		if pad_activity(&prev, &p) {
 			HOST.store(PAD, Ordering::Relaxed);
+			PAD_PULSE.store(true, Ordering::Relaxed);
 		}
 		*prev = p;
 	}
-	// With the modern camera on, R2 is the aim / strafe mode (RMB on the keyboard) and does not reach the game.
+	// With the modern camera on, or Camera Classic with Strafe aiming On, R2 is the aim / strafe mode (RMB on the keyboard) and
+	// does not reach the game (retail's R1 does the same as its R2).
 	let r2 = p.buttons & 2 != 0;
-	super::modcam::pad_aim(r2 && super::modcam::on());
-	if super::modcam::on() {
+	let aim = super::modcam::classic::aim_button();
+	super::modcam::pad_aim(r2 && aim);
+	if aim {
 		p.buttons &= !2;
 	}
 	(*buttons, *sticks) = merge((*buttons, *sticks), &p);

@@ -312,9 +312,14 @@ pub fn tie_pick(c: &TieCull, pz: f32) -> Option<(usize, f32)> {
 	if (d - c.radius) - (pz - c.radius) < 0.0 {
 		return None;
 	}
+	Some(tie_pick_open(c, pz))
+}
+
+/// [PC] Culling Off (viewer/gpu/culling.rs `cull_ties`): `tie_pick` with no draw distance (past it the far LOD, unmorphed).
+pub fn tie_pick_open(c: &TieCull, pz: f32) -> (usize, f32) {
 	let pzc = pz.max(0.0);
 	let [l0, l1, l2] = c.lod;
-	Some(if l0 - pzc >= 0.0 {
+	if l0 - pzc >= 0.0 {
 		(0, 0.0)
 	} else if l2 - pzc < 0.0 {
 		(2, 0.0)
@@ -322,7 +327,7 @@ pub fn tie_pick(c: &TieCull, pz: f32) -> Option<(usize, f32)> {
 		(0, (pzc - l0) / (l1 - l0))
 	} else {
 		(1, (pzc - l1) / (l2 - l1))
-	})
+	}
 }
 
 /// The colour slots of a packet's vertices in raw order (regular, then fat) from its index stream: regular vertex k is

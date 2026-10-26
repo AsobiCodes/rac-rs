@@ -1,3 +1,6 @@
+//! Pickups of the old hand-port `Game`: `glint_cull` (frees glints outside the view volume, FUN_00220518) and `bolt_wrap`
+//! (angle wrap); the rest is gone.
+//! Leftover from the retired hand port; still compiled because retail mode uses part of `game::Game` (the prop pools). Do not extend.
 use super::*;
 
 impl Game {

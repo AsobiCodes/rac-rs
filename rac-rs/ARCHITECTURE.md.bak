@@ -1,0 +1,531 @@
+# rac-rs architecture
+
+Map of the engine source: where things live and what a change will touch. Written 2026-10-21 after the five giant files
+were split by job. Companion files: `STATE.md` (global mutable state and threads), `ENV.md` (every environment switch, kept
+honest by `src/env_doc_tests.rs`), `SIZE_CAPS.txt` (the files and fns still over the size limits, kept by
+`src/size_limits_tests.rs`), `CLAUDE.md` (build, run, keys). Comment tags in the code: **[C]** read in code or data,
+**[I]** inferred, **[?]** unknown. Notes on retail facts live outside the repo in `D:\ratchet\decomp\notes\` (comments cite them).
+
+## 1. What the engine is
+
+- rac-rs is the PC half of the Ratchet & Clank 1 port (PAL and USA v1.00). It reads everything from the player's own disc at run time.
+- The game logic is the retail PS2 code, recompiled from the disc and run by ee-oracle / ee-game (`D:\ratchet\oracle`, not in this repo). Retail mode is the only game path.
+- Speed hands (dev s93): ee-oracle runs 11 of the hottest retail functions as exact native Rust (`oracle/src/hs_hands/`, installed by `rec::Table::build` where the code words match; same RAM and timing; RAC_HS=0 = off). rac-rs only prints their report after `smoke: done` (`retail/debug_aids.rs`).
+- rac-rs gives that code the pad once per field, reads the game's RAM back (mobys, camera, lights, GS packets, sound) and draws it with a native wgpu renderer plus PC extras.
+- The crate is the library `rac_game` (`src/lib.rs` includes `src/main.rs`); the exe in `exe/` links it with the recompiled crates.
+- A field is one retail step (50 Hz PAL, about 60 Hz USA). The viewer calls the same thing a tick.
+
+Threads (details and owners: `STATE.md`):
+
+- MAIN: winit loop, `handler` frame steps, wgpu render, `Retail::tick`, level switch.
+- retail worker ("retail", 256 MB stack): EE interpreter plus recompiled code, PC hooks, snapshot build (`retail/worker/`).
+- GS capture ("gs-relay", "gs", rayon "gs-capture-N", "gs-gpu-open"): draws the HUD and menu packets (`retail/capture.rs`, `retail/gscap*`).
+- "snap", "snap-prep" and "vu1": the effects layer's picture work (`retail/snap_pipe.rs`, `retail/efx_vu.rs`).
+- GS-full ("gsfull-vu1", "gsfull-gs", "gs-raster-N"): optional full software GS (`gsfull/`).
+- "level-prefetch" (64 MB stack) builds the next level during travel; "level-drop" frees the old one (`viewer/app.rs`).
+- "present" and "enc-finish-N": wgpu submit and present, command-buffer finish (`viewer/presenter.rs`).
+- audio callback (cpal, `audio.rs`), "fmv decode" (`fmv/player.rs`), "pspad" and "xinput search" (`retail/pspad.rs`, `retail/prompts.rs`), "veg plan" (`viewer/vegfx.rs`), log writer (`loadlog.rs`), "runlog" watchdog (`runlog.rs`, the player's log.txt).
+
+One frame (the worker runs up to 3 fields ahead; `RAC_RUN_AHEAD=0` turns that off):
+
+```
+keys / mouse / pad (winit events in viewer/handler.rs window_event, play_input.rs)
+   |
+   v  frame_input, frame_ticks -> Retail::tick_keys (retail/input.rs) -> Retail::tick (retail/tick.rs)
+FieldIn { buttons, sticks, travel, mc }  ---- mpsc ---->  retail worker: worker_main (retail/worker/spawn.rs)
+                                                          field_begin -> field_ee (EE runs the field) -> field_front
+                                                          -> field_load_loop -> field_post -> field_capture_end
+                                                          -> field_snap -> field_levels -> field_overlay -> field_end
+Snap (mobys, camera, lights, fx, shadows,   <---- mpsc ----   (GS packets go to the capture thread, effects to snap / vu1,
+      sound batch, overlay)                                    sound batch to Retail::take_sound)
+   |
+   v  MAIN: RedrawRequested = 20 steps in viewer/handler.rs (files in viewer/handler/):
+frame_begin, frame_input, frame_ticks, frame_shadows, frame_sound_events, frame_camera, frame_hero, frame_hero_scene,
+frame_hero_fx, frame_props, frame_hud_state, frame_hud_draw, frame_upload, frame_cam_restore, frame_audio_events,
+frame_audio_anim, frame_audio_music, frame_audio_ambience, frame_switch, frame_render
+   |
+   v  frame_render -> Gpu::draw (viewer/gpu/draw.rs) -> present (viewer/presenter.rs thread)
+frame_uniforms, frame_effects, frame_target, frame_buffers (viewer/gpu/draw/prepare.rs)
+draw_passes (draw/passes.rs, owns every render-pass begin and drop):
+   pass_sky, pass_world (with pass_pools, pass_shrubs), pass_oceans, pass_world_quads, pass_shop_models,
+   particle_runs + particle_buffers (particle passes), post chain (viewer/post.rs), pass_hud, pass_previews
+frame_finish (draw/finish.rs: movie overlay, readback, submit)
+```
+
+Retail mode: `Retail::load` (`retail/worker.rs`) is a list of steps in `retail/worker/` (open_machine, register_hooks, begin_rec,
+first_snapshot, gs_setup, travel_request, open_feeds, spawn_worker). `viewer/handler/frame_switch.rs` keeps the `Retail`
+across a level switch (`retail_carry`); `Retail::switch` (`retail/props_sync.rs`) rebinds the prop pools.
+
+## 2. Module map
+
+Each table is generated from the files' own `//!` headers (script: `D:\ratchet\scratch_perf_rf\docs_draft\build_arch.py`). Lines = file length.
+Split pattern: a parent file is the front door (types, `mod` list, re-exports); each child starts with `use super::*;`, so old paths such as `retail::x` still work.
+
+### Crate root (`src/*.rs`)
+
+| File | Job | Lines |
+|---|---|---|
+| `ambience.rs` | Positional ambient sound emitters (gameplay header +0x0c). [leftover hand-port code, still compiled] | 419 |
+| `anim.rs` | Moby skeletons, animation sequences, posing and skinning. | 2384 |
+| `anim_pose.rs` | `JointFx` (the joint override record) plus render-only pose overrides: the mirror op (`apply_mirrors`, one arm = the mirror image of the other), `partner_table` (bind-symmetry pairing), `ops_hash` / `ops_need_cut` (hero cache key, smoothing cut). Ops come in `HeroParts.pose_ops`, never touch RAM. | 291 |
+| `audio.rs` | Sound output: a small software mixer on the default output device. | 884 |
+| `bytes.rs` | Bounds-checked little-endian reads. | 33 |
+| `camera.rs` | Gameplay camera: the third-person follow rig and the level's fixed/scripted camera volumes, decoded from the overlay... [leftover hand-port code, still compiled] | 1070 |
+| `camgrid.rs` | Camera collision grid (gameplay header +0x84) and the shape tables it indexes (decomp/notes/camera.md "Camera collision... | 95 |
+| `collision.rs` | Level collision: the mesh the game's physics queries, separate from what is drawn. | 163 |
+| `devtune.rs` | Dev-only tuning without a rebuild: `RAC_WGSL_DIR` (shader modules read from a folder) and `RAC_TUNE` (named values read... | 55 |
+| `dynlight.rs` | Retail dynamic-light assignment and per-object evaluation (decomp/notes/lighting_fog.md section 5b and 7). | 562 |
+| `env_doc_tests.rs` | Keeps ENV.md (the catalog of the engine's environment switches) in step with the source: every "RAC_..." string literal... | 62 |
+| `fire.rs` | Class 760 fire quads (decomp/notes/particles.md "Fire quads (760/809)"): per emitter N camera-facing flame billboards (fx... | 293 |
+| `flow.rs` | A level's script on top of the gameplay: the HelpDesk tutorial messages, the cutscene chain and the level change at the end. [leftover hand-port code, still compiled] | 183 |
+| `frontend.rs` | The front end ("level -1"): title scene, logo, Press Start and the page menu (decomp/notes/frontend_flow.md,... | 2154 |
+| `gadgets.rs` | Gadget (hero weapon / item) textures. | 55 |
+| `game.rs` | Level gameplay on top of the player controller: breakable crates, bolts with the magnet, enemies, health and death. [leftover hand-port code, still compiled] | 746 |
+| `gameplay.rs` | PAL gameplay data: the per-level instance tables. | 858 |
+| `gauss.rs` | The SPU / SPU2 4-point Gaussian interpolation table: 512 signed 16-bit coefficients (hardware constant). | 87 |
+| `help.rs` | The HelpDesk box and the Help Log (decomp/notes/ingame_menu_leftovers.md P1-a): the 8-state timeline of the help state... | 329 |
+| `hud.rs` | HUD graphics: each level's hud_header + five hud banks (data range sections 4..9). | 300 |
+| `inventory.rs` | The hero's gadgets and ammo (decomp/notes/glove_prereq_inventory_input.md section 1): owned flags (0x13d4c0), ammo... [leftover hand-port code, still compiled] | 372 |
+| `iso.rs` | Raw sector access to the user's own disc image. | 41 |
+| `level.rs` | One level's data, as the game loads it: the data range's eleven (offset, size) sections, the decompressed core index and... | 487 |
+| `lib.rs` | rac_game: the rac-rs engine as a library crate (the exe in exe/ links it with the recompiled retail code and calls `main`). | 45 |
+| `rtss_crash.rs` | RivaTuner running + Vulkan crash (or a minute-long start-up freeze): a Yes/No box offering the DirectX 12 renderer (`renderer=dx12` into pc_options.txt); called by the crash filter and watchdog in `runlog.rs`. | 201 |
+| `gscap_guard.rs` | Start-up guard of the GPU capture: marker `player/gscap_start.txt` before the risky opening step, removed once the start is alive or on a normal quit; a left-over marker makes the next start switch the GPU capture off (`gscap_gpu=off` + note into pc_options.txt, run-log line, one non-blocking box). Hooks: `gpu_shared.rs` (`acquire`, `resolve`), `gpu.rs` `take`, `gscap.rs` `run`, `frame_start.rs`, `handler.rs`, `main.rs`. | 365 |
+| `rtss_layer.rs` | Switches RivaTuner's Vulkan layer off inside the process (DISABLE_RTSS_LAYER=1) before the first Vulkan call, unless RAC_RTSS_LAYER=1: its hook froze the start with NVIDIA driver 621.01 (two Vulkan instances at once, gone since s97; kept off as a second guard). RTSS's counter still shows through its injected hook. | 61 |
+| `loadlog.rs` | RAC_LOAD_LOG=1: wall-clock stamps of the load path (boot, title, Load Game, the retail loader, rac-rs's own level load); the steps also go to the run log. | 51 |
+| `main.rs` | Entry and CLI: `main`, `cmd_view` and the other commands, double-click launch args (generated/play.cfg), update check, crash log, run log start. | 609 |
+| `map.rs` | Galactic Map bundle decoder and explored-mask compositor. | 190 |
+| `mesh.rs` | A triangle mesh in game units (1.0 = 1024 fixed-point), Z up as on the PS2. | 120 |
+| `mobies.rs` | Mobys: animated model classes. | 1119 |
+| `music.rs` | Level music: the VAG streams listed in the level header (decomp/notes/music.md). | 391 |
+| `occlusion.rs` | Precomputed visibility (decomp/notes/novalis_enemies.md REN-CULL-OCC, BRIDGE-30): the level ships a grid of 4 m camera... | 334 |
+| `ocean.rs` | Level oceans (Aridia: decomp/notes/aridia_presentation.md ARI-49a/49b; Kerwan: decomp/notes/kerwan_environment.md... | 478 |
+| `overlay.rs` | Screen-space overlay: textured quads in pixels, and a built-in 5x7 pixel font for text until the game's own HUD font is... | 144 |
+| `particles.rs` | Veldin effect pool (decomp/notes/particles.md): the game's shared 2048-slot sprite pool (FUN_00267248 alloc, FUN_00267398... [leftover hand-port code, still compiled] | 1410 |
+| `physics.rs` | Triangle-soup collision: a 2D grid over XY (Z up) for fast lookups, a downward ground ray and sphere push-out. | 1020 |
+| `player.rs` | Player controller and third-person camera, with the numbers read from the decompiled hero code... [leftover hand-port code, still compiled] | 470 |
+| `render.rs` | A dependency-free software rasteriser for checking decoded geometry: perspective camera, depth buffer, flat Lambert... | 181 |
+| `retail.rs` | Retail mode (`view ISO LEVEL --retail DIR`, or `--retail-cold`): the game's own EE code runs the level in the ee-oracle... | 258 |
+| `runlog.rs` | The player's run log `<player dir>/log.txt` (last run: log.prev.txt): stderr, load steps, a Not Responding watchdog with call stacks, the crash record; RAC_RUN_LOG. | 693 |
+| `save.rs` | Save games in the game's own 59,912-byte image format (decomp/notes/savegame.md), stored as plain files... [leftover hand-port code, still compiled] | 489 |
+| `scene.rs` | In-engine cutscenes ("scenes"): per-level scene chunks, camera track, actor tracks, subtitles, speech and the FMV movie... [leftover hand-port code, still compiled] | 870 |
+| `settings.rs` | The Options values the pause menu edits (decomp/notes/ingame_menu_leftovers.md P1-d), kept in a small text file... | 112 |
+| `shadows.rs` | Ground blob shadows: the shared moby blob queue (FUN_00259bf8 -> FUN_001f95e0), drawn as one textured quad per caster on... | 595 |
+| `shipgloss.rs` | The cutscene / stream ship "gloss" overlay (retail callback FUN_002a69d8, decomp/notes/novalis_checklist.md "NOV-14.5b... | 75 |
+| `shop.rs` | The Gadgetron shop screen's 2D layout (decomp/notes/vendor.md "Shop screen", retail PAL capture): green LED ticker across... | 763 |
+| `shrubs.rs` | Shrubs: small static foliage meshes. | 515 |
+| `size_limits_tests.rs` | Unit tests: hand-written files stay within 1500 lines and fns within 150 lines; the bigger ones of 2026-10-22 are capped in SIZE_CAPS.txt, caps only go down. | 433 |
+| `sky.rs` | The sky: shells of triangles around the camera. | 378 |
+| `sound.rs` | Sound effects: Sony 989snd "SBlk" sound banks and the game's sound-id tables. | 1668 |
+| `spumix.rs` | The SPU2 voice mixer: plays the register writes of the exact 989snd driver (ee-oracle `snd989`) 1:1 with the hardware. | 768 |
+| `spurev.rs` | The SPU2 effect (reverb) unit, integer-exact, one instance per core. | 383 |
+| `strips.rs` | The Novalis strip-surface actors 678 / 1225 / 761 and the environment-map passes of class 1848: overlay table loaders,... | 273 |
+| `terrain.rs` | Static terrain ("tfrags") at LOD 0 or 2, decoded from the VIF packet programs that the game uploads to VU1, without... | 922 |
+| `ties.rs` | Ties: static instanced meshes (rocks, buildings, props). | 660 |
+| `toc.rs` | The R&C1 table of contents at sector 1500 (0x2960 bytes, read once at boot). | 75 |
+| `viewer.rs` | The window and the wgpu renderer: the front door of everything drawn on screen. | 1885 |
+| `wad.rs` | Insomniac's "WAD" LZ compression, implemented from the packet table in Wrench's docs/file_loading.md. | 153 |
+| `omni/mod.rs`, `load.rs`, `host.rs`, `cabi.rs`, `lock.rs`, `trace.rs` | OmniLoader host (mods = Luau scripts in `<player dir>/mods/<id>/`, run by `omniloader.dll` next to the exe through its C ABI): start-up and run-log lines, host callbacks (log, memory, fields), the C structs, one re-entrant lock around every DLL call, RAC_OMNI_TRACE pad log. RAC_OMNI=0 / no mod folder = nothing happens. | 64 + 127 + 143 + 263 + 52 |
+| `omni/input.rs`, `input_host.rs`, `input/tests.rs` | The mods' keyboard, mouse, window and pointer (`openrac.key`, `.pressed`, `.mouse`, `.window`, `.pointer`, `.take_input`, `.capture_mouse`): window events feed a live state, `Retail::tick` takes one snapshot per field into `FieldIn::omni`, the worker publishes it before the field (a replay gives mods a neutral one); `take_input("keyboard")` gates `Retail::tick_keys`, a mod's `capture_mouse` / `take_input("mouse")` keeps the camera, clicks and menu cursor out; a failed mod gives its holds back. Key ids = keys.h (USB HID usage). | 636 + 57 + 268 |
+| `omni/draw.rs`, `draw_map.rs`, `draw_quads.rs`, `draw_art.rs`, `draw_w2s.rs`, `draw_demo.rs`, `viewer/gpu/draw/pass_omni.rs` | The mods' draw list (ABI 1.2, `openrac.omni.draw`): `draw_submit` copies the list + text pool into a slot (WK), the renderer draws it as the last 2D layer of the HUD pass (rects, bars, text in the game's own font (x2 colour, the font sheet is mid-grey), icons; both layers on top of retail's overlay and previews); `draw_map` = the game's 512 x 448 space <-> window pixels, read from the GS overlay quad itself so a mod lines up with a retail menu at every size, aspect and mode; `draw_w2s` = `world_to_screen` from the game camera in RAM (`retail/camera.rs` `view_in_ram`); `draw_art` = the icon name table (`bolt`, `nanotech`, `weapon.<name>[.hud]`, `gadget.<name>`, `item.<id>`) and the level's font, published from `viewer/hudart.rs` `publish_omni`; `draw_demo` = `RAC_OMNI_DRAW_DEMO=1` host-side test list. No submit = no renderer work. | 184 + 120 + 347 + 160 + 162 + 97 + 55 |
+| `omni/plugins.rs`, `modset.rs`, `live_settings.rs` | Mods pages support (E1): `plugins.rs` builds the loader's plugins.json from `mods/active.txt` (a mod is on only with a line = its manifest id, plus the Load mods tick; an explicit `plugins.json` wins) and `mods/settings.json` (read, one-key write); `modset.rs` turns a setting declaration into a menu row; `live_settings.rs` queues a setting change from the pause page for the next tick (`Loader::set_setting`, `settings_json`). | 264 + 168 + 62 |
+| `omni/binding.rs`, `json.rs`, `rac1.json` | The game binding (OpenRAC SDK 1.3: hook ids, signatures, bases, fields) and a tiny JSON reader. | 157 + 233 + 1881 |
+| `omni/clash.rs`, `clash/tests.rs` | The clash switch: which of our PC features (modern camera, strafe aim, wide lock-on, keyboard table) a loaded mod replaces, from the hooks it took, its manifest `conflicts` and `take_input`; `clash::off(ID)` is a gate term in `modcam`, `pcext`, `aim`; run-log line per replaced feature and `"replaces"` in status.json. Pure matcher `decide`. | 245 + 110 |
+| `omni/hooks.rs`, `bridge.rs`, `layer.rs`, `rac1_reloc.txt` | Mod hook points: relocatable hands (oracle hs_reloc) found by code spec, one generic bridge (`hook_n::<N>`) reading arguments by signature, `omni_dispatch`, `original` = `frame_wait::call` of the retail function (compiled, no frame callback inside, with a stop at its return address, `return_stop.rs`, so a tail jump with a stale ra cannot run on into the caller). `layer.rs`: hooks layer OVER built-in hands (a hook entry that rac-rs/oracle already hands, e.g. the aim hand on the Blaster shot creator, keeps that hand: inactive slot, nested entry under `original`, failed chain -> `under`), cache dropped at each table rebuild (`disc::rescope`), RAC_OMNI_LAYER=0 = off. Specs: all 152 hook ids of the binding (17 engine hooks + 135 moby update functions), 256 slots. | 225 + 204 + 3782 |
+| `omni/native_host.rs`, `funcs.rs`, `layout.rs`, `rac1_funcs.txt` | Native C/C++ mods (ABI 1.1): `ram_ptr`, `call_game` (a retail function run from a DLL callback, registers saved and restored), relocate, loaded_level, stack_push/pop; game functions by number found by code (`rac1_funcs.txt`: `fn` block + masked-hash spec from `tools/make_spec.py`); the disc string and binding column the mods get (PAL v1.00 has the ntsc data layout, `RAC_OMNI_DISC`) |
+| `omni/events.rs`, `original.rs` | ABI 1.2 host side: `events.rs` reads level word / level-loop exit word / game mode word / front-end flag (`omni::note_front`, called from `retail/worker/field_front.rs`) / pause page id once per field (read-only) and sends `level_loaded`, `level_unloading`, `mode`, `pause_page` through `omni_event`, only on change, only with a loaded mod and an `omni_event` export; pure `Watcher::step`, `mode_name`, `page_name`. `original.rs`: `call_original` outside a hook dispatch (between fields): finds the hook point's function by its spec in the code loaded now, runs it with the slot guard held (`native_host::run_at`). `omni_storage_dir(<player dir>/omni)` is set in `load.rs` before `omni_load`. | 245 + 120 |
+| `omni/prescan.rs` | Stage C4: when a level loads (and once in the front end) `events::send` resolves every game function a mod can reach (rac1_funcs.txt specs, the raycast line test, the hook points mods hold) in ONE pass over the code and seeds the caches of funcs.rs / raycast.rs / original.rs, so the first call_game / raycast / call_original costs nothing; logs `omni: prescan level word N: x of y ... in z ms` (about 4-7 ms per level). `newgame.rs` now makes `new_game` from the front-end flag (title left, level word 0, no save_loaded since it began); only the New Game+ hand remains. |
+| `omni/card.rs`, `newgame.rs`, `raycast.rs` | ABI 1.2 host side, stage C3: `card.rs` watches the game's memory-card state machine (words 0x13d364 state, 0x13d36c cmd, 0x13d370 target, 0x13d350 active slot, open `saveN.bin` in `Mc::fds`) and gives `saving(slot)` when it enters the write states 0x10/0x13/0x14 and `save_loaded(slot)` when it leaves the load states 0xd/0xe (read-only, RAC_OMNI_TRACE prints the words); `newgame.rs` = two host-internal relocatable hands (watch only, return false) at the retail NewGame (Veldin 0x284250) and New Game+ (0x2842e8) functions, installed only when a mod is loaded and the DLL has `omni_event`, flag handed to `events::send` -> `new_game(plus)`; `raycast.rs` = `host.raycast`: runs the retail segment query `seg_collide` (Veldin 0x1efbf0, found by code like a hook point, spec inside the file) between fields or inside a hook with the vectors on the game stack, returns hit point + unit normal read from the hit record (Veldin 0x173e40 via the data map), puts the record back, -1 with no level | 160 + 90 + 230 |
+| `omni/pvars.rs`, `window.rs` | Stage B3 (Arsenal Mastery entries): `pvars.rs` = host `pvars` (`openrac.pvars(moby)`): class id and pvar pointer read at the offsets of the binding's `structs.moby` (`class`, `pvar`), the class looked up in the binding's `pvars` section (`"<class id>": "enemy"` or a list), variables read from the pvar block; nil for unlisted classes. `window.rs` = the overlay window: a binding field at `0x40000000 + reference address` (NTSC-U level-0 numbering, like `relocate`) is read/written by `host.rs` `read_mem`/`write_mem` at the address that global has in the level loaded now (data_map), used by `omni.weapon.<w>.max_ammo`; unmapped (title, load) = the read fails. Binding sections `structs` and `pvars` are parsed in `binding.rs` (the loader's own parser of `structs` is the loader crate's) | 120 + 70 |
+| `omni/mobys.rs`, `mobys_tests.rs` | Stage P2a (perk system entries): the host side of ABI 1.3 `moby_query` / `moby_valid` (`openrac.omni.mobys{..}`, `openrac.omni.moby_valid(addr)`). Reads the pool of mobies from the RAM image, driven only by the binding's `mobys` section (`binding.rs MobysDef`, no game address in the code): pool cells and target registry are overlay-window addresses (window.rs), the walk steps by the slot stride, stops at the tail marker state and skips deleted slots; filters by class list, distance (nearest first) and the retail enemy test; `fill` sets the two callbacks only when the binding has the section. Tests walk the Kerwan savestate fg1/3_0086 (expected numbers from an independent python walk) and check the binding data of stages P2a/P2a2 (readonly struct fields, hook/function signatures, `flags_w`, `matrix4`, `omni.hero.*` fields). |
+| `omni/pose.rs`, `pose_host.rs`, `pose_read.rs`, `pose_capture.rs`, `pose_tests.rs`, `pose_read_tests.rs`, `pose_capture_tests.rs`, `viewer/handler/pose_service.rs` | ABI 1.4 pose overrides of the hero (`openrac.omni.pose`: `pose_set` / `pose_info` / `pose_read` / `pose_snapshot` / `pose_debug`; host size 352, a 1.3 DLL still gets 312). RENDER-ONLY: nothing writes game RAM. `pose.rs` = the store (ops per (moby, joint): mirror / set / offset rotation / hold, weight ramps by `blend_ticks`, `duration_ticks`, `remove` and `n = 0` fade out, cap 64, errors -3/-4/-5) and the auto-clear rules run by `pose::tick` from `omni::tick` (level change, level-loop exit, game modes 1/2/5, hero death states fade, other mobys dropped; also drops snapshots and the read cache) and `clear_all()` on `new_game` / `save_loaded` in `events.rs send`; `snapshot_for` turns the ops into `JointFx` records for `HeroParts.pose_ops` (`retail/snapshot.rs snap`; applied by `Animated::local_fx_parts` / `anim_pose.rs`). `pose_host.rs` = the five callbacks (only the hero cell's class-0, 111-joint moby is posable), the parent / partner tables (bone table + the binding's `skeletons.hero` pairs) and `debug_tick`. `pose_read.rs` = `pose_read`, PURE reads (no retail call, `&Cpu` only, nothing written): the nine hero attach matrices retail writes each tick at `0x13fe10` (right hand / weapon grip = matrix 0; joints 56 55 99 93 7 5 54 3 5; current tick; same data layout on PAL and USA) and every other joint (left hand, chest, fingers) from the last rendered pose slot, ONE FRAME BEHIND the tick (render-timing dependent: for looks only); one copy of the slot per tick (`new_tick`); `flags` bit 0 = reflection across the chest plane (normal = the hero moby's left axis from RAM, offset = the chest's lateral distance from the slot, 0 before the first frame). `pose_capture.rs` = the "last rendered hero pose" slot: `pose_snapshot` (and a `hold` with no snapshot) registers a request and returns its id, `viewer/handler/pose_service.rs` (once per frame, three atomic loads when idle) captures the base local rotations of the hero (retail records + leg twist, no pose ops) and fulfils it, a hold becomes a rotation SET at the captured rotation (effective one frame later); while a mod reads joints (`pose_read`, `reads_on`) the service publishes the world frame of every joint of the game pose (`publish_world`); while `pose_debug` is on it publishes the world position of every drawn joint and the worker projects them with the game camera into a dot + name draw list (`draw.rs submit_debug`, drawn after the mods' list by `pass_omni`). Tests: store, binding section, partner cross-check vs `Animated::partner_table`, savestates, reflect, capture / hold / debug / reads, pure reads vs the recorded retail-call values. | 353 + 145 + 171 + 203 + 61 + 245 + 264 + 159 |
+| `omni/pose_follow.rs`, `pose_follow_tests.rs` | ABI 1.6 `pose_follow` (`openrac.omni.pose.follow`): picture-only follow poses. HOST STORE (up to 8 records item/source/from/to/mirror, same auto-clear as pose ops plus drop when the item or source slot holds another moby: `Store::run_rules`), the callback (`pose_follow_cb`: remove always 0; -1 no level, -2 hero not posable, -3 bad joint, -7 not a live moby, -8 cap) and `snapshot_for`, which reaches the renderer as `HeroParts.follow` (retail/snapshot.rs `mod_poses`). Never writes RAM. The picture side is `viewer/follow.rs`. | 178 + 66 |
+| `omni/data_map.rs`, `rac1_data.txt`, `counts.rs`, `tools/make_data_map.py` | `relocate` / `relocate_level` for native mods: per disc and level map of the overlay data (>= 0x15EF00) from OpenRAC's NTSC-U level-0 addresses, written by the tool from pairs of function copies in two levels + the PAL/USA disc map (addresses only); `counts.rs` = native-call counters in the run log (`native calls at tick N`) |
+| `water.rs` | Ripple-heightfield water (decomp/notes/water.md, decomp/notes/novalis_environment.md "Water surface rendering"): class... | 526 |
+
+### retail/ (retail mode: glue between the game's RAM and the viewer)
+
+| File | Job | Lines |
+|---|---|---|
+| `retail.rs` | Retail mode (`view ISO LEVEL --retail DIR`, or `--retail-cold`): the game's own EE code runs the level in the ee-oracle... | 258 |
+| `retail/accessors.rs` | The viewer's read access to the latest snapshot: scene sequences, hero parts, shadows, orbs, shop, effects and the... | 171 |
+| `retail/aim.rs` | Crosshair and aimed shots for the strafe mode (PC extra the user asked for, 2026-10-13, model: Ratchet: Gladiator,... | 1467 |
+| `retail/asset_feed.rs` | Runtime asset mutation feed: the class texture-coordinate scroll retail does to a class block in RAM. | 178 |
+| `retail/binds.rs` | Button remap: which keyboard key or controller button drives which PS2 pad function. | 660 |
+| `retail/camera.rs` | The render camera: where the level overlay keeps it in RAM (`camera_globals`, `read_cam`), the occlusion mask published... | 91 |
+| `retail/capture.rs` | The GS capture on its own thread (`Capture`, `CapTake`, `capture_gs_vram`) and the overlay pictures it hands over... | 249 |
+| `retail/debug_aids.rs` | Dev and test aids: the per-100-fields speed lines (`Smoke`, `WPerf`), the class probe, the debug-shot allowance and the... | 172 |
+| `retail/debugkeys.rs` | Debug keys for the user's own playtests (2026-10-13), keyboard only. | 425 |
+| `retail/devtools.rs` | Developer tools for retail mode (2026-10-18). | 586 |
+| `retail/disc.rs` | Which retail disc runs (PAL SCES-50916 or USA SCUS-97199, both v1.00; ee_oracle::ver) and what differs for rac-rs. | 291 |
+| `retail/disc_hands.rs` | The rac-rs hands on the USA disc: (PAL entry, PAL hash) -> (USA entry, USA end, USA hash) of the same retail function,... | 402 |
+| `retail/disc_map.rs` | PAL -> USA address map of the retail overlay part (0x15ef00..) per scope: the boot ELF's overlay sections (`BOOTOV`), the... | 2276 |
+| `retail/efx_draw.rs` | EFFECTS LAYER: every owned draw-queue callback whose packets are PATH2 DIRECT GIF only (the EE built the GS packets... | 797 |
+| `retail/efx_own.rs` | Exact ownership of the draw-queue callbacks' packets (EFFECTS LAYER). | 1022 |
+| `retail/efx_vu.rs` | EFFECTS LAYER, VU1 owners: a queue callback whose packets go through a VU1 microprogram (VIF MSCAL / MSCALF / MSCNT) is... | 837 |
+| `retail/fmv_bridge.rs` | Native movies for retail mode (no IPU/MPEG emulation in the oracle). | 439 |
+| `retail/front_end.rs` | The front end (frontbin) as the mirror sees it: its RAM state and modal dialog, the load-loop test, `front_snap`, and the... | 115 |
+| `retail/fx_queue.rs` | The effects layer read from RAM each field (`RetailFx`, `queue_fx`): the effect pool, the draw-queue callbacks (orbs,... | 606 |
+| `retail/gscap.rs` | rac-rs copy of the oracle GS capture (ee_oracle::gs, oracle/src/gs.rs + gs/draw.rs; keep in step with it): the big prims... | 1433 |
+| `retail/hot.rs` | The game's busy threads (the window's main loop, the retail worker, the GS capture) at above-normal priority and out of... | 82 |
+| `retail/input.rs` | Keyboard, mouse and pad into the game: key taps, the mouse in the menus, the scripted pad and key taps of tests, the skip... | 264 |
+| `retail/lights_water.rs` | The dynamic point lights, the reserved level lights and the water patch table, read from the interpreter's RAM. | 118 |
+| `retail/memcard.rs` | Persistent player memory card for retail mode. | 279 |
+| `retail/menu_keys.rs` | Modern menu controls for keyboard and mouse in every retail page menu (pause menu and its pages, Quick Select, the maps,... | 518 |
+| `retail/moby_state.rs` | The moby as the interpreter left it (`Moby`), the 4:3 side-test and cull inputs (`SideOnly`, `Culls`, `DrawView`), the... | 344 |
+| `retail/modcam.rs` | Modern camera and RMB aim mode for retail mode (PC extra the user asked for, 2026-10-12): `--modern-cam` or RAC_MODERN_CAM=1. | 1800 |
+| `retail/modcam_turn.rs` | The Modern camera's turn from one field's input (2026-10-23): pure `stick_axes` (the physical right stick turns like the mouse at Normal, keys Q/E/Z/X keep their old direction), `Gains` and `turn` (mouse factor = Mouse speed row, stick factor = Camera speed row, Reversed per axis); `modcam.rs` `step` calls them. | 141 |
+| `retail/modcam/classic.rs` | Strafe aim with Camera Classic (2026-10-23): RMB / R2 is the strafe aim with either camera while Strafe aiming is On; with Classic the modern camera drives only while it is held (`why` for `step`, `drives`, `aim_button` for the viewer and the pad, `aim_held` for the mouse capture). | 39 |
+| `retail/mouse_menu.rs` | Mouse in the retail menus (the page-menu engine FUN_00218da0: pause menu and its pages, Quick Select ring, galactic map... | 836 |
+| `retail/oldsim.rs` | Effects the mirror draws from rac-rs's OLD simulation state, read from retail RAM instead. | 294 |
+| `retail/pcctl.rs` | The Controls page (Pause -> Options -> Controls): the menu that edits the bindings of `binds.rs`, and the section stepper (`Pager`, `open_page`) that the Graphics and Mods pages share; the Graphics Preset, HUD and Renderer rows' bytes. | 1037 |
+| `retail/pcext.rs` | PC options in the game's own pause menu (Pause -> Options -> Camera Options, retail page id 0x1d): two extra rows in the... | 1679 |
+| `retail/pcext/camopts.rs` | The Camera Options page's Lock-on and Camera speed rows (moved out of `pcext.rs`, 2026-10-23): Lock-on mode, the speed row's percent steps (Cross / Left / Right, auto-repeat), the rate table of retail's three turn speeds, the rows' texts and RAM bytes (`CAMSEL`, `LOCKON`), `camspeed_scale` (the controller stick's turn factor; the mouse has its own, `mousespeed.rs`). | 322 |
+| `retail/pcext/camopts_tests.rs` | Tests of the Camera / Strafe rows and the Graphics page of `pcext.rs` (moved out of it, 2026-10-23), and of the two layouts of the Options list (9 rows, 10 with Mods); the Camera Options row records (8 rows + zero record), the Mouse speed row's steps and its no-key / independence rules. | 409 |
+| `retail/pcext/fogopt.rs` | The Graphics page's Fog row (Classic / High / Medium / Low; 2026-10-24): the row byte `FOG` (PC menu RAM, BASE + 21), the level (`Graphics::fog_q`, an AtomicU8 because the packed Graphics word has no free bit left), the title page's 13-row cap, the key `fog=` is in `pcopts.rs`. | 76 |
+| `retail/pcext/cloudopt.rs` | Graphics -> Volumetric clouds row (Classic / High / Medium / Low): row byte BASE+22, level in an AtomicU8 for `Graphics::clouds_q`; pause page only. | 51 |
+| `retail/pcext/texts.rs` | The new PC menu texts (NEW_IDS and the five-language TEXTS), moved out of pcext.rs; "Volumetric fog" / "Volumetric clouds" labels. | 89 |
+| `retail/pcext/gfx_word_tests.rs` | Tests of the packed Graphics word, the row counts and the table layout in PC menu RAM (moved out of `pcext.rs`, 2026-10-24). | 55 |
+| `retail/pcext/mousespeed.rs` | The Camera Options page's Mouse speed row (row 3, right below Camera speed; 2026-10-23): label in five languages, value text "< 50 >", the row byte `MOUSESEL` (PC menu RAM), steps with the same 10..200 grid as Camera speed, the `mousespeed` key of `pc_options.txt`, `mousespeed_scale` (the Modern camera's mouse factor, exactly 1.0 without the key). | 95 |
+| `retail/pcext/presets.rs` | The Graphics page's Preset row (Low / Medium / High / Custom): reads `assets/gfx_presets.txt` (built in with `include_str!`, the launcher shows the same table), writes a chosen preset into the Graphics rows, shows the preset that matches them (`choose`, `show`). | 283 |
+| `retail/pcmods.rs`, `pcmods_tests.rs` | The Mods pages, two flavours of one page. PAUSE (Pause -> Options -> Mods): the Texture packs tick, one On/Off row per installed texture pack, then the BASIC settings rows of the script mods that RUN (from the loader's own list); NO script / native mod On/Off in the game menu. TITLE (title -> Options -> Mods, `build_title`, called by `pcext::build_title`, only when a mod or pack is installed): the Load mods tick, per script / native mod an On/Off row + its settings rows (manifest) while it is on, then the Texture packs tick and packs; mod On/Off applies at the next start (the loader starts once). Writes `mods/active.txt` (launcher format, a script mod's line = its MANIFEST id; `texpack/store.rs`, foreign lines untouched) and `mods/settings.json` (`omni/plugins.rs`); `load_store` decides per planet load whether the pause Options list gets the row; text hook, section stepper, row sync. RAM: MBASE..+0x1800 (pause page + pool + title page + title Options records), written only after a build set the magic word. | 698 + 467 |
+| `retail/pcrender.rs` | The Renderer option row (Pause -> Options -> Graphics -> Screen -> Renderer, Vulkan / DirectX 12): the saved choice (`renderer=` in pc_options.txt), the menu byte sync and the row text, with " - restart" when the choice differs from the API running now. | 63 |
+| `retail/pcopts.rs` | The PC options file (`<player dir>/pc_options.txt`, next to card.bin): what the player chose in the game's own menus and... | 805 |
+| `retail/present.rs` | What the viewer shows this frame: movie hand-off, the GS overlay and GS-full picture, the front end's state and the flags... | 129 |
+| `retail/prompts.rs` | Button prompts that follow the device in use, and the gamepad as an input device. | 1183 |
+| `retail/prop_pools.rs` | The retail prop pools handed to `Game::with_story`: counting them from the moby table, widening them for the level being... | 216 |
+| `retail/props_sync.rs` | Binding the game's props to retail's mobys: the level switch, the prop pools' (re)bind order and `sync`, which mirrors... | 201 |
+| `retail/pspad.rs` | PlayStation controllers (DualShock 4, DualSense, DualSense Edge) as gamepads, read directly over USB or Bluetooth. | 398 |
+| `retail/queue_b.rs` | Retail's second custom draw queue (queue B) and the queue callbacks the mirror ports as world quads. | 1351 |
+| `retail/queue_fxa.rs` | Draw-queue B callbacks of the later planets that the mirror did not draw (fx_census rows 16-17). | 401 |
+| `retail/queue_fxb.rs` | Ribbon trails of flying mobys (Rilgar class 79 FUN_002d72b0, Pokitaru class 1319 FUN_00318bf8), queue A. | 144 |
+| `retail/queue_q1.rs` | Queue-A callbacks of the early planets that the mirror did not draw (census rows 6-8, decomp/notes/draw_producers.md):... | 481 |
+| `retail/queue_q2.rs` | Draw-queue callbacks of the later planets that the mirror did not draw (fx_census rows 10, 14-17). | 215 |
+| `retail/queue_story.rs` | Queue callbacks that only run in story moments (in-engine cutscenes) and that the weapon / gameplay ports do not cover. | 79 |
+| `retail/ram_globals.rs` | Fixed boot-RAM addresses (level byte, held moby, moby table) and the game-mode predicates built on the mode words (frozen... | 52 |
+| `retail/rec.rs` | Input recorder and replayer for retail mode: `RAC_RETAIL_REC=file` writes every field's pad exactly as the retail worker... | 224 |
+| `retail/session.rs` | Turning retail mode on for the next game start (`enable`, `enable_cold`, `--gsfull`) and asking whether it is on. | 81 |
+| `retail/shadow_snap.rs` | Retail's shadow volumes and the ship ground shadow read from RAM (`RetailShadows`, `shadow_snap`, `ship_shadow`), and the... | 191 |
+| `retail/shipmouse.rs` | Mouse steering for the ship fights (a PC extra the player asked for: a keyboard stick is all-or-nothing, so aiming the... | 397 |
+| `retail/shop_snap.rs` | The vendor shop screen's VU1 mobys and hologram beam, read from RAM (`ShopSnap`, `shop_snap`). | 172 |
+| `retail/snap_pipe.rs` | perf: the effects layer's picture work (`efx_draw::capture` + `efx_vu::Picker::prep`, which copy the field's packets and... | 365 |
+| `retail/snapshot.rs` | `Snap`, what the main thread needs of one field, and `snap`, which reads it from the interpreter's RAM; the scene... | 512 |
+| `retail/snd.rs` | Retail sound in rac-rs: the exact 989snd driver (ee-oracle `snd989`, a Rust port of the IOP module) plays the game's... | 224 |
+| `retail/strafe.rs` | "Controls: Modern" movement for retail mode (PC extra, R&C3-style strafe built from R&C1's own data): on top of the... | 938 |
+| `retail/strafe_feel.rs` | Strafe feel (PC extra, part of strafe.rs's "Controls: Modern"): while RMB aims, the ground movement and the strafe flips take the numbers of R&C2's strafe (start, stop, reversal, flip speed; written between two fields). | 309 |
+| `retail/strafe/chain.rs` | Strafe flip chaining: a hand on SetState turns retail's landing jump (Cross pressed just before a strafe flip lands) into the next strafe flip, like R&C2's. | 128 |
+| `retail/strafe/pack_fx.rs` | The Thruster-Pack exhaust while strafing: flame and smoke particles and the flame cones moved onto the drawn (turned) pack. Draw only. | 148 |
+| `retail/test_suite.rs` | Tests of retail mode (the savestate probes are `#[ignore]`). | 922 |
+| `retail/tick.rs` | The main thread's field loop: `tick` hands the pad to the worker and takes the field it finished, the sound of the field,... | 264 |
+| `retail/title_boot.rs` | Boot to the game's own title screen, and the front end (frontbin) in retail mode. | 446 |
+| `retail/vendor.rs` | Gadgetron vendor "buy all ammo" (PC extra, Options -> Camera Options -> Buy all ammo, default On). | 509 |
+| `retail/warp.rs` | Mirror of the arrival warp (game mode 6, substate 4; decomp/notes/level_transition.md SCN-4.1 / SCN-4.2): the warp state... | 336 |
+| `retail/worker.rs` | `Retail::load`: starts the interpreter on its worker thread (and the GS capture, sound, recording and replay it feeds)... | 96 |
+
+### retail/worker/ (`Retail::load` and the worker's field loop)
+
+| File | Job | Lines |
+|---|---|---|
+| `retail/worker.rs` | `Retail::load`: starts the interpreter on its worker thread (and the GS capture, sound, recording and replay it feeds)... | 96 |
+| `retail/worker/feeds.rs` | `load`, part 3: the travel request, the channels to the worker thread, the recorded pad (`@play`) and the title boot. | 48 |
+| `retail/worker/field_front.rs` | One field of the worker: the front end (title, menus; the late GS pipe, the capture's modes) and the level-load loop (turbo). | 193 |
+| `retail/worker/field_gs.rs` | One field of the worker: the hooks after it, the effects layer's owned packets, the GS-full feed and the capture's field end. | 73 |
+| `retail/worker/field_run.rs` | One field of the worker: the pad and the hooks before it (travel request, ship/turret mouse, PC options, replay), then... | 93 |
+| `retail/worker/field_snap.rs` | One field of the worker: the snapshot for the main thread (effects layer, level and pool changes, overlay), the load log... | 260 |
+| `retail/worker/gs_setup.rs` | `load`, part 2: the first snapshot (the game before its first field) and the GS capture / GS-full pipes with the effects... | 72 |
+| `retail/worker/machine.rs` | `load`, part 1: the machine (cold boot from the disc, or a savestate), the PC hooks on the retail functions, the... | 96 |
+| `retail/worker/spawn.rs` | `load`, part 4: the worker thread (`spawn_worker`, what it takes along: `ThreadIn`) and its field loop (`worker_main`). | 57 |
+| `retail/worker/state.rs` | The worker thread's state (`Worker`): everything that lives across fields, the thread start and its end. | 120 |
+
+### retail/gscap/ (GS capture pixel pipeline; `retail/gscap.rs` is in the retail table)
+
+| File | Job | Lines |
+|---|---|---|
+| `retail/gscap/draw.rs` | GS pixel pipeline for the captured 2D work: sprite/triangle/line raster, texture fetch (CT32/24/16, T8/T4 with CLUT), TFX... | 1412 |
+| `retail/gscap/draw/gpu.rs` | GS capture on the GPU (on by default on a Vulkan or DX12 (DXC) window, `set_default`; RAC_GSCAP_GPU=0 draws on the CPU, 1 uses the window's... | 1636 |
+| `retail/gscap/draw/gpu_shared.rs` | Which device the GS capture draws on: the window's own device, Vulkan or DX12 with DXC (published by `Gpu::new`, no second instance; a DX12 window never opens Vulkan), an own device (Vulkan, or DX12 when the player runs DX12) only for `own` / warm-gpu, the default per backend, device type and DXC. Tests: `gpu_shared_tests.rs`. | 286 |
+| `retail/gscap/draw/gpu/kernels.rs` | The capture's 13 compute pipelines (`Gpu::pipes`, build workers) with a per-thread error scope per kernel: a kernel the shader compiler refuses ends the GPU capture with a log line (CPU capture), never a panic. | 78 |
+| `retail/gscap/draw/pmemo.rs` | Memo of big prims (PC speed-up, no retail counterpart; RAC_GSCAP_PMEMO=0 turns it off). | 314 |
+| `retail/gscap/edge_cut.rs` | Rows of the captured overlay where a HUD prim is cut by the scissor edge (Pokitaru breath tank sliding in/out), so the 16:9 presenter does not smear its cut column into the side margins; a later full-width fill clears the row. | 127 |
+
+### viewer/ (window, wgpu renderer, PC effects)
+
+| File | Job | Lines |
+|---|---|---|
+| `viewer.rs` | The window and the wgpu renderer: the front door of everything drawn on screen. | 1885 |
+| `viewer/app.rs` | `impl App` for the viewer's level life cycle: the pause-menu frame (Quick Select wheel, settings), play-mode toggle, and... | 1707 |
+| `viewer/app_state.rs` | Sub-state the App carries besides the GPU: front end, Galactic Map, this frame's HUD values and the HUD art slots, plus... | 127 |
+| `viewer/bindless.rs` | perf round 3 (no retail counterpart): the tie and shrub batches drawn without a texture bind group per draw. | 171 |
+| `viewer/clip.rs` | The CPU side of the retail moby guard-band clipper (VU1 prog11 `L_1b58`; NOV-5.9c / NOV-5.9d in the notes). | 337 |
+| `viewer/fardraw.rs` | Draw distance (Pause -> Options -> Graphics -> Draw distance; user, 2026-10-17: "rn whole game uses ps2 lods which isnt... | 150 |
+| `viewer/front_mirror.rs` | The retail front end (frontbin: title, main menu, New / Load Game) drawn by the mirror renderer instead of the GS picture. | 341 |
+| `viewer/gpu.rs` | The wgpu renderer of the viewer: device and pipelines, scene upload, prop slots, per-frame draw. | 53 |
+| `viewer/gpucache.rs` | perf: "same inputs as last frame" keys for `Gpu::set_marker` and `Gpu::cull_ties`, and their off-by-default check modes... | 114 |
+| `viewer/gpuhero.rs` | perf: the hero marker built on the GPU. `Gpu::set_marker` builds the marker's world-space vertices on the CPU every... | 582 |
+| `viewer/gpuskin.rs` | perf round 3 (no retail counterpart): the props batch posed in the vertex shader (`vs_props`). | 269 |
+| `viewer/gs_state.rs` | One decode of the retail GS draw state for every native draw path. | 560 |
+| `viewer/handler.rs` | The winit event handler of the viewer (`impl ApplicationHandler for App`). | 256 |
+| `viewer/hero_pose.rs` | Hero attach and pose helpers: back objects (Clank, jetpack), the Clank light, held gadget rigs (Held, PyroRig), wrench /... | 123 |
+| `viewer/heroanim.rs` | The hero and his held gadgets' animation clocks: one `anim::PropAnim` (the retail 0x264df8 clock) each, stepped once per... | 63 |
+| `viewer/herocache.rs` | perf: the hero's posed bundle is computed once per game tick, not per display frame. | 108 |
+| `viewer/hud.rs` | HUD drawing as `Quad` lists: the counter bar, the nanotech, breath and morph meters, the marker and count widgets, art... | 838 |
+| `viewer/hudart.rs` | Decodes the HUD art from the level data (bolt icon, counter bar, nanotech orb, default font) into textures and the... | 176 |
+| `viewer/hudsharp.rs` | Sharp title / main menu: with the sharp HUD on, the front end's PS2 art quads are sampled with the edge-aware HUD shader... | 114 |
+| `viewer/icefx.rs` | Enhanced ice (user request 2026-10-16): Hoven's ice floes, ice blocks and icicles get a cold gloss that follows the... | 92 |
+| `viewer/interp.rs` | FRAME SMOOTHING (port extra, user request 2026-10-17: "unlocked frame rate like the Sly Cooper port"; Pause -> Options ->... | 686 |
+| `viewer/lights.rs` | Level-light slots of the pause menu and the gold weapon (LIT-7a), and the scene actors' light snapshot (SCN-3); with... | 72 |
+| `viewer/maths.rs` | Small vector / matrix / mesh helpers: cross, normalise, invert3, moby placement matrices, 3x4 transforms, mesh bounds and... | 171 |
+| `viewer/mirror.rs` | Water Enhanced: the planar mirror (no retail counterpart; Water Classic never runs it). | 422 |
+| `viewer/moby_fade.rs` | Moby draw verdicts: the dynamic-light id table, the alpha / baked-colour encodings, the draw-distance fades and the metal... | 151 |
+| `viewer/pace.rs` | (speed) Frame cap for the uncapped present modes (Mailbox / Immediate, gpu.rs `present_mode`). | 60 |
+| `viewer/partfx.rs` | Particles Enhanced (Pause -> Options -> Graphics -> Particles, with Lighting Enhanced; retail/pcext.rs `graphics`; no... | 299 |
+| `viewer/pause_hero.rs` | Pause-menu hero preview: preview keys, aux / actor / clip / view tables, the worn-item batch types, the preview clock... | 173 |
+| `viewer/popups.rs` | Small HUD overlays drawn as `Quad` lists: the pickup popup, the Quick Select wheel with its fade, the save icon and the... | 146 |
+| `viewer/post.rs` | Enhanced image (Pause -> Options -> Graphics -> Lighting Enhanced, retail/pcext.rs `graphics`; no retail counterpart). | 1153 |
+| `viewer/presenter.rs` | Presents on a worker thread, by default only on NVIDIA (no retail counterpart; render path only, the picture is unchanged; GitHub #12). | 313 |
+| `viewer/profile.rs` | RAC_FRAME_PROFILE=1 (PC debug aid, no retail counterpart): the CPU time of each display frame split by phase, printed to... | 382 |
+| `viewer/projection.rs` | Camera projection: the retail PAL constants, `view_proj`, `project`, the panel-target projection constants and the tests... | 171 |
+| `viewer/sfx.rs` | Viewer sound state: the level / global sample banks (`Sfx`), voice bookkeeping, the retail start gate and the spatial... | 195 |
+| `viewer/shadowvol.rs` | BRIDGE-64a (decomp/notes/shadows.md "BRIDGE-64a port spec"): the moby shadow-volume pass. | 375 |
+| `viewer/smooth.rs` | Render interpolation for displays faster than the 50 Hz game (port extra, user request 2026-10-06). | 670 |
+| `viewer/follow.rs`, `follow_tests.rs` | Follow poses in the picture: per displayed frame `item_draw = W(to) * D * (W(from)^-1 * W(source))` (D = row 1 negated with the mirror flag; checked against `anim_pose::mirrored` on a synthetic leaning skeleton), from the hero joint matrices `frame_hero.rs` captured (`capture`, `capture_held`) in the drawn hero frame (`smooth::hero_frame`), blended between ticks like `Smooth::hero`; writes `smooth::PROP_XF[item prop]` from `App::apply_follow` (frame_props.rs, after `smooth.props`). Looks-only log `RAC_FOLLOW_LOG=1`. | 257 + 129 |
+| `viewer/startup.rs` | Start-up: `run` (the viewer entry point), the frame worker pool and `new_app`, which builds the `App`. | 241 |
+| `viewer/sunshadow.rs` | Dynamic shadows (Pause -> Options -> Graphics -> Dynamic shadows On, with Lighting Enhanced; retail/pcext.rs `graphics`;... | 656 |
+| `viewer/targets.rs` | Render targets and buffers: 4x MSAA / depth views, mip chain, buffer creation, the shop item-panel target and the... | 102 |
+| `viewer/test_clock.rs` | TEST ONLY: the regression gate's two switches (gate/gate.ps1), never set by players. | 85 |
+| `viewer/tiegpu.rs` | perf: the tie vertex rewrite of `Gpu::cull_ties` (geomorph position + VU1 prog7 vertex colour, `ties::morphed` /... | 589 |
+| `viewer/travel.rs` | Ship travel after the Galactic Map: flight-away fade, the planet FMVs, the title cards, then the level change through the... | 328 |
+| `viewer/travel/mirror_warp.rs` | Retail mode: draws the arrival warp retail runs (mode 6 substate 4) from retail's own warp state... | 174 |
+| `viewer/under_detect.rs` | Water Low / Medium / High: when the camera counts as under water (retail's flag, or the camera below the surface the swimming hero is in; the Seebad tunnels have no water face). | 40 |
+| `viewer/underwater.rs` | Water Low / Medium / High: the underwater look (no retail counterpart; Water Classic and Off draw the retail picture). | 382 |
+| `viewer/vegfx.rs` | Vegetation (Pause -> Options -> Graphics -> Vegetation Off / Moderate / Lush, with Lighting Enhanced; retail/pcext.rs):... | 2530 |
+| `viewer/vegfx/cover.rs` | Vegetation: which ties count as raised grass beds (on swamp levels at least 2 m tall: Umbris' thin water-level slabs get none, nor any ground under them) and the swamp rules for Umbris (dark-tolerant green and olive-soil tests, grass tufts in patches, no flowers, every ground texture tried). | 215 |
+| `viewer/warpfx.rs` | GPU side of the arrival warp's draw pass (decomp/notes/level_transition.md SCN-4.2): the star fan (the warp bundle's sky... | 119 |
+| `viewer/waterfx.rs` | Water Enhanced (Pause -> Options -> Graphics -> Water, with Lighting Enhanced; retail/pcext.rs `graphics`; no retail... | 195 |
+
+### viewer/handler/ (the frame steps of `RedrawRequested`)
+
+| File | Job | Lines |
+|---|---|---|
+| `viewer/handler.rs` | The winit event handler of the viewer (`impl ApplicationHandler for App`). | 256 |
+| `viewer/handler/display.rs` | Test-window and display-mode helpers of the viewer window, with their test. | 29 |
+| `viewer/handler/frame_audio.rs` | RedrawRequested: the audio phase (playing the frame's collected sounds, animation cues, music, positional ambience). | 566 |
+| `viewer/handler/frame_hero.rs` | RedrawRequested: hero phase (hero pose and held items, scene actors and flight camera, effects). | 724 |
+| `viewer/handler/frame_hud.rs` | RedrawRequested: the HUD phase (HUD state of the frame, HUD and pause menu draw). | 385 |
+| `viewer/handler/frame_post.rs` | RedrawRequested: post phase (blob and ship shadows, sound events collected from the field's ticks, camera). | 348 |
+| `viewer/handler/frame_props.rs` | RedrawRequested: props phase (prop poses). | 74 |
+| `viewer/handler/frame_render.rs` | RedrawRequested: the render phase (final draw, capture, present, frame end). | 242 |
+| `viewer/handler/edge_fill.rs` | The 4:3 overlay quad over a wider window: one stretched quad as before, or (with edge-cut rows from `retail/gscap/edge_cut.rs`) the picture plus side-margin stretch only on uncut rows. | 62 |
+| `viewer/handler/frame_start.rs` | RedrawRequested, part 1: the frame's shared locals (`Frame`), the frame start (pause, cursor grab, window mode, listener... | 269 |
+| `viewer/handler/frame_switch.rs` | RedrawRequested: the level switch and travel, messages and the free camera keys. | 118 |
+| `viewer/handler/frame_ticks.rs` | RedrawRequested: the game ticks of the frame, and the per-tick render state. | 177 |
+| `viewer/handler/frame_upload.rs` | RedrawRequested: the upload phase (draw lists to the GPU, window title), the scene camera put back, and the water hold... | 257 |
+| `viewer/handler/hero_rows.rs` | Hero model rows (body tilt) and the hero joint override records, with their tests. | 112 |
+| `viewer/handler/play_input.rs` | Mouse button and key state changes of the viewer window (`play_mouse`, `key_change`). | 33 |
+| `viewer/handler/ship_shadows.rs` | Ground shadow quads of the ship pad stream and the flying pad ship. | 50 |
+| `viewer/handler/sound_loops.rs` | Sound helpers of the frame: sound-stage bookkeeping, enemy animation cues, loop voices (with their tests). | 135 |
+
+### viewer/gpu/ (`impl Gpu` blocks, one file per job)
+
+| File | Job | Lines |
+|---|---|---|
+| `viewer/gpu.rs` | The wgpu renderer of the viewer: device and pipelines, scene upload, prop slots, per-frame draw. | 53 |
+| `viewer/gpu/culling.rs` | Per-frame culling of ties, shrubs and tfrags, the far draw level, and the ice tag. | 403 |
+| `viewer/gpu/draw.rs` | The per-frame draw: Gpu::draw, strip drawing, debug switches, water mirror choice. | 191 |
+| `viewer/gpu/hud_art.rs` | HUD art textures and the retail overlay texture. | 67 |
+| `viewer/gpu/reshade.rs` | ReShade add-on: registers with a loaded ReShade (`attach`; event 76 begin_effects registered in `on_init`, after ReShade loaded all add-ons), unregisters at exit (`detach`, `Drop for Slot`), the frame hook that renders its effects on the picture before the HUD, `Gpu::reshade_begin` / `hud_pass`. | 408 |
+| `viewer/gpu/reshade/abi.rs` | ReShade add-on ABI: exports, event ids, effect_runtime / command_queue / device vtable slots (create / destroy resource view; with header cites), `ViewDesc` and their tests. | 387 |
+| `viewer/gpu/reshade/native.rs` | The views ReShade takes for the colour target (rtv, rtv_srgb) and the depth texture (srv): on D3D12 created by ReShade's own device API (its descriptor-heap proxy would reject our handles), on Vulkan raw image views. | 139 |
+| `viewer/gpu/reshade/targets.rs` | The ReShade add-on's textures, pipelines and passes (`passes.wgsl`): depth resolve, MSAA resolve, copy-back for the HUD. | 182 |
+| `viewer/gpu/item_panel.rs` | Shop portrait pose and the item panel render targets. | 159 |
+| `viewer/gpu/lighting.rs` | Frame uniforms and fog, dynamic light rows, relight of the scene vertices, and the moby / hero light words. | 160 |
+| `viewer/gpu/marker.rs` | The posed hero marker model (set_marker) and its clipped polygons. | 251 |
+| `viewer/gpu/metal.rs` | Metal (chrome) mobys: view and palette rows, packet to vertex conversion, upload and the per-frame metal props. | 182 |
+| `viewer/gpu/particle_fx.rs` | Particle sprites, ribbons and lines (set_particles) and their view tests. | 188 |
+| `viewer/gpu/prop_clip.rs` | Retail polygon clipper for props: draw-distance alphas, per-prop verdicts and the clipped polygon queue. | 205 |
+| `viewer/gpu/props_layout.rs` | Prop slot layout: class faces, draw layout, slot allocation, and growing the props batch (append / regrow). | 568 |
+| `viewer/gpu/props_set.rs` | Per-frame prop slot rebuild (set_props): slot jobs and sources, GPU records, preview and panel poses, debris. | 388 |
+| `viewer/gpu/renderer.rs` | Which graphics API the window opens (`renderer=` in pc_options.txt; WGPU_BACKEND overrides): instance, surface and adapter for Vulkan or DirectX 12, the DXC (`dxcompiler.dll` next to the exe) or FXC shader compiler, and the frame latency (3 on DX12). | 117 |
+| `viewer/gpu/scene_build.rs` | Level scene build (terrain, ties, shrubs, sky) on the build context, and its parallel vertex helpers. | 318 |
+| `viewer/gpu/scene_ctx.rs` | SceneCtx (the device handles of the scene build) and its texture upload and batching, with the Gpu wrappers around it. | 402 |
+| `viewer/gpu/setup.rs` | Gpu::new (device, every pipeline and buffer; the instance / adapter come from `renderer.rs`), resize, surface configuration and present mode. | 497 |
+| `viewer/gpu/sky_water.rs` | Sky spin and sprites, ocean surfaces (set_ocean, set_ocean_ram) and the sea shading mesh. | 186 |
+| `viewer/gpu/tests.rs` | Unit tests of the renderer helpers (kept together; they reach every sibling through `use super::*`). | 307 |
+| `viewer/gpu/warp_actors.rs` | Warp (travel) actors: load, pose and clear. | 101 |
+
+### viewer/gpu/draw/ (`Gpu::draw` steps)
+
+| File | Job | Lines |
+|---|---|---|
+| `viewer/gpu/draw/finish.rs` | The end of the frame: movie overlay, screenshot readback, command buffer finish, submit / present. | 48 |
+| `viewer/gpu/draw/pass_hud.rs` | HUD-pass steps: the overlay quad groups with the prompt model between them, and the pause-menu / vendor item previews. | 161 |
+| `viewer/gpu/draw/pass_particles.rs` | Particle steps: the pool runs gathered for this frame and their vertex / index buffers (the draws and the cover pass stay... | 50 |
+| `viewer/gpu/draw/pass_shrubs.rs` | Level-pass step for the vegetation: the shrub meshes, the billboards (two passes) and the extra plants (vegfx). | 104 |
+| `viewer/gpu/draw/pass_water.rs` | Level-pass steps for liquids and effect quads: the oceans (also recorded for the water pass), the textured world quads... | 214 |
+| `viewer/gpu/draw/pass_world.rs` | Level-pass steps that record the world: sky shells and sprites, the opaque world (terrain, ties, shrubs, props, mobies,... | 252 |
+| `viewer/gpu/draw/passes.rs` | The render passes of the frame in order: level pass (sky, world, water, effects), the particle passes, post, the HUD pass. | 177 |
+| `viewer/gpu/draw/prepare.rs` | Draw steps before the render passes: uniforms and sun, water and particle flags, surface image and encoder, HUD quads and... | 198 |
+
+### viewer/waterfx/ (Water Enhanced)
+
+| File | Job | Lines |
+|---|---|---|
+| `viewer/waterfx.rs` | Water Enhanced (Pause -> Options -> Graphics -> Water, with Lighting Enhanced; retail/pcext.rs `graphics`; no retail... | 195 |
+| `viewer/waterfx/contacts.rs` | What touches the water: contact rings (`Rings`) and the movers (`WaterFx::contacts`, `track_props`, `shore_movers`). | 148 |
+| `viewer/waterfx/draws.rs` | One water mesh for the water pass (`WaterDraw`) and the position target's format. | 93 |
+| `viewer/waterfx/fall_sheets.rs` | Waterfall sheets (Pokitaru): sheet shaping, `SheetMem` (the sheets as seen over time), the fast hash it uses, the foot... | 464 |
+| `viewer/waterfx/flows.rs` | River and strip flows: the flow slot of each strip or river quad from the drift of its texture (`WaterFx::strip_flows`,... | 177 |
+| `viewer/waterfx/levels.rs` | Per-level tables: which textures and terrain are sea, pond, river, waterfall, cold, frozen, lava, mud or sludge, and the... | 134 |
+| `viewer/waterfx/looks.rs` | Look parameters: the geometric sea (`GeoLook`), the water uniform block (`WaterU`), the tuning constants and the... | 103 |
+| `viewer/waterfx/own_spray.rs` | Where the hero and movers have been in the water lately: their own spray is never churn foam (`OwnPath`). | 70 |
+| `viewer/waterfx/passes.rs` | The water pass each frame: `positions` (meshes into the position target, uniforms, mirrors), `sea_waves`, `shade` (inside... | 289 |
+| `viewer/waterfx/setup.rs` | Making the water pass: pipelines, buffers, bind-group layouts (`WaterFx::new`) and the targets that follow the window and... | 302 |
+| `viewer/waterfx/shader.rs` | The water shader (WGSL, one string): the sea, wave, lava, mud, sludge and waterfall looks, `fs_pos`, `fs_water` and... | 1820 |
+| `viewer/waterfx/shore_map.rs` | The geometric sea's shore map: its compute shader (WGSL), the uniform block and the map's size constants. | 93 |
+| `viewer/waterfx/skymap.rs` | Sky map: a top-down depth map of ALL static ties/tfrags/world inside its window (not the camera-culled draw lists) and `sky_vis`, the share of the sun that reaches a water point (no caustics, shafts or glint under roofs). | 222 |
+| `viewer/waterfx/underside.rs` | WGSL appended to the water shader: the Enhanced water surface seen from below (Snell's window, total internal reflection, Fresnel, wave slope); `fs_water` calls `under_side` where the eye is under the surface. | 89 |
+| `viewer/waterfx/edge_calm.rs` | WGSL appended to the water shader: calms the geometric waves near a waterline seen in the scene depth (no crest standing over a wall or rock base); depth samples on the hero and on retail's own sea are skipped. | 56 |
+| `viewer/waterfx/rim.rs` | WGSL appended to the water shader: `finish` (shore pixels blend toward the neighbouring non-water pixels, never retail's old water picture) and `mirror_push` (mirror taps kept off the wall foot: no pale line at waterlines). | 55 |
+| `viewer/waterfx/steady.rs` | Smooths the water plane heights (retail moves them in 50 Hz steps with jitter) on the render clock, for the wave grid and the planar mirrors. | 88 |
+| `viewer/waterfx/wakes.rs` | Wakes behind the hero and movers, the churn where falling water lands, and the constants of the contact effects. | 267 |
+
+### gsfull/ (optional full software GS: `--gsfull`)
+
+| File | Job | Lines |
+|---|---|---|
+| `gsfull/crtc.rs` | The PS2 CRTC: which part of local memory the TV shows, from the GS privileged registers. | 175 |
+| `gsfull/gs.rs` | Software GS for the GS-full mode (draws the game's own GIF output: all three paths). | 904 |
+| `gsfull/gs_mem.rs` | GS local memory (4 MB): swizzled pixel addresses for PSMCT32/24/16(S), PSMT8, PSMT4 and the 8H/4HL/4HH views, pixel... | 467 |
+| `gsfull/gs_queue.rs` | Command queue between the GS front end (`gs.rs`, serial GIF parsing) and the rasteriser. | 983 |
+| `gsfull/gs_raster.rs` | Pixel pipeline of the GS-full software GS: triangles, sprites, lines and points into one screen rectangle (a tile, or the... | 903 |
+| `gsfull/mod.rs` | GS-full: the game's own complete picture. | 15 |
+| `gsfull/pipe.rs` | The GS-full pipeline: the `Job` stream ee-oracle produces per field (VIF1 chains, GIF DMA) -> VIF1 front end + VU1... | 367 |
+| `gsfull/vif.rs` | VIF1: the word stream of a DMA chain (UNPACK into VU1 data memory, MPG into VU1 micro memory, MSCAL / MSCNT, DIRECT) and... | 683 |
+| `gsfull/vu1.rs` | VU1: the PS2 vector unit that turns the game's model data into GS triangle packets (PATH1, XGKICK). | 980 |
+| `gsfull/vu1aot.rs` | Native (ahead-of-time translated) VU1 microprograms: dispatch and the SSE helpers the generated code uses. | 206 |
+| `gsfull/wide.rs` | Widescreen (16:9) for the GS-full display: `--wide` / RAC_WIDE=1. | 280 |
+| `gsfull/vu1_prog10.rs, gsfull/vu1_prog11.rs, gsfull/vu1_prog2.rs, gsfull/vu1_prog3.rs, gsfull/vu1_prog4.rs, gsfull/vu1_prog5.rs, gsfull/vu1_prog6.rs, gsfull/vu1_prog7.rs, gsfull/vu1_prog8.rs, gsfull/vu1aot_gen.rs` | Generated by tools/vu1aot/vu1gen.py (native VU1 programs and their table); no header | 67704 |
+
+### fmv/ (PSS movies)
+
+| File | Job | Lines |
+|---|---|---|
+| `fmv/adpcm_stream.rs` | PSS stream audio: SShd/SSbd headers and stateful PS2 ADPCM decode (decomp/notes/cutscenes.md). | 163 |
+| `fmv/mod.rs` | FMV (PSS movie) support: program stream demux and stream ADPCM audio. | 8 |
+| `fmv/mpeg2.rs` | Pure-Rust MPEG-2 video (ISO/IEC 13818-2, Main Profile, 4:2:0) elementary stream decoder. | 1380 |
+| `fmv/player.rs` | Streaming FMV player (decomp/notes/cutscenes.md): a worker thread demuxes the PSS from the disc, decodes MPEG-2 video and... | 226 |
+| `fmv/present.rs` | Movie presentation: Y/Cb/Cr planes as R8 textures, converted in the shader (BT.601 limited range), drawn in its own pass... | 194 |
+| `fmv/pss.rs` | MPEG-2 program stream (PSS) demuxer, streaming over any reader (decomp/notes/cutscenes.md). | 147 |
+
+### Old hand-port directories (game/, game/kerwan/, particles/, player/)
+
+The clean-room planet 1-4 port is archived (2026-10-12). This code is still compiled: `game::Game` holds the retail prop pools and the viewer reads `particles`, `anim` and others. Do not extend it; the cleanup lane removes it piece by piece.
+
+| Files | Job | Lines |
+|---|---|---|
+| `game/` blaster.rs devastator.rs doom.rs mine.rs morph.rs pyro.rs swingshot.rs grapple.rs taunter.rs visibomb.rs suck.rs suckcomp.rs tube.rs held.rs decoys.rs bombs.rs | Old hand-port: weapons | 1245 |
+| `game/` levels.rs aridia.rs aridia_machines.rs aridia_props.rs novalis.rs foes.rs bot.rs shark.rs enemy.rs jets.rs jetdebris.rs hits.rs crates.rs pickups.rs bolt.rs reward.rs fragment.rs mouse.rs currents.rs | Old hand-port: levels, enemies, pickups | 1280 |
+| `game/` breath_hud.rs count_hud.rs hints.rs mission.rs vendor.rs gadget_scene.rs transit.rs camtrig.rs shiprefl.rs uidstate.rs sched.rs setup.rs | Old hand-port: HUD, story, vendor, scheduler | 2630 |
+| `game/kerwan/` breakable.rs cam1.rs cam14.rs cars.rs conveyor.rs debris.rs destroy.rs director.rs dog.rs ferry.rs gate.rs helga.rs heli.rs infobot.rs layer.rs lift.rs mine.rs mod.rs npc909.rs npc914.rs ride.rs shack_sign.rs shuttles.rs spawner.rs walker.rs | Old hand-port: Kerwan actor ports (KER-n class updaters); mod.rs is the Kerwan actor registry | 906 |
+| `particles/` blast.rs blasterfx.rs blastfx.rs fume.rs fx.rs lights.rs orb_tables.rs orbs.rs spawn.rs tests.rs tracer.rs wade.rs waterfall.rs | Old hand-port: effect-pool types, orbs, blasts, tracer, wading and waterfall sprites, light slots | 1540 |
+| `player/` edges.rs grind.rs ground_id_tests.rs headpose.rs hero_cue_tests.rs pad_tests.rs retail_ground_tests.rs states.rs states_tests.rs steering.rs swim_tests.rs swing.rs wall.rs wallop.rs | Old hand-port: hero states, grind, swing, wall jump, walloper, head pose, steering and their tests | 746 |
+
+
+## 3. Where to change X
+
+| Task | Files |
+|---|---|
+| Speed hand (exact native rewrite of a hot retail function) | not in rac-rs: `oracle/src/hs_hands/` (generated in lane `scratch_perf_hs`, see its PLAN.md; no new hands unless the user asks) |
+| Renderer (Vulkan / DirectX 12), RivaTuner layer, DXC | `viewer/gpu/renderer.rs` (backend, compiler, latency), `retail/pcrender.rs` + the Renderer row in `retail/pcctl.rs` / `retail/pcext.rs`, `rtss_layer.rs`; setup.ps1 fetches `dxcompiler.dll` (`Install-Dxc`) |
+| Mod loader / mod hooks (OmniLoader host, Luau mods) | `src/omni/*`: new hook point = a line `hook <id>` + spec in `omni/rac1_reloc.txt` (made by `scratch_perf_omni/tools/make_reloc_data.py` from `hsreloc.py spec`) + its entry in the `hooks` array of `omni/rac1.json`, no code change below 256 hooks (`MAX_HOOKS` and the `tables!` list in `omni/hooks.rs`); a PC feature a mod can replace = a `Feature` row in `omni/clash.rs` and a `&& !clash::off(ID)` term at its gate; new host entry = `omni/host.rs` (or its own file, as `omni/input_host.rs`) + `omni/cabi.rs` (ABI 1.2: host size 296, optional exports `omni_event` / `omni_storage_dir` / `omni_set_setting` / `omni_settings_json`); new mod event = a variant in `omni/events.rs`; mouse / keyboard / pointer for mods = `omni/input.rs` (feeds in `viewer/handler.rs`, the per-field snapshot in `retail/tick.rs` and `retail/worker/field_run.rs`) |
+| New PC Options row (Pause -> Options) | `retail/pcext.rs` (rows, `patch_graphics`), `retail/pcopts.rs` (file key), `retail/pcctl.rs` (Controls page); a Camera Options row: a new file next to `retail/pcext/mousespeed.rs`, its record in `pcext.rs` `patch_rows_at` (table `TAB`, 9 records at BASE+0x1200, inside the camopts block) |
+| Camera speed / Mouse speed (Camera Options rows, `camspeed=` / `mousespeed=`) | stick: `retail/pcext/camopts.rs` (`camspeed_scale`); mouse: `retail/pcext/mousespeed.rs` (`mousespeed_scale`); both read by `retail/modcam.rs` `step` through `retail/modcam_turn.rs` (`turn`, `Gains`); keys: `retail/pcopts.rs` |
+| Which way the right stick / mouse turns the Modern camera (Normal / Reversed) | `retail/modcam_turn.rs` (`stick_axes`, `turn`); the keys' share of the stick travels as `Retail.kb_rs` (`retail/input.rs` `tick_keys`) -> `FieldIn.mc.keys` (`retail/tick.rs`) -> `modcam::Input.keys`, recorded by `retail/rec.rs` |
+| New Graphics quality level | `retail/pcext.rs` (`Graphics`, `pack_gfx`), `retail/pcopts.rs` (`draw_level`), `viewer/gpu/draw/prepare.rs` (`frame_effects`), then the effect file |
+| Graphics presets (Low / Medium / High values, the Preset row) | the table is ONE file, `assets/gfx_presets.txt` (the launcher's `ui/presets.rs` TABLE must equal it: a test compares them when the launcher sources are next to the project); the row is `retail/pcext/presets.rs` (`choose`, `show`) and `retail/pcctl.rs` (`PRESETB`, `preset_chosen`, `preset_show`, `gfx_table`); a new picture option = a key in the file for all three presets |
+| Mods page (Pause / title -> Options -> Mods), `mods/active.txt`, `mods/settings.json`; when the Mods row is in the Options list | `retail/pcmods.rs` (pages, rows, `sync`, `front_field`, `load_store` = the pause row's rule), `omni/modset.rs` (a setting -> menu row: bool / choice 2-4 / int,float as <=4 values; advanced, string, keybind: launcher only), `omni/plugins.rs` (active.txt + settings.json -> the loader's plugins list; settings.json read / one-key write), `omni/live_settings.rs` (a pause change reaches the running mod at once: `omni_set_setting`), `texpack/store.rs` (installed packs + script mods by manifest id + file), `texpack/active.rs` (the launcher's file format; fixtures `texpack/fixtures/launcher_*.txt`), `texpack/mod.rs` (`refresh`: the packs rebuild at a planet load when the file changed), `retail/pcext.rs` (`patch_graphics` row, `build_title`, `text_hook`), `viewer/front_mirror.rs` + `frontend.rs` (the title page's drawing) |
+| Water look, waves | `viewer/waterfx/shader.rs`, `looks.rs` (`wave_look`, `march_steps`), `levels.rs`, `passes.rs` |
+| Waterfall, rings, wakes | `viewer/waterfx/fall_sheets.rs`, `contacts.rs`, `wakes.rs` |
+| Water mirror, underwater | `viewer/mirror.rs`, `viewer/underwater.rs`, `viewer/gpu/draw.rs` (`mirror_pick`) |
+| Oceans, sky | `viewer/gpu/sky_water.rs`, `viewer/gpu/draw/pass_world.rs` (`pass_sky`), `pass_water.rs` (`pass_oceans`), `ocean.rs`, `sky.rs` |
+| Vegetation | `viewer/vegfx.rs`, `viewer/gpu/draw/pass_shrubs.rs`, `viewer/gpu/culling.rs` (`cull_shrubs`), `shrubs.rs` |
+| `viewer/volfog.rs` | Graphics -> Fog row Low / Medium / High (with Lighting Enhanced): volumetric fog pass (march, temporal accumulation, depth-aware apply) after the water pass; no retail counterpart; Classic draws the retail fog alone. | 375 |
+| `viewer/volfog/density.rs` | Fog: how thick the air is at a world point (height fog, drifting wisps, Kerwan sheet volume) and how the level's retail fog sets the amount. | 93 |
+| `viewer/volfog/frame.rs` | Fog: the per-frame inputs (level, retail fog, light colour, sheet height) and the RAC_FOG_LOG log. | 102 |
+| `viewer/volfog/gputime.rs` | Fog: GPU timestamp queries around the three passes (RAC_FOG_LOG=1 prints ms per pass). | 83 |
+| `viewer/volfog/noise.rs` | Shared by fog and clouds: the tiling 3D noise volume (CPU generated, 64^3). | 134 |
+| `viewer/volfog/scatter.rs` | Shared by fog and clouds: uniform block, sun phase, sun shadow visibility, jittered ray march WGSL. | 142 |
+| `viewer/volfog/temporal.rs` | Shared by fog and clouds: reprojection and neighbourhood-clamped temporal accumulation WGSL. | 44 |
+| `viewer/volfog/tests.rs` | Unit tests of the volumetric fog pass (shader parse, uniform size, quality levels). | 28 |
+| `viewer/volclouds.rs` | Graphics -> Effects -> Volumetric clouds Low / Medium / High (with Lighting Enhanced): a cloud slab in the world ray-marched on a coarse grid with volfog's noise / scatter / temporal tools, accumulated and laid over the sky (and anything behind the layer) before the fog pass; `sky_skip` = the retail sky shell draws it replaces; no retail counterpart. | 273 |
+| `viewer/volclouds/input.rs` | Clouds: the per-frame inputs (level, picture size, light and fog colours, direction to the key light) and `level` (RAC_TUNE cl_q override). | 68 |
+| `viewer/volclouds/layer.rs` | Clouds: the WGSL of the cloud medium (weather map, height profile, erosion, sun march, multi-scatter, Beer-Powder) and the march / apply entry points. | 178 |
+| `viewer/volclouds/params.rs` | Clouds: quality levels, per-level look (coverage, altitude, none on space and dark levels), sun direction floor, ambient colour, slab altitudes, retail sky shell mask. | 93 |
+| `viewer/volclouds/tests.rs` | Unit tests of the cloud pass (shader parse, uniform size, quality levels, sun floor). | 47 |
+| Lighting Enhanced, post chain | `viewer/post.rs`, `viewer/sunshadow.rs`, `viewer/gpu/lighting.rs`, `dynlight.rs` |
+| Particles Enhanced | `viewer/partfx.rs`, `viewer/gpu/particle_fx.rs`, `viewer/gpu/draw/pass_particles.rs` |
+| Shadows | `shadows.rs`, `viewer/shadowvol.rs`, `retail/shadow_snap.rs`, `viewer/handler/frame_post.rs` (`frame_shadows`), `ship_shadows.rs` |
+| HUD and menu picture (GS capture) | `retail/capture.rs`, `retail/gscap.rs`, `retail/gscap/draw.rs`, `draw/gpu.rs` + `gpu.wgsl`, `pmemo.rs`; shown by `viewer/gpu/hud_art.rs` (`set_retail_overlay`), `viewer/gpu/draw/pass_hud.rs` |
+| Sharp HUD | `viewer/hudsharp.rs`, `retail/capture.rs` (`ui_sharp`) |
+| Camera (Classic / Static / Smooth) | `retail/modcam.rs`, `retail/camera.rs`, `viewer/handler/frame_post.rs` (`frame_camera`), the Camera row in `retail/pcext.rs` |
+| Aim, strafe, ship mouse | `retail/aim.rs`, `retail/strafe.rs`, `retail/strafe_feel.rs`, `retail/strafe/chain.rs`, `retail/strafe/pack_fx.rs`, `retail/modcam/classic.rs` (strafe aim with Camera Classic), `retail/shipmouse.rs` |
+| Keys, pad, button prompts | `retail/binds.rs`, `prompts.rs`, `pspad.rs`, `input.rs`, `menu_keys.rs`, `mouse_menu.rs` |
+| Sound | `retail/snd.rs`, `spumix.rs`, `spurev.rs`, `audio.rs`, `viewer/handler/frame_audio.rs`; music `music.rs`; tables `sound.rs` |
+| Level load, travel, warp | `retail/props_sync.rs` (`switch`), `retail/prop_pools.rs`, `viewer/app.rs` (`load_level_from`), `viewer/handler/frame_switch.rs`, `viewer/travel.rs`, `retail/warp.rs` |
+| Start from savestate or cold boot | `retail/session.rs` (`enable`, `enable_cold`), `retail/worker/machine.rs` (`open_machine`), `main.rs` (`cmd_view`), `retail/title_boot.rs` |
+| Memory card | `retail/memcard.rs` |
+| USA vs PAL differences | `retail/disc.rs`, `disc_hands.rs`, `disc_map.rs` |
+| The per-field worker | `retail/worker/field_*.rs`, `state.rs` (`Worker`), `spawn.rs` |
+| Read more game RAM into the viewer | `retail/snapshot.rs` (`Snap`, `snap`), `moby_state.rs`, `accessors.rs`, `fx_queue.rs` |
+| Effects (draw-queue glows, ribbons, VU1 effects) | `retail/efx_own.rs`, `efx_draw.rs`, `efx_vu.rs`, `fx_queue.rs`, `queue_*.rs`, `snap_pipe.rs` |
+| New render pass | `viewer/gpu/draw/passes.rs` (`draw_passes`), a new `pass_*.rs`, pipelines in `viewer/gpu/setup.rs`, WGSL in `viewer.rs` |
+| Main world shader | `viewer.rs` (`SHADER`; tests `shader_tests`) |
+| Props and mobys on the GPU | `viewer/gpu/props_layout.rs`, `props_set.rs`, `prop_clip.rs`, `viewer/gpuskin.rs`, `viewer/handler/frame_props.rs` |
+| Hero pose and skin | `viewer/handler/frame_hero.rs`, `hero_rows.rs`, `viewer/gpu/marker.rs`, `viewer/gpuhero.rs`, `herocache.rs`, `heroanim.rs`, `hero_pose.rs`; mod follow poses (picture only): `omni/pose_follow.rs` (store), `viewer/follow.rs` (matrix per displayed frame); mod pose overrides (render-only): `anim_pose.rs` (JointFx, mirror ops), `viewer/handler/pose_service.rs`, `omni/pose*.rs` |
+| Frame smoothing, fps cap, present mode | `viewer/interp.rs`, `smooth.rs`, `pace.rs`, `presenter.rs`, `viewer/gpu/setup.rs` (`present_mode`) |
+| PCSX2 texture packs (names, mods contract, replacement upload) | `texpack/` (hash, name, mods, active + store = the launcher's `active.txt` and the in-game Mods page's store, index, source, names = lookup; xmap = PAL <-> USA name twins from `assets/texmap.tsv`, tried by `names::resolve` for names the pack lacks; levelrule = which files a texture's replacement is built from (authored chain or lowest named level + generated chain); inflate, png, dds, bc, chain = decoders; jobs, repl = loader threads; extra = names of the fx / particle / chrome / glass / sky / ship / warp-bundle textures, extra_hd = level-load hooks that swap the decoded image into those textures, extra_grass = grass colour from the HD ground), upload `viewer/gpu/repl_upload.rs` (`SceneCtx::upload_slot` at the batch upload sites, `Gpu::swap_repl` at the top of `draw`), hook `texpack::level_loaded` in `viewer/app.rs` (`load_level_from`), BC feature `texpack::gpu_features` (one line in `viewer/gpu/setup.rs`); design in `scratch_texpack/DESIGN.md` |
+| ReShade add-on (depth + picture before the HUD, registration, DEPTH definitions) | `viewer/gpu/reshade.rs`, `reshade/abi.rs`, `native.rs`, `targets.rs` + `passes.wgsl`; submit split in `viewer/presenter.rs` (`Cuts::split`), HUD pass in `viewer/gpu/draw/passes.rs` |
+| Movies | `fmv/`, `retail/fmv_bridge.rs` |
+| Title screen, front end | `retail/title_boot.rs`, `retail/front_end.rs`, `viewer/front_mirror.rs` |
+| Vendor shop | `retail/vendor.rs`, `retail/shop_snap.rs`, `viewer/gpu/item_panel.rs`, `viewer/gpu/draw/pass_world.rs` (`pass_shop_models`) |
+| Debug keys, dev tools, profiling | `retail/debugkeys.rs`, `devtools.rs`, `debug_aids.rs`, `viewer/profile.rs`, `loadlog.rs` |
+| Player log file (log.txt), freeze watchdog, crash record | `runlog.rs` (`waiting` names a wait; `loadlog::say` steps), `main.rs` (start, panic hook) |
+| Record or replay a pad | `retail/rec.rs` (6 columns, +5 Modern-camera columns, +2 camera-key columns; see its header) |
+| Speed caches and GPU offloads | `viewer/gpucache.rs`, `gpuhero.rs`, `tiegpu.rs`, `bindless.rs`, `herocache.rs`, `retail/snap_pipe.rs` |
+| Gate test switches (fixed clock) | `viewer/test_clock.rs` |
+| New feature or new job | a new file (module) next to the related ones, with its `//!` header and a line in the parent's map; never append it to the biggest nearby file |
+| A file or fn grew too big | split the file into modules by job (pure move, `movecheck.py`) or break the fn into named steps (`FUNC_RULES.md`); `src/size_limits_tests.rs` fails until then |
+| New env switch | read it in code, add a row to `ENV.md`; `src/env_doc_tests.rs` fails without it |
+| New global (static, thread_local) | add a row to `STATE.md` |
+| New gate scene | `D:\ratchet\gate\cases.txt`, steps in `D:\ratchet\gate\README.md` ("Adding a case") |
+| New unit test | beside the code, or `retail/test_suite.rs`, `viewer/gpu/tests.rs` |
+
+## 4. State and switches
+
+- `STATE.md` lists every static, thread_local and set-once value with writer, reader, thread and lifetime, plus the thread table.
+- Counts: retail 116 items (37 Mutex, 73 Atomic, 6 thread_local), viewer 51, audio 11, gsfull and others about 30, 79 read-only OnceLocks.
+- Top risks: level-prefetch writes `mobies::MIP_KS` and `gpu::MOBY_CHAINS` with no deferral; `Drop for Retail` does not join the worker; many retail statics have no reset at `Retail::load`.
+- Also: PC options live in four places (kept in step only by `pcext::sync`); `session::STATE/COLD/START_LEVEL` are set-once.
+- `ENV.md` lists every `RAC_*` switch (about 240 rows) by category: player, harness, debug, tune, kill, dead?.
+- A new static or env switch needs its row in the same change.
+
+## 5. Safe-change rules
+
+- One lane per file area (a lane owns a file and its directory). Never edit a file another lane owns.
+- Pure moves are proven by `python -B D:\ratchet\scratch_perf_rf\tools\movecheck.py --new <lane>/rac-rs/src <F>.rs <F>`; it must end with `PURE MOVE`.
+- Breaking up a function follows `D:\ratchet\scratch_perf_rf\FUNC_RULES.md`: contiguous steps, same order, early exits kept, no behaviour change.
+- Every new file starts with a `//!` header (its job, 1-4 lines); a parent keeps the `//!` map of its children. Keep both honest.
+- Size limits (2026-10-22, `src/size_limits_tests.rs`): a hand-written file at most 1500 lines, a fn at most 150 lines (rac-rs src and exe/src, oracle src, core/src, game/src; files with a "generated by" header line are exempt). The ones over on 2026-10-22 have a cap in `SIZE_CAPS.txt` (11 files, 51 fns) that only goes down: growing fails, shrinking fails until `RAC_SIZE_CAPS_WRITE=1 cargo test --lib size_limits` lowers the cap, and a raised or added cap fails against git HEAD. A new feature goes in a new file.
+- Every merge runs the gate (`D:\ratchet\gate\gate.ps1 -Exe <exe> -Tag <tag> -Jobs 6`, deterministic with `RAC_TEST_CLOCK=1`, RAM hashes plus pictures vs approved references; see `D:\ratchet\gate\README.md`) and the unit tests (the size limits among them).
+- Unit test baseline (2026-10-22): 482 passed, 1 failed (`hud::tests::fonts_decode`: its output folder target\test_out\hud is missing), 22 ignored. On a fresh target folder `fmv::mpeg2::tests::decode_movie_one` and `gadgets::tests::wrench_textures` fail too until a test has made target\test_out. `retail::pcext::camopts_tests` can flake in parallel.
+- Match retail exactly by default. PC extras sit behind the Options menu, are tagged `[PC]` in headers, and must leave the RAM hashes untouched when off.
+- Files are LF, ASCII, tab-indented, no BOM unless the file already has one. Do not `sed -i` a CRLF file.
+
+## 6. Running and building
+
+- Entry: no arguments = the player start (reads `generated/play.cfg` written by Setup, asks about updates, cold boot with the modern camera). With arguments: `rac-rs view ISO LEVEL --retail STATE_DIR` (savestate) or `--retail-cold` (boot from the disc); other flags: `--title`, `--shot out.png`, `--cam x y z yaw pitch`, `--give ITEM`, `--gsfull`, `--wide`, `--modern-cam`. `view` without `--retail` or `--retail-cold` is an error. Other commands: `levels`, `terrain`, `ties`, `scan`, `verify`, `dump`.
+- Build: `cargo build --release --target-dir D:/ratchet/scratch_NAME` (the flag, not the env var, so sccache works; `timeout 600`). The 458-crate ee-game build needs an empty `RUSTC_WRAPPER`. Lane builds: `D:\ratchet\scratch_perf_tools\build.ps1 -Lane NAME`.
+- Tests: `cargo test --release` (most read the disc at `D:\ratchet\Ratchet & Clank (Europe) (En,Fr,De,Es,It) (v1.00).iso`); retail savestate probes are `#[ignore]`.
+- Keys and env vars for play and tests: `CLAUDE.md`, `ENV.md`.
+- Units: 1024 = 1.0 fixed point, metres, Z up; PAL steps of 0.02 s.
+- Dependencies (`Cargo.toml`): wgpu 30, winit 0.30, cpal, rayon, bytemuck, pollster, ee-oracle (path).

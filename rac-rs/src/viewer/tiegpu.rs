@@ -1,4 +1,4 @@
-//! [PC] perf (speed lane D5b, step A): the tie vertex rewrite of `Gpu::cull_ties` (geomorph position + VU1 prog7 vertex colour,
+//! [PC] perf: the tie vertex rewrite of `Gpu::cull_ties` (geomorph position + VU1 prog7 vertex colour,
 //! `ties::morphed` / `ties::TieColours`) on the GPU. The CPU pick stays authoritative: LOD, Q, the draw lists, the sun shadow
 //! lists and the stale / full bookkeeping are all unchanged; only the work of writing the 64-byte vertices of a picked range
 //! (rayon rewrite + `queue.write_buffer`) moves into one compute dispatch per pass. The maths must be bit-exact, so the kernels
@@ -481,7 +481,7 @@ impl TieGpu {
 		if nt == 0 {
 			return;
 		}
-		let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("tie rewrite"), timestamp_writes: None });
+		let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("tie rewrite"), timestamp_writes: crate::viewer::passtime::cw("tie rewrite") });
 		pass.set_pipeline(&self.pipeline);
 		pass.set_bind_group(0, &self.bind, &[]);
 		pass.dispatch_workgroups(nt.min(65535), nt.div_ceil(65535), 1);

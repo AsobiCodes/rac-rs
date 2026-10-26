@@ -63,6 +63,8 @@ pub fn scope() -> u8 {
 /// Finds the overlay in RAM by its code signature (disc_hands::SCOPE_SIG: 8 code words at one address inside the code of
 /// every overlay); keeps the last one while none matches (an overlay being loaded). USA only; cheap (one hash per scope).
 pub fn rescope(ram: &[u8]) {
+	// Every table build: the built-in hands under the omni hook entries may be another level's (omni/layer.rs).
+	crate::omni::layer_rebuilt();
 	if !usa() {
 		return;
 	}

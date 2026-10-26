@@ -1,3 +1,5 @@
+//! Decodes the HUD art from the level data (bolt icon, counter bar, nanotech orb, default font) into textures and the `HudArt`
+//! slot table; a missing piece falls back to a plain shape.
 use super::*;
 
 /// Decodes the HUD sprites (bolt icon 0x754f, counter bar 0x7580, nanotech orb 0x7536) and the
@@ -171,4 +173,19 @@ pub(super) fn hud_art(l: &Level, disc: &mut iso::Disc) -> (Vec<Texture>, HudArt)
 		r => eprintln!("hud font: {:?}", r.err()),
 	}
 	(tex, a)
+}
+
+/// Hands the mods' draw pass (omni/draw_art.rs) this level's default font and icon slots; called right after `set_hud_art` uploads the slots.
+pub(super) fn publish_omni(a: &HudArt) {
+	use crate::omni::draw_art::{defs, Art, Src};
+	let icons = defs()
+		.iter()
+		.map(|d| match d.src {
+			Src::Bolt => a.bolt.first().copied(),
+			Src::Nano => a.orb.first().copied(),
+			Src::Item(id) => a.items.get(&id).copied(),
+			Src::Hud(id) => a.weapon_icons.get(&id).copied(),
+		})
+		.collect();
+	crate::omni::draw_art::set(Art { font: a.font.clone(), icons });
 }

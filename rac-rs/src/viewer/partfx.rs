@@ -1,4 +1,4 @@
-//! [PC] Particles Enhanced (Pause -> Options -> Graphics -> Particles, with Lighting Enhanced; retail/pcext.rs `graphics`; no
+//! [PC] Particles Enhanced (Pause -> Options -> Graphics -> Particles, with Lighting Enhanced; retail/pcext.rs `graphics`; Split view: hangs on `DrawFx.part_on`, from `post_on` = `splitview::fx`; no
 //! retail counterpart). The particles stay retail: the same pool, counts, textures, colours and blending, built by the same code.
 //! Only how they meet the picture changes:
 //! - soft particles: the level pass ends before the particle pool and they draw in their own pass that reads the level's depth
@@ -50,6 +50,12 @@ pub(super) const fn light_count(level: u8) -> usize {
 		2 => 4,
 		_ => FX_LIGHTS,
 	}
+}
+
+/// The mean alpha-weighted colour of a particle texture (`tints`).
+pub(super) fn tint_of(t: &Texture) -> [f32; 3] {
+	let n = t.rgba.len().max(1) as f32;
+	std::array::from_fn(|c| t.rgba.iter().map(|p| p[c] as f32 * p[3] as f32).sum::<f32>() / (n * 255.0 * 255.0))
 }
 
 /// Gathers the additive particle quads (4 vertices each, as built by gpu.rs `set_particles`) within `FX_FAR` of the eye into
@@ -144,6 +150,8 @@ pub(super) struct PartFx {
 	t: Option<Targets>,
 	/// Per particle texture key: its mean alpha-weighted colour (`set_tints`), for `lights`.
 	pub tints: HashMap<u32, [f32; 3]>,
+	/// Split view with a texture pack (gpu/split_orig.rs): `tints` of the disc's original textures of the slots the pack replaced.
+	pub tints_orig: HashMap<u32, [f32; 3]>,
 }
 
 /// The glow target's format (post.rs binds the resolved copy).
@@ -201,6 +209,7 @@ impl PartFx {
 			layout,
 			t: None,
 			tints: HashMap::new(),
+			tints_orig: HashMap::new(),
 		}
 	}
 
@@ -208,11 +217,7 @@ impl PartFx {
 	pub(super) fn set_tints(&mut self, textures: &[(usize, Texture)]) {
 		self.tints = textures
 			.iter()
-			.map(|(k, t)| {
-				let n = t.rgba.len().max(1) as f32;
-				let c = std::array::from_fn(|c| t.rgba.iter().map(|p| p[c] as f32 * p[3] as f32).sum::<f32>() / (n * 255.0 * 255.0));
-				(*k as u32, c)
-			})
+			.map(|(k, t)| (*k as u32, tint_of(t)))
 			.collect();
 	}
 
@@ -245,7 +250,7 @@ impl PartFx {
 				Some(wgpu::RenderPassColorAttachment { view: &t.glow_ms, resolve_target: Some(glow), depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Discard } }),
 			],
 			depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: depth, depth_ops: None, stencil_ops: None }),
-			timestamp_writes: None,
+			timestamp_writes: crate::viewer::passtime::rw("particles"),
 			occlusion_query_set: None,
 			multiview_mask: None,
 		});

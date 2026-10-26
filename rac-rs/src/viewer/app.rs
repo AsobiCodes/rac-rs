@@ -1,3 +1,6 @@
+//! `impl App` for the viewer's level life cycle: the pause-menu frame (Quick Select wheel, settings), play-mode toggle, and level
+//! loading with the prefetch thread that parses the next level while the ship travels (`prefetch_spec`, `prefetch_ready`,
+//! `load_level`), plus prop-slot growth when retail adds pool props (`regrow_props`, `append_pools`).
 use super::*;
 
 /// What `load_level` leaves in the app besides its big result tuple: the class rank and row tables (gameplay.rs).
@@ -137,7 +140,7 @@ pub(super) fn slots_game(instances: &[crate::gameplay::MobyInstance], level: i32
 }
 
 impl App {
-	/// Per frame: the pause menu (update, held volume keys, RAC_PAUSE_KEYS), the wheel, the settings.
+	/// Per frame: the pause menu (update, held volume keys), the wheel, the settings.
 	pub(super) fn pause_frame(&mut self, dt: f32) {
 		let held = |k: &[KeyCode]| k.iter().any(|k| self.keys.contains(k));
 		let dir = held(&[KeyCode::ArrowRight, KeyCode::KeyD]) as i32 - held(&[KeyCode::ArrowLeft, KeyCode::KeyA]) as i32;
@@ -554,11 +557,11 @@ crate::loadlog::say(|| "host: terrain_lods done".into());
 crate::loadlog::say(|| "host: ties done".into());
 			let world = match collision::collision(&l) {
 				Ok(faces) if !faces.is_empty() => {
-					eprintln!("collision: {} triangles", faces.len());
+					eprintln!("collision: {} triangles", faces.len()); super::volfog::floor::set_level(level_no, tfrags.iter().flat_map(|t| t.near.positions.iter().copied()), tie_set.iter().flat_map(|t| t.lods[0].positions.iter().copied()), faces.iter().map(|f| f.v)); // [PC] fog floor
 					World::homed(faces.into_iter().map(|f| (f.v, f.kind, Some(f.cell))), 4.0)
 				}
 				r => {
-					eprintln!("collision: {}; using the visible geometry", r.err().unwrap_or("empty".into()));
+					eprintln!("collision: {}; using the visible geometry", r.err().unwrap_or("empty".into())); super::volfog::floor::set(level_no, None);
 					World::new(tfrags.iter().map(|t| &t.near).chain(meshes.iter()).chain(tie_set.iter().map(|t| &t.lods[0])).flat_map(|m| m.faces.iter().map(|&(_, f)| f.map(|i| m.positions[i as usize]))), 4.0)
 				}
 			};
@@ -983,7 +986,7 @@ crate::loadlog::say(|| "host: hud art done".into());
 					fx_textures.push((PART_TEX as usize + n, t));
 				}
 			}
-crate::loadlog::say(|| "host: fx textures done".into());
+crate::texpack::extra_hd::apply_fx(&l, &mut fx_textures, front); crate::loadlog::say(|| "host: fx textures done".into());
 			let sfx = if front { global_sfx(&mut disc) } else { load_sfx(&l) };
 			if front {
 				// Logo and the five Press Start captions after the HUD art (slot = 1 + texture index).
@@ -1023,7 +1026,7 @@ crate::loadlog::say(|| "host: scenes done".into());
 				let ships = if crate::retail::active() { 3 } else { 1 };
 				for ship in 0..ships {
 				let n = n0 + 2 * ship as u32;
-				match scene::ship_bundle(&mut disc, ship).and_then(|b| scene::ship_assets_of(&b, n, ship)) {
+				match scene::ship_bundle(&mut disc, ship).and_then(|b| scene::ship_assets_of(&b, n, ship).map(|sa| crate::texpack::extra_hd::hd_ship(&b, sa))) {
 					Ok(sa) => {
 						match mobies::moby_remaps(&l) {
 							Ok(registered) => {
@@ -1239,11 +1242,11 @@ crate::loadlog::say(|| "host: ship bundle done".into());
 			let ship = gameplay::ship(&l).map_err(|e| eprintln!("ship: {e}")).unwrap_or(None);
 			let flight_data = ship.and_then(|_| gameplay::ship_flight(&l).map_err(|e| eprintln!("ship flight: {e}")).ok()).map(|w| gameplay::flight_data(w, &polygons, &volumes));
 			let death_height = gameplay::death_height(&l).map_err(|e| eprintln!("death height: {e}")).unwrap_or(f32::MIN);
-			let sky = sky::sky(&l).unwrap_or_else(|e| {
+			let sky = sky::sky(&l).map(|s| s.map(|s| crate::texpack::extra_hd::hd_sky(&l, s))).unwrap_or_else(|e| {
 				eprintln!("sky: {e}");
 				None
 			});
-			let mut textures = l.all_textures()?;
+			let mut textures = l.all_textures().inspect(|t| drop(crate::texpack::level_loaded(&l, t, &[], front)))?; // [PC] texture packs
 			// The moby materials read the authored mip chain of their texture at the level the GS picks (gpu.rs `moby_word`).
 			if !front {
 				match l.mip_chains(crate::level::TextureGroup::Moby) {
@@ -1255,7 +1258,7 @@ crate::loadlog::say(|| "host: ship bundle done".into());
 			textures.insert(crate::level::texture_key(crate::level::TextureGroup::Moby, crate::mobies::FLAT_SLOT), Texture { w: 8, h: 8, rgba: vec![[128, 128, 128, 255]; 64] });
 crate::loadlog::say(|| "host: (rest) before metal textures".into());
 			// NOV-35b: the chrome / glass sphere-map textures of moby metal packets.
-			match l.metal_textures() {
+			match l.metal_textures().map(|t| crate::texpack::extra_hd::hd_metal(&l, t)) {
 				Ok([chrome, glass]) => {
 					textures.insert(crate::level::CHROME_KEY, chrome);
 					textures.insert(crate::level::GLASS_KEY, glass);
@@ -1438,7 +1441,7 @@ crate::loadlog::say(|| format!("host: parse {} ({:.0} ms waited)", if prefetched
 crate::loadlog::say(|| "host: closure done (all host parsing)".into());
 		let gpu = self.gpu.as_mut().unwrap();
 		match result {
-			Ok(((meshes, tie_set, occ, (tfrags, tfrag_b, shrub_set, (bb_tex, terrain_chains))), textures, sky, world, spawn, hero_anim, instances, prop_meshes, prop_anims, (death_height, (polygons, (volumes, cuboid_basis), ship, (groups, grind_rails)), emitters, rig, music, lighting, actor_slots, smoke, map_data), flow, (wrench, (glove, (pyro_rig, ((suck_rig, (held_rigs, hook_rig)), (back_rig, (clank_rig, (back_joint, light_rig)))))), held_bomb, (previews, (hero_items, hero_actors, menu_actor_classes, hero_worn), menu_clip_base, (debris_bspheres, class_kinds, class_scales), (colliders, metal_classes))), (art_textures, fx_textures, part_defs), art, sfx, scenes, ((water, ocean), ship_gloss, moby_slots, (level_overlay, flight_data)))) => {
+			Ok(((meshes, tie_set, occ, (tfrags, tfrag_b, shrub_set, (bb_tex, mut terrain_chains))), mut textures, sky, world, spawn, hero_anim, instances, prop_meshes, prop_anims, (death_height, (polygons, (volumes, cuboid_basis), ship, (groups, grind_rails)), emitters, rig, music, lighting, actor_slots, smoke, map_data), flow, (wrench, (glove, (pyro_rig, ((suck_rig, (held_rigs, hook_rig)), (back_rig, (clank_rig, (back_joint, light_rig)))))), held_bomb, (previews, (hero_items, hero_actors, menu_actor_classes, hero_worn), menu_clip_base, (debris_bspheres, class_kinds, class_scales), (colliders, metal_classes))), (art_textures, fx_textures, part_defs), art, sfx, scenes, ((water, ocean), ship_gloss, moby_slots, (level_overlay, flight_data)))) => {
 				// Ratchet with the wrench, the glove, the glove's bomb, the Pyrocitor and its nozzle appended (in that
 				// order); their vertices follow his joints each frame.
 				let combined = if prebuilt.is_some() { None } else { combined_hero!(hero_anim, wrench, glove, held_bomb, pyro_rig, suck_rig, held_rigs, back_rig, clank_rig, hook_rig, light_rig) };
@@ -1465,7 +1468,7 @@ crate::loadlog::say(|| "host: pre gpu.load_scene".into());
 crate::loadlog::say(|| "host: load_scene returned".into());
 				gpu.set_shrub_bb_textures(&bb_tex);
 				// [PC] PREVIEW (vegfx.rs, RAC_VEG): where the extra plants go.
-				gpu.plan_veg(&world, &instances, &shrub_set, &textures, &terrain_chains.0, &terrain_chains.1, &prop_meshes, &tie_set, &terrain_chains.2, self.level);
+				crate::texpack::extra_grass::apply(self.level, &mut textures, &mut terrain_chains); gpu.plan_veg(&world, &instances, &shrub_set, &textures, &terrain_chains.0, &terrain_chains.1, &prop_meshes, &tie_set, &terrain_chains.2, self.level);
 crate::loadlog::say(|| "host: bb textures".into());
 				gpu.load_debris(&debris_classes, &prop_meshes, &textures);
 crate::loadlog::say(|| "host: debris".into());
@@ -1574,10 +1577,10 @@ crate::loadlog::say(|| "host: t lighting".into());
 				drop_later(old);
 crate::loadlog::say(|| "host: t fields assigned".into());
 crate::loadlog::say(|| "host: pre set_hud_art/fx upload".into());
-				gpu.set_hud_art(&art_textures);
+				gpu.set_hud_art(&art_textures); publish_omni(&art);
 crate::loadlog::say(|| "host: t set_hud_art".into());
 				gpu.fx_tex = fx_textures.iter().map(|(k, t)| (*k, gpu.upload_texture(Some(t)))).collect();
-				gpu.partfx.set_tints(&fx_textures);
+				gpu.partfx.set_tints(&fx_textures); gpu.set_fx_originals(&crate::texpack::extra_hd::take_fx_originals()); // [PC] split view with a pack
 				// GS CLAMP_1 = 5 variants (`particles::FX_CLAMP`): the hero swing trail's textures; no mips (TEX1 MXL 0).
 				for (k, t) in fx_textures.iter().filter(|(k, _)| crate::retail::queue_b::FX_CLAMPED.contains(k) || crate::retail::queue_q2::FX_CLAMPED.contains(k) || *k < crate::particles::FX_TEX as usize) {
 					let b = gpu.upload(Some(t), &gpu.clamp_sampler);
@@ -1676,13 +1679,9 @@ crate::loadlog::say(|| "host: t ui_text".into());
 							eprintln!("front-end text: {e}");
 							frontend::Text::default()
 						});
-					let script = std::env::var("RAC_MENU_KEYS").unwrap_or_default().chars().filter_map(|c| {
-						use frontend::Key::*;
-						Some(match c { 'u' => Up, 'd' => Down, 'l' => Left, 'r' => Right, 'c' => Confirm, 'b' => Back, 'o' => Circle, _ => return None })
-					}).collect();
 					let mut menu = frontend::Menu::new(lang);
 					menu.settings = self.settings;
-					self.front = Some(FrontEnd { menu, text, art: front_art, tick: 0.0, bed: Vec::new(), timed: [None; 2], script, script_t: 200, att: frontend::Attract::new(crate::particles::Rng::shared().next() % 4), acc: 0.0, attract_movie: None });
+					self.front = Some(FrontEnd { menu, text, art: front_art, tick: 0.0, bed: Vec::new(), timed: [None; 2], att: frontend::Attract::new(crate::particles::Rng::shared().next() % 4), acc: 0.0, attract_movie: None });
 					// Retail: the game's own 989snd commands play the title's sounds (retail/snd.rs), not this bed.
 					if let (Some(a), false) = (&mut self.audio, crate::retail::active()) {
 						let bed = TITLE_BED.iter().filter_map(|&i| self.sfx.clips.get(i)?.as_ref().filter(|c| c.loop_start.is_some()).map(|c| a.play(c, 0.5, 0.0))).collect();

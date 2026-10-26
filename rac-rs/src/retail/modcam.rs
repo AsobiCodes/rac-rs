@@ -22,9 +22,9 @@
 //! Input reaches the worker in `FieldIn::mc` (recorded and replayed with the pad).
 use ee_oracle::cpu::Cpu;
 use ee_oracle::rec::{register_hand, Hand};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{atomic::{AtomicBool, Ordering}, Mutex};
 use crate::retail::disc::va;
+pub mod classic;
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static IN: AtomicBool = AtomicBool::new(false);
@@ -39,8 +39,8 @@ pub fn enable() {
 
 /// The switch: `--modern-cam` or RAC_MODERN_CAM=1 (read when the retail machine loads).
 pub fn enabled() -> bool {
-	// Off on the USA disc with RAC_USA_EXTRAS=0 (retail/disc.rs).
-	if super::disc::extras_off() {
+	// Off on the USA disc with RAC_USA_EXTRAS=0 (retail/disc.rs), and when a loaded mod does the camera's job (omni/clash.rs; then `follow` / `attack` hand back to retail untouched).
+	if super::disc::extras_off() || crate::omni::clash::off(crate::omni::clash::MODERN_CAMERA) {
 		return false;
 	}
 	ENABLED.load(Ordering::SeqCst) || std::env::var("RAC_MODERN_CAM").is_ok_and(|v| v != "0" && !v.is_empty()) || super::pcext::enabled()
@@ -67,6 +67,8 @@ pub struct Input {
 	pub zoom: i8,
 	/// F7 pressed: toggle the modern camera.
 	pub toggle: bool,
+	/// The camera keys' share of the right stick (Q/E, Z/X), offset from 0x80, 0 = not held (modcam_turn.rs `stick_axes`).
+	pub keys: [i8; 2],
 }
 
 impl Input {
@@ -153,7 +155,7 @@ fn parse_feed(v: &str) -> Vec<(u32, u32, Input)> {
 			let (r, a) = p.split_once(':')?;
 			let (f, t) = r.split_once('-')?;
 			let n: Vec<i32> = a.split(',').filter_map(|x| x.trim().parse().ok()).collect();
-			let inp = Input { look: [*n.first()? as i16, *n.get(1)? as i16], aim: n.get(2).is_some_and(|&l| l != 0), zoom: n.get(3).copied().unwrap_or(0) as i8, toggle: false };
+			let inp = Input { look: [*n.first()? as i16, *n.get(1)? as i16], aim: n.get(2).is_some_and(|&l| l != 0), zoom: n.get(3).copied().unwrap_or(0) as i8, toggle: false, keys: [0; 2] };
 			Some((f.trim().parse().ok()?, t.trim().parse().ok()?, inp))
 		})
 		.collect()
@@ -172,7 +174,7 @@ pub fn take_ui(n: u32) -> Input {
 		u.look[1] -= y;
 		let z = u.zoom.trunc().clamp(-100.0, 100.0);
 		u.zoom -= z;
-		out = Input { look: [x as i16, y as i16], aim: u.aim || PAD_AIM.load(std::sync::atomic::Ordering::Relaxed), zoom: z as i8, toggle: std::mem::take(&mut u.toggle) };
+		out = Input { look: [x as i16, y as i16], aim: u.aim || PAD_AIM.load(std::sync::atomic::Ordering::Relaxed), zoom: z as i8, toggle: std::mem::take(&mut u.toggle), keys: [0; 2] };
 	}
 	if let Ok(mut f) = FEED.lock() {
 		for &(a, b, i) in f.get_or_insert_with(feed).iter() {
@@ -444,7 +446,7 @@ struct St {
 }
 
 static ST: Mutex<St> = Mutex::new(St {
-	inp: Input { look: [0; 2], aim: false, zoom: 0, toggle: false },
+	inp: Input { look: [0; 2], aim: false, zoom: 0, toggle: false, keys: [0; 2] },
 	rstick: [0x80; 2],
 	lstick: [0x80; 2],
 	active: true,
@@ -1295,7 +1297,7 @@ fn dbg_chk(c: &mut Cpu, lv: &Lv, chest: [f32; 3], pivot: [f32; 3], eye: [f32; 3]
 
 /// Wrapping hand on the follow camera update: retail first, then the modern pose.
 fn follow(c: &mut Cpu, lv: &'static Lv) -> bool {
-	if IN.swap(true, Ordering::SeqCst) {
+	if crate::omni::clash::off(crate::omni::clash::MODERN_CAMERA) || IN.swap(true, Ordering::SeqCst) {
 		return false;
 	}
 	let _g = Guard;
@@ -1328,7 +1330,7 @@ fn step(c: &mut Cpu, lv: &'static Lv, rec: u32, st: &mut St) {
 			eprintln!("retail: modcam re-seeds after a hero jump (respawn / teleport, field {})", st.field);
 		}
 	}
-	let why = if st.active { why_retail(c, lv, rec) } else { Some("toggled off (F7)".into()) };
+	let why = classic::why(c, lv, rec, st);
 	if let Some(why) = why {
 		st.aiming = false;
 		(st.aim_t, st.lift, st.lift_cap) = (0, 0.0, AIM_LIFT);
@@ -1410,25 +1412,22 @@ fn step(c: &mut Cpu, lv: &'static Lv, rec: u32, st: &mut St) {
 		eprintln!("retail: modcam feel {} (field {})", if dynamic { "Smooth" } else { "Static" }, st.field);
 	}
 	// Input: mouse (0.003 rad a count, RAC_MODCAM_SENS scales), the right stick (keys Q/E turn the view left / right,
-	// Z/X tilt it up / down), wheel zoom.
-	let sens = sens();
+	// Z/X tilt it up / down), wheel zoom. modcam_turn.rs: the controller's stick turns like the mouse, the keys as ever.
 	let inp = st.inp;
-	let rx = (st.rstick[0] as f32 - 128.0) / 127.0;
-	let ry = (st.rstick[1] as f32 - 128.0) / 127.0;
+	let rs = super::modcam_turn::stick_axes([st.rstick[0], st.rstick[1]], inp.keys);
 	let dz = |v: f32| if v.abs() < 0.2 { 0.0 } else { v };
-	let lr = if c.mem.rd8(OPT_LR) == 0 { -1.0 } else { 1.0 };
-	let ud = if c.mem.rd8(OPT_UD) == 0 { -1.0 } else { 1.0 };
-	// The Camera speed row (pcext.rs camopts section): percent / 50, exactly 1.0 until the player sets it.
-	let k = super::pcext::camspeed_scale();
+	let (lr, ud) = (if c.mem.rd8(OPT_LR) == 0 { -1.0 } else { 1.0 }, if c.mem.rd8(OPT_UD) == 0 { -1.0 } else { 1.0 });
+	// Camera speed row = the stick's factor, Mouse speed row = the mouse's (pcext.rs camopts / mousespeed): percent / 50, 1.0 until set.
+	let (mouse_k, stick_k) = (super::pcext::mousespeed_scale(), super::pcext::camspeed_scale());
 	// Dynamic: the mouse stays direct, the right stick ramps up (a gentle acceleration; keys Q/E Z/X ramp too).
 	let (sx, sy) = if dynamic {
-		st.dy.rs = [ramp1(st.dy.rs[0], dz(rx)), ramp1(st.dy.rs[1], dz(ry))];
+		st.dy.rs = [ramp1(st.dy.rs[0], dz(rs[0])), ramp1(st.dy.rs[1], dz(rs[1]))];
 		(st.dy.rs[0], st.dy.rs[1])
 	} else {
-		(dz(rx), dz(ry))
+		(dz(rs[0]), dz(rs[1]))
 	};
-	let dyaw = (-(inp.look[0] as f32) * MOUSE * sens * k + sx * ROTATE_RATE * k) * lr;
-	let dpitch = (inp.look[1] as f32 * MOUSE * sens * k - sy * TILT_STEP * k) * ud;
+	let g = super::modcam_turn::Gains { mouse: MOUSE, sens: sens(), mouse_k, rot: ROTATE_RATE, tilt: TILT_STEP, stick_k, lr, ud };
+	let (dyaw, dpitch) = super::modcam_turn::turn(inp.look, [sx, sy], &g);
 	st.dist = (st.dist - inp.zoom as f32 * 0.5).clamp(ZOOM.0, ZOOM.1);
 	// Aim mode (RMB): the mouse keeps turning the camera as it does without RMB; nothing is picked or framed.
 	// Aim mode is a ground feature: on a magnetic wall retail stows the guns (0x1413fc) and the facing / aim yaw words are world-z.
@@ -1442,7 +1441,7 @@ fn step(c: &mut Cpu, lv: &'static Lv, rec: u32, st: &mut St) {
 	st.yaw = wrap(st.yaw + dyaw);
 	st.pitch = (st.pitch + dpitch).clamp(PITCH.0, PITCH.1);
 	if dynamic {
-		let input = inp.look != [0, 0] || dz(rx) != 0.0 || dz(ry) != 0.0 || inp.zoom != 0 || inp.aim;
+		let input = inp.look != [0, 0] || dz(rs[0]) != 0.0 || dz(rs[1]) != 0.0 || inp.zoom != 0 || inp.aim;
 		dyn_track(c, st, &fr, hero, piv, input);
 		if !st.aiming {
 			dyn_auto(st, &fr);
@@ -1592,14 +1591,14 @@ fn face(c: &mut Cpu, st: &St, want: f32) {
 /// Wrapping hand on hero_attack_lock: retail picks its wrench target as always. With RMB aiming and no target found, the
 /// swing turns to the camera yaw: the same two words retail sets from stick input (0x13fda8 = 1, 0x13fdac = yaw).
 fn attack(c: &mut Cpu, lv: &'static Lv) -> bool {
-	if IN_ATK.swap(true, Ordering::SeqCst) {
+	if crate::omni::clash::off(crate::omni::clash::MODERN_CAMERA) || IN_ATK.swap(true, Ordering::SeqCst) {
 		return false;
 	}
 	c.call(lv.attack);
 	IN_ATK.store(false, Ordering::SeqCst);
 	ATK_RUNS.fetch_add(1, Ordering::Relaxed);
 	let Ok(st) = ST.lock() else { return true };
-	if st.active && st.aiming && st.live && st.level == lv.level && c.mem.rd32(ATK_TARGET) & 0x01ff_ffff == 0 {
+	if classic::drives(&st) && st.aiming && st.live && st.level == lv.level && c.mem.rd32(ATK_TARGET) & 0x01ff_ffff == 0 {
 		c.mem.wr32(ATK_STICK, 1);
 		wf(c, ATK_YAW, wrap(st.yaw));
 	}
@@ -1610,7 +1609,7 @@ fn attack(c: &mut Cpu, lv: &'static Lv) -> bool {
 /// for the flips and the torso twist: modcam's own yaw state, not RAM 0x166ed8, so it is not a field behind.
 pub fn aim_yaw() -> Option<f32> {
 	let st = ST.lock().ok()?;
-	(enabled() && st.active && st.aiming && st.live).then(|| wrap(st.yaw))
+	(enabled() && classic::drives(&st) && st.aiming && st.live).then(|| wrap(st.yaw))
 }
 
 /// The camera while RMB aim is in force, for aim.rs (crosshair ray): the pose last written (eye, forward = row 0), the pivot
@@ -1626,7 +1625,7 @@ pub struct AimCam {
 /// None unless `aim_yaw()` is Some (the same state: modern camera driving, RMB held).
 pub fn aim_cam() -> Option<AimCam> {
 	let st = ST.lock().ok()?;
-	if !(enabled() && st.active && st.aiming && st.live) {
+	if !(enabled() && classic::drives(&st) && st.aiming && st.live) {
 		return None;
 	}
 	let (eye, yaw, pitch) = st.last;
@@ -1668,7 +1667,7 @@ pub fn pre_field(m: &mut ee_oracle::Machine, fin: &super::FieldIn) {
 			u.on = st.active;
 		}
 	}
-	let aiming = st.active && st.aiming && st.live && st.level == m.level() && lv_of(m.level()).is_some() && m.rd32(va(GAME_MODE)) == 0;
+	let aiming = classic::drives(&st) && st.aiming && st.live && st.level == m.level() && lv_of(m.level()).is_some() && m.rd32(va(GAME_MODE)) == 0;
 	if aiming {
 		// Retail's manual-aim override: the gun updaters read 0x14060c instead of the hero-forward yaw as the shot and
 		// target-search direction (their own search and green reticle run on it).
@@ -1732,7 +1731,7 @@ mod tests {
 	fn feed_parses() {
 		let f = parse_feed("10-20:5,-3,1;30-31:0,0,0,2");
 		assert_eq!(f.len(), 2);
-		assert_eq!(f[0], (10, 20, Input { look: [5, -3], aim: true, zoom: 0, toggle: false }));
+		assert_eq!(f[0], (10, 20, Input { look: [5, -3], aim: true, zoom: 0, toggle: false, keys: [0; 2] }));
 		assert_eq!(f[1].2.zoom, 2);
 	}
 
@@ -1790,7 +1789,7 @@ mod tests {
 	}
 
 	fn step_field(m: &mut ee_oracle::Machine, buttons: u16, sticks: [u8; 4], mc: Input) {
-		let fin = crate::retail::FieldIn { buttons, sticks, travel: None, mc };
+		let fin = crate::retail::FieldIn { buttons, sticks, travel: None, mc, omni: Default::default() };
 		m.set_pad(buttons, sticks);
 		pre_field(m, &fin);
 		m.frame().expect("frame");

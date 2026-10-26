@@ -260,17 +260,24 @@ fn bolts_add(ram: &mut [u8], presses: u32) -> (i32, i32) {
 	(from, to)
 }
 
-/// The price/ammo table is at `base`: item 10 (Bomb Glove) 40 max / 10 start, 15 (Blaster) 200, 16 (Pyrocitor) 240, 17 50;
-/// the same rows on every level (a savestate of each of the 19 levels checked).
+/// The price/ammo table is at `base`: prices (u32 +0x0, ammo price +0x4) and start ammo (+0x12) of item 10 (Bomb Glove, start 10),
+/// 15 (Blaster 2500 / 1250, start 100), 16 (Pyrocitor 2500, start 120), 17 (7500 / 5000, start 25), and the wrench row 8 (price 0);
+/// the same rows on every level (a savestate of each of the 19 levels checked). Not the max ammo (+0xe): mods raise it (Arsenal
+/// Mastery writes +0xe and the gold price +0x14), and the cheat must still find the table then (2026-10-25: the ammo cheat did nothing
+/// with the mod on).
 fn table_ok(ram: &[u8], base: usize) -> bool {
 	base != 0
 		&& base + ITEMS * ROW <= ram.len()
-		&& h16(ram, base + 10 * ROW + MAX_AT) == 40
 		&& h16(ram, base + 10 * ROW + 0x12) == 10
-		&& h16(ram, base + 15 * ROW + MAX_AT) == 200
-		&& h16(ram, base + 16 * ROW + MAX_AT) == 240
-		&& h16(ram, base + 17 * ROW + MAX_AT) == 50
-		&& h16(ram, base + 8 * ROW + MAX_AT) == 0
+		&& rd32(ram, (base + 15 * ROW) as u32) == 2500
+		&& rd32(ram, (base + 15 * ROW + 4) as u32) == 1250
+		&& h16(ram, base + 15 * ROW + 0x12) == 100
+		&& rd32(ram, (base + 16 * ROW) as u32) == 2500
+		&& h16(ram, base + 16 * ROW + 0x12) == 120
+		&& rd32(ram, (base + 17 * ROW) as u32) == 7500
+		&& rd32(ram, (base + 17 * ROW + 4) as u32) == 5000
+		&& h16(ram, base + 17 * ROW + 0x12) == 25
+		&& rd32(ram, (base + 8 * ROW) as u32) == 0
 }
 
 fn find_table(ram: &[u8]) -> Option<usize> {
@@ -324,6 +331,10 @@ mod tests {
 			r[base + id * ROW + MAX_AT..][..2].copy_from_slice(&max.to_le_bytes());
 			r[base + id * ROW + 0x12..][..2].copy_from_slice(&start.to_le_bytes());
 		}
+		for (id, price, ammo_price) in [(15usize, 2500u32, 1250u32), (16, 2500, 0), (17, 7500, 5000)] {
+			r[base + id * ROW..][..4].copy_from_slice(&price.to_le_bytes());
+			r[base + id * ROW + 4..][..4].copy_from_slice(&ammo_price.to_le_bytes());
+		}
 		r
 	}
 
@@ -341,6 +352,19 @@ mod tests {
 			assert!(table_ok(&r, base) && !table_ok(&r, base + 4) && !table_ok(&r, 0));
 		}
 		assert_eq!(find_table(&vec![0u8; SCAN_HI]), None);
+	}
+
+	#[test]
+	fn table_is_still_found_when_a_mod_raised_the_max_ammo_and_the_fill_uses_the_raised_max() {
+		let base = 0x1c4130;
+		let mut r = ram_with_table(base);
+		// Arsenal Mastery's level-ups: Blaster max 200 -> 320, gold price column written too.
+		r[base + 15 * ROW + MAX_AT..][..2].copy_from_slice(&320u16.to_le_bytes());
+		r[base + 15 * ROW + 0x14..][..4].copy_from_slice(&40000u32.to_le_bytes());
+		assert_eq!(find_table(&r), Some(base));
+		r[HAVE as usize + 15] = 1;
+		assert_eq!(ammo_fill(&mut r, base, None), 1);
+		assert_eq!(rd32(&r, AMMO + 4 * 15), 320);
 	}
 
 	#[test]

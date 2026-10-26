@@ -1,3 +1,6 @@
+//! `Particles` accessors for the Novalis blast effects: the live shard and fireball mobys (`effect_mobys`) and their draw sprites
+//! (`blast_sprites`).
+//! Leftover from the retired hand port; still compiled because retail mode and the renderer still use parts of `particles` (`Rng`, sprite and quad types). Do not extend.
 use super::*;
 
 impl Particles {

@@ -14,6 +14,9 @@ pub(super) const KIND_PROP: u32 = 1;
 pub(super) const KIND_ACTOR: u32 = 2;
 pub(super) const KIND_DEFERRED: u32 = 3;
 pub(super) const FLAG_PROMPT: u32 = 0x100;
+/// [PC] A prop record only the sun shadow pass poses (`vs_sh_props`): a moby retail culled for the game camera alone
+/// (`Prop::cast`). Every other reader (`vs_props`, `emulate`, `slot_sphere`) takes it as hidden.
+pub(super) const KIND_CAST: u32 = 4;
 
 /// One props slot's record (std430 layout of the shader's `PropInst`).
 /// `m`: placement (column-major; an actor's world offset in `m[12..15]`); `light`: the vertex light word; `tint`: the

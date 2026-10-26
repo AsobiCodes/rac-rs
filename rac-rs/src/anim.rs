@@ -28,7 +28,7 @@ fn flat(m: &Mat) -> [f32; 12] {
 }
 
 /// Ordinary right-handed rotation matrix of a unit quaternion (x, y, z, w).
-fn quat_mat(q: [f32; 4]) -> [[f32; 3]; 3] {
+pub(crate) fn quat_mat(q: [f32; 4]) -> [[f32; 3]; 3] {
 	let [x, y, z, w] = q;
 	[
 		[1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
@@ -819,25 +819,7 @@ impl PropAnim {
 	}
 }
 
-/// One joint override record of the retail evaluator FUN_00268a80 (moby +0x64 list): `rot` (port quaternion sign),
-/// per-lane `scale` and raw-unit `off`; `blend` None = mode 0 (multiply / scale / add), Some(w) = mode 1 (weighted
-/// blend with weight w); `reg` orders the list (newest registration first = descending).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct JointFx {
-	pub joint: usize,
-	pub rot: [f32; 4],
-	pub scale: [f32; 3],
-	pub off: [f32; 3],
-	pub blend: Option<f32>,
-	pub reg: u32,
-}
-
-impl JointFx {
-	/// A rotation-only mode-0 record.
-	pub fn rot(joint: usize, rot: [f32; 4]) -> JointFx {
-		JointFx { joint, rot, scale: [1.0; 3], off: [0.0; 3], blend: None, reg: 0 }
-	}
-}
+pub use crate::anim_pose::JointFx;
 
 #[derive(Clone)]
 pub struct Animated {
@@ -1297,11 +1279,11 @@ impl Animated {
 		for &(j, s) in &b.scale { if j < n { sb[j] = s; } }
 		for &(j, v) in &a.translation { if j < n { ta[j] = v; } }
 		for &(j, v) in &b.translation { if j < n { tb[j] = v; } }
-		(0..n).map(|j| {
+		let mut parts: Vec<_> = (0..n).map(|j| {
 			let mut q = blend_rotation(a.rotation[j], b.rotation[j], t, direct);
 			let mut s = [0, 1, 2].map(|i| sa[j][i] + (sb[j][i] - sa[j][i]) * t);
 			let mut tr = [0, 1, 2].map(|i| ta[j][i] + (tb[j][i] - ta[j][i]) * t);
-			for f in fx.iter().filter(|f| f.joint == j) {
+			for f in fx.iter().filter(|f| f.joint == j && f.mirror.is_none()) {
 				let [x, y, z, w] = q;
 				let [rx, ry, rz, rw] = f.rot;
 				match f.blend {
@@ -1325,7 +1307,9 @@ impl Animated {
 				}
 			}
 			(q, s, tr)
-		}).collect()
+		}).collect();
+		crate::anim_pose::apply_mirrors(&mut parts, fx, &self.skeleton.parents);
+		parts
 	}
 
 	/// Skin matrices `World_j * InvBind_j` (3x4 row-major, translation in game units) of sequence `seq` after `ticks`

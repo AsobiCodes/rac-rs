@@ -1,6 +1,7 @@
 //! Level gameplay on top of the player controller: breakable crates, bolts with the magnet,
 //! enemies, health and death. Numbers come from decomp/notes/veldin_mobies.md and hero_movement.md;
 //! veldin_enemies.md; the ones the notes leave open are placeholders and marked [P].
+//! Leftover from the retired hand port; still compiled because retail mode uses part of `game::Game` (the prop pools). Do not extend.
 
 use crate::gameplay::{self, Cuboid, MobyInstance};
 use crate::inventory::{Inventory, BOMB_GLOVE};
@@ -185,6 +186,9 @@ pub struct Prop {
 	/// Retail mode: the draw basis is mirrored in model Y (moby +0x34 bit 0x8000, retail.rs `basis_pose`); `rot` is the plain rotation.
 	pub mirror: bool,
 	pub shown: bool,
+	/// [PC] Retail mode: not shown only because retail's draw culled it for the game camera (`retail::Moby::view_culled`): it still
+	/// casts its sun shadow, and Culling Off draws it (viewer/gpu/props_set.rs). With Culling Off also when past its draw distance.
+	pub cast: bool,
 	/// Animation sequence and its retail clock (stepped once per game tick, anim.rs `PropAnim`).
 	pub anim: crate::anim::PropAnim,
 	/// Size multiplier, and a colour the model is multiplied by (the moby's RGB tint, 1.0 = neutral).
@@ -203,7 +207,7 @@ pub struct Prop {
 impl Prop {
 	/// An inert prop of a retail-mode pool (retail.rs moves and shows it from the interpreter's moby table).
 	pub fn retail(class_id: u32, level: i32) -> Prop {
-		Prop { class_id, pos: [0.0; 3], rot: [0.0; 3], mirror: false, shown: false, anim: crate::anim::PropAnim::new(0), scale: 1.0, tint: None, light: None, index: None, sched: sched::spawned(level, class_id),  kind: Kind::Retail { alpha: 0x80, ovr: None } }
+		Prop { class_id, pos: [0.0; 3], rot: [0.0; 3], mirror: false, shown: false, cast: false, anim: crate::anim::PropAnim::new(0), scale: 1.0, tint: None, light: None, index: None, sched: sched::spawned(level, class_id),  kind: Kind::Retail { alpha: 0x80, ovr: None } }
 	}
 	pub fn is_retail(&self) -> bool {
 		self.index.is_none() && matches!(self.kind, Kind::Retail { .. })

@@ -1,3 +1,5 @@
+//! Lightning-arc geometry: `arc_frame` (strand frame from an arc's origin and end, FUN_002e1bf8) and `arc_world` (strand space to world).
+//! Leftover from the retired hand port; still compiled because retail mode and the renderer still use parts of `particles` (`Rng`, sprite and quad types). Do not extend.
 use super::*;
 
 

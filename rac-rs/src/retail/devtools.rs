@@ -58,7 +58,7 @@ pub fn set_menu(on: bool, announce: bool) -> bool {
 	let mut u = ui();
 	if on {
 		u.notice = announce.then(Instant::now);
-		eprintln!("retail: devtools: Debug mode On (F1 planet list / warp, F2 free camera, F3 draw distance A/B, F5 immortality, F6 infinite ammo, F8 +10000 bolts)");
+		eprintln!("retail: devtools: Debug mode On (F1 planet list / warp, F2 free camera, F3 draw distance A/B, F5 immortality, F6 infinite ammo, F8 +10000 bolts, F10 split view, F11 hide HUD, F12 split labels)");
 	} else {
 		u.pick = None;
 		u.warp = None;
@@ -77,6 +77,7 @@ pub fn set_menu(on: bool, announce: bool) -> bool {
 	drop(u);
 	if !on {
 		super::debugkeys::menu_off();
+		super::splitview::menu_off();
 	}
 	true
 }
@@ -110,7 +111,7 @@ const PAD_R3: u16 = 0x400;
 const PAD_START: u16 = 0x800;
 
 /// The notice drawn when the player switches Debug mode On: the keys, then the warning (the overlay font has capitals only).
-pub const NOTICE: [&str; 9] = [
+pub const NOTICE: [&str; 12] = [
 	"DEBUG MODE ON",
 	"F1  PLANET LIST / WARP (ENTER GOES, ESC CLOSES)",
 	"F2  FREE CAMERA (WASD, MOUSE, P FREEZE, R RESET)",
@@ -118,6 +119,9 @@ pub const NOTICE: [&str; 9] = [
 	"F5  IMMORTALITY ON / OFF",
 	"F6  INFINITE AMMO ON / OFF",
 	"F8  +10000 BOLTS",
+	"F10 SPLIT VIEW CLASSIC | ENHANCED ([ ] MOVE, SHIFT FAST, HOME CENTRE, BACKSLASH AUTO WIPE)",
+	"F11 HIDE HUD ON / OFF (CLEAN RECORDINGS)",
+	"F12 SPLIT VIEW LABELS ON / OFF",
 	"WARNING: WARPING CAN SKIP STORY PROGRESS.",
 	"SAVE YOUR GAME FIRST. OFF: OPTIONS > CONTROLS > DEBUG.",
 ];

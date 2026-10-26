@@ -23,7 +23,7 @@ pub const R1: u16 = 8;
 const MENU_BTNS: u16 = UP | RIGHT | DOWN | LEFT | CROSS | CIRCLE | TRIANGLE | 0x80 | L1 | R1 | 0x800;
 
 /// The overlay's pixel space.
-const SCREEN: (f32, f32) = (512.0, 448.0);
+pub(super) const SCREEN: (f32, f32) = (512.0, 448.0);
 /// Fields a pulse holds the button, and fields it then stays released (the menu's auto-repeat needs a fresh press). A steering
 /// pulse ends after its first released field once the snap shows the selection moved (`State::step`): 3 fields a step
 /// instead of 5 when the game takes the press at once, the full 5 when it does not.
@@ -168,7 +168,7 @@ fn classify(rd: &dyn Fn(u32) -> u32, rd16: &dyn Fn(u32) -> u32, id: u32, slot: u
 		return Kind::Ring { cursor: rd(it + 0x50) & 7 };
 	}
 	// The title's Graphics page (pcext.rs `title_options`): the front end's value item, 5-word rows, row cursor at +0x38.
-	if it == super::pcext::TGVAL {
+	if it == super::pcext::TGVAL || it == super::pcmods::TVAL {
 		let n = (0..16).take_while(|k| rd(rd(it + 0x34) + 20 * k) != 0).count() as u32;
 		return Kind::Value { n: n.max(1), cursor: rd(it + 0x38) };
 	}
@@ -177,7 +177,7 @@ fn classify(rd: &dyn Fn(u32) -> u32, rd16: &dyn Fn(u32) -> u32, id: u32, slot: u
 			0x13 => 2,
 			0x1b => 1,
 			0x20 => 3,
-			// Camera Options (0x1d): the rows of the item's table (3 as retail, 5 with the PC options' two rows, retail/pcext.rs;
+			// Camera Options (0x1d): the rows of the item's table (3 as retail, 8 with the PC options' rows: Mouse speed, Camera, Strafe, Buy all, Lock-on, retail/pcext.rs;
 			// the Graphics page's copy has 13).
 			_ => match (0..16).take_while(|k| rd(rd(it + 0x34) + 24 * k) != 0).count() as u32 {
 				0 => 3,
@@ -832,5 +832,24 @@ mod tests {
 		let (x, y) = to_ps2((155.0 + 100.0) / 512.0 * 0.75 + 0.125, (44.0 + 17.0) / 448.0, 1280.0 / 720.0, None);
 		assert_eq!(m.hit(x, y), Some(Target::Sub { item: 0x1b27b8, sub: 0 }));
 		assert_eq!(m.toward(Target::Sub { item: 0x1b27b8, sub: 0 }), Some(UP));
+	}
+
+	/// `Retail::picture_point` (the mods' `omni.pointer`) is this map over `SCREEN`: the 4:3 picture's corners are 0..1.
+	#[test]
+	fn picture_corners_are_zero_and_one() {
+		let frac = |fx: f32, fy: f32, aspect: f32, full: Option<f32>| {
+			let (x, y) = to_ps2(fx, fy, aspect, full);
+			[x / SCREEN.0, y / SCREEN.1]
+		};
+		// A 16:9 window, 4:3 picture in the middle (uv x in [0.125, 0.875]): the window's centre is the picture's.
+		let wide = 16.0 / 9.0;
+		let (l, r) = (0.5 - 0.5 * (4.0 / 3.0) / wide, 0.5 + 0.5 * (4.0 / 3.0) / wide);
+		let near = |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).abs() < 1e-4 && (a[1] - b[1]).abs() < 1e-4;
+		assert!(near(frac(l, 0.0, wide, None), [0.0, 0.0]) && near(frac(r, 1.0, wide, None), [1.0, 1.0]) && near(frac(0.5, 0.5, wide, None), [0.5, 0.5]));
+		assert!(frac(0.0, 0.5, wide, None)[0] < 0.0, "left of the picture is below 0");
+		// A 4:3 window: the whole window is the picture.
+		assert!(near(frac(0.0, 0.0, 4.0 / 3.0, None), [0.0, 0.0]) && near(frac(1.0, 1.0, 4.0 / 3.0, None), [1.0, 1.0]));
+		// GS-full (picture aspect given): letterboxed at the largest centred size.
+		assert!(near(frac(l, 0.0, wide, Some(4.0 / 3.0)), [0.0, 0.0]) && near(frac(r, 1.0, wide, Some(4.0 / 3.0)), [1.0, 1.0]));
 	}
 }

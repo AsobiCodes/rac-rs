@@ -525,7 +525,7 @@ pub fn warp_assets(bundle: &[u8]) -> R<WarpAssets> {
 		particle_defs.push(*bundle.get(blob + if off == 0 { defs } else { off }).ok_or("particle def out of range")?);
 	}
 	let chrome = texture(span(gs, w(0x10)?, 128 * 128)?, (128, 128), span(gs, w(0x11)?, 1024)?)?;
-	Ok(WarpAssets { classes, moby_textures, sky, fx_textures,   })
+	Ok(crate::texpack::extra_hd::hd_warp(bundle, WarpAssets { classes, moby_textures, sky, fx_textures,   }))
 }
 
 /// Ship class ids of core 0 / core 1 for ship 0 (level_transition.md NOV-34c.1).

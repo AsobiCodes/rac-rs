@@ -1,6 +1,7 @@
 ﻿//! Player controller and third-person camera, with the numbers read from the decompiled hero code
 //! (decomp/notes/hero_movement.md; SI units, the game stores them per 50 Hz tick). Marked [I] where
 //! the note itself marks the meaning as inferred.
+//! Leftover from the retired hand port; still compiled because the old `Game` and the viewer still use the player types. Do not extend.
 
 use crate::physics::add;
 use crate::physics::length;

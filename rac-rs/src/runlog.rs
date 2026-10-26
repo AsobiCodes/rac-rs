@@ -602,6 +602,8 @@ mod win {
 			let n = unwind(&mut ctx, lo, hi, &mut pcs);
 			write_raw(&format!("runlog: calls of the crashed thread:\n{}", stack_lines(&pcs[..n], Syms::load().as_ref())));
 		}
+		// RivaTuner running with Vulkan: the box that offers DirectX 12 (rtss_crash.rs; the filter hands on after it).
+		crate::rtss_crash::on_crash(write_raw);
 		match PREV.load(Ordering::Relaxed) {
 			// EXCEPTION_CONTINUE_SEARCH: Windows ends the game as without the log.
 			0 => 0,
@@ -649,6 +651,12 @@ mod win {
 				match std::env::var("RAC_TEST_CRASH").as_deref() {
 					// SAFETY: none: a deliberate write to address 8.
 					Ok("1") => unsafe { std::ptr::write_volatile(8 as *mut u8, 0) },
+					// =rtss: the same crash, as if RivaTuner's hook were loaded (rtss_crash.rs).
+					Ok("rtss") => {
+						crate::rtss_crash::pretend_loaded();
+						// SAFETY: as for =1.
+						unsafe { std::ptr::write_volatile(8 as *mut u8, 0) }
+					}
 					Ok("panic") => panic!("RAC_TEST_CRASH=panic"),
 					_ => {}
 				}
@@ -686,6 +694,10 @@ mod win {
 				// Where the threads are, at the first note and again at the minute (moved: slow; the same: stuck).
 				if notes == 1 || STALL_NOTES[notes - 1] == 60 {
 					note_stacks(&mut syms);
+				}
+				// A minute stuck with RivaTuner's hook and Vulkan: the DirectX 12 box, once (rtss_crash.rs).
+				if STALL_NOTES[notes - 1] == 60 {
+					crate::rtss_crash::on_freeze(write_raw);
 				}
 			}
 		}

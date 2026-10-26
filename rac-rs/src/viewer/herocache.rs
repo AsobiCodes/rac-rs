@@ -1,4 +1,4 @@
-//! PC perf (speed lane A, B1): the hero's posed bundle is computed once per game tick, not per display frame.
+//! [PC] perf: the hero's posed bundle is computed once per game tick, not per display frame.
 //! `HeroCache` holds the result of the hero skinning block in handler.rs (hero + glove + held items + back objects + wrench + ghosts)
 //! with the side values derived with it. A display frame that ran no tick and has an equal `HeroKey` reuses it; the per-frame
 //! blend (`smooth.hero`) stays per frame. RAC_HERO_CHECK=1 computes the fresh result every frame as well, compares it with the
@@ -6,7 +6,7 @@
 use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-pub(super) type HeroKey = [u64; 14];
+pub(super) type HeroKey = [u64; 15];
 
 pub(super) struct HeroCache {
 	pub key: HeroKey,
@@ -43,9 +43,10 @@ pub(super) fn hero_check_on() -> bool {
 /// Everything the posed bundle is a function of that can change without a tick: identity of the rig, the level, the field and
 /// play-tick counters (a tick changes them), the hero's placement and the equipment flags. The state itself only changes in ticks.
 /// `anim` = address of the hero rig's class (identity), `field` = the retail field counter (u64::MAX without retail),
-/// `counts` = layer / loose wrench / held rig / hero ghost counts, `flags` = parts present, wrench rig present.
+/// `counts` = layer / loose wrench / held rig / hero ghost counts, `flags` = parts present, wrench rig present, `pose_ops` =
+/// `anim_pose::ops_hash` of the render-only pose overrides (0 = none).
 #[allow(clippy::too_many_arguments)]
-pub(super) fn hero_cache_key(anim: usize, level: usize, play_ticks: u32, field: Option<u32>, counts: [usize; 3], flags: u64, game: &Game) -> HeroKey {
+pub(super) fn hero_cache_key(anim: usize, level: usize, play_ticks: u32, field: Option<u32>, counts: [usize; 3], flags: u64, pose_ops: u64, game: &Game) -> HeroKey {
 	let p = &game.player;
 	let b = |v: f32| v.to_bits() as u64;
 	[
@@ -63,6 +64,7 @@ pub(super) fn hero_cache_key(anim: usize, level: usize, play_ticks: u32, field: 
 		counts[0] as u64,
 		counts[1] as u64,
 		counts[2] as u64 | (p.hero_ghosts().iter().filter(|g| g.is_some()).count() as u64) << 32,
+		pose_ops,
 	]
 }
 

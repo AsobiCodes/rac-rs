@@ -1,4 +1,4 @@
-//! EFFECTS LAYER, VU1 owners (stage 5): a queue callback whose packets go through a VU1 microprogram (VIF MSCAL /
+//! EFFECTS LAYER, VU1 owners: a queue callback whose packets go through a VU1 microprogram (VIF MSCAL /
 //! MSCALF / MSCNT) is drawn from the GS packets that program XGKICKs, with no per-effect code.
 //!
 //! Source of the VU1 state at the owner's start [C]: the field's own VIF1 chain.
@@ -490,6 +490,7 @@ impl Picker {
 					if let Some(r) = j.reply {
 						let (mut qa, mut pools) = (Vec::new(), Vec::new());
 						let st = super::efx_draw::build_in(&j.bi, &out, &mut qa, &mut pools);
+						super::free_water::apply(&j.bi.free_water, &mut pools);
 						nq = (qa.len(), pools.len());
 						if log() {
 							eprintln!("efxdraw field {}: {st:x?}", j.field);

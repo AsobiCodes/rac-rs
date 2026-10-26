@@ -1,7 +1,7 @@
-//! [PC] PREVIEW (lane scratch_veg, 2026-10-16; not in dev): more vegetation, drawn only with Lighting Enhanced and the switch
-//! RAC_VEG = 1 (moderate) or 2 (lush); RAC_VEG_KIND = both (default), blades or shrubs; RAC_VEG_LOG=1 prints the placement
-//! census. Classic, and Enhanced without RAC_VEG, build and draw nothing new. Visual only: no collision, nothing goes back to
-//! the game.
+//! [PC] Vegetation (Pause -> Options -> Graphics -> Vegetation Off / Moderate / Lush, with Lighting Enhanced; retail/pcext.rs; Split view: drawn per `veg.prepare(post_on)`, `post_on` = `splitview::fx`; `veg_follow` keeps the real row): more
+//! plants around the level's own. Dev override RAC_VEG = 0/1/2; RAC_VEG_KIND = both (default), blades or shrubs; RAC_VEG_LOG=1 prints
+//! the placement census. Classic, and Enhanced with Vegetation Off, build and draw nothing new. Visual only: no collision, nothing goes
+//! back to the game.
 //!
 //! Two kinds of plants:
 //! - blades: clumps of grass blades made here in code, coloured with the ground texel and baked shade under each clump (a
@@ -21,6 +21,8 @@
 
 use super::*;
 use rayon::prelude::*;
+
+mod cover;
 
 pub(super) struct Cfg {
 	/// Dev override RAC_VEG=0/1/2 (off, moderate, lush); unset = Options > Graphics > Vegetation (`want`).
@@ -557,7 +559,7 @@ fn veg_fog(i: VegOut) -> f32 {
 
 impl VegFx {
 	pub(super) fn new(device: &wgpu::Device, ulayout: &wgpu::BindGroupLayout, tex_layout: &wgpu::BindGroupLayout, format: wgpu::TextureFormat, depth_format: wgpu::TextureFormat) -> VegFx {
-		let src = format!("{}{}", SHADER, WGSL);
+		let src = format!("{}{}", super::volfog::soft::level_source(SHADER, super::volfog::soft::early(device)), WGSL);
 		let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("veg"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("veg", src.into())) });
 		let vlayout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
 			label: Some("veg"),
@@ -663,7 +665,7 @@ impl VegFx {
 		if !self.plan.as_ref().is_some_and(|p| on && SHOWN.load(std::sync::atomic::Ordering::Relaxed) && p.scene_id == (scene.tfrag_set.len(), scene.radius.to_bits())) {
 			return;
 		}
-		let t = self.start.elapsed().as_secs_f32() % 3600.0;
+		let t = crate::viewer::test_clock::secs(|| self.start.elapsed().as_secs_f32()) % 3600.0;
 		let dn = (WIND_DIR[0] * WIND_DIR[0] + WIND_DIR[1] * WIND_DIR[1]).sqrt();
 		let d = self.plan.as_ref().unwrap().dens;
 		let (a, act) = self.touch(t, eye, d.blade_end.max(d.mesh_end));
@@ -871,34 +873,13 @@ struct Cover<'a> {
 	/// The grass blocks: ties with at least `BLOCK_TOP` m2 of flat grass faces (a bush's rounded leaves have next to none).
 	/// Retail gives their tops no floor of their own (raised decor beside the walkable ground), so their grass skips the floor test.
 	blocks: std::collections::HashSet<u32>,
+	/// A dark swamp level (Umbris): `Cover::lit_green`.
+	swamp: bool,
 }
 
 /// Flat grass top (m2) that makes a tie a grass block (`Cover::blocks`), and what counts as flat (normal z).
 const BLOCK_TOP: f32 = 4.0;
 const BLOCK_FLAT: f32 = 0.95;
-
-/// The grass blocks among the ties (`Cover::blocks`).
-fn tie_blocks(tie_set: &[ties::LitTie], ttex: &HashMap<u32, &Texture>) -> std::collections::HashSet<u32> {
-	(0..tie_set.len() as u32)
-		.filter(|&ii| {
-			let m = &tie_set[ii as usize].lods[0];
-			let flat: f32 = m
-				.faces
-				.iter()
-				.filter(|(key, _)| ttex.contains_key(&(key & crate::mobies::KEY_MASK)))
-				.map(|&(_, f)| {
-					let [a, b, c] = f.map(|i| m.positions[i as usize]);
-					let e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-					let e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-					let n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
-					let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-					if len > 1e-6 && n[2] / len >= BLOCK_FLAT { len * 0.5 } else { 0.0 }
-				})
-				.sum();
-			flat >= BLOCK_TOP
-		})
-		.collect()
-}
 
 impl Cover<'_> {
 	/// A shrub face's texture as drawn and its CLAMP wrap (bit 0 u, bit 1 v): the chain's `DECAL_MIP` level, where a decal's
@@ -1106,11 +1087,11 @@ fn grass_at(scene: &TfView, textures: &HashMap<u32, &Texture>, grass: &HashMap<u
 		}
 		let tex = key & 0xff;
 		let Some(img) = textures.get(&tex) else { continue };
-		let (seen, _) = terrain_seen(scene, img, tj as usize, f, w);
+		let (seen, sh) = terrain_seen(scene, img, tj as usize, f, w);
 		if seen[3] < 128.0 {
 			continue;
 		}
-		let ok = if grass.contains_key(&tex) { seen[3] >= 200.0 && green(seen) } else { leafy(seen) };
+		let ok = if grass.contains_key(&tex) { seen[3] >= 200.0 && cover.lit_green(seen, sh) } else { leafy(seen) };
 		best = Some((dz, z, ok.then_some([seen[0], seen[1], seen[2]])));
 	}
 	// The grass-topped ties are ground as well (Eudora's raised grass blocks).
@@ -1123,11 +1104,11 @@ fn grass_at(scene: &TfView, textures: &HashMap<u32, &Texture>, grass: &HashMap<u
 		if dz > 1.0 || best.is_some_and(|b| b.0 <= dz) {
 			continue;
 		}
-		let (seen, _) = cover.tie_seen(ii as usize, fi as usize, w);
+		let (seen, sh) = cover.tie_seen(ii as usize, fi as usize, w);
 		if seen[3] < 128.0 {
 			continue;
 		}
-		best = Some((dz, z, (seen[3] >= 200.0 && green(seen)).then_some([seen[0], seen[1], seen[2]])));
+		best = Some((dz, z, (seen[3] >= 200.0 && cover.lit_green(seen, sh)).then_some([seen[0], seen[1], seen[2]])));
 	}
 	best.is_some_and(|(_, z, ok)| ok.is_some_and(|under| !decal_over(cover, [p[0], p[1], z], under)))
 }
@@ -1218,7 +1199,7 @@ fn spots(scene: &TfView, textures: &HashMap<u32, &Texture>, grass: &HashMap<u32,
 					// grass texture with the vertex colours).
 					let seen = [tx[0] * shade[0].max(0.0), tx[1] * shade[1].max(0.0), tx[2] * shade[2].max(0.0), tx[3]].map(|x| x.min(255.0));
 					// Why the spot is dropped (0 kept, 1 not grass, 2 covered, 3 no ground, 4 ground off, 5 bad surface, 6 dirt margin).
-					let why = if tx[3] < 200.0 || !green(seen) {
+					let why = if tx[3] < 200.0 || !cover.grows(seen, shade, p, rs[5]) {
 						1
 					} else if covered(scene, textures, cover, (ti, fi), p, [seen[0], seen[1], seen[2]]) {
 						2
@@ -1226,7 +1207,7 @@ fn spots(scene: &TfView, textures: &HashMap<u32, &Texture>, grass: &HashMap<u32,
 						match world.line([p[0], p[1], p[2] + RAY_UP], [p[0], p[1], p[2] - RAY_DOWN], crate::physics::qmask::TWO_SIDED) {
 							None => 3,
 							Some(h) if (h.p[2] - p[2]).abs() > GROUND_TOL => 4,
-							Some(h) if BAD_SURF.contains(&(h.kind & 0x1f)) => 5,
+							Some(h) if BAD_SURF.contains(&(h.kind & 0x1f)) || cover.under_slab(p) => 5,
 							_ => 0,
 						}
 					};
@@ -1264,7 +1245,7 @@ fn spots(scene: &TfView, textures: &HashMap<u32, &Texture>, grass: &HashMap<u32,
 						continue;
 					}
 					cs.kept += 1;
-					let col = std::array::from_fn(|j| tx[j] / 255.0 * shade[j].max(0.0));
+					let col = cover.tint(seen, shade, std::array::from_fn(|j| tx[j] / 255.0 * shade[j].max(0.0)));
 					out.push(Spot { p, slope: [-n[0] / n[2].max(0.2), -n[1] / n[2].max(0.2)], col, lum: lum(shade), r: rs, tex, short });
 				}
 			}
@@ -1317,7 +1298,7 @@ fn tie_spots(scene: &TfView, textures: &HashMap<u32, &Texture>, grass: &HashMap<
 					let p: [f32; 3] = std::array::from_fn(|j| a[j] * w[0] + b[j] * w[1] + c[j] * w[2]);
 					cs.tried += 1;
 					let (seen, shade) = cover.tie_seen(ii as usize, fi as usize, w);
-					let why = if seen[3] < 200.0 || !green(seen) {
+					let why = if seen[3] < 200.0 || !cover.grows(seen, shade, p, rs[5]) {
 						1
 					} else if decal_over(cover, p, [seen[0], seen[1], seen[2]]) {
 						2
@@ -1325,11 +1306,11 @@ fn tie_spots(scene: &TfView, textures: &HashMap<u32, &Texture>, grass: &HashMap<
 						let block = cover.blocks.contains(&ii);
 						match world.line([p[0], p[1], p[2] + RAY_UP], [p[0], p[1], p[2] - RAY_DOWN], crate::physics::qmask::TWO_SIDED) {
 							// A grass block's top: no floor of its own; only a floor over it (the block buried) keeps it bare.
-							None if block => 0,
-							Some(h) if block && h.p[2] < p[2] - GROUND_TOL => 0,
+							None if block && !cover.under_slab(p) => 0,
+							Some(h) if block && h.p[2] < p[2] - GROUND_TOL && !cover.under_slab(p) => 0,
 							None => 3,
 							Some(h) if (h.p[2] - p[2]).abs() > GROUND_TOL => 4,
-							Some(h) if BAD_SURF.contains(&(h.kind & 0x1f)) => 5,
+							Some(h) if BAD_SURF.contains(&(h.kind & 0x1f)) || cover.under_slab(p) => 5,
 							_ => 0,
 						}
 					};
@@ -1359,7 +1340,7 @@ fn tie_spots(scene: &TfView, textures: &HashMap<u32, &Texture>, grass: &HashMap<
 						continue;
 					}
 					cs.kept += 1;
-					let col = std::array::from_fn(|j| seen[j] / 255.0);
+					let col = cover.tint(seen, shade, std::array::from_fn(|j| seen[j] / 255.0));
 					out.push(Spot { p, slope: [-n[0] / n[2].max(0.2), -n[1] / n[2].max(0.2)], col, lum: lum(shade), r: rs, tex: 0x1_0000 | ii, short });
 				}
 			}
@@ -1616,7 +1597,6 @@ struct LeafSpot {
 	r: [f32; 4],
 	/// Cluster scale (1, or `SLOPE_LEAF` on grass-block slopes).
 	s: f32,
-	why: u8,
 }
 
 /// Leaf cluster points on one tree crown or bush (`tree_spots`), or None when `m` is not one: at least `TREE_LEAFY` (mostly
@@ -1712,10 +1692,8 @@ fn mesh_leaves<'t>(m: &Mesh, img_of: &dyn Fn(u32) -> Option<&'t Texture>, seed: 
 			if !foliage_seen(seen, kind) {
 				continue;
 			}
-			// Lane debug (RAC_VEG_LEAFRED=2): why = texture kind, 4 = olive as drawn.
-			let why = kind;
 			let p: [f32; 3] = std::array::from_fn(|j| q[0][j] * w[0] + q[1][j] * w[1] + q[2][j] * w[2]);
-			out.push(LeafSpot { p, n, col: [seen[0], seen[1], seen[2]].map(|x| x / 255.0), lum: lum(shade).max(0.05), r: rs, s: scale, why });
+			out.push(LeafSpot { p, n, col: [seen[0], seen[1], seen[2]].map(|x| x / 255.0), lum: lum(shade).max(0.05), r: rs, s: scale });
 		}
 	}
 	Some(out)
@@ -1854,7 +1832,7 @@ fn terrain_leaves(scene: &TfView, textures: &HashMap<u32, &Texture>, grass: &Has
 					if !steep && world.line([p[0], p[1], p[2] + RAY_UP], [p[0], p[1], p[2] - RAY_DOWN], crate::physics::qmask::TWO_SIDED).is_some_and(|h| (h.p[2] - p[2]).abs() <= GROUND_TOL) {
 						continue;
 					}
-					out.push(LeafSpot { p, n, col: [seen[0], seen[1], seen[2]].map(|x| x / 255.0), lum: lum(shade).max(0.05), r: rs, s: SLOPE_LEAF, why: 1 });
+					out.push(LeafSpot { p, n, col: [seen[0], seen[1], seen[2]].map(|x| x / 255.0), lum: lum(shade).max(0.05), r: rs, s: SLOPE_LEAF });
 				}
 			}
 			out
@@ -1971,7 +1949,7 @@ fn plan_cpu(scene: &TfView, world: &World, src: &VegIn, on: u8) -> Option<PlanCp
 			let Some(&img) = terr.get(&t) else { continue };
 			let (g, cut, mean) = tex_stats(img);
 			if c.log {
-				eprintln!("veg: terrain tex {t:3} {}x{} grass {g:.2} cut {cut:.2} mean {:.0} {:.0} {:.0}", img.w, img.h, mean[0], mean[1], mean[2]);
+				eprintln!("veg: terrain tex {t:3} {}x{} grass {g:.2} moss {:.2} cut {cut:.2} mean {:.0} {:.0} {:.0}", img.w, img.h, cover::moss_share(img), mean[0], mean[1], mean[2]);
 				if g >= 0.25 {
 					// Debug: the authored chain's levels (the terrain pass samples GS LOD levels of it).
 					if let Some(ch) = terrain_chains.get(t as usize).and_then(|c| c.as_ref()) {
@@ -1982,7 +1960,7 @@ fn plan_cpu(scene: &TfView, world: &World, src: &VegIn, on: u8) -> Option<PlanCp
 					}
 				}
 			}
-			if g >= 0.25 {
+			if g >= 0.25 || cover::mossy(level, img) {
 				grass.insert(t, g);
 			}
 		}
@@ -1995,7 +1973,7 @@ fn plan_cpu(scene: &TfView, world: &World, src: &VegIn, on: u8) -> Option<PlanCp
 		}
 		let (mut verts, mut idx, mut models, mut insts): (Vec<VegVertex>, Vec<u32>, Vec<ModelCpu>, Vec<(u32, VegInst)>) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
 		let ttex = tie_grass(tie_set, textures, tie_chains);
-		let cover = Cover { tf: cover_grid(scene), sh: shrub_grid(shrub_set), shrubs: shrub_set, stex: textures, schains: shrub_chains, tg: tie_grid(tie_set, &ttex), ties: tie_set, blocks: tie_blocks(tie_set, &ttex), ttex };
+		let cover = Cover { tf: cover_grid(scene), sh: shrub_grid(shrub_set), shrubs: shrub_set, stex: textures, schains: shrub_chains, tg: tie_grid(tie_set, &ttex), ties: tie_set, blocks: cover::tie_blocks(level, tie_set, &ttex), swamp: cover::is_swamp(level), ttex };
 		if c.log {
 			eprintln!("veg: {} grass tie textures, {} tie grass cells, {} grass blocks", cover.ttex.len(), cover.tg.len(), cover.blocks.len());
 			let (mut n, mut miss, mut chained) = (0, 0, 0);
@@ -2010,81 +1988,7 @@ fn plan_cpu(scene: &TfView, world: &World, src: &VegIn, on: u8) -> Option<PlanCp
 			eprintln!("veg: shrub faces {n}, chained {chained}, no texture {miss}");
 		}
 		// The grass points: the blade clumps, and the test of where the level itself puts each plant class.
-		let (bsp, cs) = spots(scene, &terr, &grass, &cover, world, d.blade_m2, 1);
-		if let Ok(dir) = std::env::var("RAC_VEG_MAP") {
-			// Debug (lane only): the near faces (centroid, texture, colour as drawn, slope) and the blade spots (why code in debug
-			// view 2) for a top-down map.
-			use std::io::Write;
-			let mut f = std::io::BufWriter::new(std::fs::File::create(format!("{dir}/faces.csv")).unwrap());
-			for (ti, t) in scene.set.iter().enumerate() {
-				let m = &t.near;
-				for &(key, fc) in &m.faces {
-					let q = fc.map(|i| m.positions[i as usize]);
-					let e1 = [q[1][0] - q[0][0], q[1][1] - q[0][1], q[1][2] - q[0][2]];
-					let e2 = [q[2][0] - q[0][0], q[2][1] - q[0][1], q[2][2] - q[0][2]];
-					let n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
-					let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-9);
-					let tex = key & 0xff;
-					let Some(img) = terr.get(&tex) else { continue };
-					let (seen, _) = terrain_seen(scene, img, ti, fc, [1.0 / 3.0; 3]);
-					let _ = writeln!(f, "{ti},{tex},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.3},{:.0},{:.0},{:.0},{:.0},{}", q[0][0], q[0][1], q[0][2], q[1][0], q[1][1], q[1][2], q[2][0], q[2][1], q[2][2], (n[2] / len).abs(), seen[0], seen[1], seen[2], seen[3], grass.contains_key(&tex) as u8);
-				}
-			}
-			let mut f = std::io::BufWriter::new(std::fs::File::create(format!("{dir}/ties.csv")).unwrap());
-			for (ii, t) in tie_set.iter().enumerate() {
-				let m = &t.lods[0];
-				for &(key, fc) in &m.faces {
-					let q = fc.map(|i| m.positions[i as usize]);
-					let e1 = [q[1][0] - q[0][0], q[1][1] - q[0][1], q[1][2] - q[0][2]];
-					let e2 = [q[2][0] - q[0][0], q[2][1] - q[0][1], q[2][2] - q[0][2]];
-					let n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
-					let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-9);
-					let tk = key & crate::mobies::KEY_MASK;
-					let img = tie_chains.get((tk & 0xff) as usize).and_then(|c| c.as_ref()).and_then(|c| c.first()).or_else(|| textures.get(&tk));
-					let ix = fc.map(|i| i as usize);
-					let uv: [f32; 2] = std::array::from_fn(|j| (0..3).map(|v| m.uvs[ix[v]][j] / 3.0).sum());
-					let tx = img.map_or([0.0; 4], |im| texel3(im, uv[0], uv[1]));
-					let sh: [f32; 3] = std::array::from_fn(|j| (0..3).map(|v| m.colours.get(ix[v]).map_or(1.0, |c| c[j]) / 3.0).sum());
-					let _ = writeln!(f, "{ii},{tk:x},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.3},{:.0},{:.0},{:.0},{:.0},{:.2},{:.2},{:.2}", q[0][0], q[0][1], q[0][2], q[1][0], q[1][1], q[1][2], q[2][0], q[2][1], q[2][2], n[2] / len, tx[0], tx[1], tx[2], tx[3], sh[0], sh[1], sh[2]);
-				}
-			}
-			let mut f = std::io::BufWriter::new(std::fs::File::create(format!("{dir}/tieg.csv")).unwrap());
-			for (&(cx, cy), list) in &cover.tg {
-				let _ = (cx, cy);
-				for &(ii, fi) in list {
-					let m = &tie_set[ii as usize].lods[0];
-					let q = m.faces[fi as usize].1.map(|i| m.positions[i as usize]);
-					let c: [f32; 3] = std::array::from_fn(|j| (q[0][j] + q[1][j] + q[2][j]) / 3.0);
-					let (seen, _) = cover.tie_seen(ii as usize, fi as usize, [1.0 / 3.0; 3]);
-					let hit = world.line([c[0], c[1], c[2] + RAY_UP], [c[0], c[1], c[2] - RAY_DOWN], crate::physics::qmask::TWO_SIDED).map_or(String::from("-"), |h| format!("{:.2}", h.p[2] - c[2]));
-					let _ = writeln!(f, "{ii},{fi},{:.2},{:.2},{:.2},{hit},{:.0},{:.0},{:.0},{:.0}", c[0], c[1], c[2], seen[0], seen[1], seen[2], seen[3]);
-				}
-			}
-			let mut f = std::io::BufWriter::new(std::fs::File::create(format!("{dir}/coll.csv")).unwrap());
-			for xi in 0..60 {
-				for yi in 0..70 {
-					let (x, y) = (250.0 + xi as f32, 200.0 + yi as f32);
-					let mut z = 100.0f32;
-					let mut row = format!("{x},{y}");
-					for _ in 0..8 {
-						let Some(h) = world.line([x, y, z], [x, y, 20.0], crate::physics::qmask::TWO_SIDED) else { break };
-						row += &format!(",{:.2}:{}", h.p[2], h.kind & 0x1f);
-						z = h.p[2] - 0.05;
-					}
-					let _ = writeln!(f, "{row}");
-				}
-			}
-			let mut f = std::io::BufWriter::new(std::fs::File::create(format!("{dir}/spots.csv")).unwrap());
-			for sp in &bsp {
-				let why = if sp.tex > u32::MAX - 8 { u32::MAX - sp.tex } else { 0 };
-				let hit = if why == 3 || why == 4 {
-					world.line([sp.p[0], sp.p[1], sp.p[2] + 40.0], [sp.p[0], sp.p[1], sp.p[2] - 40.0], crate::physics::qmask::TWO_SIDED).map_or(String::from("-,-"), |h| format!("{:.2},{}", h.p[2], h.kind & 0x1f))
-				} else {
-					String::from("-,-")
-				};
-				let _ = writeln!(f, "{:.2},{:.2},{:.2},{why},{hit}", sp.p[0], sp.p[1], sp.p[2]);
-			}
-		}
+		let (bsp, cs) = spots(scene, &terr, &grass, &cover, world, d.blade_m2 * cover.density(), 1);
 		if c.log {
 			eprintln!("veg: blades tried {} not grass {} covered {} no ground {} ground off {} bad surface {} dirt margin {} kept {}", cs.tried, cs.not_green, cs.covered, cs.no_hit, cs.far, cs.bad, cs.edge, cs.kept);
 		}
@@ -2098,7 +2002,7 @@ fn plan_cpu(scene: &TfView, world: &World, src: &VegIn, on: u8) -> Option<PlanCp
 			}
 			for s in &bsp {
 				let h = (d.blade_h.0 + (d.blade_h.1 - d.blade_h.0) * s.r[2]) * if s.short { EDGE_H } else { 1.0 };
-				let flower = s.r[5] < d.flower;
+				let flower = s.r[5] < d.flower && !cover.swamp;
 				let patch = Rng::new(((s.p[0] / PATCH).floor() as i64 as u64) << 32 ^ (s.p[1] / PATCH).floor() as i64 as u64, 3).next();
 				let col = if debug_tex() { let mut q = Rng::new(s.tex as u64, 9); [q.next(), q.next(), q.next()] } else if debug_why() || debug_probe() { if s.tex > u32::MAX - 8 { s.col } else { [1.0; 3] } } else { s.col };
 				insts.push((flower as u32, VegInst { a: [s.p[0], s.p[1], s.p[2], s.r[0] * std::f32::consts::TAU], b: [0.85 + 0.3 * s.r[1], h, s.r[3], s.r[4] * std::f32::consts::TAU], c: [col[0], col[1], col[2], (patch * 4.0).floor().min(3.0)], d: [s.slope[0], s.slope[1], s.lum.max(0.05), 0.0] }));
@@ -2124,13 +2028,6 @@ fn plan_cpu(scene: &TfView, world: &World, src: &VegIn, on: u8) -> Option<PlanCp
 					}
 					insts.push((mi, VegInst { a: [sp.p[0], sp.p[1], sp.p[2], sp.r[0] * std::f32::consts::TAU], b: [0.8 + 0.4 * sp.r[4], h, sp.r[3], sp.r[4] * std::f32::consts::TAU], c: [col[0], col[1], col[2], 0.0], d: [sp.slope[0], sp.slope[1], sp.lum, 1.0] }));
 					sea_n += 1;
-				}
-			}
-			if let Ok(dir) = std::env::var("RAC_VEG_MAP") {
-				use std::io::Write;
-				let mut f = std::io::BufWriter::new(std::fs::File::create(format!("{dir}/sea.csv")).unwrap());
-				for sp in &ssp {
-					let _ = writeln!(f, "{:.2},{:.2},{:.2},{:.2},{}", sp.p[0], sp.p[1], sp.p[2], sp.r[2], sp.tex);
 				}
 			}
 			if c.log {
@@ -2218,11 +2115,9 @@ fn plan_cpu(scene: &TfView, world: &World, src: &VegIn, on: u8) -> Option<PlanCp
 				let shades: Vec<f32> = list.iter().filter_map(|&i| on_grass(shrub_set[i].mesh.lit.as_ref().map_or([0.0; 3], |l| l.origin))).collect();
 				let grassy = shades.len() as f32 / list.len() as f32;
 				let ground = if shades.is_empty() { 1.0 } else { shades.iter().sum::<f32>() / shades.len() as f32 };
-				// Lane debug: RAC_VEG_NOCLASS="a,b" never copies those shrub classes.
-				let banned = std::env::var("RAC_VEG_NOCLASS").is_ok_and(|v| v.split(',').any(|x| x.trim().parse::<u32>().ok() == Some(cid)));
 				// A template whose lowest point sits above its own origin (Novalis cliff ferns 135/139, zlo 0.13/0.49) hangs from a
 				// ledge in retail: copied onto flat ground it floats, so it is never copied.
-				let plant = !banned && zlo <= HANG_ZLO && !s.mesh.faces.is_empty() && leafy && grassy >= ON_GRASS && height >= 0.15 && height >= 0.15 * 2.0 * r && size <= MAX_PLANT_R && (small || height >= MIN_BUSH_H * r);
+				let plant = zlo <= HANG_ZLO && !s.mesh.faces.is_empty() && leafy && grassy >= ON_GRASS && height >= 0.15 && height >= 0.15 * 2.0 * r && size <= MAX_PLANT_R && (small || height >= MIN_BUSH_H * r);
 				if c.log {
 					eprintln!("veg: shrub class {cid:4} x{:4} r {r:.2} h {height:.2} grass {g:.2} cut {cut:.2} on grass {grassy:.2} mean {:.0} {:.0} {:.0} drawn {:.0} {:.0} {:.0} baked {tlum_v:.2} ground {ground:.2} zlo {zlo:.2} -> {}", list.len(), mean[0], mean[1], mean[2], drawn[0], drawn[1], drawn[2], if plant { if small { "ground cover" } else { "bush" } } else { "-" });
 				}
@@ -2308,8 +2203,6 @@ fn plan_cpu(scene: &TfView, world: &World, src: &VegIn, on: u8) -> Option<PlanCp
 				eprintln!("veg: terrain slope leaves: {}", hill.len());
 			}
 			lsp.extend(hill);
-			// Lane debug: RAC_VEG_LEAFRED=1 draws the leaves red.
-			let red = std::env::var("RAC_VEG_LEAFRED").ok();
 			if !lsp.is_empty() {
 				let mi = models.len() as u32;
 				let first = idx.len() as u32;
@@ -2318,13 +2211,7 @@ fn plan_cpu(scene: &TfView, world: &World, src: &VegIn, on: u8) -> Option<PlanCp
 				for sp in &lsp {
 					// The crown's colour as drawn (texel x shade), as the blades' ground colour; the fragment stage relights it by its
 					// luminance (sun_baked).
-					let col = match (red.as_deref(), sp.why) {
-					(None, _) => sp.col,
-					(Some("2"), 2) => [0.0, 0.3, 1.0],
-					(Some("2"), 3) => [1.0, 0.0, 1.0],
-					(Some("2"), 4) => [0.0, 1.0, 1.0],
-					_ => [1.0, 0.0, 0.0],
-				};
+					let col = sp.col;
 					insts.push((mi, VegInst { a: [sp.p[0], sp.p[1], sp.p[2], sp.r[0] * std::f32::consts::TAU], b: [(0.8 + 0.4 * sp.r[1]) * sp.s, 0.0, sp.r[2], sp.r[3] * std::f32::consts::TAU], c: [col[0], col[1], col[2], 0.0], d: [sp.n[0], sp.n[1], sp.n[2], sp.lum] }));
 					leaf_n += 1;
 				}

@@ -13,7 +13,9 @@
 //! lockon=auto      auto on off      (Pause -> Options -> Camera Options -> Lock-on: the strafe aim's red lock circle; auto = on with a
 //!                   pad, off with keyboard and mouse)
 //! camspeed=50      10..200 in steps of 10   (Pause -> Options -> Camera Options -> Camera speed, in percent: 50 = retail's Fast; the
-//!                   key is only written once the player changes the row, absent = retail's own Slow / Medium / Fast row untouched)
+//!                   key is only written once the player changes the row, absent = retail's own Slow / Medium / Fast row untouched; stick only)
+//! mousespeed=50    10..200 in steps of 10   (Pause -> Options -> Camera Options -> Mouse speed, in percent: the Modern camera's mouse turn;
+//!                   50 = the default feel, the key is only written once the player changes the row)
 //! keys=cross:KeyK,start:Escape+Enter   (Pause -> Options -> Controls: keyboard keys that differ from the defaults, function:key names; binds.rs)
 //! pad=cross:b,circle:a                  (Pause -> Options -> Controls: controller buttons that differ from the defaults; binds.rs)
 //! lighting=enhanced   classic enhanced   (Pause -> Options -> Graphics -> Lighting; viewer/post.rs. Older files: original reads
@@ -31,9 +33,18 @@
 //! waves=on          on off           (Pause -> Options -> Graphics -> Waves: the sea's geometric waves at Water Medium / High; viewer/waterfx.rs)
 //! draw=medium       low medium high   (Pause -> Options -> Graphics -> Draw distance, with either Lighting: low = retail's distances and
 //!                   PS2 far LODs, medium = 4x farther up to 720 m, high = up to 2 km; viewer/fardraw.rs)
+//! clouds=high       classic low medium high   (Pause -> Options -> Graphics -> Effects -> Volumetric clouds: dynamic 3D sky clouds, with Lighting Enhanced; viewer/volclouds.rs)
+//! fog=high          classic low medium high   (Pause -> Options -> Graphics -> Effects -> Fog: volumetric fog and light shafts, with Lighting Enhanced; viewer/volfog.rs)
 //! hud=sharp         sharp original   (the HUD and menus drawn again at the window's resolution, no new art; original = the 512-wide picture;
 //!                   gscap/draw/gpu.rs, gpu.wgsl k_hd; Pause -> Options -> Graphics -> Picture -> HUD, applied at once; only on windows at least
 //!                   896 px tall (gscap.rs HD_MIN_PX_PER_ROW); RAC_HUD=original forces Original)
+//! renderer=vulkan   vulkan dx12     (Pause -> Options -> Graphics -> Screen -> Renderer: which graphics API the window uses, read before the window opens, so a
+//!                   change applies after a restart; missing = vulkan; WGPU_BACKEND still overrides; an outside launcher writes the same key;
+//!                   viewer/gpu/renderer.rs)
+//! intro=play       play skip        (Pause -> Options -> Graphics -> System -> Skip intro: skip ends the boot logo movie at once; play = retail's, the default; pcintro.rs)
+//! gscap_gpu=auto   auto off         (the GPU capture of the HUD, gscap_guard.rs: auto = on where the GPU supports it, off = the CPU capture (Original HUD);
+//!                   a start that froze while the GPU capture opened writes `off` itself, with `gscap_gpu_note` (what happened) and `gscap_gpu_froze`
+//!                   (the game version): a newer game version tries `auto` again once; the player or an outside launcher sets it back to `auto`)
 //! debug=off        off on           (Pause -> Options -> Controls -> Debug -> Debug mode: On switches the test keys of retail/devtools.rs (F1 planet
 //!                   list / warp, F2 free camera) and retail/debugkeys.rs (F5 immortality, F6 infinite ammo, F8 +10000 bolts, F3 draw distance A/B)
 //!                   on; only `on` is written, the env switches RAC_DEV_TOOLS / RAC_DEBUG_KEYS still force them on)
@@ -101,6 +112,8 @@ pub struct PcOptions {
 	/// Camera Options -> Camera speed in percent: Some(10..=200, steps of 10; 50 = retail's Fast); None: never changed (retail's own
 	/// Slow / Medium / Fast row decides).
 	pub camspeed: Option<u8>,
+	/// Camera Options -> Mouse speed in percent (same grid as `camspeed`; 50 = the default mouse feel); None: never changed (50).
+	pub mousespeed: Option<u8>,
 	/// Graphics -> Lighting: 0 Classic (the retail picture), 1 Enhanced; None: never changed (Classic).
 	pub lighting: Option<u8>,
 	/// Graphics -> Ambient occlusion: Some(0 Off, 1 Low, 2 Medium, 3 High); None: never changed (High).
@@ -127,8 +140,23 @@ pub struct PcOptions {
 	pub waves: Option<bool>,
 	/// Graphics -> Draw distance: Some(0 Low = retail, 1 Medium, 2 High); None: never changed (Medium).
 	pub draw: Option<u8>,
+	/// Graphics -> Fog (volumetric fog, viewer/volfog.rs): Some(0 Classic, 1 Low, 2 Medium, 3 High); None: never changed (High, shown with Lighting Enhanced).
+	pub fog: Option<u8>,
+	/// Graphics -> Volumetric clouds (viewer/volclouds.rs): Some(0 Classic, 1 Low, 2 Medium, 3 High); None: never changed (High, shown with Lighting Enhanced).
+	pub clouds: Option<u8>,
+	/// Smooth texture detail transitions with Lighting Enhanced (default true); classic keeps retail mip selection.
+	pub texfilter: Option<bool>,
 	/// HUD: Some(true) = Sharp (the HUD drawn again at the window's resolution, gscap/draw/gpu.rs), Some(false) = Original; None: Sharp.
 	pub hud: Option<bool>,
+	/// Graphics -> Screen -> Renderer: Some(true) = DirectX 12, Some(false) = Vulkan; None: Vulkan (the key says `vulkan` or `dx12`).
+	pub renderer: Option<bool>,
+	/// `intro=play|skip` (Some(true) = skip the boot logo movie; pcintro.rs).
+	pub intro: Option<bool>,
+	/// The GPU capture of the HUD (`gscap_guard.rs`): Some(false) = off (the player's choice or the start-up guard's), Some(true) / None = auto.
+	pub gscap_gpu: Option<bool>,
+	/// `gscap_gpu_note`: what the guard saw ("(auto: start on <adapter> froze <date>)"); `gscap_gpu_froze`: the game version that froze.
+	pub gscap_note: Option<String>,
+	pub gscap_froze: Option<String>,
 	/// Debug mode (Controls -> Debug): Some(true) = On; None: Off. Only `debug=on` is written.
 	pub debug: Option<bool>,
 	/// Lines this build does not know, kept verbatim on rewrite.
@@ -223,7 +251,7 @@ fn flag(v: &str, yes: &str, no: &str) -> Option<bool> {
 
 impl PcOptions {
 	pub const fn new() -> PcOptions {
-		PcOptions { lang: None, camera: None, camfeel: None, strafe: None, buyall: None, lockon: None, camspeed: None, lighting: None, ao: None, shadows: None, fullscreen: None, water: None, particles: None, sun_rays: None, smoothing: None, vegetation: None, culling: None, gi: None, waves: None, draw: None, hud: None, debug: None, extra: Vec::new() }
+		PcOptions { lang: None, camera: None, camfeel: None, strafe: None, buyall: None, lockon: None, camspeed: None, mousespeed: None, lighting: None, ao: None, shadows: None, fullscreen: None, water: None, particles: None, sun_rays: None, smoothing: None, vegetation: None, culling: None, gi: None, waves: None, draw: None, fog: None, clouds: None, texfilter: None, hud: None, renderer: None, intro: None, gscap_gpu: None, gscap_note: None, gscap_froze: None, debug: None, extra: Vec::new() }
 	}
 
 	/// Lock-on with the default: Auto (0).
@@ -234,6 +262,16 @@ impl PcOptions {
 	/// Debug mode with the default: Off.
 	pub fn debug_on(&self) -> bool {
 		self.debug.unwrap_or(false)
+	}
+
+	/// The Renderer row with the default: Vulkan (false); true = DirectX 12.
+	/// `intro=skip`: the boot logo movie ends at once (missing = play, retail's).
+	pub fn intro_skip(&self) -> bool {
+		self.intro.unwrap_or(false)
+	}
+
+	pub fn renderer_dx12(&self) -> bool {
+		self.renderer.unwrap_or(false)
 	}
 
 	/// The HUD row with the default: Sharp.
@@ -259,7 +297,7 @@ impl PcOptions {
 	/// The Graphics page's row bytes (retail/pcext.rs `GROWS` order: lighting, ambient occlusion, dynamic shadows, display mode,
 	/// water, particles, sun rays, frame smoothing, vegetation, culling: 0 On, 1 Off, global illumination, waves: 0 On, 1 Off, draw
 	/// distance: `draw_byte`) with the defaults.
-	pub fn graphics_rows(&self) -> [u8; 13] {
+	pub fn graphics_rows(&self) -> [u8; 15] {
 		[
 			self.lighting_or_default(),
 			self.ao_level(),
@@ -274,11 +312,13 @@ impl PcOptions {
 			self.gi.unwrap_or(0).min(3),
 			!self.waves.unwrap_or(true) as u8,
 			draw_byte(self.draw.unwrap_or(1)),
+			self.fog.unwrap_or(3).min(3),
+			self.clouds.unwrap_or(3).min(3),
 		]
 	}
 
 	/// The player chose `g` (`graphics_rows` order): every Graphics key is written.
-	pub fn set_graphics_rows(&mut self, g: [u8; 13]) {
+	pub fn set_graphics_rows(&mut self, g: [u8; 15]) {
 		self.lighting = Some(g[0].min(1));
 		self.ao = Some(g[1].min(3));
 		self.shadows = Some(g[2].min(3));
@@ -292,6 +332,8 @@ impl PcOptions {
 		self.gi = Some(g[10].min(3));
 		self.waves = Some(g[11] != 1);
 		self.draw = Some(draw_level(g[12]));
+		self.fog = Some(g[13].min(3));
+		self.clouds = Some(g[14].min(3));
 	}
 
 	/// The value of a key this file type does not model itself (`keys`, `pad`: binds.rs).
@@ -366,6 +408,7 @@ impl PcOptions {
 				"buyall" => o.buyall = flag(v, "on", "off"),
 				"lockon" => o.lockon = lockon_value(v),
 				"camspeed" => o.camspeed = camspeed_value(v),
+				"mousespeed" => o.mousespeed = camspeed_value(v),
 				"lighting" => o.lighting = lighting_value(v),
 				"ao" => o.ao = level_value(v),
 				"shadows" => o.shadows = level_value(v),
@@ -379,7 +422,15 @@ impl PcOptions {
 				"gi" => o.gi = level_value(v),
 				"waves" => o.waves = flag(v, "on", "off"),
 				"draw" => o.draw = draw_value(v),
+				"fog" => o.fog = level_value(v),
+				"clouds" => o.clouds = level_value(v),
+				"texfilter" => o.texfilter = flag(v, "smooth", "classic"),
 				"hud" => o.hud = flag(v, "sharp", "original"),
+				"renderer" => o.renderer = flag(v, "dx12", "vulkan"),
+				"intro" => o.intro = flag(v, "skip", "play"),
+				"gscap_gpu" => o.gscap_gpu = flag(v, "auto", "off"),
+				"gscap_gpu_note" => o.gscap_note = Some(v.to_string()).filter(|v| !v.is_empty()),
+				"gscap_gpu_froze" => o.gscap_froze = Some(v.to_string()).filter(|v| !v.is_empty()),
 				"debug" => o.debug = flag(v, "on", "off"),
 				_ if !k.is_empty() && !k.starts_with('#') => {
 					o.extra.retain(|(e, _)| *e != k);
@@ -415,6 +466,9 @@ impl PcOptions {
 		}
 		if let Some(p) = self.camspeed {
 			s += &format!("camspeed={}\n", snap_camspeed(p));
+		}
+		if let Some(p) = self.mousespeed {
+			s += &format!("mousespeed={}\n", snap_camspeed(p));
 		}
 		if let Some(l) = self.lighting {
 			s += &format!("lighting={}\n", LIGHTING[(l as usize).min(LIGHTING.len() - 1)]);
@@ -455,8 +509,31 @@ impl PcOptions {
 		if let Some(l) = self.draw {
 			s += &format!("draw={}\n", DRAW[l.min(2) as usize]);
 		}
+		if let Some(l) = self.fog {
+			s += &format!("fog={}\n", LEVELS_CLASSIC[l.min(3) as usize]);
+		}
+		if let Some(l) = self.clouds {
+			s += &format!("clouds={}\n", LEVELS_CLASSIC[l.min(3) as usize]);
+		}
+		if let Some(t) = self.texfilter {
+			s += &format!("texfilter={}\n", if t { "smooth" } else { "classic" });
+		}
 		if let Some(t) = self.hud {
 			s += &format!("hud={}\n", if t { "sharp" } else { "original" });
+		}
+		if let Some(t) = self.renderer {
+			s += &format!("renderer={}\n", if t { "dx12" } else { "vulkan" });
+		}
+		if let Some(t) = self.intro {
+			s += &format!("intro={}\n", if t { "skip" } else { "play" });
+		}
+		if let Some(t) = self.gscap_gpu {
+			s += &format!("gscap_gpu={}\n", if t { "auto" } else { "off" });
+		}
+		for (k, v) in [("gscap_gpu_note", &self.gscap_note), ("gscap_gpu_froze", &self.gscap_froze)] {
+			if let Some(v) = v {
+				s += &format!("{k}={}\n", v.replace(['\r', '\n'], " "));
+			}
 		}
 		if self.debug == Some(true) {
 			s += "debug=on\n";
@@ -528,6 +605,47 @@ mod tests {
 		o2.store(&p).unwrap();
 		assert_eq!(PcOptions::load(&p).camera, Some(true));
 		let _ = std::fs::remove_dir_all(&d);
+	}
+
+	/// `renderer=vulkan|dx12` (the Renderer row; an outside launcher writes the same key): missing = Vulkan, case does not matter, a bad
+	/// value is ignored, the key is kept on rewrite.
+	/// `gscap_gpu=auto|off` and the guard's two notes (gscap_guard.rs): round trip, the other keys stay.
+	#[test]
+	fn the_gscap_gpu_keys() {
+		assert_eq!(PcOptions::parse("").gscap_gpu, None);
+		assert_eq!(PcOptions::parse("gscap_gpu=OFF\n").gscap_gpu, Some(false));
+		assert_eq!(PcOptions::parse("gscap_gpu=auto\n").gscap_gpu, Some(true));
+		assert_eq!(PcOptions::parse("gscap_gpu=maybe\n").gscap_gpu, None);
+		let o = PcOptions::parse("camera=modern\ngscap_gpu=off\ngscap_gpu_note=(auto: start on X froze 2026-10-23)\ngscap_gpu_froze=rac-rs v0.3.5\nfuture=1\n");
+		assert_eq!(o.gscap_froze.as_deref(), Some("rac-rs v0.3.5"));
+		let t = o.to_text();
+		assert!(t.contains("gscap_gpu=off\n") && t.contains("gscap_gpu_note=(auto: start on X froze 2026-10-23)\n") && t.contains("future=1\n") && t.contains("camera=modern\n"), "{t}");
+		assert_eq!(PcOptions::parse(&t), o);
+	}
+
+	#[test]
+	fn the_intro_key() {
+		assert!(!PcOptions::parse("").intro_skip(), "a new player plays the intro as retail does");
+		assert_eq!(PcOptions::parse("intro=skip\n").intro, Some(true));
+		assert!(PcOptions::parse("intro=SKIP\n").intro_skip());
+		assert_eq!(PcOptions::parse("intro=play\n").intro, Some(false));
+		assert_eq!(PcOptions::parse("intro=never\n").intro, None);
+		assert_eq!(PcOptions { intro: Some(true), ..Default::default() }.to_text(), "version=1\nintro=skip\n");
+		assert_eq!(PcOptions { intro: Some(false), ..Default::default() }.to_text(), "version=1\nintro=play\n");
+	}
+
+	#[test]
+	fn the_renderer_key() {
+		assert!(!PcOptions::parse("").renderer_dx12(), "a new player starts on Vulkan");
+		assert_eq!(PcOptions::parse("renderer=dx12\n").renderer, Some(true));
+		assert!(PcOptions::parse("renderer=DX12\n").renderer_dx12());
+		assert_eq!(PcOptions::parse("renderer=Vulkan\n").renderer, Some(false));
+		assert_eq!(PcOptions::parse("renderer=metal\n").renderer, None);
+		let o = PcOptions { renderer: Some(true), ..Default::default() };
+		assert_eq!(o.to_text(), "version=1\nrenderer=dx12\n");
+		assert_eq!(PcOptions::parse(&o.to_text()), o);
+		assert_eq!(PcOptions { renderer: Some(false), ..Default::default() }.to_text(), "version=1\nrenderer=vulkan\n");
+		assert_eq!(PcOptions::new().to_text(), "version=1\n", "nothing is written until the player or the launcher chooses");
 	}
 
 	#[test]
@@ -619,6 +737,19 @@ mod tests {
 		}
 		assert_eq!(PcOptions::parse("camspeed=fast\n").camspeed, None);
 		assert_eq!(PcOptions::new().camspeed, None);
+		// Mouse speed: the same grid and parser, its own key, written right after camspeed; absent = None, nothing written.
+		for (text, want) in [("100", 100u8), ("50", 50), ("10", 10), ("200", 200), ("5", 10), ("999", 200), ("44", 40), ("45", 50), ("75%", 80), (" 120 ", 120)] {
+			let o = PcOptions::parse(&format!("mousespeed={text}\n"));
+			assert_eq!((o.mousespeed, o.camspeed), (Some(want), None), "mousespeed={text}");
+			assert_eq!(o.to_text(), format!("version=1\nmousespeed={want}\n"));
+			assert_eq!(PcOptions::parse(&o.to_text()).mousespeed, Some(want), "round trip");
+		}
+		assert_eq!(PcOptions::parse("mousespeed=fast\n").mousespeed, None);
+		assert_eq!(PcOptions::new().mousespeed, None);
+		let both = PcOptions { camspeed: Some(70), mousespeed: Some(30), lighting: Some(1), ..Default::default() };
+		assert_eq!(both.to_text(), "version=1\ncamspeed=70\nmousespeed=30\nlighting=enhanced\n", "mousespeed right after camspeed");
+		let back = PcOptions::parse(&both.to_text());
+		assert_eq!((back.camspeed, back.mousespeed), (Some(70), Some(30)), "the two keys are independent");
 		assert_eq!(PcOptions::new().to_text(), "version=1\n", "neither key is written until the player changes the row");
 		// Written after buyall, before the Graphics keys.
 		let o = PcOptions { buyall: Some(true), lockon: Some(2), camspeed: Some(70), lighting: Some(1), ..Default::default() };
@@ -639,9 +770,9 @@ mod tests {
 		assert_eq!(PcOptions::parse("display=windowed\n").fullscreen, Some(false));
 		assert!(!PcOptions::parse("display=huge\n").fullscreen_on(), "unreadable value: Windowed");
 		let o = PcOptions::parse("water=classic\nparticles=Enhanced\nsunrays=off\n");
-		assert_eq!(o.graphics_rows(), [0, 3, 3, 0, 0, 3, 0, 1, 1, 0, 0, 0, 0], "old enhanced = High");
+		assert_eq!(o.graphics_rows(), [0, 3, 3, 0, 0, 3, 0, 1, 1, 0, 0, 0, 0, 3, 3], "old enhanced = High");
 		assert_eq!(o.to_text(), "version=1\nwater=classic\nparticles=high\nsunrays=off\n");
-		assert_eq!(PcOptions::default().graphics_rows(), [0, 3, 3, 0, 3, 3, 3, 1, 1, 0, 0, 0, 0], "defaults: Classic lighting, the rest ready for Enhanced at High, GI Off, waves On, draw distance Medium");
+		assert_eq!(PcOptions::default().graphics_rows(), [0, 3, 3, 0, 3, 3, 3, 1, 1, 0, 0, 0, 0, 3, 3], "defaults: Classic lighting, the rest ready for Enhanced at High, GI Off, waves On, draw distance Medium, fog and clouds High");
 		let o = PcOptions::parse("vegetation=Lush\n");
 		assert_eq!((o.vegetation, o.graphics_rows()[8]), (Some(2), 2));
 		assert_eq!(o.to_text(), "version=1\nvegetation=lush\n");
@@ -670,6 +801,25 @@ mod tests {
 			assert_eq!(PcOptions::parse(&r.to_text()).draw, Some(level), "draw={name} round trip");
 		}
 		assert_eq!(PcOptions::new().graphics_rows()[12], 0, "default Medium = byte 0");
+		// Fog: the file names the level, the page's byte is Classic 0, High 1, Medium 2, Low 3 (pcext `swap_level`); default High.
+		for (name, level) in [("classic", 0u8), ("Low", 1), ("MEDIUM", 2), ("high", 3)] {
+			let o = PcOptions::parse(&format!("fog={name}\n"));
+			assert_eq!((o.fog, o.graphics_rows()[13]), (Some(level), level), "fog={name}");
+			assert_eq!(o.to_text(), format!("version=1\nfog={}\n", name.to_ascii_lowercase()));
+			let mut r = PcOptions::default();
+			r.set_graphics_rows(o.graphics_rows());
+			assert_eq!(PcOptions::parse(&r.to_text()).fog, Some(level), "fog={name} round trip");
+		}
+		for (name, level) in [("classic", 0u8), ("Low", 1), ("MEDIUM", 2), ("high", 3)] {
+			let o = PcOptions::parse(&format!("clouds={name}\n"));
+			assert_eq!((o.clouds, o.graphics_rows()[14]), (Some(level), level), "clouds={name}");
+			assert_eq!(o.to_text(), format!("version=1\nclouds={}\n", name.to_ascii_lowercase()));
+			let mut r = PcOptions::default();
+			r.set_graphics_rows(o.graphics_rows());
+			assert_eq!(PcOptions::parse(&r.to_text()).clouds, Some(level), "clouds={name} round trip");
+		}
+		assert_eq!((PcOptions::new().graphics_rows()[14], PcOptions::parse("clouds=thick\n").clouds), (3, None), "default High; an unreadable value is the default");
+		assert_eq!((PcOptions::new().graphics_rows()[13], PcOptions::parse("fog=thick\n").fog), (3, None), "default High; an unreadable value is the default");
 		assert_eq!(PcOptions::parse("draw=far\n").draw, None, "unreadable value: Medium");
 		assert_eq!([0u8, 1, 2].map(draw_level), [1, 2, 0]);
 		assert_eq!([0u8, 1, 2].map(draw_byte), [2, 0, 1]);
@@ -686,15 +836,15 @@ mod tests {
 		// The new names, any case; rows keep their own zero name when written.
 		let new = PcOptions::parse("ao=Low\nshadows=MEDIUM\nwater=low\nparticles=Medium\nsunrays=high\n");
 		assert_eq!((new.ao, new.shadows, new.water, new.particles, new.sun_rays), (Some(1), Some(2), Some(1), Some(2), Some(3)));
-		assert_eq!(new.graphics_rows(), [0, 1, 2, 0, 1, 2, 3, 1, 1, 0, 0, 0, 0]);
+		assert_eq!(new.graphics_rows(), [0, 1, 2, 0, 1, 2, 3, 1, 1, 0, 0, 0, 0, 3, 3]);
 		assert_eq!(new.to_text(), "version=1\nao=low\nshadows=medium\nwater=low\nparticles=medium\nsunrays=high\n");
 		let zero = PcOptions::parse("ao=off\nshadows=off\nwater=classic\nparticles=classic\nsunrays=off\n");
 		assert_eq!(zero.to_text(), "version=1\nao=off\nshadows=off\nwater=classic\nparticles=classic\nsunrays=off\n");
 		// An unreadable name is ignored (default High); a row set from the page round-trips through the file text.
 		assert_eq!(PcOptions::parse("ao=ultra\n").ao_level(), 3);
 		let mut o = PcOptions::default();
-		o.set_graphics_rows([1, 2, 1, 1, 3, 0, 2, 0, 2, 1, 2, 1, 2]);
-		assert_eq!(PcOptions::parse(&o.to_text()).graphics_rows(), [1, 2, 1, 1, 3, 0, 2, 0, 2, 1, 2, 1, 2]);
+		o.set_graphics_rows([1, 2, 1, 1, 3, 0, 2, 0, 2, 1, 2, 1, 2, 2, 1]);
+		assert_eq!(PcOptions::parse(&o.to_text()).graphics_rows(), [1, 2, 1, 1, 3, 0, 2, 0, 2, 1, 2, 1, 2, 2, 1]);
 		assert_eq!(PcOptions::parse(&o.to_text()), o);
 	}
 

@@ -1,4 +1,4 @@
-//! NOV-5.9c / NOV-5.9d: the CPU side of the retail moby guard-band clipper (VU1 prog11 `L_1b58`). Faces that cross the
+//! The CPU side of the retail moby guard-band clipper (VU1 prog11 `L_1b58`; NOV-5.9c / NOV-5.9d in the notes). Faces that cross the
 //! guard band are pre-clipped here into the retail list-order polygon (`mobies::guard_clip`) and drawn as its strip
 //! triangles; the GPU triangle they replace is masked or left out of the batch.
 

@@ -1,4 +1,4 @@
-//! [PC] perf (lane R2): the hero marker built on the GPU. `Gpu::set_marker` builds the marker's world-space vertices on the CPU
+//! [PC] perf: the hero marker built on the GPU. `Gpu::set_marker` builds the marker's world-space vertices on the CPU
 //! every display frame (blend of the two step poses, turn, light / tint / ghost colour, upload). With frame smoothing that is
 //! 2-3 times per game step. Here a compute pass writes `marker.vbuf` instead: the model and the step's two poses (before / now)
 //! are uploaded once per change, a display frame only writes the 368-byte parameter block (placement, light, colours, blend factor).
@@ -517,7 +517,7 @@ impl HeroGpu {
 		if !self.armed.swap(false, std::sync::atomic::Ordering::Relaxed) {
 			return;
 		}
-		let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("hero build"), timestamp_writes: None });
+		let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("hero build"), timestamp_writes: crate::viewer::passtime::cw("hero build") });
 		pass.set_pipeline(&self.pipeline);
 		pass.set_bind_group(0, &self.bind, &[]);
 		pass.dispatch_workgroups(self.n.div_ceil(64) as u32, 1, 1);

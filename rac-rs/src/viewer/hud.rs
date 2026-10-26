@@ -1,3 +1,5 @@
+//! HUD drawing as `Quad` lists: the counter bar, the nanotech, breath and morph meters, the marker and count widgets, art text,
+//! the on-screen sprites and pad prompts, and `hud`, the entry point that assembles the whole HUD.
 use super::*;
 
 /// The counter bar: end caps (frame 1, the right one flipped) around a stretched middle (frame 0).

@@ -5,6 +5,7 @@
 //! Anything the notes leave open is a placeholder marked [P]; guesses from the notes are [I].
 //! Positions are world units (Ratchet is 1.42 tall). Per-tick values keep the notes' units and
 //! the pool runs at 50 Hz (`TICK_HZ`); velocities handed to the caller are per second.
+//! Leftover from the retired hand port; still compiled because retail mode and the renderer still use parts of `particles` (`Rng`, sprite and quad types). Do not extend.
 
 use crate::dynlight::SlotLight;
 use std::f32::consts::TAU;

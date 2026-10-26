@@ -159,7 +159,7 @@ pub(super) fn array_group(layout: &wgpu::BindGroupLayout, device: &wgpu::Device,
 mod tests {
 	#[test]
 	fn shader_source_rewrites_every_texture_read() {
-		let s = super::shader_source(super::super::SHADER);
+		let s = super::shader_source(&super::volfog::soft::level_source(super::super::SHADER, false));
 		assert!(!s.contains("(tex,") && !s.contains("var tex:"));
 		assert!(s.contains("o.ti = inst;") && s.contains("ti: u32 };"));
 		assert!(s.contains("samp_uv, i.uv") && s.contains("binding(4) var samp_uv"), "the shrub mesh texel is rewritten to the wrap samplers");

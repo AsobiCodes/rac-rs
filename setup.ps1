@@ -26,6 +26,8 @@
 #           -NoBuild (stop after (c2)), -NoShortcut (no desktop shortcut), -CargoJobs N (compiler jobs at once in (d); default: automatic), -NoSharedSlow (generate the memory-access slow paths inline instead of as shared helpers),
 #           -NoPgo (build without the speed profile in .\pgo).
 #           -NoFetchAhead (download the libraries in (d), not in the background during (b), (c) and (c2)).
+#           -RustNoLinks (install Rust without rustup, as setup does by itself on a drive without hard links such as exFAT; test switch).
+#           -NoLauncher / -AddToSteam: the two boxes of the setup window as switches (no launcher; add the game to Steam). -AddToSteam / -RemoveFromSteam alone only do that and exit.
 param(
     [string]$Iso = '',
     [switch]$SkipHash,
@@ -36,8 +38,10 @@ param(
     [switch]$NoShortcut,
     [switch]$NoPgo,                 # (d) without the speed profile (pgo\<serial>.profdata.gz)
     [switch]$NoFetchAhead,
+    [switch]$RustNoLinks,           # install Rust from its packages, without rustup (done by itself when this drive cannot make hard links: exFAT, FAT32, some network shares)
     [int]$Jobs = 0,                 # parallel generators in (c); 0 = one per logical CPU, at most 12 (each needs about 120 MB)
     [int]$CargoJobs = 0,            # compiler jobs at once in (d); 0 = automatic
+    [switch]$NoDxc,                 # do not fetch Microsoft's DirectX shader compiler (dxcompiler.dll) for the DirectX 12 renderer
     [switch]$Console,
     [string]$ShortcutDir = '',      # where the shortcut goes (default: the desktop)
     [switch]$TestNoShow,            # test only: build the launcher without showing it and save PNGs of its views
@@ -51,9 +55,17 @@ param(
     [string]$NewVersion = '',
     [int]$ExePid = 0,               # the game exe that started -Launch (the update waits for it to close)
     [switch]$SkipUnblock,
+    [switch]$GetLauncher,           # download the latest RAC-RS Launcher (github.com/AsobiCodes/rac-rs-launcher releases) into this folder; exit 0 = it is in place
+    [string]$TestLauncherReleases = '',   # test only: a folder with latest.json + the asset instead of GitHub
+    [switch]$NoLauncher,            # the setup window starts with "Also install the RAC-RS Launcher" unticked; with -Console it remembers "no launcher" (generated\setup_choice.txt). -Console never fetches the launcher itself (use -GetLauncher)
+    [switch]$AddToSteam,            # add "Ratchet & Clank (RAC-RS)" to Steam (the shortcuts.vdf of every Steam user; Steam must be closed). Alone: do just that and exit; with -Console -Iso: also at the end of the set-up
+    [switch]$RemoveFromSteam,       # take our entry out of Steam's shortcuts.vdf again, then exit
+    [string]$TestWorkerArgs = '',   # test only: more switches for the hidden worker of the window (for example -CheckOnly)
     [string]$WindowFlag = '',       # -Launch: a file it creates when it shows a window (the exe then waits for the answer)
     [string]$TestUpdateBase = '',   # test only: folder / file:// / http URL that serves VERSION, CHANGELOG.md and v<version>.zip instead of GitHub
-    [string]$TestChoice = ''        # test only (-Launch -TestNoShow): 'update' or 'notnow' instead of a click; 'firstview' (launcher test): only the first view
+    [string]$TestChoice = '',       # test only (-Launch -TestNoShow): 'update' or 'notnow' instead of a click; 'firstview' (launcher test): only the first view; 'dpiviews': every view with stub content (no install)
+    [int]$TestDpi = 0,              # test only: pretend the Windows display scale is N percent (for example 300); the window lays itself out for that scale
+    [string]$TestScreen = ''        # test only: pretend the screen is WxH pixels (for example 1920x1080; the taskbar takes 40 off the height)
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -159,16 +171,386 @@ function Start-Game([bool]$noUpdateCheck = $false) {
 function New-GameShortcut([string]$dir) {
     # Desktop shortcut: the game exe itself (no arguments, working folder = this folder).
     $exe = Join-Path $root 'build\release\rac-rs.exe'
+    # With the launcher installed, the shortcut opens the launcher (it has the Play button); otherwise the game exe itself.
+    $launcher = Join-Path $root 'RAC-RS Launcher.exe'
+    $target = $(if (Test-Path -LiteralPath $launcher -PathType Leaf) { $launcher } else { $exe })
     $lnk = Join-Path $dir 'Ratchet & Clank (rac-rs).lnk'
     $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
-    $sc.TargetPath = $exe
+    $sc.TargetPath = $target
     $sc.Arguments = ''
     $sc.WorkingDirectory = $root
     $ico = Get-IconFile
-    $sc.IconLocation = $(if ($ico) { $ico } else { "$exe,0" })
+    $sc.IconLocation = $(if ($ico) { $ico } else { "$target,0" })
     $sc.Description = 'Ratchet & Clank (rac-rs)'
     $sc.Save()
     return $lnk
+}
+
+# ================================================================ launcher choice and Steam shortcut (shared by the window, -Console and the launcher)
+# generated\setup_choice.txt remembers what the player chose in the setup window (key=value lines, UTF-8 without BOM): launcher=yes|no.
+# Setup.cmd reads it, so a later run follows the choice without asking. generated\ is never touched by an update.
+$SteamAppName = 'Ratchet & Clank (RAC-RS)'
+
+function Get-SetupChoice([string]$key) {
+    $f = Join-Path $root 'generated\setup_choice.txt'
+    if (Test-Path -LiteralPath $f -PathType Leaf) {
+        try { foreach ($l in ([System.IO.File]::ReadAllLines($f))) { if ($l -match ('^' + [regex]::Escape($key) + '=(.*)$')) { return $Matches[1].Trim().ToLowerInvariant() } } } catch { }
+    }
+    return ''
+}
+
+function Set-SetupChoice([string]$key, [string]$value) {
+    $f = Join-Path $root 'generated\setup_choice.txt'
+    $lines = @()
+    if (Test-Path -LiteralPath $f -PathType Leaf) {
+        try { $lines = @([System.IO.File]::ReadAllLines($f) | Where-Object { $_.Trim() -and ($_ -notmatch ('^' + [regex]::Escape($key) + '=')) }) } catch { $lines = @() }
+    }
+    $lines += "$key=$value"
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $f) | Out-Null
+    [System.IO.File]::WriteAllText($f, (($lines -join "`n") + "`n"), (New-Object System.Text.UTF8Encoding($false)))
+}
+
+# --- Steam: "Add to Steam" writes one non-Steam-game entry into the binary file userdata\<id>\config\shortcuts.vdf of every Steam user.
+# Binary VDF: a section is  0  key  0  fields...  8 ; a field is  type  key  0  value  with type 1 = text (then 0), 2 = 32-bit number, 8 = end of section.
+# The file is  0 "shortcuts" 0  [entry "0", entry "1", ...]  8  8.  Only our entry is added, updated or removed; every other entry is copied byte for byte.
+function Find-VdfNul([byte[]]$b, [int]$pos) {
+    $i = [Array]::IndexOf($b, [byte]0, $pos)
+    if ($i -lt 0) { throw 'shortcuts.vdf: a text is not closed' }
+    return ($i + 1)
+}
+
+function Skip-VdfValue([byte[]]$b, [int]$type, [int]$pos) {
+    # the index just after a value of this type that starts at $pos (nested sections are skipped whole)
+    switch ($type) {
+        0 {
+            while ($true) {
+                if ($pos -ge $b.Length) { throw 'shortcuts.vdf: a section is not closed' }
+                $t = [int]$b[$pos]; $pos++
+                if ($t -eq 8) { return $pos }
+                $pos = Find-VdfNul $b $pos
+                $pos = Skip-VdfValue $b $t $pos
+            }
+        }
+        1 { return (Find-VdfNul $b $pos) }
+        { $_ -in 2, 3, 4, 6 } { $e = $pos + 4 }
+        { $_ -in 7, 10 } { $e = $pos + 8 }
+        default { throw ('shortcuts.vdf: unknown value type ' + $type) }
+    }
+    if ($e -gt $b.Length) { throw 'shortcuts.vdf: the file is cut off' }
+    return $e
+}
+
+function Get-VdfFields([byte[]]$b, [int]$pos, [int]$end) {
+    # the fields of one section body: from $pos to $end (= just after the closing 8). Each: Type, Key, From (type byte), VFrom (value start), To (just after the value)
+    $list = New-Object System.Collections.ArrayList
+    $limit = $end - 1
+    while ($pos -lt $limit) {
+        $from = $pos; $t = [int]$b[$pos]; $pos++
+        $ks = $pos; $pos = Find-VdfNul $b $pos
+        $key = [System.Text.Encoding]::UTF8.GetString($b, $ks, $pos - 1 - $ks)
+        $vs = $pos; $pos = Skip-VdfValue $b $t $pos
+        [void]$list.Add(@{ Type = $t; Key = $key; From = $from; VFrom = $vs; To = $pos })
+    }
+    return ,$list
+}
+
+function New-VdfEmptyShortcuts {
+    $ms = New-Object System.IO.MemoryStream
+    $ms.WriteByte(0); $kb = [System.Text.Encoding]::ASCII.GetBytes('shortcuts'); $ms.Write($kb, 0, $kb.Length); $ms.WriteByte(0); $ms.WriteByte(8); $ms.WriteByte(8)
+    return ,$ms.ToArray()
+}
+
+function Read-ShortcutsVdf([byte[]]$b) {
+    # Entries: Key, From (the entry's type byte), BodyFrom (after its key), To (after its closing 8). BodyFrom/DictEnd of "shortcuts" are indexes into $b.
+    if ($b.Length -lt 13 -or $b[0] -ne 0) { throw 'shortcuts.vdf: not a shortcuts file' }
+    $pos = Find-VdfNul $b 1
+    if ([System.Text.Encoding]::ASCII.GetString($b, 1, $pos - 2) -ne 'shortcuts') { throw 'shortcuts.vdf: the first section is not "shortcuts"' }
+    $bodyFrom = $pos
+    $entries = New-Object System.Collections.ArrayList
+    while ($true) {
+        if ($pos -ge $b.Length) { throw 'shortcuts.vdf: the file is cut off' }
+        $t = [int]$b[$pos]
+        if ($t -eq 8) { break }
+        if ($t -ne 0) { throw 'shortcuts.vdf: an entry is not a section' }
+        $from = $pos; $pos++
+        $ks = $pos; $pos = Find-VdfNul $b $pos
+        $key = [System.Text.Encoding]::UTF8.GetString($b, $ks, $pos - 1 - $ks)
+        $bs = $pos; $pos = Skip-VdfValue $b 0 $pos
+        [void]$entries.Add(@{ Key = $key; From = $from; BodyFrom = $bs; To = $pos })
+    }
+    if (($pos + 2) -ne $b.Length -or $b[$pos + 1] -ne 8) { throw 'shortcuts.vdf: unexpected content after the shortcuts section' }
+    return @{ BodyFrom = $bodyFrom; DictEnd = $pos; Entries = $entries }
+}
+
+function Get-VdfEntryInfo([byte[]]$b, $e) {
+    # lower-case key -> value (text as string, numbers as [uint32]) of the fields of one entry
+    $info = @{}
+    foreach ($f in (Get-VdfFields $b $e.BodyFrom $e.To)) {
+        $k = $f.Key.ToLowerInvariant()
+        if ($f.Type -eq 1) { $info[$k] = [System.Text.Encoding]::UTF8.GetString($b, $f.VFrom, $f.To - 1 - $f.VFrom) }
+        elseif ($f.Type -eq 2) { $info[$k] = [BitConverter]::ToUInt32($b, $f.VFrom) }
+    }
+    return $info
+}
+
+function Write-VdfField($ms, [string]$key, $value) {
+    $isText = ($value -is [string])
+    $ms.WriteByte($(if ($isText) { 1 } else { 2 }))
+    $kb = [System.Text.Encoding]::UTF8.GetBytes($key); $ms.Write($kb, 0, $kb.Length); $ms.WriteByte(0)
+    if ($isText) { $vb = [System.Text.Encoding]::UTF8.GetBytes([string]$value); $ms.Write($vb, 0, $vb.Length); $ms.WriteByte(0) }
+    else { $vb = [BitConverter]::GetBytes([uint32]$value); $ms.Write($vb, 0, 4) }
+}
+
+function New-ShortcutEntry([string]$key, [hashtable]$d) {
+    # a new entry with the fields Steam writes itself
+    $ms = New-Object System.IO.MemoryStream
+    $ms.WriteByte(0); $kb = [System.Text.Encoding]::UTF8.GetBytes($key); $ms.Write($kb, 0, $kb.Length); $ms.WriteByte(0)
+    Write-VdfField $ms 'appid' $d.appid
+    Write-VdfField $ms 'AppName' $d.AppName
+    Write-VdfField $ms 'Exe' $d.Exe
+    Write-VdfField $ms 'StartDir' $d.StartDir
+    Write-VdfField $ms 'icon' $d.icon
+    Write-VdfField $ms 'ShortcutPath' ''
+    Write-VdfField $ms 'LaunchOptions' ''
+    Write-VdfField $ms 'IsHidden' ([uint32]0)
+    Write-VdfField $ms 'AllowDesktopConfig' ([uint32]1)
+    Write-VdfField $ms 'AllowOverlay' ([uint32]1)
+    Write-VdfField $ms 'OpenVR' ([uint32]0)
+    Write-VdfField $ms 'Devkit' ([uint32]0)
+    Write-VdfField $ms 'DevkitGameID' ''
+    Write-VdfField $ms 'DevkitOverrideAppID' ([uint32]0)
+    Write-VdfField $ms 'LastPlayTime' ([uint32]0)
+    Write-VdfField $ms 'FlatpakAppID' ''
+    $ms.WriteByte(0); $tb = [System.Text.Encoding]::ASCII.GetBytes('tags'); $ms.Write($tb, 0, $tb.Length); $ms.WriteByte(0); $ms.WriteByte(8)
+    $ms.WriteByte(8)
+    return ,$ms.ToArray()
+}
+
+function Update-ShortcutEntry([byte[]]$b, $e, [hashtable]$d) {
+    # our entry exists: set only the five fields we own (appid, AppName, Exe, StartDir, icon); everything else in it (tags, play time, launch options ...) stays byte for byte
+    $own = @{ 'appid' = $d.appid; 'appname' = $d.AppName; 'exe' = $d.Exe; 'startdir' = $d.StartDir; 'icon' = $d.icon }
+    $seen = @{}
+    $ms = New-Object System.IO.MemoryStream
+    $ms.Write($b, $e.From, $e.BodyFrom - $e.From)
+    foreach ($f in (Get-VdfFields $b $e.BodyFrom $e.To)) {
+        $lk = $f.Key.ToLowerInvariant()
+        if ($own.ContainsKey($lk) -and -not $seen.ContainsKey($lk)) { $seen[$lk] = $true; Write-VdfField $ms $f.Key $own[$lk] }
+        else { $ms.Write($b, $f.From, $f.To - $f.From) }
+    }
+    foreach ($k in @('appid', 'AppName', 'Exe', 'StartDir', 'icon')) { if (-not $seen.ContainsKey($k.ToLowerInvariant())) { Write-VdfField $ms $k $own[$k.ToLowerInvariant()] } }
+    $ms.WriteByte(8)
+    return ,$ms.ToArray()
+}
+
+function Test-BytesEqual([byte[]]$a, [byte[]]$b) {
+    if ($a.Length -ne $b.Length) { return $false }
+    for ($i = 0; $i -lt $a.Length; $i++) { if ($a[$i] -ne $b[$i]) { return $false } }
+    return $true
+}
+
+function Update-ShortcutsBytes([byte[]]$orig, [string]$mode, [hashtable]$d) {
+    # mode 'add' (add our entry, or update it when it is there) or 'remove'. Returns Bytes (the new file), Changed, Action (added updated unchanged removed absent).
+    # An entry is ours when its AppName is ours or its appid is ours. A removal from a file with consecutive keys 0,1,2 ... renumbers the keys after it (only the key text changes).
+    $b = $(if ($orig.Length -eq 0) { New-VdfEmptyShortcuts } else { $orig })
+    $v = Read-ShortcutsVdf $b
+    $consecutive = $true; $idx = 0; $next = 0
+    foreach ($e in $v.Entries) {
+        if ($e.Key -ne [string]$idx) { $consecutive = $false }
+        $idx++
+        $n = 0; if ([int]::TryParse($e.Key, [ref]$n) -and ($n + 1) -gt $next) { $next = $n + 1 }
+    }
+    $ms = New-Object System.IO.MemoryStream
+    $ms.Write($b, 0, $v.BodyFrom)
+    $action = $(if ($mode -eq 'add') { 'added' } else { 'absent' })
+    $matched = $false; $keep = 0
+    foreach ($e in $v.Entries) {
+        $info = Get-VdfEntryInfo $b $e
+        $mine = (($info.ContainsKey('appname') -and ($info['appname'] -is [string]) -and ([string]$info['appname'] -ceq $d.AppName)) -or ($info.ContainsKey('appid') -and ($info['appid'] -is [uint32]) -and ([uint32]$info['appid'] -eq [uint32]$d.appid)))
+        if ($mine -and $mode -eq 'remove') { $action = 'removed'; continue }
+        if ($mine) {
+            if ($matched) { $action = 'updated'; continue }       # a second copy of ours is dropped
+            $matched = $true
+            $nb = Update-ShortcutEntry $b $e $d
+            $ms.Write($nb, 0, $nb.Length)
+            $action = 'updated'
+            $keep++
+            continue
+        }
+        if ($mode -eq 'remove' -and $consecutive) {
+            $kb = [System.Text.Encoding]::UTF8.GetBytes([string]$keep)
+            $ms.WriteByte(0); $ms.Write($kb, 0, $kb.Length); $ms.WriteByte(0); $ms.Write($b, $e.BodyFrom, $e.To - $e.BodyFrom)
+        } else { $ms.Write($b, $e.From, $e.To - $e.From) }
+        $keep++
+    }
+    if ($mode -eq 'add' -and -not $matched) { $nb = New-ShortcutEntry ([string]$next) $d; $ms.Write($nb, 0, $nb.Length) }
+    $ms.Write($b, $v.DictEnd, $b.Length - $v.DictEnd)
+    $out = $ms.ToArray()
+    $changed = -not (Test-BytesEqual $out $orig)
+    if (-not $changed) { $action = $(if ($mode -eq 'add') { 'unchanged' } else { 'absent' }) }
+    return @{ Bytes = $out; Changed = $changed; Action = $action }
+}
+
+$script:Crc32Table = $null
+function Get-Crc32([byte[]]$data) {
+    # the usual CRC-32 (zlib), in 64-bit integers so that PowerShell 5.1 never sees a negative number
+    if (-not $script:Crc32Table) {
+        $t = New-Object 'long[]' 256
+        for ($i = 0; $i -lt 256; $i++) {
+            $c = [long]$i
+            for ($k = 0; $k -lt 8; $k++) { if (($c -band 1L) -ne 0) { $c = 0xEDB88320L -bxor ($c -shr 1) } else { $c = $c -shr 1 } }
+            $t[$i] = $c
+        }
+        $script:Crc32Table = $t
+    }
+    $crc = 0xFFFFFFFFL
+    foreach ($x in $data) { $crc = $script:Crc32Table[($crc -bxor [long]$x) -band 0xFFL] -bxor ($crc -shr 8) }
+    return ($crc -bxor 0xFFFFFFFFL)
+}
+
+function Get-ShortcutAppId([string]$exeQuoted, [string]$name) {
+    # the number Steam gives a non-Steam shortcut: CRC-32 of (the Exe field as written, with its quotes) + AppName, top bit set. Grid artwork files are named after it.
+    $crc = Get-Crc32 ([System.Text.Encoding]::UTF8.GetBytes($exeQuoted + $name))
+    return [uint32]($crc -bor 0x80000000L)
+}
+
+function Get-SteamEntryDef {
+    $exe = '"' + (Join-Path $root 'build\release\rac-rs.exe') + '"'
+    $d = @{ AppName = $SteamAppName; Exe = $exe; StartDir = ('"' + $root.TrimEnd('\') + '\"'); icon = [string](Get-IconFile) }
+    $d.appid = Get-ShortcutAppId $exe $SteamAppName
+    return $d
+}
+
+function Get-SteamRoot {
+    # the Steam folder: HKCU\Software\Valve\Steam SteamPath; the test-only environment variable RAC_TEST_STEAM_DIR replaces it (tests never look at the real Steam)
+    if ($env:RAC_TEST_STEAM_DIR) { if (Test-Path -LiteralPath $env:RAC_TEST_STEAM_DIR -PathType Container) { return $env:RAC_TEST_STEAM_DIR } else { return '' } }
+    try {
+        $p = [string](Get-ItemProperty -Path 'HKCU:\Software\Valve\Steam' -Name 'SteamPath' -ErrorAction Stop).SteamPath
+        if ($p) { $p = $p.Replace('/', '\'); if (Test-Path -LiteralPath $p -PathType Container) { return $p } }
+    } catch { }
+    return ''
+}
+
+function Get-SteamUserDirs([string]$steam) {
+    $ud = Join-Path $steam 'userdata'
+    if (-not (Test-Path -LiteralPath $ud -PathType Container)) { return @() }
+    return @(Get-ChildItem -LiteralPath $ud -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^\d+$' -and $_.Name -ne '0' } | ForEach-Object { $_.FullName })
+}
+
+function Test-SteamRunning {
+    # Steam rewrites shortcuts.vdf when it closes, so it must be closed first. We only look, we never close it. (With RAC_TEST_STEAM_DIR only RAC_TEST_STEAM_RUNNING=1 says "running".)
+    if ($env:RAC_TEST_STEAM_DIR) { return ($env:RAC_TEST_STEAM_RUNNING -eq '1') }
+    try { return [bool](Get-Process -Name 'steam' -ErrorAction Stop) } catch { return $false }
+}
+
+function Set-SteamShortcutsFile([string]$path, [string]$mode, [hashtable]$d) {
+    # one user's shortcuts.vdf. A .bak of the file as it was is written first; the new file is written beside it and moved into place. Returns the action.
+    $exists = Test-Path -LiteralPath $path -PathType Leaf
+    if (-not $exists -and $mode -eq 'remove') { return 'absent' }
+    $orig = $(if ($exists) { [System.IO.File]::ReadAllBytes($path) } else { New-Object byte[] 0 })
+    $r = Update-ShortcutsBytes $orig $mode $d
+    if (-not $r.Changed) { return $r.Action }
+    if ($exists) { Copy-Item -LiteralPath $path -Destination ($path + '.bak') -Force }
+    else { New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null }
+    $tmp = $path + '.rac-tmp'
+    [System.IO.File]::WriteAllBytes($tmp, $r.Bytes)
+    Move-Item -LiteralPath $tmp -Destination $path -Force
+    return $r.Action
+}
+
+function Write-SteamGridArt([string]$userDir, [uint32]$appid) {
+    # Artwork made from OUR logo only (rac-rs\assets\icon\rac-rs-256.png) on a plain dark card; an existing file is never replaced. Returns the files made.
+    $logo = Join-Path $root 'rac-rs\assets\icon\rac-rs-256.png'
+    $made = @()
+    if (-not (Test-Path -LiteralPath $logo -PathType Leaf)) { return $made }
+    Add-Type -AssemblyName System.Drawing
+    $grid = Join-Path $userDir 'config\grid'
+    $img = [System.Drawing.Image]::FromFile($logo)
+    try {
+        foreach ($a in @(@{ N = "${appid}p.png"; W = 600; H = 900 }, @{ N = "${appid}.png"; W = 920; H = 430 }, @{ N = "${appid}_hero.png"; W = 1920; H = 620 })) {
+            $f = Join-Path $grid $a.N
+            if (Test-Path -LiteralPath $f) { continue }
+            New-Item -ItemType Directory -Force -Path $grid | Out-Null
+            $bmp = New-Object System.Drawing.Bitmap($a.W, $a.H)
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            try {
+                $g.Clear([System.Drawing.Color]::FromArgb(24, 28, 38))
+                $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+                $s = [int][math]::Min($a.W * 0.8, $a.H * 0.9)
+                $g.DrawImage($img, [int](($a.W - $s) / 2), [int](($a.H - $s) / 2), $s, $s)
+            } finally { $g.Dispose() }
+            try { $bmp.Save($f, [System.Drawing.Imaging.ImageFormat]::Png) } finally { $bmp.Dispose() }
+            $made += $f
+        }
+    } finally { $img.Dispose() }
+    return $made
+}
+
+function Invoke-SteamShortcut([string]$mode) {
+    # mode 'add' or 'remove', for every Steam user. Status: ok, nosteam (Steam or its users not found), running (Steam is open: NOTHING was changed), error.
+    $steam = Get-SteamRoot
+    if (-not $steam) { return @{ Status = 'nosteam'; Detail = 'Steam was not found on this PC.'; Actions = @(); Errors = @() } }
+    $users = @(Get-SteamUserDirs $steam)
+    if ($users.Count -eq 0) { return @{ Status = 'nosteam'; Detail = 'Steam is here, but no Steam user has signed in yet. Start Steam once, sign in, close it, then try again.'; Actions = @(); Errors = @() } }
+    if (Test-SteamRunning) { return @{ Status = 'running'; Detail = 'Steam is running. Close Steam first (it rewrites its shortcut list when it closes), then try again.'; Actions = @(); Errors = @() } }
+    $d = Get-SteamEntryDef
+    $artList = Join-Path $root 'generated\steam_art.txt'
+    $acts = @(); $errs = @()
+    foreach ($u in $users) {
+        $vdf = Join-Path $u 'config\shortcuts.vdf'
+        try {
+            $acts += (Set-SteamShortcutsFile $vdf $mode $d)
+            if ($mode -eq 'add') {
+                $made = @(Write-SteamGridArt $u $d.appid)
+                if ($made.Count -gt 0) {
+                    # one row per picture: SHA-256, TAB, path (so -RemoveFromSteam can tell our picture from one the player swapped in)
+                    $rows = @($made | ForEach-Object { (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash + "`t" + $_ })
+                    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $artList) | Out-Null
+                    [System.IO.File]::AppendAllText($artList, (($rows -join "`n") + "`n"), (New-Object System.Text.UTF8Encoding($false)))
+                }
+            }
+        } catch { $errs += ($vdf + ': ' + $_.Exception.Message) }
+    }
+    if ($mode -eq 'remove' -and (Test-Path -LiteralPath $artList -PathType Leaf)) {
+        # the artwork this setup made (rows "SHA-256 TAB path" in generated\steam_art.txt): a file goes only while its hash is still ours; a picture the player swapped in stays
+        foreach ($l in ([System.IO.File]::ReadAllLines($artList))) {
+            $p = $l.Split("`t", 2)
+            if ($p.Count -ne 2 -or -not $p[0].Trim() -or -not (Test-Path -LiteralPath $p[1] -PathType Leaf)) { continue }
+            try { if ((Get-FileHash -LiteralPath $p[1] -Algorithm SHA256).Hash -eq $p[0].Trim()) { Remove-Item -LiteralPath $p[1] -Force } } catch { }
+        }
+        Remove-Item -LiteralPath $artList -Force -ErrorAction SilentlyContinue
+    }
+    $st = $(if ($acts.Count -eq 0) { 'error' } else { 'ok' })
+    return @{ Status = $st; Detail = ''; Actions = $acts; Errors = $errs }
+}
+
+function Get-SteamResultText([string]$mode, $r) {
+    switch ($r.Status) {
+        'ok' {
+            $t = $(if ($mode -eq 'add') { "Added `"$SteamAppName`" to Steam. Start Steam to see it in your library." } else { "Removed `"$SteamAppName`" from Steam." })
+            if ($r.Errors.Count -gt 0) { $t += ' (Not every Steam user could be changed: ' + ($r.Errors -join '; ') + ')' }
+            return $t
+        }
+        'error' { return ('Steam could not be changed: ' + ($r.Errors -join '; ')) }
+        default { return $r.Detail }
+    }
+}
+
+function Get-SteamState {
+    # for the window: Found = Steam and at least one user are there; Has = our entry is in some user's shortcuts.vdf
+    $found = $false; $has = $false
+    $steam = Get-SteamRoot
+    if ($steam) {
+        $users = @(Get-SteamUserDirs $steam)
+        $found = ($users.Count -gt 0)
+        if ($found) {
+            $d = Get-SteamEntryDef
+            foreach ($u in $users) {
+                $f = Join-Path $u 'config\shortcuts.vdf'
+                if (Test-Path -LiteralPath $f -PathType Leaf) { try { if ((Update-ShortcutsBytes ([System.IO.File]::ReadAllBytes($f)) 'remove' $d).Action -eq 'removed') { $has = $true } } catch { } }
+            }
+        }
+    }
+    return @{ Found = $found; Has = $has }
 }
 
 # ================================================================ updates (shared by -Launch, the update window, the launcher and the -Console worker)
@@ -251,7 +633,8 @@ function Get-VuGenFiles {
 function Test-ProtectedPath([string]$rel) {
     # What an update never touches: the toolchain, the build, the generated code, the player's saves, the disc image.
     $r = $rel.Replace('\', '/').TrimStart('/').ToLowerInvariant()
-    foreach ($p in @('toolchain/', 'build/', 'generated/', 'player/', 'oracle/rec/', 'oracle/game/', 'test_shots/')) { if ($r.StartsWith($p)) { return $true } }
+    foreach ($p in @('toolchain/', 'build/', 'generated/', 'player/', 'oracle/rec/', 'oracle/game/', 'test_shots/', 'mods/', 'profiles/')) { if ($r.StartsWith($p)) { return $true } }
+    if ($r -in @('launcher.cfg', 'library.json', 'portable.txt', 'rac-rs launcher.exe', 'rac-rs launcher.exe.old')) { return $true }
     if ($r -in @('play.cmd', 'oracle/src/vu0_prog0.rs', 'oracle/src/vu0_prog1.rs', 'oracle/src/vu0_prog9hi.rs', 'oracle/src/skinff_ee.rs', 'oracle/src/skinff_vu.rs', 'rac-rs/src/gsfull/vu1aot_gen.rs', 'rac-rs/src/particles/orb_tables.rs')) { return $true }
     if ($r -match '^rac-rs/src/gsfull/vu1_prog\d+\.rs$') { return $true }
     return $r.EndsWith('.iso')
@@ -420,6 +803,48 @@ function Start-UpdateProcess([string]$ver, [bool]$finish) {
     $null = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -ArgumentList $a -WorkingDirectory $root -WindowStyle Hidden
 }
 
+# -GetLauncher (started by Setup.cmd when the launcher exe is missing): fetch the latest launcher RELEASE of AsobiCodes/rac-rs-launcher, check its
+# SHA-256 digest, place "RAC-RS Launcher.exe" in this folder. Exit code 0 = placed; 1 = anything else (Setup.cmd then opens the old setup window).
+if ($GetLauncher) {
+    $code = 1
+    $launcherExe = Join-Path $root 'RAC-RS Launcher.exe'
+    try {
+        $assetName = 'rac-rs-launcher-windows-x64.exe'
+        try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
+        if ($TestLauncherReleases) { $relText = Get-Content -LiteralPath (Join-Path $TestLauncherReleases 'latest.json') -Raw }
+        else {
+            $old = $ProgressPreference; $ProgressPreference = 'SilentlyContinue'
+            try { $relText = (Invoke-WebRequest -Uri 'https://api.github.com/repos/AsobiCodes/rac-rs-launcher/releases/latest' -UseBasicParsing -TimeoutSec 15 -Headers @{ 'Accept' = 'application/vnd.github+json'; 'User-Agent' = 'rac-rs-setup' }).Content } finally { $ProgressPreference = $old }
+        }
+        $rel = $relText | ConvertFrom-Json
+        $asset = @($rel.assets | Where-Object { $_.name -eq $assetName })[0]
+        if (-not $asset) { throw 'the release has no launcher exe' }
+        if (-not ([string]$asset.digest -match '^sha256:([0-9a-fA-F]{64})$')) { throw 'the launcher exe has no checksum' }
+        $want = $Matches[1].ToLower()
+        $part = $launcherExe + '.part'
+        if ($TestLauncherReleases) {
+            $srcName = $(if ([string]$asset.browser_download_url -match '^https?://') { $asset.name } else { $asset.browser_download_url })
+            Copy-Item -LiteralPath (Join-Path $TestLauncherReleases $srcName) -Destination $part -Force
+        } else { Save-Url ([string]$asset.browser_download_url) $part }
+        $got = (Get-Sha256Hex $part).Replace('-', '').ToLower()
+        if ($got -ne $want) { Remove-Item -LiteralPath $part -Force; throw 'the checksum does not match' }
+        Move-Item -LiteralPath $part -Destination $launcherExe -Force
+        $code = 0
+    } catch {
+        try { Remove-Item -LiteralPath ($launcherExe + '.part') -Force -ErrorAction SilentlyContinue } catch { }
+    }
+    exit $code
+}
+
+# -AddToSteam / -RemoveFromSteam on their own (no -Iso; the launcher calls these): do just that, say what happened, exit. No window, no prompt, Steam is never closed.
+# Exit code: 0 = done (or nothing to do), 1 = error, 2 = Steam (or a Steam user) not found, 3 = Steam is running (nothing was changed).
+if (($AddToSteam -or $RemoveFromSteam) -and -not $Iso) {
+    $steamMode = $(if ($RemoveFromSteam) { 'remove' } else { 'add' })
+    $steamRes = Invoke-SteamShortcut $steamMode
+    Write-Host (Get-SteamResultText $steamMode $steamRes)
+    exit $(switch ($steamRes.Status) { 'ok' { 0 } 'nosteam' { 2 } 'running' { 3 } default { 1 } })
+}
+
 # -Launch (started by the game exe): is there something to update? Offline, an error or "not newer" = exit 0 at once, no window.
 $launchMode = ''; $launchNew = ''
 if ($Launch) {
@@ -443,7 +868,10 @@ if (-not $Console) {
         t0 = $null; lastError = ''; status = ''; shortcut = $false; ranOk = $false; finished = $false
         update = $false; newV = ''; finish = $false; finishPending = $false; workerExtra = ''; workerCode = 0; buildT0 = $null; expect = 0; exitCode = 0
         test = [bool]$TestNoShow; toolsSub = 0.0; vu = $false; suppress = $false; shortcutDir = ''; shortcutPath = ''
+        fetch = $null; fetchErr = ''; wantShortcut = $false; handedOver = $false; steamWanted = $false; steamHas = $false; steamNote = ''; askAnswer = 'Cancel'; boxLauncher = $false; boxSteam = $false; launcherBtn = $true
     }
+    # test mode never looks at the real Steam: without a fake Steam folder (RAC_TEST_STEAM_DIR) Steam counts as not found
+    if ($TestNoShow -and -not $env:RAC_TEST_STEAM_DIR) { $env:RAC_TEST_STEAM_DIR = Join-Path ([System.IO.Path]::GetTempPath()) 'rac_no_steam_here' }
     $StepNames = @('Download tools', 'Check disc', 'Prepare game code', 'Build game', 'Finish')
     $StepNamesInstall = $StepNames
     $StepNamesUpdate = @('Download update', 'Check tools', 'Prepare game code', 'Build game', 'Finish')
@@ -479,13 +907,42 @@ if (-not $Console) {
         }
     }
 
+    # ---------------------------------------------------------------- display scale
+    # The window is laid out in "design units" (96 DPI: 580 x 440 and so on). $LayoutK turns design units into pixels and is worked out ONCE, here:
+    #   $want = the Windows display scale (125% = 1.25, 300% = 3.0; -TestDpi N pretends N percent),
+    #   cut down so that the tallest view (480 units) and the width (580 units) fit the working area of the screen (taskbar excluded).
+    # So at 300% on a 1920 x 1080 screen the window is smaller than 3.0 times (about 1.9) instead of bigger than the screen.
+    # Fonts are set in points, which Windows already scales with the display DPI, so they only get the difference ($fMul; 1.0 on a real display
+    # that is not cut down). There is no WinForms auto-scaling: one scale pass over the controls (Scale-Layout) and Set-FormHeight below.
+    # Panels scroll as a last resort (a screen so small that even the cut-down window does not fit).
+    $DesignW = 580; $DesignHMax = 480
+    $dpiScale = 1.0
+    try { $g0 = [System.Drawing.Graphics]::FromHwnd([IntPtr]::Zero); $dpiScale = [double]$g0.DpiX / 96.0; $g0.Dispose() } catch { $dpiScale = 1.0 }
+    if ($dpiScale -lt 1.0 -or $dpiScale -gt 6.0) { $dpiScale = 1.0 }
+    $want = $dpiScale
+    if ($TestDpi -ge 50 -and $TestDpi -le 600) { $want = $TestDpi / 100.0 }
+    $wa = $null
+    if ($TestScreen -match '^(\d+)x(\d+)$') { $wa = New-Object System.Drawing.Rectangle(0, 0, [int]$Matches[1], ([int]$Matches[2] - 40)) }
+    else { try { $wa = [System.Windows.Forms.Screen]::FromPoint([System.Windows.Forms.Cursor]::Position).WorkingArea } catch { $wa = $null } }
+    if (-not $wa -or $wa.Width -lt 300 -or $wa.Height -lt 300) { $wa = New-Object System.Drawing.Rectangle(0, 0, 1280, 720) }
+    # title bar + borders of this window style (measured on a throw-away form; scaled like the display when the scale is only pretended)
+    $probe = New-Object System.Windows.Forms.Form
+    $probe.FormBorderStyle = 'FixedDialog'; $probe.ClientSize = New-Object System.Drawing.Size(100, 100)
+    $ncH = ($probe.Height - 100) * ($want / $dpiScale); $ncW = ($probe.Width - 100) * ($want / $dpiScale)
+    $probe.Dispose()
+    $LayoutK = [math]::Min($want, [math]::Min(($wa.Height - $ncH - 6) / $DesignHMax, ($wa.Width - $ncW - 6) / $DesignW))
+    $LayoutK = [math]::Max($LayoutK, 0.8)
+    $MaxClientH = [int][math]::Floor($wa.Height - $ncH - 6)
+    $fMul = $LayoutK / $dpiScale
+    function New-Font([string]$family, [double]$pt) { return (New-Object System.Drawing.Font($family, [single]($pt * $fMul))) }
+
     # ---------------------------------------------------------------- helpers
-    $fN = New-Object System.Drawing.Font('Segoe UI', 9.5)
-    $fSmall = New-Object System.Drawing.Font('Segoe UI', 8.75)
-    $fTitle = New-Object System.Drawing.Font('Segoe UI Semibold', 16)
-    $fBig = New-Object System.Drawing.Font('Segoe UI Semibold', 20)
-    $fGlyph = New-Object System.Drawing.Font('Segoe UI Symbol', 11)
-    $fMono = New-Object System.Drawing.Font('Consolas', 8.5)
+    $fN = New-Font 'Segoe UI' 9.5
+    $fSmall = New-Font 'Segoe UI' 8.75
+    $fTitle = New-Font 'Segoe UI Semibold' 16
+    $fBig = New-Font 'Segoe UI Semibold' 20
+    $fGlyph = New-Font 'Segoe UI Symbol' 11
+    $fMono = New-Font 'Consolas' 8.5
     $cText = [System.Drawing.Color]::FromArgb(32, 32, 32)
     $cGrey = [System.Drawing.Color]::FromArgb(110, 110, 110)
     $cGreen = [System.Drawing.Color]::FromArgb(16, 124, 16)
@@ -516,6 +973,7 @@ if (-not $Console) {
     function New-Panel() {
         $p = New-Object System.Windows.Forms.Panel
         $p.Dock = 'Fill'; $p.BackColor = [System.Drawing.Color]::White; $p.Visible = $false
+        $p.AutoScroll = $true      # only shows a scroll bar when the content is taller than the window (a very small screen)
         return $p
     }
     function New-Bar([int]$x, [int]$y, [int]$w, [int]$h) {
@@ -538,8 +996,7 @@ if (-not $Console) {
     $form = New-Object System.Windows.Forms.Form
     $UI.form = $form
     $form.Text = $AppTitle
-    $form.AutoScaleDimensions = New-Object System.Drawing.SizeF(96, 96)
-    $form.AutoScaleMode = 'Dpi'
+    $form.AutoScaleMode = 'None'      # no automatic scaling: see "display scale" above (the old setting scaled the window size on top of a size that already had the scale in it)
     $form.Font = $fN
     $form.ClientSize = New-Object System.Drawing.Size(580, 440)
     $form.FormBorderStyle = 'FixedDialog'
@@ -554,7 +1011,7 @@ if (-not $Console) {
     # --- view: pick the disc image
     $pPick = New-Panel; $UI.pPick = $pPick
     $pPick.Controls.Add((New-Label 'Set up Ratchet & Clank' 28 22 520 36 $fTitle $cText))
-    $UI.lblPickText = New-Label 'Pick the .iso image of your own Ratchet & Clank disc (PAL / Europe or USA, v1.00)' 28 68 520 44 $fN $cText
+    $UI.lblPickText = New-Label 'Pick the .iso image of your own Ratchet & Clank disc (PAL / Europe or USA, v1.00)' 28 68 520 54 $fN $cText      # 3 lines (the repair text) need 54
     $pPick.Controls.Add($UI.lblPickText)
     $UI.txtIso = New-Object System.Windows.Forms.TextBox
     $UI.txtIso.Location = New-Object System.Drawing.Point(28, 124); $UI.txtIso.Size = New-Object System.Drawing.Size(404, 26); $UI.txtIso.Font = $fN
@@ -570,10 +1027,24 @@ if (-not $Console) {
     $pPick.Controls.Add($UI.lblPickNote)
     $UI.chkShortcut = New-Object System.Windows.Forms.CheckBox
     $UI.chkShortcut.Text = 'Create desktop shortcut'; $UI.chkShortcut.Checked = $true; $UI.chkShortcut.Font = $fN
-    $UI.chkShortcut.Location = New-Object System.Drawing.Point(28, 300); $UI.chkShortcut.Size = New-Object System.Drawing.Size(300, 26)
+    $UI.chkShortcut.Location = New-Object System.Drawing.Point(28, 276); $UI.chkShortcut.Size = New-Object System.Drawing.Size(300, 26)
     $pPick.Controls.Add($UI.chkShortcut)
-    $pPick.Controls.Add((New-Label 'Needs about 5 GB of free disk space and an internet connection (once).' 28 372 400 40 $fSmall $cGrey))
-    $UI.btnInstall = New-Button 'Install' 442 364 110 42 $true
+    # the launcher choice: ticked = "Continue" gets the RAC-RS Launcher and hands over to it; unticked = this window does the whole set-up. Remembered in generated\setup_choice.txt.
+    $launcherChoice = Get-SetupChoice 'launcher'
+    $UI.chkLauncher = New-Object System.Windows.Forms.CheckBox
+    $UI.chkLauncher.Text = 'Also install the RAC-RS Launcher (recommended: mods, texture packs, settings, updates)'
+    $UI.chkLauncher.Checked = (($launcherChoice -ne 'no') -and -not $NoLauncher); $UI.chkLauncher.Font = $fN
+    $UI.chkLauncher.Location = New-Object System.Drawing.Point(28, 306); $UI.chkLauncher.Size = New-Object System.Drawing.Size(524, 46)
+    $pPick.Controls.Add($UI.chkLauncher)
+    $UI.lnkGetLauncher = New-Link 'Install the RAC-RS Launcher instead' 28 310 300 24
+    $UI.lnkGetLauncher.Visible = $false
+    $pPick.Controls.Add($UI.lnkGetLauncher)
+    $UI.chkSteam = New-Object System.Windows.Forms.CheckBox
+    $UI.chkSteam.Text = 'Add the game to Steam (Steam must be closed; for the Steam Deck and Big Picture)'; $UI.chkSteam.Checked = $false; $UI.chkSteam.Font = $fN
+    $UI.chkSteam.Location = New-Object System.Drawing.Point(28, 354); $UI.chkSteam.Size = New-Object System.Drawing.Size(524, 46)
+    $pPick.Controls.Add($UI.chkSteam)
+    $pPick.Controls.Add((New-Label 'Needs about 5 GB of free disk space and an internet connection (once).' 28 424 400 40 $fSmall $cGrey))
+    $UI.btnInstall = New-Button 'Install' 442 416 110 42 $true
     $pPick.Controls.Add($UI.btnInstall)
 
     # --- view: installing
@@ -603,7 +1074,6 @@ if (-not $Console) {
     $UI.txtLog = New-Object System.Windows.Forms.TextBox
     $UI.txtLog.Multiline = $true; $UI.txtLog.ReadOnly = $true; $UI.txtLog.ScrollBars = 'Both'; $UI.txtLog.WordWrap = $false; $UI.txtLog.Font = $fMono
     $UI.txtLog.Location = New-Object System.Drawing.Point(28, 376); $UI.txtLog.Size = New-Object System.Drawing.Size(524, 200); $UI.txtLog.Visible = $false
-    $UI.txtLog.Anchor = 'Top,Left,Right,Bottom'
     $pInst.Controls.Add($UI.txtLog)
 
     # --- view: done / already installed
@@ -615,18 +1085,27 @@ if (-not $Console) {
     $UI.btnPlay = New-Button 'Play' 140 130 300 84 $true
     $UI.btnPlay.Font = $fBig
     $pDone.Controls.Add($UI.btnPlay)
-    $UI.btnFolder = New-Button 'Open game folder' 200 236 180 34 $false
+    $UI.btnFolder = New-Button 'Open game folder' 200 230 180 34 $false
     $pDone.Controls.Add($UI.btnFolder)
-    $UI.lnkRepair = New-Link 'Repair / rebuild' 200 288 180 22
+    $UI.btnLauncher = New-Button 'Install the launcher' 200 270 180 34 $false     # shown while the RAC-RS Launcher is not installed (changing your mind later)
+    $pDone.Controls.Add($UI.btnLauncher)
+    $UI.lnkRepair = New-Link 'Repair / rebuild' 200 312 180 22
     $UI.lnkRepair.TextAlign = 'MiddleCenter'
     $pDone.Controls.Add($UI.lnkRepair)
-    $UI.lblDoneNote = New-Label '' 28 340 524 60 $fSmall $cGrey
+    $UI.lnkSteam = New-Link 'Add to Steam' 200 336 180 22      # "Remove from Steam" while our entry is in Steam; hidden when Steam is not found
+    $UI.lnkSteam.TextAlign = 'MiddleCenter'
+    $pDone.Controls.Add($UI.lnkSteam)
+    $UI.lblDoneNote = New-Label '' 28 362 524 44 $fSmall $cGrey
     $pDone.Controls.Add($UI.lblDoneNote)
     $UI.lblVersion = New-Label '' 28 408 200 20 $fSmall $cGrey
     $pDone.Controls.Add($UI.lblVersion)
     $UI.lnkCheck = New-Link 'Check for updates' 392 406 160 22
     $UI.lnkCheck.Font = $fSmall; $UI.lnkCheck.TextAlign = 'MiddleRight'
     $pDone.Controls.Add($UI.lnkCheck)
+    # a small link at the end of a finished install / update (the "done" view only, never on errors); it opens the project's Ko-fi page in the browser when clicked, nothing else
+    $UI.lnkSupport = New-Link 'Support the project' 392 406 160 22
+    $UI.lnkSupport.Font = $fSmall; $UI.lnkSupport.TextAlign = 'MiddleRight'; $UI.lnkSupport.Visible = $false
+    $pDone.Controls.Add($UI.lnkSupport)
 
     # --- view: error
     $pErr = New-Panel; $UI.pErr = $pErr
@@ -663,30 +1142,143 @@ if (-not $Console) {
     foreach ($p in @($pPick, $pInst, $pDone, $pErr, $pOffer)) { $form.Controls.Add($p) }
 
     # ---------------------------------------------------------------- views
-    function Get-Scale { return ($form.CurrentAutoScaleDimensions.Width / 96.0) }
-    function Set-FormHeight([int]$h96) { $form.ClientSize = New-Object System.Drawing.Size($form.ClientSize.Width, [int][math]::Round($h96 * (Get-Scale))) }
+    function Get-Scale { return $LayoutK }
+    function Scale-Layout($parent) {
+        # one pass, before the first view: design units -> pixels for every control that has a fixed place (docked ones follow their panel)
+        foreach ($c in $parent.Controls) {
+            if ($c.Dock -eq [System.Windows.Forms.DockStyle]::None) {
+                # edges are rounded, not sizes, so two neighbours that touch in design units still touch (no 1 px overlaps)
+                $x1 = [int][math]::Round($c.Left * $LayoutK); $y1 = [int][math]::Round($c.Top * $LayoutK)
+                $c.SetBounds($x1, $y1, ([int][math]::Round(($c.Left + $c.Width) * $LayoutK) - $x1), ([int][math]::Round(($c.Top + $c.Height) * $LayoutK) - $y1))
+            }
+            if ($c.Controls.Count -gt 0) { Scale-Layout $c }
+        }
+    }
+    function Fit-FormToScreen {
+        # keep the whole window on the working area (the height changes from view to view; at big scales it must not slide off the bottom)
+        $b = $form.Bounds
+        $x = [math]::Min([math]::Max($b.X, $wa.Left), [math]::Max($wa.Left, $wa.Right - $b.Width))
+        $y = [math]::Min([math]::Max($b.Y, $wa.Top), [math]::Max($wa.Top, $wa.Bottom - $b.Height))
+        if ($x -ne $b.X -or $y -ne $b.Y) { $form.Location = New-Object System.Drawing.Point($x, $y) }
+    }
+    function Fit-LabelFont($lbl) {
+        # a label whose text needs more lines than its box has (a scale where the text wraps differently): the font gets smaller in 0.5 pt steps (at most 6) until it fits
+        if (-not $lbl.Text -or $lbl.ClientSize.Width -lt 20) { return }
+        $fl = [System.Windows.Forms.TextFormatFlags]::WordBreak -bor [System.Windows.Forms.TextFormatFlags]::NoPrefix
+        if ($lbl.Tag -isnot [System.Drawing.Font]) { $lbl.Tag = $lbl.Font }      # the normal font, kept in Tag
+        $base = $lbl.Tag
+        $f = $base
+        for ($i = 0; $i -lt 6; $i++) {
+            $m = [System.Windows.Forms.TextRenderer]::MeasureText($lbl.Text, $f, (New-Object System.Drawing.Size($lbl.ClientSize.Width, 100000)), $fl)
+            if ($m.Height -le $lbl.ClientSize.Height) { break }
+            $f = New-Object System.Drawing.Font($base.FontFamily, [single]([math]::Max(5.0, $f.Size - 0.5)), $base.Style)
+        }
+        if ($lbl.Font.Size -ne $f.Size) { $lbl.Font = $f }
+    }
+    function Fit-TextLabels { foreach ($l in @($UI.lblPickText, $UI.lblDisc, $UI.lblDoneText, $UI.lblOfferNote)) { Fit-LabelFont $l } }
+    function Set-FormHeight([int]$h96) {
+        # the client size in pixels: width and height in design units times the scale; never taller than the screen has room for
+        $h = [math]::Min([int][math]::Round($h96 * $LayoutK), $MaxClientH)
+        $form.ClientSize = New-Object System.Drawing.Size([int][math]::Round($DesignW * $LayoutK), $h)
+        if ($form.Visible) { Fit-FormToScreen }
+    }
+    Scale-Layout $form
+
+    function Test-LauncherMode {
+        # first view with "Also install the RAC-RS Launcher" ticked: the button says Continue and the disc is picked in the launcher
+        return ($S.view -eq 'pick' -and $S.boxLauncher -and $UI.chkLauncher.Checked -and -not $S.repair)
+    }
+
+    function Update-PickMode {
+        $lm = Test-LauncherMode
+        $UI.txtIso.Enabled = (-not $lm); $UI.btnBrowse.Enabled = (-not $lm); $UI.lblDisc.Visible = (-not $lm)
+        if ($lm) {
+            $UI.lblPickText.Text = 'Continue gets the RAC-RS Launcher (a small download). It asks for your disc image (PAL / Europe or USA, v1.00) and does the whole set-up.'
+            $UI.btnInstall.Text = 'Continue'; $UI.pbCheck.Visible = $false
+        } elseif ($S.repair) {
+            $UI.lblPickText.Text = 'Repair / rebuild: this makes the game code again from your disc and rebuilds the game (about 15 minutes). Pick the .iso image of your Ratchet & Clank disc (PAL / Europe or USA, v1.00).'
+            $UI.btnInstall.Text = 'Repair'; $UI.pbCheck.Visible = [bool]$S.check
+        } else {
+            $UI.lblPickText.Text = 'Pick the .iso image of your own Ratchet & Clank disc (PAL / Europe or USA, v1.00)'
+            $UI.btnInstall.Text = 'Install'; $UI.pbCheck.Visible = [bool]$S.check
+        }
+        Set-InstallEnabled $(if ($lm) { $true } else { $S.discOk })
+        Fit-TextLabels
+    }
+
+    function Set-PickChoices {
+        # the launcher and Steam boxes of the first view. Repair: neither. A remembered "no" (or no way to ask): no box, only the link to change your mind.
+        $hasLauncher = Test-Path -LiteralPath (Join-Path $root 'RAC-RS Launcher.exe') -PathType Leaf
+        $ask = ((-not $S.repair) -and (-not $hasLauncher))
+        $no = ((Get-SetupChoice 'launcher') -eq 'no')
+        $S.boxLauncher = ($ask -and -not $no); $S.boxSteam = ((-not $S.repair) -and (Get-SteamState).Found)      # the logic reads these, not .Visible (which is false while the window is not shown)
+        $UI.chkLauncher.Visible = $S.boxLauncher
+        $UI.lnkGetLauncher.Visible = ($ask -and $no)
+        $UI.chkSteam.Visible = $S.boxSteam
+        Update-PickMode
+    }
+
+    function Set-DoneExtras {
+        # the done / installed view: "Install the launcher" while it is not installed, "Add to Steam" / "Remove from Steam" when Steam is found
+        $st = Get-SteamState
+        $S.steamHas = $st.Has
+        $UI.lnkSteam.Visible = $st.Found
+        $UI.lnkSteam.Text = $(if ($st.Has) { 'Remove from Steam' } else { 'Add to Steam' })
+        $S.launcherBtn = (-not (Test-Path -LiteralPath (Join-Path $root 'RAC-RS Launcher.exe') -PathType Leaf))
+        $UI.btnLauncher.Visible = $S.launcherBtn
+    }
+
+    function Update-DoneLayout {
+        # done / installed view: the links and the note move up while the "Install the launcher" button is hidden; the note gets the height its text needs
+        # (the window grows when that is more than the room). All positions are 96-DPI units times the window scale.
+        $k = Get-Scale
+        $shift = $(if ($S.launcherBtn) { 0 } else { 26 })
+        $UI.lnkRepair.Top = [int][math]::Round((312 - $shift) * $k)
+        $UI.lnkSteam.Top = [int][math]::Round((336 - $shift) * $k)
+        $UI.lblDoneNote.Top = [int][math]::Round((362 - $shift) * $k)
+        $need = 22
+        if ($UI.lblDoneNote.Text) {
+            $fl = [System.Windows.Forms.TextFormatFlags]::WordBreak -bor [System.Windows.Forms.TextFormatFlags]::NoPrefix
+            $m = [System.Windows.Forms.TextRenderer]::MeasureText($UI.lblDoneNote.Text, $UI.lblDoneNote.Font, (New-Object System.Drawing.Size($UI.lblDoneNote.ClientSize.Width, 100000)), $fl)
+            $need = [int][math]::Ceiling($m.Height / $k) + 6
+        }
+        $extra = [math]::Max(0, $need - (404 - (362 - $shift)))
+        $UI.lblDoneNote.Height = [int][math]::Round($need * $k)
+        $UI.lblVersion.Top = [int][math]::Round((408 + $extra) * $k)
+        $UI.lnkCheck.Top = [int][math]::Round((406 + $extra) * $k)
+        $UI.lnkSupport.Top = $UI.lnkCheck.Top
+        Set-FormHeight (440 + $extra)
+    }
+
+    function Update-ErrLayout {
+        # error view: the message gets the height its text needs, the log box shrinks to make room (down to 110 units), then the window grows
+        $k = Get-Scale
+        $fl = [System.Windows.Forms.TextFormatFlags]::WordBreak -bor [System.Windows.Forms.TextFormatFlags]::NoPrefix
+        $m = [System.Windows.Forms.TextRenderer]::MeasureText($UI.lblErrMsg.Text, $UI.lblErrMsg.Font, (New-Object System.Drawing.Size($UI.lblErrMsg.ClientSize.Width, 100000)), $fl)
+        $need = [math]::Max(84, [int][math]::Ceiling($m.Height / $k) + 6)
+        $extra = [math]::Max(0, $need - 84 - 90)
+        $logTop = 64 + $need + 6
+        $btnTop = 372 + $extra
+        $UI.lblErrMsg.Height = [int][math]::Round($need * $k)
+        $UI.txtErrLog.Top = [int][math]::Round($logTop * $k)
+        $UI.txtErrLog.Height = [int][math]::Round(($btnTop - 18 - $logTop) * $k)
+        foreach ($b in @($UI.btnCopy, $UI.btnRetry, $UI.btnErrClose)) { $b.Top = [int][math]::Round($btnTop * $k) }
+        Set-FormHeight (440 + $extra)
+    }
 
     function Show-View([string]$name) {
         $S.view = $name
         foreach ($p in @($pPick, $pInst, $pDone, $pErr, $pOffer)) { $p.Visible = $false }
-        Set-FormHeight $(if ($name -eq 'offer') { 350 } else { 440 })
+        Set-FormHeight $(if ($name -eq 'offer') { 350 } elseif ($name -eq 'pick') { 480 } else { 440 })
         switch ($name) {
             'offer' { $pOffer.Visible = $true; $form.AcceptButton = $UI.btnUpdNow }
-            'pick' {
-                $pPick.Visible = $true; $form.AcceptButton = $UI.btnInstall
-                if ($S.repair) {
-                    $UI.lblPickText.Text = 'Repair / rebuild: this makes the game code again from your disc and rebuilds the game (about 15 minutes). Pick the .iso image of your Ratchet & Clank disc (PAL / Europe or USA, v1.00).'
-                    $UI.btnInstall.Text = 'Repair'
-                } else {
-                    $UI.lblPickText.Text = 'Pick the .iso image of your own Ratchet & Clank disc (PAL / Europe or USA, v1.00)'
-                    $UI.btnInstall.Text = 'Install'
-                }
-            }
+            'pick' { $pPick.Visible = $true; $form.AcceptButton = $UI.btnInstall; Set-PickChoices }
             'install' { $pInst.Visible = $true; $form.AcceptButton = $null; $UI.lnkDetails.Text = 'Show details'; $UI.txtLog.Visible = $false }
             'done'    { $pDone.Visible = $true; $form.AcceptButton = $UI.btnPlay }
             'installed' { $pDone.Visible = $true; $form.AcceptButton = $UI.btnPlay }
             'error'   { $pErr.Visible = $true; $form.AcceptButton = $UI.btnRetry }
         }
+        if ($name -eq 'error') { Update-ErrLayout }
         if ($name -eq 'done' -or $name -eq 'installed') {
             $isDone = ($name -eq 'done')
             $UI.lblDoneTitle.Text = $(if ($isDone) { 'Ready to play' } else { 'Ratchet & Clank is installed' })
@@ -700,6 +1292,8 @@ if (-not $Console) {
             }
             $iso = Get-InstalledIso
             if ($iso -and -not (Test-Path -LiteralPath $iso -PathType Leaf)) { $note = 'Your disc image was not found where it was during setup. Use Repair / rebuild to pick it again.' }
+            if ($S.steamNote) { $note = ($note + "`r`n" + $S.steamNote).Trim() }
+            Set-DoneExtras
             $UI.lblDoneNote.Text = $note
             $UI.lblDoneNote.ForeColor = $(if ($note -like 'Your disc*') { $cRed } else { $cGrey })
             $S.finishPending = $false; $UI.btnPlay.Text = 'Play'
@@ -716,8 +1310,10 @@ if (-not $Console) {
                 }
             }
             $UI.lblVersion.Text = 'Version ' + (Get-LocalVersion)
+            Update-DoneLayout
         }
-        $UI.lblVersion.Visible = ($name -eq 'done' -or $name -eq 'installed'); $UI.lnkCheck.Visible = ($name -eq 'installed')
+        $UI.lblVersion.Visible = ($name -eq 'done' -or $name -eq 'installed'); $UI.lnkCheck.Visible = ($name -eq 'installed'); $UI.lnkSupport.Visible = ($name -eq 'done')
+        Fit-TextLabels
         $form.PerformLayout()
     }
 
@@ -761,6 +1357,7 @@ if (-not $Console) {
     }
 
     function Set-InstallEnabled([bool]$on) {
+        if ($S.fetch) { $on = $false } elseif (Test-LauncherMode) { $on = $true }
         $UI.btnInstall.Enabled = $on
         $UI.btnInstall.BackColor = $(if ($on) { $cAccent } else { [System.Drawing.Color]::FromArgb(200, 200, 200) })
         $UI.btnInstall.ForeColor = $(if ($on) { [System.Drawing.Color]::White } else { [System.Drawing.Color]::FromArgb(245, 245, 245) })
@@ -773,6 +1370,7 @@ if (-not $Console) {
             'bad'  { $UI.lblDisc.Text = $msg; $UI.lblDisc.ForeColor = $cRed }
         }
         $UI.pbCheck.Visible = ($kind -eq 'run')
+        Fit-LabelFont $UI.lblDisc
     }
 
     function Stop-DiscCheck {
@@ -978,6 +1576,7 @@ if (-not $Console) {
         Remove-Item -LiteralPath $S.outPath, $S.errPath -Force -ErrorAction SilentlyContinue
         $a = '-NoProfile -ExecutionPolicy Bypass -File "' + (Join-Path $root 'setup.ps1') + '" -Console -Iso "' + $iso + '" -SkipHash'
         if ($S.workerExtra) { $a += ' ' + $S.workerExtra }
+        if ($TestWorkerArgs) { $a += ' ' + $TestWorkerArgs }
         if (-not $shortcut) { $a += ' -NoShortcut' }
         if ($S.shortcutDir) { $a += ' -ShortcutDir "' + $S.shortcutDir + '"' }
         if ($regen) { $a += ' -Regenerate' }
@@ -1047,6 +1646,7 @@ if (-not $Console) {
             if ($code -eq 0) {
                 $S.finished = $true; $S.ranOk = $true
                 Set-Step 4; Update-Progress
+                if ($S.steamWanted) { $S.steamWanted = $false; [void](Invoke-SteamFromWindow 'add') }      # "Add to Steam" was ticked: now that the game exists
                 Show-View 'done'
             } else {
                 Set-Step $S.step $true
@@ -1055,13 +1655,89 @@ if (-not $Console) {
         }
     }
 
-    function Tick-All { Tick-Disc; Tick-Install }
+    function Ask-CloseSteam {
+        # Steam is open: it would overwrite our change when it closes. We never close it; the player does, then clicks Retry.
+        if ($S.test) { return $S.askAnswer }
+        $r = [System.Windows.Forms.MessageBox]::Show($form, "Steam is running.`r`n`r`nPlease close Steam first (right-click its icon next to the clock, then Exit), because Steam rewrites its shortcut list when it closes. Then click Retry.", $AppTitle, 'RetryCancel', 'Information')
+        return $(if ($r -eq [System.Windows.Forms.DialogResult]::Retry) { 'Retry' } else { 'Cancel' })
+    }
+
+    function Invoke-SteamFromWindow([string]$mode) {
+        # add or remove our Steam entry; while Steam runs: ask the player to close it and click Retry. The result text goes into $S.steamNote.
+        while ($true) {
+            $r = Invoke-SteamShortcut $mode
+            if ($r.Status -ne 'running') { break }
+            if ((Ask-CloseSteam) -ne 'Retry') { break }
+        }
+        $what = $(if ($mode -eq 'add') { 'Add to Steam' } else { 'Remove from Steam' })
+        $S.steamNote = $(if ($r.Status -eq 'running') { "Steam was still running, so it was not changed. Close Steam, then use `"$what`" again." } else { Get-SteamResultText $mode $r })
+        return $r
+    }
+
+    function Set-FetchBusy([bool]$on) {
+        foreach ($c in @($UI.chkLauncher, $UI.lnkGetLauncher, $UI.btnLauncher, $UI.btnPlay, $UI.btnFolder, $UI.lnkRepair, $UI.lnkSteam, $UI.chkShortcut, $UI.chkSteam)) { $c.Enabled = (-not $on) }
+        if ($on) {
+            if ($S.view -eq 'pick') { $UI.lblPickText.Text = 'Getting the RAC-RS Launcher ... (a few seconds)'; $UI.btnInstall.Text = 'Please wait'; $UI.btnInstall.Enabled = $false; $UI.btnInstall.BackColor = [System.Drawing.Color]::FromArgb(200, 200, 200); $UI.btnInstall.ForeColor = [System.Drawing.Color]::FromArgb(245, 245, 245) }
+            else { $UI.lblDoneNote.Text = 'Getting the RAC-RS Launcher ... (a few seconds)' }
+        }
+    }
+
+    function Start-LauncherHandOver {
+        # ticked box / "Install the launcher": a hidden child runs setup.ps1 -GetLauncher (GitHub, SHA-256 digest checked); Tick-Fetch continues when it is done
+        if ($S.fetch) { return }
+        $S.steamWanted = (($S.view -eq 'pick') -and $S.boxSteam -and $UI.chkSteam.Checked)
+        $S.wantShortcut = (($S.view -eq 'pick') -and $UI.chkShortcut.Checked)
+        $a = '-NoProfile -ExecutionPolicy Bypass -File "' + (Join-Path $root 'setup.ps1') + '" -GetLauncher'
+        if ($TestLauncherReleases) { $a += ' -TestLauncherReleases "' + $TestLauncherReleases.TrimEnd('\') + '"' }
+        Set-FetchBusy $true
+        $S.fetch = Start-Process -FilePath $psExe -ArgumentList $a -WorkingDirectory $root -WindowStyle Hidden -PassThru
+        $null = $S.fetch.Handle
+    }
+
+    function Complete-LauncherHandOver {
+        # the launcher is in place: remember the choice, make or re-point the desktop shortcut (it opens the launcher now), Steam when ticked, start the launcher, close this window
+        Set-SetupChoice 'launcher' 'yes'
+        $deskDir = $(if ($S.shortcutDir) { $S.shortcutDir } else { [Environment]::GetFolderPath('Desktop') })
+        try { if ($S.wantShortcut -or (Test-Path -LiteralPath (Join-Path $deskDir 'Ratchet & Clank (rac-rs).lnk'))) { $S.shortcutPath = New-GameShortcut $deskDir } } catch { }
+        if ($S.steamWanted) { $S.steamWanted = $false; [void](Invoke-SteamFromWindow 'add') }
+        $S.handedOver = $true
+        if ($S.test) { return }
+        try { $null = Start-Process -FilePath (Join-Path $root 'RAC-RS Launcher.exe') -WorkingDirectory $root }
+        catch { [void][System.Windows.Forms.MessageBox]::Show($form, "The launcher could not be started.`r`n`r`n" + $_.Exception.Message, $AppTitle, 'OK', 'Warning'); Set-FetchBusy $false; Show-View $S.view; return }
+        $form.Close()
+    }
+
+    function Tick-Fetch {
+        $p = $S.fetch
+        if (-not $p -or -not $p.HasExited) { return }
+        $S.fetch = $null
+        if ($p.ExitCode -eq 0 -and (Test-Path -LiteralPath (Join-Path $root 'RAC-RS Launcher.exe') -PathType Leaf)) { Complete-LauncherHandOver; return }
+        $S.fetchErr = 'The RAC-RS Launcher could not be downloaded.'
+        Set-FetchBusy $false
+        Show-View $S.view
+        if (-not $S.test) {
+            $more = $(if ($S.view -eq 'pick') { 'Check your internet connection and try again, or untick "Also install the RAC-RS Launcher" to set up the game with this window.' } else { 'Check your internet connection and try again. The game works without it.' })
+            [void][System.Windows.Forms.MessageBox]::Show($form, "The RAC-RS Launcher could not be downloaded.`r`n`r`n$more", $AppTitle, 'OK', 'Information')
+        }
+    }
+
+    function Invoke-InstallClick {
+        if ($S.fetch) { return }
+        if (Test-LauncherMode) { Start-LauncherHandOver; return }
+        if (-not $S.discOk) { return }
+        if ($S.boxLauncher -and -not $S.repair) { Set-SetupChoice 'launcher' 'no' }      # unticked: remembered, so a later Setup.cmd does not push the launcher again
+        $S.steamWanted = ((-not $S.repair) -and $S.boxSteam -and $UI.chkSteam.Checked)
+        Set-Mode $false
+        Start-Install $S.discPath $UI.chkShortcut.Checked $S.repair
+    }
+
+    function Tick-All { Tick-Disc; Tick-Install; Tick-Fetch }
 
     function Switch-Details {
         if ($UI.txtLog.Visible) {
             $UI.txtLog.Visible = $false; $UI.lnkDetails.Text = 'Show details'; Set-FormHeight 440
         } else {
-            Set-FormHeight 660; $UI.txtLog.Size = New-Object System.Drawing.Size($UI.txtLog.Width, [int]($form.ClientSize.Height - $UI.txtLog.Top - 18 * (Get-Scale)))
+            Set-FormHeight 660; $UI.txtLog.Size = New-Object System.Drawing.Size($UI.txtLog.Width, [int][math]::Max(40 * (Get-Scale), $form.ClientSize.Height - $UI.txtLog.Top - 18 * (Get-Scale)))
             $UI.txtLog.Visible = $true; $UI.lnkDetails.Text = 'Hide details'
             $UI.txtLog.SelectionStart = $UI.txtLog.TextLength; $UI.txtLog.ScrollToCaret()
         }
@@ -1084,12 +1760,16 @@ if (-not $Console) {
         if ($UI.txtIso.Text -and (Test-Path -LiteralPath (Split-Path -Parent $UI.txtIso.Text) -ErrorAction SilentlyContinue)) { $dlg.InitialDirectory = Split-Path -Parent $UI.txtIso.Text }
         if ($dlg.ShowDialog($form) -eq [System.Windows.Forms.DialogResult]::OK) { Set-IsoPath $dlg.FileName }
     })
-    $UI.btnInstall.Add_Click({
-        if (-not $S.discOk) { return }
-        Set-Mode $false
-        Start-Install $S.discPath $UI.chkShortcut.Checked $S.repair
+    $UI.btnInstall.Add_Click({ Invoke-InstallClick })
+    $UI.chkLauncher.Add_CheckedChanged({ Update-PickMode })
+    $UI.lnkGetLauncher.Add_LinkClicked({ Start-LauncherHandOver })
+    $UI.btnLauncher.Add_Click({ Start-LauncherHandOver })
+    $UI.lnkSteam.Add_LinkClicked({
+        [void](Invoke-SteamFromWindow $(if ($S.steamHas) { 'remove' } else { 'add' }))
+        Show-View $S.view
     })
     $UI.lnkDetails.Add_LinkClicked({ Switch-Details })
+    $UI.lnkSupport.Add_LinkClicked({ try { Start-Process 'https://ko-fi.com/asobicodes' } catch { } })
     $UI.btnPlay.Add_Click({
         if ($S.finishPending) { $S.finish = $true; Start-UpdateRun; return }
         try { Start-Game $S.update; $form.Close() }
@@ -1216,6 +1896,253 @@ if (-not $Console) {
             Save-Shot 'first_view'
             Write-Host ('  view: ' + $S.view + '; title: ' + $UI.lblDoneTitle.Text + '; text: ' + $UI.lblDoneText.Text + '; button: ' + $UI.btnPlay.Text)
             exit 0
+        }
+        if ($TestChoice -in @('launcherviews', 'flow_unticked', 'flow_ticked', 'dpiviews')) {
+            # test only: the launcher box / Steam box views (shots 30..) and the two click paths of the first view, headless, on a COPY of the folder
+            # (it writes generated\, the launcher exe and a Steam entry). Steam is a fake folder inside the shot folder; the real Steam is never looked at.
+            if ($root -notlike '*\scratch_setup*\*') { Write-Host 'refused: run this on a copy of the folder under scratch_setup'; exit 2 }
+            $simK = $LayoutK      # the window itself is laid out for -TestDpi N (the old RAC_TEST_SIM_SCALE second look is gone: the real layout is tested instead)
+            $getState = [System.Windows.Forms.Control].GetMethod('GetState', [System.Reflection.BindingFlags]'NonPublic,Instance', $null, [Type[]]@([int]), $null)
+            function Own-Visible($c) { return [bool]$getState.Invoke($c, @(2)) }      # a control's own Visible flag (.Visible reads false while the window is not shown)
+            $fake = Join-Path $TestShot 'fake_steam'
+            if ($fake.StartsWith($TestShot) -and (Test-Path -LiteralPath $fake)) { Remove-Item -LiteralPath $fake -Recurse -Force }
+            New-Item -ItemType Directory -Force -Path (Join-Path $fake 'userdata\1001\config') | Out-Null
+            $env:RAC_TEST_STEAM_DIR = $fake; $env:RAC_TEST_STEAM_RUNNING = '0'
+            $noSteam = Join-Path $TestShot 'no_steam_here'
+            $choiceFile = Join-Path $root 'generated\setup_choice.txt'
+            $launcherExe = Join-Path $root 'RAC-RS Launcher.exe'
+            Write-Host ('  layout scale of this window: {0:N2} (Windows display scale {1:N2})' -f $LayoutK, $want)
+            function Test-ViewFit([string]$tag) {
+                # every visible control of the current view: inside the panel, its text fits its box (word-wrapped), no two boxes overlap
+                $panel = @($form.Controls | Where-Object { (Own-Visible $_) -and ($_ -is [System.Windows.Forms.Panel]) })[0]
+                $kids = @($panel.Controls | Where-Object { Own-Visible $_ })
+                $bad = 0
+                foreach ($c in $kids) {
+                    $nm = $(if ($c.Text) { $c.Text } else { $c.GetType().Name })
+                    if ($c.Bottom -gt $panel.ClientSize.Height -or $c.Right -gt $panel.ClientSize.Width) { Test-Check "$tag : '$nm' is inside the window ($($c.Bottom) of $($panel.ClientSize.Height))" $false; $bad++ }
+                    if (($c -is [System.Windows.Forms.Label] -or $c -is [System.Windows.Forms.ButtonBase]) -and $c.Text) {
+                        $isBtn = ($c -is [System.Windows.Forms.Button]); $isChk = ($c -is [System.Windows.Forms.CheckBox])
+                        $pad = $(if ($isChk) { [int](22 * $simK) } elseif ($isBtn) { [int](10 * $simK) } else { 0 })
+                        $fl = [System.Windows.Forms.TextFormatFlags]::NoPrefix; if (-not $isBtn) { $fl = $fl -bor [System.Windows.Forms.TextFormatFlags]::WordBreak }
+                        $m = [System.Windows.Forms.TextRenderer]::MeasureText($c.Text, $c.Font, (New-Object System.Drawing.Size(($c.ClientSize.Width - $pad), 100000)), $fl)
+                        if (($isBtn -and $m.Width -gt ($c.ClientSize.Width - $pad)) -or (-not $isBtn -and $m.Height -gt $c.ClientSize.Height)) { Test-Check "$tag : text of '$nm' fits its box (needs $($m.Width)x$($m.Height), box $($c.ClientSize.Width)x$($c.ClientSize.Height))" $false; $bad++ }
+                    }
+                }
+                for ($i = 0; $i -lt $kids.Count; $i++) { for ($j = $i + 1; $j -lt $kids.Count; $j++) {
+                    if ($kids[$i].Bounds.IntersectsWith($kids[$j].Bounds)) { Test-Check "$tag : '$($kids[$i].Text)' and '$($kids[$j].Text)' do not overlap" $false; $bad++ }
+                } }
+                Test-Check "$tag : every control fits (inside, text not clipped, no overlap)" ($bad -eq 0)
+            }
+            if ($TestChoice -eq 'launcherviews') {
+                if (Test-Path -LiteralPath $choiceFile) { Remove-Item -LiteralPath $choiceFile -Force }
+                if (Test-Path -LiteralPath $launcherExe) { Remove-Item -LiteralPath $launcherExe -Force }
+                $S.repair = $false
+                $UI.chkLauncher.Checked = $true; $UI.chkSteam.Checked = $false
+                Show-View 'pick'
+                Test-Check 'pick, ticked: launcher box and Steam box shown, button says Continue, disc controls greyed' ((Own-Visible $UI.chkLauncher) -and (Own-Visible $UI.chkSteam) -and ($UI.btnInstall.Text -eq 'Continue') -and $UI.btnInstall.Enabled -and -not $UI.txtIso.Enabled -and -not (Own-Visible $UI.lnkGetLauncher))
+                Test-ViewFit 'pick ticked'; Save-Shot '30_pick_ticked'
+                $UI.chkLauncher.Checked = $false
+                Test-Check 'pick, unticked: button says Install and waits for a checked disc, disc controls usable' (($UI.btnInstall.Text -eq 'Install') -and -not $UI.btnInstall.Enabled -and $UI.txtIso.Enabled -and $UI.btnBrowse.Enabled)
+                Test-ViewFit 'pick unticked'; Save-Shot '31_pick_unticked'
+                $UI.chkLauncher.Checked = $true; $UI.chkSteam.Checked = $true
+                Test-ViewFit 'pick Steam ticked'; Save-Shot '32_pick_steam_ticked'
+                $UI.chkSteam.Checked = $false
+                $env:RAC_TEST_STEAM_DIR = $noSteam; Show-View 'pick'
+                Test-Check 'pick, Steam not found: no Steam box' (-not (Own-Visible $UI.chkSteam) -and (Own-Visible $UI.chkLauncher))
+                Test-ViewFit 'pick no Steam'; Save-Shot '33_pick_no_steam'
+                $env:RAC_TEST_STEAM_DIR = $fake
+                Set-SetupChoice 'launcher' 'no'; Show-View 'pick'
+                Test-Check 'pick, remembered no: no box, the link "Install the RAC-RS Launcher instead", button says Install' ((-not (Own-Visible $UI.chkLauncher)) -and (Own-Visible $UI.lnkGetLauncher) -and ($UI.btnInstall.Text -eq 'Install'))
+                Test-ViewFit 'pick remembered no'; Save-Shot '34_pick_remembered_no'
+                Remove-Item -LiteralPath $choiceFile -Force
+                $UI.chkLauncher.Checked = $true; Show-View 'pick'
+                Set-FetchBusy $true
+                Test-Check 'fetching: boxes and button disabled, text says getting the launcher' ((-not $UI.chkLauncher.Enabled) -and (-not $UI.btnInstall.Enabled) -and ($UI.lblPickText.Text -like 'Getting the RAC-RS Launcher*'))
+                Test-ViewFit 'pick fetching'; Save-Shot '35_pick_fetching'
+                Set-FetchBusy $false
+                Show-View 'pick'
+                Set-IsoPath (Join-Path $TestShot 'dummy.iso'); $UI.chkLauncher.Checked = $false
+                [void](Wait-Until { -not $S.check } 60)
+                Test-ViewFit 'pick unticked, bad disc'; Save-Shot '36_pick_unticked_bad_disc'
+                Set-IsoPath ''; $UI.chkLauncher.Checked = $true
+                $S.repair = $true; Show-View 'pick'
+                Test-Check 'repair: neither launcher nor Steam box' ((-not (Own-Visible $UI.chkLauncher)) -and (-not (Own-Visible $UI.chkSteam)) -and ($UI.btnInstall.Text -eq 'Repair'))
+                Test-ViewFit 'pick repair'; Save-Shot '37_pick_repair'
+                $S.repair = $false
+                # installed view
+                Show-View 'installed'
+                Test-Check 'installed, Steam found and not in it: "Install the launcher" button and the link "Add to Steam"' ((Own-Visible $UI.btnLauncher) -and (Own-Visible $UI.lnkSteam) -and ($UI.lnkSteam.Text -eq 'Add to Steam'))
+                Test-ViewFit 'installed add'; Save-Shot '38_installed_add_steam'
+                $null = Invoke-SteamShortcut 'add'; Show-View 'installed'
+                Test-Check 'installed, our entry is in Steam: the link says Remove from Steam' ($UI.lnkSteam.Text -eq 'Remove from Steam')
+                Test-ViewFit 'installed remove'; Save-Shot '39_installed_remove_steam'
+                $env:RAC_TEST_STEAM_DIR = $noSteam; Show-View 'installed'
+                Test-Check 'installed, Steam not found: no Steam link' (-not (Own-Visible $UI.lnkSteam))
+                Test-ViewFit 'installed no Steam'; Save-Shot '40_installed_no_steam'
+                $env:RAC_TEST_STEAM_DIR = $fake
+                Set-Content -LiteralPath $launcherExe -Value 'x'
+                Show-View 'installed'
+                Test-Check 'installed, launcher present: no "Install the launcher" button' (-not (Own-Visible $UI.btnLauncher))
+                Test-ViewFit 'installed with launcher'; Save-Shot '41_installed_launcher_present'
+                Remove-Item -LiteralPath $launcherExe -Force
+                # done view with the longest notes
+                $S.shortcut = $true; $S.shortcutPath = ''; $S.steamNote = (Get-SteamResultText 'add' @{ Status = 'ok'; Errors = @(); Actions = @('added') })
+                Show-View 'done'
+                Test-ViewFit 'done shortcut + Steam note'; Save-Shot '42_done_notes'
+                $S.steamNote = "Steam was still running, so it was not changed. Close Steam, then use `"Add to Steam`" again."
+                Show-View 'done'
+                Test-ViewFit 'done Steam running note'; Save-Shot '43_done_steam_running'
+                $S.steamNote = (Get-SteamResultText 'add' @{ Status = 'ok'; Errors = @('C:\Program Files (x86)\Steam\userdata\123456789\config\shortcuts.vdf: Access to the path is denied.'); Actions = @('added') })
+                Show-View 'done'
+                Test-ViewFit 'done Steam error note'; Save-Shot '44_done_steam_error'
+                $S.shortcut = $false; $S.steamNote = ''
+                $isoGone = 'C:\no_such_folder\Ratchet and Clank.iso'
+                [System.IO.File]::WriteAllText((Join-Path $root 'generated\play.cfg'), "iso=$isoGone`n")
+                $S.steamNote = (Get-SteamResultText 'remove' @{ Status = 'ok'; Errors = @('C:\Program Files (x86)\Steam\userdata\123456789\config\shortcuts.vdf: Access to the path is denied.'); Actions = @('removed') })
+                Show-View 'installed'
+                Test-ViewFit 'installed, disc gone + Steam error note'; Save-Shot '45_installed_longest_note'
+                Remove-Item -LiteralPath (Join-Path $root 'generated\play.cfg') -Force
+                Stop-DiscCheck
+                Write-Host ("launcher views finished, failures: {0}" -f $script:TestFails)
+                if ($Mutex) { $Mutex.ReleaseMutex() }
+                exit $script:TestFails
+            }
+            if ($TestChoice -eq 'dpiviews') {
+                # every view with stub content at the scale given by -TestDpi / -TestScreen: the window must fit the screen, every control must be inside
+                # its panel with its text not clipped. Nothing is installed or downloaded. Shots: dpi_*.png
+                Write-Host ('  screen {0}x{1} (work area), display scale {2:N2} -> layout scale {3:N2}, window client {4}x{5} max {6}' -f $wa.Width, $wa.Height, $want, $LayoutK, $form.ClientSize.Width, $form.ClientSize.Height, $MaxClientH)
+                function Test-Window([string]$tag) {
+                    Test-Check "$tag : window $($form.Width)x$($form.Height) fits the work area $($wa.Width)x$($wa.Height)" (($form.Width -le $wa.Width) -and ($form.Height -le $wa.Height))
+                }
+                function Show-DpiView([string]$tag, [string]$view) {
+                    Show-View $view; Test-Window $tag; Test-ViewFit $tag; Save-Shot ('dpi_' + $tag)
+                }
+                if (Test-Path -LiteralPath $choiceFile) { Remove-Item -LiteralPath $choiceFile -Force }
+                if (Test-Path -LiteralPath $launcherExe) { Remove-Item -LiteralPath $launcherExe -Force }
+                New-Item -ItemType Directory -Force -Path (Join-Path $root 'generated') | Out-Null
+                $builtFile = Join-Path $root 'generated\built_version.txt'
+                $bakBuilt = $null; if (Test-Path -LiteralPath $builtFile) { $bakBuilt = [System.IO.File]::ReadAllText($builtFile) }
+                $playCfg = Join-Path $root 'generated\play.cfg'
+                $bakCfg = $null; if (Test-Path -LiteralPath $playCfg) { $bakCfg = [System.IO.File]::ReadAllText($playCfg) }
+                # first view
+                $S.repair = $false; $UI.chkLauncher.Checked = $true; $UI.chkSteam.Checked = $true
+                Show-DpiView '01_pick_launcher_ticked' 'pick'
+                $UI.chkLauncher.Checked = $false
+                Set-DiscStatus 'bad' 'This is not the right disc image. It must be Ratchet & Clank PAL / Europe v1.00 or USA v1.00, one .iso file of about 3.9 GB. This file is 4.0 KB. Other regions, other versions and Platinum / Greatest Hits re-releases do not work.'
+                $UI.txtIso.Text = 'C:\Users\Someone\Games\Ratchet & Clank (Europe) (En,Fr,De,Es,It) (v1.00).iso'
+                Show-DpiView '02_pick_unticked_bad_disc' 'pick'
+                $S.repair = $true
+                Show-DpiView '03_pick_repair' 'pick'
+                $S.repair = $false; $UI.chkLauncher.Checked = $true
+                # installing, then the details box
+                Set-Mode $false
+                Reset-InstallState; $S.toolsSub = 0.0; $S.vu = $false; $S.t0 = (Get-Date).AddMinutes(-7).AddSeconds(-12)
+                Show-View 'install'
+                foreach ($l in @('== (a) tools', '== (b) disc image', '== (c) generating game code', '== (c2) VU', '== (d) building the game')) { Feed-Line $l }
+                foreach ($i in 1..237) { Feed-Line ('   Compiling crate-{0} v0.1.0' -f $i) }
+                Feed-Line '   Compiling rec-l4-03 v0.1.0 (C:\games\rac-rs\oracle\rec\l4\rec-l4-03)'
+                $UI.lblElapsed.Text = 'Elapsed: 07:12'; $UI.lblStatus.Text = $S.status; Update-Progress
+                Test-Window '04_install'; Test-ViewFit '04_install'; Save-Shot 'dpi_04_install'
+                Switch-Details
+                Test-Window '05_install_details'; Test-ViewFit '05_install_details'; Save-Shot 'dpi_05_install_details'
+                Switch-Details
+                # the same for an update
+                $S.newV = '0.4.1'; Set-Mode $true
+                Reset-InstallState; $S.t0 = (Get-Date).AddMinutes(-1)
+                Show-View 'install'; Feed-Line '== (u) updating'
+                Update-Progress
+                Test-Window '06_install_update'; Test-ViewFit '06_install_update'; Save-Shot 'dpi_06_install_update'
+                # done after an install (shortcut note + Steam note), then the done view of an update
+                Set-Mode $false; Reset-InstallState
+                foreach ($l in @('== (e) play.cfg and Play.cmd', '== done', '  desktop shortcut created: C:\Users\Someone\Desktop\Ratchet & Clank (rac-rs).lnk')) { Feed-Line $l }
+                $S.finished = $true; Set-Step 4; Update-Progress
+                $S.steamNote = (Get-SteamResultText 'add' @{ Status = 'ok'; Errors = @(); Actions = @('added') })
+                Show-DpiView '07_done_install' 'done'
+                Test-Check '07 done: the support link is visible and says what it is' ((Own-Visible $UI.lnkSupport) -and ($UI.lnkSupport.Text -eq 'Support the project') -and (Own-Visible $UI.btnPlay))
+                $S.steamNote = (Get-SteamResultText 'add' @{ Status = 'ok'; Errors = @('C:\Program Files (x86)\Steam\userdata\123456789\config\shortcuts.vdf: Access to the path is denied.'); Actions = @('added') })
+                Show-DpiView '08_done_install_longest_note' 'done'
+                $S.steamNote = ''
+                $S.newV = '0.4.1'; Set-Mode $true; Reset-InstallState
+                $S.finished = $true; Set-Step 4; Update-Progress
+                Show-DpiView '09_done_update' 'done'
+                Test-Check '09 done (update): the support link is visible' (Own-Visible $UI.lnkSupport)
+                Set-Mode $false; Reset-InstallState
+                # installed (home) view, and the "Finish the update" variant of it
+                [System.IO.File]::WriteAllText($playCfg, "iso=C:\no_such_folder\Ratchet and Clank.iso`n")
+                Show-DpiView '10_installed_disc_gone' 'installed'
+                Test-Check '10 installed: no support link' (-not (Own-Visible $UI.lnkSupport))
+                [System.IO.File]::WriteAllText($playCfg, "iso=$($MyInvocation.MyCommand.Path)`n")
+                [System.IO.File]::WriteAllText($builtFile, '0.3.1')
+                Show-DpiView '11_finish_the_update' 'installed'
+                Test-Check '11 finish the update: the button says Update' ($UI.btnPlay.Text -eq 'Update')
+                if ($null -ne $bakBuilt) { [System.IO.File]::WriteAllText($builtFile, $bakBuilt) } else { Remove-Item -LiteralPath $builtFile -Force }
+                Show-DpiView '12_installed' 'installed'
+                # error (install and update), with a long log
+                Reset-InstallState
+                foreach ($l in @('== (a) tools', '== (b) disc image', '== (c) generating game code', '== (d) building the game')) { Feed-Line $l }
+                foreach ($i in 1..40) { Feed-Line ('   Compiling crate-{0} v0.1.0' -f $i) }
+                Feed-Line 'error[E0463]: can not find crate for `core` (a long line that makes the horizontal scroll bar of the log box appear: 0123456789 0123456789 0123456789 0123456789 0123456789)'
+                $S.lastError = 'could not compile `rec-l4-03` (lib) due to 1 previous error'
+                Set-Step 3 $true; Show-Error
+                Test-Window '13_error'; Test-ViewFit '13_error'; Save-Shot 'dpi_13_error'
+                Test-Check '13 error: no support link anywhere on the error view' (-not (Own-Visible $UI.lnkSupport))
+                $S.newV = '0.4.1'; Set-Mode $true; Show-Error
+                Test-Window '14_error_update'; Test-ViewFit '14_error_update'; Save-Shot 'dpi_14_error_update'
+                Set-Mode $false
+                # update offer (shown by the game exe)
+                $UI.lblOfferTitle.Text = 'Update available: v0.4.0 ' + [string][char]0x2192 + ' v0.4.1'
+                $UI.lblOfferNote.Text = 'This takes about 2 to 10 minutes. Your saves and settings are kept.'
+                $UI.txtChanges.Text = (@(1..14 | ForEach-Object { "- Change number $_ : something got better in the game" }) -join "`r`n")
+                Show-DpiView '15_offer' 'offer'
+                $S.finish = $true
+                $UI.lblOfferTitle.Text = 'Finish the update to v0.4.1'
+                $UI.lblOfferNote.Text = 'An earlier update was not finished. It takes about 2 to 10 minutes. Your saves and settings are kept.'
+                Show-DpiView '16_offer_finish' 'offer'
+                $S.finish = $false
+                # restore what the test changed in the folder
+                if ($null -ne $bakCfg) { [System.IO.File]::WriteAllText($playCfg, $bakCfg) } else { Remove-Item -LiteralPath $playCfg -Force -ErrorAction SilentlyContinue }
+                Stop-DiscCheck
+                Write-Host ("dpi views finished (display scale {0:N2}, layout scale {1:N2}), failures: {2}" -f $want, $LayoutK, $script:TestFails)
+                if ($Mutex) { $Mutex.ReleaseMutex() }
+                exit $script:TestFails
+            }
+            # ---- the two click paths of the first view
+            if (Test-Path -LiteralPath $choiceFile) { Remove-Item -LiteralPath $choiceFile -Force }
+            $S.repair = $false; $S.discOk = $true; $S.discPath = $TestIso
+            $UI.chkShortcut.Checked = $true
+            Show-View 'pick'
+            if ($TestChoice -eq 'flow_unticked') {
+                $UI.chkLauncher.Checked = $false; $UI.chkSteam.Checked = $true
+                Test-Check 'unticked: Install is enabled with the test disc' ($UI.btnInstall.Enabled -and ($UI.btnInstall.Text -eq 'Install'))
+                Invoke-InstallClick
+                Test-Check 'unticked: the choice "no" is written at once' ((Get-SetupChoice 'launcher') -eq 'no')
+                [void](Wait-Until { -not $S.proc } 900)
+                Write-Host ('  worker exit code {0}; view {1}; steam note: {2}' -f $S.workerCode, $S.view, ($S.steamNote -replace "`r`n", ' | '))
+                Test-Check 'unticked: the old install ran (worker exit 0) and the done view is shown' (($S.workerCode -eq 0) -and ($S.view -eq 'done'))
+                Test-Check 'unticked: no launcher exe was fetched' (-not (Test-Path -LiteralPath $launcherExe))
+                Test-Check 'unticked: Steam was added AFTER the install (entry in the fake Steam, note says so)' ((Get-SteamState).Has -and ($S.steamNote -like 'Added*'))
+                Test-Check 'unticked: the done view note names the Steam result' ($UI.lblDoneNote.Text -like '*Steam*')
+                Test-ViewFit 'flow_unticked done'; Save-Shot '50_flow_unticked_done'
+            } else {
+                $UI.chkLauncher.Checked = $true; $UI.chkSteam.Checked = $true
+                Test-Check 'ticked: the button says Continue' ($UI.btnInstall.Text -eq 'Continue')
+                Invoke-InstallClick
+                Test-Check 'ticked: the click starts the hidden fetch and greys the window' ($S.fetch -and (-not $UI.btnInstall.Enabled))
+                [void](Wait-Until { $S.handedOver } 120)
+                Write-Host ('  handed over: {0}; fetch error: "{1}"; steam note: {2}' -f $S.handedOver, $S.fetchErr, ($S.steamNote -replace "`r`n", ' | '))
+                Test-Check 'ticked: the launcher exe is in place' (Test-Path -LiteralPath $launcherExe -PathType Leaf)
+                Test-Check 'ticked: the choice "yes" is written' ((Get-SetupChoice 'launcher') -eq 'yes')
+                $lnkPath = Join-Path $S.shortcutDir 'Ratchet & Clank (rac-rs).lnk'
+                $tgt = $(if (Test-Path -LiteralPath $lnkPath) { ((New-Object -ComObject WScript.Shell).CreateShortcut($lnkPath)).TargetPath } else { '' })
+                Test-Check 'ticked: the shortcut opens the launcher' ($tgt -eq $launcherExe)
+                Test-Check 'ticked: Steam was added at the hand-over' ((Get-SteamState).Has -and ($S.steamNote -like 'Added*'))
+                Test-Check 'ticked: no install worker ran (no game build started)' (-not $S.proc -and ($S.workerCode -eq 0))
+                Test-Check 'ticked: handed over (in test mode the launcher is not started and the window not closed)' ($S.handedOver)
+            }
+            Write-Host ("flow test finished, failures: {0}" -f $script:TestFails)
+            Stop-DiscCheck
+            if ($Mutex) { $Mutex.ReleaseMutex() }
+            exit $script:TestFails
         }
         Write-Host "launcher test (nothing is shown); shots in $TestShot"
 
@@ -1396,6 +2323,8 @@ if (-not $SkipUnblock) { try { Get-ChildItem -LiteralPath $root -Recurse -File -
 # on the PC, no admin rights, no PATH or registry change. Rust uses the GNU host (x86_64-pc-windows-gnu): its linker ships with
 # Rust itself, so the Microsoft C++ build tools are not needed. Python is the official embeddable package from python.org.
 # Rust or Python already installed on the PC are not used and not touched. Running setup again reuses .\toolchain (no new download).
+# On a drive that cannot make hard links (exFAT, FAT32, some network shares) rustup cannot work (its cargo.exe / rustc.exe are hard links
+# to rustup.exe): there the same pinned Rust is unpacked from its official packages instead, still inside .\toolchain (see Rust below).
 Step '(a) tools'
 $RustVersion = '1.99.0'
 $RustHost = 'x86_64-pc-windows-gnu'
@@ -1409,6 +2338,40 @@ $tc = Join-Path $root 'toolchain'
 $tcDl = Join-Path $tc 'downloads'
 $t = Get-Date
 
+# Rust without rustup, for a drive that cannot make hard links. rustup makes cargo.exe, rustc.exe, ... as hard links to rustup.exe and stops
+# there with "could not create link ... Incorrect function" (os error 1). So the four packages of rustup's "minimal" profile (rustc, cargo,
+# rust-std, rust-mingw: the hashes are those of the release manifest https://static.rust-lang.org/dist/channel-rust-1.99.0.toml, whose own
+# SHA-256 is CE6DDDC886364F8D786514771212CEBE9B731BA82D6B859951C6B0CCC516B6A2) are downloaded and unpacked by tools\rust_unpack.py into the
+# folder rustup would have made, toolchain\rustup\toolchains\<version>-<host> (so the linker folder below is the same), and cargo.exe /
+# rustc.exe are run from its bin\ directly. Chosen when -RustNoLinks is given, when toolchain\rust_direct.txt exists (an earlier setup of
+# this folder did it) or when a test hard link in toolchain\ fails; any other drive gets rustup, exactly as before.
+$RustDistUrl = 'https://static.rust-lang.org/dist/2026-10-01'
+$RustPkgs = [ordered]@{
+    "rustc-$RustVersion-$RustHost.tar.xz"      = '015F770C3CA0B3226A24FE159F30B03782A91679BA16159F7D83550F768FB795'
+    "cargo-$RustVersion-$RustHost.tar.xz"      = '36DC7CBA4BE341C5A6CB3E10F660C4565B6F87F318D3CB87519B2CFE8C630BCA'
+    "rust-std-$RustVersion-$RustHost.tar.xz"   = 'A2382BF189D5621E09DB647DA419A8E1D4C604D60941CB116DA00CE34042B1DD'
+    "rust-mingw-$RustVersion-$RustHost.tar.xz" = 'AD2B4B41362A99A86E20A8DBCEC4BE81B99F2D507F6408A72C7A139BC1919080'
+}
+$RustDirectMark = Join-Path $tc 'rust_direct.txt'
+function Test-HardLinks([string]$dir) {
+    # $true when a hard link can be made in $dir (NTFS, ReFS); $false on exFAT, FAT32 and shares that cannot
+    $a = $dir.TrimEnd('\') + '\linktest_a.tmp'
+    $b = $dir.TrimEnd('\') + '\linktest_b.tmp'
+    try {
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        Remove-Item -LiteralPath $a, $b -Force -ErrorAction SilentlyContinue
+        [System.IO.File]::WriteAllText($a, 'x')
+        New-Item -ItemType HardLink -Path $b -Value $a -ErrorAction Stop | Out-Null
+        return (Test-Path -LiteralPath $b -PathType Leaf)
+    } catch { return $false } finally { Remove-Item -LiteralPath $a, $b -Force -ErrorAction SilentlyContinue }
+}
+$RustDirect = [bool]$RustNoLinks -or (Test-Path -LiteralPath $RustDirectMark -PathType Leaf)
+if (-not $RustDirect -and -not (Test-HardLinks $tc)) {
+    $RustDirect = $true
+    Write-Host '  this drive cannot make hard links (exFAT / FAT32 / network share?): Rust is installed without rustup'
+}
+$rustHome = Join-Path $tc "rustup\toolchains\$RustVersion-$RustHost"      # where rustup puts the toolchain; with $RustDirect rust_unpack.py does
+
 # Only this folder's toolchain is used: its own rustup/cargo homes, the pinned Rust version, and no build settings from the PC
 # (they could change the build or its speed).
 $env:RUSTUP_HOME = Join-Path $tc 'rustup'
@@ -1418,6 +2381,11 @@ $env:Path = (Join-Path $tc 'cargo\bin') + ';' + $env:Path
 foreach ($v in @('RUSTC', 'RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER', 'RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS', 'CARGO_BUILD_TARGET', 'CARGO_BUILD_RUSTFLAGS',
                   'CARGO_BUILD_RUSTC_WRAPPER', 'CARGO_TARGET_DIR', 'CARGO_PROFILE_RELEASE_OPT_LEVEL', 'CARGO_PROFILE_RELEASE_LTO', 'RUSTUP_DIST_SERVER')) {
     Remove-Item -LiteralPath "Env:$v" -ErrorAction SilentlyContinue
+}
+if ($RustDirect) {
+    # no rustup proxies: cargo and rustc are the real files; cargo is told which rustc to run (no rustup to ask)
+    $env:Path = (Join-Path $rustHome 'bin') + ';' + $env:Path
+    $env:RUSTC = Join-Path $rustHome 'bin\rustc.exe'
 }
 
 function Get-Pinned($url, $file, $sha) {
@@ -1442,9 +2410,82 @@ function Get-Pinned($url, $file, $sha) {
     Fail "could not download $url (check the internet connection, then run Setup.cmd again)"
 }
 
+# DirectX shader compiler (DXC) for the DirectX 12 renderer option (Options -> Graphics -> Screen -> Renderer). The game looks for
+# dxcompiler.dll next to rac-rs.exe and falls back to the built-in FXC (about 7 s slower first start) without it, so a failed
+# download here is only a warning, never a failed setup. Pinned release zip from Microsoft; only bin\x64\dxcompiler.dll is taken.
+# Licence texts: NOTICE_dxc.md. Runs at the end of every setup/update/repair build and refetches the DLL when it is missing or differs.
+$DxcZipUrl = 'https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.9.2609/dxc_2026_09_29.zip'
+$DxcZipSha256 = 'AD31B1FC8443175D204F77A611FDB3EF2EC42759BDC2F1167368DE24A4A7E7F1'
+$DxcDllSha256 = '0689E2FEE0A1C9DF8662A59680469F24E2A3AD7CE6BBBCC9284F7A83172BFC59'
+function Install-Dxc([string]$exeDir) {
+    if ($NoDxc) { Write-Host '  DirectX shader compiler: not fetched (-NoDxc)'; return }
+    $dll = Join-Path $exeDir 'dxcompiler.dll'
+    $tmp = Join-Path $exeDir 'dxc_download.tmp'
+    try {
+        if ((Test-Path -LiteralPath $dll -PathType Leaf) -and ((Get-FileHash -LiteralPath $dll -Algorithm SHA256).Hash -eq $DxcDllSha256)) {
+            Write-Host '  DirectX shader compiler: dxcompiler.dll is already there'; return
+        }
+        Write-Host '  DirectX shader compiler: downloading dxcompiler.dll (Microsoft DXC v1.9.2609, about 32 MB) for the DirectX 12 option'
+        try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
+        $zip = "$tmp.zip"
+        $old = $ProgressPreference; $ProgressPreference = 'SilentlyContinue'
+        try { Invoke-WebRequest -Uri $DxcZipUrl -OutFile $zip -UseBasicParsing -TimeoutSec 300 } finally { $ProgressPreference = $old }
+        $h = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+        if ($h -ne $DxcZipSha256) { throw "wrong SHA-256 $h" }
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $za = [System.IO.Compression.ZipFile]::OpenRead($zip)
+        try {
+            # (this archive stores its names with backslashes; accept either slash)
+            $entry = $za.Entries | Where-Object { $_.FullName.Replace('\', '/') -eq 'bin/x64/dxcompiler.dll' } | Select-Object -First 1
+            if (-not $entry) { throw 'bin/x64/dxcompiler.dll is not in the archive' }
+            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $tmp, $true)
+        } finally { $za.Dispose() }
+        if ((Get-FileHash -LiteralPath $tmp -Algorithm SHA256).Hash -ne $DxcDllSha256) { throw 'dxcompiler.dll has an unexpected SHA-256' }
+        Move-Item -LiteralPath $tmp -Destination $dll -Force
+        Write-Host '  DirectX shader compiler: dxcompiler.dll installed next to rac-rs.exe'
+    } catch {
+        Write-Host "  DirectX shader compiler: could not get dxcompiler.dll ($($_.Exception.Message)); the DirectX 12 option still works, with a slower first start" -ForegroundColor Yellow
+    } finally {
+        Remove-Item -LiteralPath $tmp, "$tmp.zip" -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# Things that come with the game (since v0.4.0), in bundled\: omniloader.dll = the OmniLoader mod loader (our own MIT/Apache code, built
+# with MSVC and the static CRT, no game data), copied next to rac-rs.exe (without it the game simply runs without script mods); and
+# bundled\mods\<folder> = mods that come preinstalled (Arsenal Mastery), mirrored into mods\<folder>. Nothing is switched on here: a mod
+# runs only when the player turns it on (launcher Mods page or title-screen Options > Mods, which write mods\active.txt); mods\active.txt
+# and mods\settings.json are never touched. Runs at the end of every setup/update/repair build. A problem is a warning, never a failed setup.
+function Install-Bundled([string]$exeDir) {
+    $b = Join-Path $root 'bundled'
+    try {
+        $src = Join-Path $b 'omniloader.dll'
+        if (Test-Path -LiteralPath $src -PathType Leaf) {
+            $dst = Join-Path $exeDir 'omniloader.dll'
+            if ((Test-Path -LiteralPath $dst -PathType Leaf) -and ((Get-FileHash -LiteralPath $dst -Algorithm SHA256).Hash -eq (Get-FileHash -LiteralPath $src -Algorithm SHA256).Hash)) {
+                Write-Host '  mod loader: omniloader.dll is already there'
+            } else {
+                Copy-Item -LiteralPath $src -Destination $dst -Force
+                Write-Host '  mod loader: omniloader.dll installed next to rac-rs.exe'
+            }
+        }
+        $bm = Join-Path $b 'mods'
+        if (Test-Path -LiteralPath $bm -PathType Container) {
+            foreach ($m in @(Get-ChildItem -LiteralPath $bm -Directory)) {
+                $to = Join-Path (Join-Path $root 'mods') $m.Name
+                & robocopy $m.FullName $to /MIR /COPY:DAT /DCOPY:T /R:1 /W:1 /NP /NFL /NDL /NJH /NJS | Out-Null
+                if ($LASTEXITCODE -ge 8) { throw "could not copy the mod $($m.Name) (robocopy $LASTEXITCODE)" }
+                Write-Host "  bundled mod: $($m.Name) in mods\$($m.Name) (off until you turn it on)"
+            }
+        }
+    } catch {
+        Write-Host "  bundled files: $($_.Exception.Message); the game still runs, without that mod support" -ForegroundColor Yellow
+    }
+}
+
 # Rust. A first setup downloads and installs it (about 150 MB) in the background: Python and the assembler come meanwhile, then
 # the disc check and the game code (Python only) run while it installs. Complete-Tools (below) finishes (a) once it is there.
-$cargo = Join-Path $tc 'cargo\bin\cargo.exe'
+$cargo = $(if ($RustDirect) { Join-Path $rustHome 'bin\cargo.exe' } else { Join-Path $tc 'cargo\bin\cargo.exe' })
+$rustcExe = $(if ($RustDirect) { Join-Path $rustHome 'bin\rustc.exe' } else { Join-Path $tc 'cargo\bin\rustc.exe' })
 # The GNU host's own linker tools (ld, dlltool for the Windows API import libraries) come with Rust; rustc finds dlltool on PATH
 # (the GNU assembler that dlltool runs is added to the same folder by Complete-Tools).
 $rsc = Join-Path $tc "rustup\toolchains\$RustVersion-$RustHost\lib\rustlib\$RustHost\bin\self-contained"
@@ -1465,20 +2506,34 @@ foreach ($pd in ($env:Path -split ';')) {
 $env:Path = $pathKeep -join ';'
 function Get-RustVersion {
     $v = ''
-    if (Test-Path -LiteralPath $cargo) { try { $v = (& (Join-Path $tc 'cargo\bin\rustc.exe') --version 2>$null) } catch { $v = '' } }
+    if (Test-Path -LiteralPath $cargo) { try { $v = (& $rustcExe --version 2>$null) } catch { $v = '' } }
     return "$v"
 }
 $rv = Get-RustVersion
+$script:RustUnpack = @()
 if ($rv -notmatch "^rustc $([regex]::Escape($RustVersion)) ") {
-    Write-Host "  downloading Rust $RustVersion ($RustHost, about 150 MB) into toolchain\ (in the background) ..."
-    $ri = Join-Path $tcDl "rustup-init-$RustupVersion.exe"
-    Get-Pinned $RustupUrl $ri $RustupSha256
-    # rustup checks every Rust package it downloads against the signed release manifest of $RustVersion.
     $rl = Join-Path $tc 'rust_install.log'
     Remove-Item -LiteralPath $rl, "$rl.out" -Force -ErrorAction SilentlyContinue
-    $p = Start-Process -FilePath $ri -ArgumentList @('-y', '--no-modify-path', '--profile', 'minimal', '--default-host', $RustHost, '--default-toolchain', $RustVersion) -NoNewWindow -PassThru -RedirectStandardOutput "$rl.out" -RedirectStandardError $rl
-    $null = $p.Handle      # keeps the exit code readable
-    $script:RustJob = [pscustomobject]@{ Proc = $p; Log = $rl; T0 = Get-Date }
+    if ($RustDirect) {
+        # the four packages come now (about 150 MB); tools\rust_unpack.py unpacks them in the background once Python is there (below)
+        Write-Host "  downloading Rust $RustVersion ($RustHost, about 150 MB, without rustup) into toolchain\ ..."
+        # remembered: this folder runs Rust without rustup from now on (also when the next setup or an update runs without -RustNoLinks)
+        New-Item -ItemType Directory -Force -Path $tc | Out-Null
+        [System.IO.File]::WriteAllText($RustDirectMark, "Rust $RustVersion is unpacked from its packages (tools\rust_unpack.py), without rustup: this drive cannot make hard links.`n", (New-Object System.Text.UTF8Encoding($false)))
+        foreach ($e in $RustPkgs.GetEnumerator()) {
+            $f = Join-Path $tcDl $e.Key
+            Get-Pinned "$RustDistUrl/$($e.Key)" $f $e.Value
+            $script:RustUnpack += $f
+        }
+    } else {
+        Write-Host "  downloading Rust $RustVersion ($RustHost, about 150 MB) into toolchain\ (in the background) ..."
+        $ri = Join-Path $tcDl "rustup-init-$RustupVersion.exe"
+        Get-Pinned $RustupUrl $ri $RustupSha256
+        # rustup checks every Rust package it downloads against the signed release manifest of $RustVersion.
+        $p = Start-Process -FilePath $ri -ArgumentList @('-y', '--no-modify-path', '--profile', 'minimal', '--default-host', $RustHost, '--default-toolchain', $RustVersion) -NoNewWindow -PassThru -RedirectStandardOutput "$rl.out" -RedirectStandardError $rl
+        $null = $p.Handle      # keeps the exit code readable
+        $script:RustJob = [pscustomobject]@{ Proc = $p; Log = $rl; T0 = Get-Date }
+    }
 } else {
     Write-Host "  $rv ($RustHost, toolchain\)"
 }
@@ -1499,6 +2554,16 @@ if ($pv -ne $PyVersion) {
     if ($pv -ne $PyVersion) { Fail "Python in toolchain\ does not run (version: '$pv')" }
 }
 Write-Host "  python $pv (toolchain\python)"
+
+# Rust without rustup (see above): unpack the downloaded packages in the background, like the rustup install in the normal case
+if ($script:RustUnpack.Count -gt 0) {
+    $ru = Join-Path $root 'tools\rust_unpack.py'
+    if (-not (Test-Path -LiteralPath $ru -PathType Leaf)) { Fail 'tools\rust_unpack.py is missing (needed to install Rust on a drive without hard links); download the game files again' }
+    $ua = @('-I', $ru, $rustHome) + @($script:RustUnpack) | ForEach-Object { if ($_ -match '[\s&]') { '"' + $_ + '"' } else { $_ } }
+    $p = Start-Process -FilePath $python -ArgumentList $ua -NoNewWindow -PassThru -RedirectStandardOutput "$rl.out" -RedirectStandardError $rl
+    $null = $p.Handle      # keeps the exit code readable
+    $script:RustJob = [pscustomobject]@{ Proc = $p; Log = $rl; T0 = Get-Date }
+}
 
 # GNU assembler. rustc makes the Windows API import libraries of some crates (windows-link and its users) with dlltool.exe,
 # which comes with Rust, and dlltool runs the GNU assembler (as.exe), which does not. as.exe and the four DLLs it needs are
@@ -1965,6 +3030,8 @@ if ($cargoExit -ne 0) { Fail 'cargo build failed' }
 $exe = Join-Path $root 'build\release\rac-rs.exe'
 if (-not (Test-Path -LiteralPath $exe)) { Fail "build finished but $exe is missing" }
 Write-Host "  built $exe ($([math]::Round((Get-Item -LiteralPath $exe).Length / 1MB)) MB) in $($timings['build']) s"
+Install-Dxc (Split-Path -Parent $exe)
+Install-Bundled (Split-Path -Parent $exe)
 [System.IO.File]::WriteAllText((Join-Path $root 'generated\built_version.txt'), ((Get-LocalVersion) + "`n"), (New-Object System.Text.UTF8Encoding($false)))      # the version this build was made from
 Get-ChildItem -LiteralPath (Join-Path $root 'generated') -Filter 'synced_*' -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue      # (see Sync-Update / -ApplyUpdate)
 
@@ -2004,5 +3071,12 @@ try {
         Write-Host "  desktop shortcut created: $lnkPath"
     }
 } catch { Write-Host "  could not create the desktop shortcut: $($_.Exception.Message)" -ForegroundColor Yellow }
+# the checkboxes of the setup window as switches (never a prompt here): -NoLauncher remembers "no launcher", -AddToSteam adds the Steam entry (Steam open = a note, the set-up is still a success)
+if ($NoLauncher) { try { Set-SetupChoice 'launcher' 'no'; Write-Host '  remembered: no launcher (generated\setup_choice.txt)' } catch { } }
+if ($AddToSteam) {
+    try { $steamRes = Invoke-SteamShortcut 'add'; Write-Host ('  Steam: ' + (Get-SteamResultText 'add' $steamRes) + $(if ($steamRes.Status -ne 'ok') { ' Run Setup.cmd -AddToSteam later to try again.' } else { '' })) }
+    catch { Write-Host "  Steam: could not be changed ($($_.Exception.Message))" -ForegroundColor Yellow }
+}
 Write-Host ''
 Write-Host 'All done. To play: double-click "Ratchet & Clank (rac-rs)" on your desktop, or open Setup.cmd and click Play (or Play.cmd in this folder).' -ForegroundColor Green
+Write-Host 'Support the project: https://ko-fi.com/asobicodes'

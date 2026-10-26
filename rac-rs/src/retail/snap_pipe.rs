@@ -1,4 +1,4 @@
-//! Speed lane A: the effects layer's picture work (`efx_draw::capture` + `efx_vu::Picker::prep`, which copy the field's
+//! [PC] perf: the effects layer's picture work (`efx_draw::capture` + `efx_vu::Picker::prep`, which copy the field's
 //! packets and the VIF1 chain out of RAM) runs on its own thread, while the game thread already runs the next field.
 //!
 //! Hand-over, per field, on the worker (the `retail` thread) after `Machine::frame` returned (the game thread is parked):

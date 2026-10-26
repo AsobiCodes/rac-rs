@@ -1,4 +1,4 @@
-//! One decode of the retail GS draw state for every native draw path (run 6 of lane scratch_cliff2, "general fix").
+//! One decode of the retail GS draw state for every native draw path.
 //!
 //! Each native path (tfrag, tie, shrub, moby, effects, sky, ocean, HUD) builds a [`GsRegs`] from the register words retail
 //! writes for that draw (level data, the draw packet constants, or the live GIF words in RAM), and takes its sampler, alpha

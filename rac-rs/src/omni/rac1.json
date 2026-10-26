@@ -1,0 +1,4779 @@
+{
+  "format": 1,
+  "about": "Ratchet & Clank's binding for mods: its hook points and the game state exposed to scripts by name. Addresses are each disc's; a field's offset is added to its base's.",
+  "game": "rac1",
+  "discs": [
+    "pal",
+    "ntsc"
+  ],
+  "catalogue": "sdk/catalogue/rac1/classes.json",
+  "catalogue_symbols": {
+    "ntsc": "sdk/bindings/rac1.ntsc.tsv"
+  },
+  "catalogue_exclude": {
+    "func_001E9768": "Profile_Mark: an empty routine 46 classes take as their update, which the engine also calls as a profiler mark; a hook on it would run for every mark and never see a moby",
+    "func_L00_002B33E8": "defined under another name (func_L00_002B33E8_r, vendor_002B33E8.c), which hostgen does not check a hook row against",
+    "func_L00_002B5C98": "defined under another name (func_L00_002B5C98_r), which hostgen does not check a hook row against",
+    "func_L00_002B9AD8": "defined under another name (func_L00_002B9AD8_r), which hostgen does not check a hook row against",
+    "func_L00_002C74B8": "defined under another name (func_L00_002C74B8_r), which hostgen does not check a hook row against",
+    "func_L07_0031A410": "defined under another name (func_L07_0031A410_r), which hostgen does not check a hook row against",
+    "func_L10_002DE018": "defined under another name (func_L10_002DE018_impl, a functional candidate), which hostgen does not check a hook row against",
+    "func_L13_00306EF0": "defined under another name (func_L13_00306EF0_r), which hostgen does not check a hook row against"
+  },
+  "hooks": [
+    {
+      "id": "rac1.pad.process_report",
+      "name": "Pad_ProcessReport",
+      "signature": "void(u32,u32,i32)",
+      "params": [
+        "pad",
+        "report",
+        "size"
+      ],
+      "symbols": {
+        "pal": "func_002181F0",
+        "ntsc": "FUN_00217328"
+      },
+      "about": "One pad report into the pad's state (PadState, at pad), each poll, before the tick reads it."
+    },
+    {
+      "id": "rac1.player.update_motion_input",
+      "name": "Hero_UpdateMotionInput",
+      "signature": "void()",
+      "params": [],
+      "symbols": {
+        "pal": "func_L00_00211D28",
+        "ntsc": "FUN_L00_00211670"
+      },
+      "about": "The stick read into the hero, early in his update each tick."
+    },
+    {
+      "id": "rac1.player.turn_to_heading",
+      "name": "Hero_TurnToHeading",
+      "signature": "void(i32,f32,f32,f32)",
+      "params": [
+        "mode",
+        "accel",
+        "damping",
+        "limit"
+      ],
+      "symbols": {
+        "pal": "func_L00_002124E8",
+        "ntsc": "FUN_L00_00211e30"
+      },
+      "about": "Eases the hero's facing toward his move yaw."
+    },
+    {
+      "id": "rac1.player.set_planar_velocity",
+      "name": "Hero_SetPlanarVelocity",
+      "signature": "void(f32)",
+      "params": [
+        "angle"
+      ],
+      "symbols": {
+        "pal": "func_L00_00212790",
+        "ntsc": "FUN_L00_002120d8"
+      },
+      "about": "The hero's velocity at his ground speed along an angle; an angle above pi means his facing."
+    },
+    {
+      "id": "rac1.camera.follow.apply_overrides",
+      "name": "FollowCamera_ApplyOverrides",
+      "signature": "void(u32)",
+      "params": [
+        "camera"
+      ],
+      "symbols": {
+        "pal": "func_L00_002E74B0",
+        "ntsc": "FUN_L00_002e6000"
+      },
+      "about": "The follow camera's per-tick requests from the hero's state; the camera moby's update calls it before it places the eye."
+    },
+    {
+      "id": "rac1.player.advance_animation",
+      "name": "Hero_AdvanceAnimation",
+      "signature": "void()",
+      "params": [],
+      "symbols": {
+        "pal": "func_L00_00232EF0",
+        "ntsc": "FUN_L00_00232670"
+      },
+      "about": "Ratchet's animation moved on by his animation speed, once a tick after his state's update."
+    },
+    {
+      "id": "rac1.item.give",
+      "name": "Item_Give",
+      "signature": "void(i32,i32)",
+      "params": [
+        "id",
+        "equip"
+      ],
+      "symbols": {
+        "pal": "func_L00_002618D8",
+        "ntsc": "FUN_L00_00260860"
+      },
+      "about": "Gives the player item id (GiveItem): sets its owned and obtained bytes, shows its banner, gives its starting ammo, marks it bought in the vendor's stock and adds it to the quick select; equip non-zero also puts it in hand. Every item the game gives goes through it but the Persuader's."
+    },
+    {
+      "id": "rac1.planet.unlock",
+      "name": "Planet_Unlock",
+      "signature": "void(i32)",
+      "params": [
+        "planet"
+      ],
+      "symbols": {
+        "pal": "func_L00_00261848",
+        "ntsc": "FUN_L00_002607d0"
+      },
+      "about": "Unlocks a planet's coordinates (UnlockPlanet): its flag (one byte per level), the galaxy list, and its banner unless it is the planet the player is on."
+    },
+    {
+      "id": "rac1.vendor.init_level_stock",
+      "name": "Vendor_InitLevelStock",
+      "signature": "void()",
+      "params": [],
+      "symbols": {
+        "pal": "func_L00_0023DB30",
+        "ntsc": "FUN_L00_0023d198"
+      },
+      "about": "The vendor's stock at each level start (VendorStockLevelInit): gives the Bomb Glove while the player has none, keeps the stock's known items and adds the level's new weapon."
+    },
+    {
+      "id": "rac1.vendor.build_item_list",
+      "name": "Vendor_BuildItemList",
+      "signature": "void(i32)",
+      "params": [
+        "skip_unflagged"
+      ],
+      "symbols": {
+        "pal": "func_L00_0029B770",
+        "ntsc": "FUN_L00_0029a400"
+      },
+      "about": "The vendor menu's list (VendorBuildItemList), from the stock and the items owned: each time the menu opens and after each purchase. skip_unflagged leaves out what is for sale (the menu opened from the pause screen)."
+    },
+    {
+      "id": "rac1.gold_bolt.count_collected",
+      "name": "GoldBolts_CountCollected",
+      "signature": "i32()",
+      "params": [],
+      "symbols": {
+        "pal": "func_002160E0",
+        "ntsc": "FUN_00215290"
+      },
+      "about": "The gold bolts collected, at most 40 (count_nonzero_entries_up_to_40): what the pause screen shows; the unspent ones are this less 4 per gold weapon."
+    },
+    {
+      "id": "rac1.player.take_damage",
+      "name": "Hero_TakeDamage",
+      "signature": "void(i32)",
+      "params": [
+        "amount"
+      ],
+      "symbols": {
+        "pal": "func_L00_002056D8",
+        "ntsc": "FUN_L00_002050c0"
+      },
+      "about": "Takes hit points off the hero's health (Hero_TakeDamage): at most one a call, none for 0, then the HUD's health bank. Every hit the hero takes goes through it but the instant kills (falls, crushers), which set his health to 0."
+    },
+    {
+      "id": "rac1.combat.get_hit",
+      "name": "Moby_GetHitMessage",
+      "signature": "u32(u32,i32,i32)",
+      "params": [
+        "moby",
+        "mask",
+        "keep"
+      ],
+      "symbols": {
+        "pal": "func_L00_0025B478",
+        "ntsc": "FUN_L00_0025a420"
+      },
+      "about": "The hit pending on moby (MobyGetHitMessage): the record of the last hit posted to it (+0x20 the attacker, +0x24 the flags, +0x2C the damage, an f32) when its flags match mask, else 0, dropping the hit unless keep. How the hero and every enemy read the hits they take, each tick, so a hit may be read more than once."
+    },
+    {
+      "id": "rac1.weapon.take_ammo",
+      "name": "Weapon_TakeAmmo",
+      "signature": "i32(i32,i32)",
+      "params": [
+        "item",
+        "amount"
+      ],
+      "symbols": {
+        "pal": "func_L00_00234638",
+        "ntsc": "FUN_L00_00233db8"
+      },
+      "about": "Takes amount of ammo from item for a shot (TakeAmmo; -1 is the item in hand): 1 when taken, 0 when there is too little. An item with no ammo limit takes none and gives 1."
+    },
+    {
+      "id": "rac1.moby.record_death",
+      "name": "Moby_RecordDeath",
+      "signature": "void(u32,i32,i32)",
+      "params": [
+        "moby",
+        "flags",
+        "index"
+      ],
+      "about": "Records a placed moby's death or a crate's break (SetDeathBits): its save id's killed bits (none for a save id below 0), its mission, then drops its bolts: about the s16 at +0xB4 (or what a tallied source has left of +0xB6), which it then clears.",
+      "symbols": {
+        "pal": "func_L00_002584A8",
+        "ntsc": "FUN_L00_00257470"
+      }
+    },
+    {
+      "id": "rac1.level.load_gameplay",
+      "name": "Level_LoadGameplay",
+      "signature": "u32(i32)",
+      "params": [
+        "full"
+      ],
+      "symbols": {
+        "pal": "func_L00_002422D8",
+        "ntsc": "FUN_L00_00241940"
+      },
+      "about": "Loads a level's gameplay file into the level heap (LoadLevelGameplay), once per level start: the settings, the placed mobys and their pvars, the spare moby pool, the paths and the rest; returns the heap cursor. After it, every placed moby exists and none has run."
+    },
+    {
+      "id": "rac1.player.approach_speed",
+      "name": "Hero_ApproachSpeed",
+      "signature": "void(f32,f32)",
+      "params": [
+        "up",
+        "down"
+      ],
+      "symbols": {
+        "pal": "func_L00_00212740",
+        "ntsc": "FUN_L00_00212088"
+      },
+      "about": "Eases the hero's ground speed (+0x194, the speed Hero_SetPlanarVelocity moves him at) toward his target speed (+0x190) by up when below it and by down when above, each tick he moves on foot, in every level."
+    },
+    {
+      "id": "rac1.moby.amoeboid.update",
+      "name": "Moby_LargeAmoeboid_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby classes 572, 865, 866 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L01_002EF078"
+      }
+    },
+    {
+      "id": "rac1.moby.big_axebot.update",
+      "name": "Moby_BigAxebot_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 217 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L04_002BB7B0"
+      }
+    },
+    {
+      "id": "rac1.moby.birdbot.update",
+      "name": "Moby_Birdbot_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 459 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L01_002E7FC8"
+      }
+    },
+    {
+      "id": "rac1.moby.blarg_bomb_thrower.update",
+      "name": "Moby_BlargBombthrower_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 333 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L08_002DBF68"
+      }
+    },
+    {
+      "id": "rac1.moby.blarg_commander.update",
+      "name": "Moby_BlargCommander_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1371 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L12_00309CF8"
+      }
+    },
+    {
+      "id": "rac1.moby.blarg_gun.update",
+      "name": "Moby_BlargGun_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby classes 344, 547, 548, 549, 550, 551, 588, 589, 590, 591, 592, 593, 594, 595, 596, 597, 598, 782, 783, 784, 785, 980, 981 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L05_00319C08"
+      }
+    },
+    {
+      "id": "rac1.moby.blarg_space_commando.update",
+      "name": "Moby_BlargSpaceCommando1262_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1262 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental."
+    },
+    {
+      "id": "rac1.moby.blarg_trooper.update",
+      "name": "Moby_BlargTrooper_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 427 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L04_002C5BD0"
+      }
+    },
+    {
+      "id": "rac1.moby.blarg_turret.update",
+      "name": "Moby_BlargTurret_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 29 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L13_002B5368"
+      }
+    },
+    {
+      "id": "rac1.moby.bomber_tank.update",
+      "name": "Moby_BomberTank_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 253 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L08_002D55E0"
+      }
+    },
+    {
+      "id": "rac1.moby.circular_saw.update",
+      "name": "Moby_CircularSawEnemy_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 340 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L04_002C35F0"
+      }
+    },
+    {
+      "id": "rac1.moby.edwina.update",
+      "name": "Moby_Edwina_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 328 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L12_002EC8F0"
+      }
+    },
+    {
+      "id": "rac1.moby.extermibot.update",
+      "name": "Moby_Extermibot_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 623 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L05_003033A0"
+      }
+    },
+    {
+      "id": "rac1.moby.extermitank.update",
+      "name": "Moby_Extermitank_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 625 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L05_00305778"
+      }
+    },
+    {
+      "id": "rac1.moby.fleet_turret.update",
+      "name": "Moby_DreksFleetTurret_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 347 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L17_002CC788"
+      }
+    },
+    {
+      "id": "rac1.moby.floating_enemy.update",
+      "name": "Moby_BlargEliteCommando_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 638 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L16_002D40B8"
+      }
+    },
+    {
+      "id": "rac1.moby.gem_lock_turret.update",
+      "name": "Moby_BlargGunner_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 36 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L13_002B5E30"
+      }
+    },
+    {
+      "id": "rac1.moby.grazing_critter.update",
+      "name": "Moby_Amoeboid_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 133 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L05_002DBF10"
+      }
+    },
+    {
+      "id": "rac1.moby.guide.update",
+      "name": "Moby_BigAl_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 909 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L03_002DC920"
+      }
+    },
+    {
+      "id": "rac1.moby.helicopter_gunship.update",
+      "name": "Moby_BlargHelicopter_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 631 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L03_002CDDC8"
+      }
+    },
+    {
+      "id": "rac1.moby.horny_toad.update",
+      "name": "Moby_HornyToad_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 749 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L00_002D5AC0"
+      }
+    },
+    {
+      "id": "rac1.moby.infobot.update",
+      "name": "Moby_Infobot_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 750 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L00_002D7298"
+      }
+    },
+    {
+      "id": "rac1.moby.linked_turret.update",
+      "name": "Moby_Gun_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1346 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L10_002E9E70"
+      }
+    },
+    {
+      "id": "rac1.moby.machinegun_turret_1126.update",
+      "name": "Moby_MachinegunTurret_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1126 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L07_0031B620"
+      }
+    },
+    {
+      "id": "rac1.moby.machinegun_turret_30.update",
+      "name": "Moby_MachinegunTurret30_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 30 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L14_002B4E40"
+      }
+    },
+    {
+      "id": "rac1.moby.minibomber.update",
+      "name": "Moby_Minibomber_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 31 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L14_002B5938"
+      }
+    },
+    {
+      "id": "rac1.moby.moby1048.update",
+      "name": "Moby_AlienSnapper_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1048 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L06_002F91A8"
+      }
+    },
+    {
+      "id": "rac1.moby.moby1068.update",
+      "name": "Moby_BlargSpaceCommando_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1068 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L06_002FF000"
+      }
+    },
+    {
+      "id": "rac1.moby.moby1196.update",
+      "name": "Moby_Screamer_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1196 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L10_002E0630"
+      }
+    },
+    {
+      "id": "rac1.moby.moby1246.update",
+      "name": "Moby_Puffoid_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1246 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L11_00315788"
+      }
+    },
+    {
+      "id": "rac1.moby.moby1267.update",
+      "name": "Moby_HovenTurret_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1267 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L12_00304920"
+      }
+    },
+    {
+      "id": "rac1.moby.moby1290.update",
+      "name": "Moby_PilotsHelmet_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1290 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L00_002E1850"
+      }
+    },
+    {
+      "id": "rac1.moby.moby1382.update",
+      "name": "Moby_RobotDog1382_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1382 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L17_002F0678"
+      }
+    },
+    {
+      "id": "rac1.moby.moby211.update",
+      "name": "Moby_Plasmabot211_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 211 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L14_002D7250"
+      }
+    },
+    {
+      "id": "rac1.moby.moby294.update",
+      "name": "Moby_BlargTrooper294_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 294 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L12_002E8640"
+      }
+    },
+    {
+      "id": "rac1.moby.moby326.update",
+      "name": "Moby_BlargHelicopter326_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 326 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L12_002EB2E8"
+      }
+    },
+    {
+      "id": "rac1.moby.moby52.update",
+      "name": "Moby_Seeker_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 52 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L09_002C6B30"
+      }
+    },
+    {
+      "id": "rac1.moby.moby573.update",
+      "name": "Moby_RobotDog_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 573 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L03_002C6F80"
+      }
+    },
+    {
+      "id": "rac1.moby.moby90.update",
+      "name": "Moby_Bob_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 90 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L11_002D18D0"
+      }
+    },
+    {
+      "id": "rac1.moby.mountable_turret.update",
+      "name": "Moby_Turret_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1201 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L09_00306030"
+      }
+    },
+    {
+      "id": "rac1.moby.nanotech_ball.update",
+      "name": "Moby_NanotechBall_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 806 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L00_002D9EA0"
+      }
+    },
+    {
+      "id": "rac1.moby.paratrooper.update",
+      "name": "Moby_BlargParatrooper_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1023 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L08_00302618"
+      }
+    },
+    {
+      "id": "rac1.moby.path_follow_moby.update",
+      "name": "Moby_Pterodactyl_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1564 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L00_002E4F38"
+      }
+    },
+    {
+      "id": "rac1.moby.peckbot.update",
+      "name": "Moby_Peckbot_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 577 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L01_002F1038"
+      }
+    },
+    {
+      "id": "rac1.moby.plasmabot.update",
+      "name": "Moby_Plasmabot_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 28 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L14_002B2A28"
+      }
+    },
+    {
+      "id": "rac1.moby.psytcopus.update",
+      "name": "Moby_Psytcopus_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1231 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L11_00311648"
+      }
+    },
+    {
+      "id": "rac1.moby.quest_giver.update",
+      "name": "Moby_Helga_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 890 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L03_002DBC38"
+      }
+    },
+    {
+      "id": "rac1.moby.robosquawker.update",
+      "name": "Moby_Robosquawker_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 63 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental."
+    },
+    {
+      "id": "rac1.moby.sand_shark.update",
+      "name": "Moby_SandShark_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 580 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental."
+    },
+    {
+      "id": "rac1.moby.scoutbot.update",
+      "name": "Moby_Scoutbot_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 252 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L08_002D3DF8"
+      }
+    },
+    {
+      "id": "rac1.moby.sentrybot.update",
+      "name": "Moby_Sentrybot_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 44 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L15_00298BB8"
+      }
+    },
+    {
+      "id": "rac1.moby.sharkigator_1059.update",
+      "name": "Moby_Sharkigator1059_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1059 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L07_003109D0"
+      }
+    },
+    {
+      "id": "rac1.moby.sharkigator_35.update",
+      "name": "Moby_Sharkigator_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 35 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L05_002D28D0"
+      }
+    },
+    {
+      "id": "rac1.moby.spiderbot.update",
+      "name": "Moby_Spiderbot_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 123 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L15_002A8090"
+      }
+    },
+    {
+      "id": "rac1.moby.toxic_crab.update",
+      "name": "Moby_ToxicCrab_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1202 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L10_002E30F8"
+      }
+    },
+    {
+      "id": "rac1.moby.trooper.update",
+      "name": "Moby_MineLayer_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 578 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L03_002CB280"
+      }
+    },
+    {
+      "id": "rac1.moby.wandering_helper.update",
+      "name": "Moby_Chomper_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1445 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L16_002E7270"
+      }
+    },
+    {
+      "id": "rac1.moby.wb_moby.update",
+      "name": "Moby_WoodcutBot_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 563 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L04_002D2A98"
+      }
+    },
+    {
+      "id": "rac1.moby.airship_chain_link.update",
+      "name": "Moby_AirshipPart1181_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1181 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L09_00305710"
+      }
+    },
+    {
+      "id": "rac1.moby.airship_part.update",
+      "name": "Moby_AirshipPart_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby classes 1182, 1183, 1184, 1185, 1186, 1187, 1188, 1189 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L09_002C3858"
+      }
+    },
+    {
+      "id": "rac1.moby.alien_queen.update",
+      "name": "Moby_AlienQueen_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1051 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental."
+    },
+    {
+      "id": "rac1.moby.batalia_bolt_thief.update",
+      "name": "Moby_BoltThief_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 452 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L08_002E4168"
+      }
+    },
+    {
+      "id": "rac1.moby.blarg_fighter111.update",
+      "name": "Moby_BlargSpaceFighter111_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 111 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L13_002C56B0"
+      }
+    },
+    {
+      "id": "rac1.moby.blarg_interceptor.update",
+      "name": "Moby_BlargHeavyInterceptor1417_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1417 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L14_00308368"
+      }
+    },
+    {
+      "id": "rac1.moby.blarg_ship.update",
+      "name": "Moby_BlargShip_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1229 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L10_002E5E48"
+      }
+    },
+    {
+      "id": "rac1.moby.blarg_space_fighter.update",
+      "name": "Moby_BlargSpaceFighter_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 101 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L13_002C3840"
+      }
+    },
+    {
+      "id": "rac1.moby.bolt_thief.update",
+      "name": "Moby_BoltThief923_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 923 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L14_002FF728"
+      }
+    },
+    {
+      "id": "rac1.moby.child_spawner.update",
+      "name": "Moby_Spawner_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 455 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L03_002C0330"
+      }
+    },
+    {
+      "id": "rac1.moby.codebot_slot.update",
+      "name": "Moby_CodebotSlot_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1430 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L15_002ED420"
+      }
+    },
+    {
+      "id": "rac1.moby.commando.update",
+      "name": "Moby_Commando_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1130 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L08_003041A8"
+      }
+    },
+    {
+      "id": "rac1.moby.crate_platform.update",
+      "name": "Moby_BoltThief1401_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1401 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L16_002E4C08"
+      }
+    },
+    {
+      "id": "rac1.moby.deserter.update",
+      "name": "Moby_BataliaDeserter_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1144 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L08_00306730"
+      }
+    },
+    {
+      "id": "rac1.moby.doom_bot.update",
+      "name": "Moby_DoomBot_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 186 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L00_002C12B0"
+      }
+    },
+    {
+      "id": "rac1.moby.door_switch.update",
+      "name": "Moby_HomingMineSpawner_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1281 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L12_00308C20"
+      }
+    },
+    {
+      "id": "rac1.moby.drone.update",
+      "name": "Moby_Drone_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 479 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L00_002CF808"
+      }
+    },
+    {
+      "id": "rac1.moby.fighter_jet_1379.update",
+      "name": "Moby_FighterJet1379_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1379 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental."
+    },
+    {
+      "id": "rac1.moby.fighter_jet_69.update",
+      "name": "Moby_FighterJet69_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 69 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental."
+    },
+    {
+      "id": "rac1.moby.final_boss.update",
+      "name": "Moby_DrekFinalBossRobot_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1422 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental."
+    },
+    {
+      "id": "rac1.moby.floating_mine.update",
+      "name": "Moby_Mine933_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 933 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L14_00300AC8"
+      }
+    },
+    {
+      "id": "rac1.moby.flying_craft.update",
+      "name": "Moby_BlargShip1319_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1319 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L11_0031ACA8"
+      }
+    },
+    {
+      "id": "rac1.moby.frog.update",
+      "name": "Moby_Frog_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 827 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L06_002E9AA8"
+      }
+    },
+    {
+      "id": "rac1.moby.fx_group.update",
+      "name": "Moby_Hoverboard_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby classes 1505, 1506, 1517, 1518, 1522, 1525, 1526, 1528, 1529, 1533, 1534, 1537, 1538, 1539, 1569, 1570, 1571, 1572, 1588, 1589, 1590, 1591, 1592, 1593, 1594, 1595, 1599, 1601, 1602, 1603, 1604, 1605, 1606, 1607, 1608, 1609, 1610, 1611, 1612, 1613, 1614, 1615, 1616, 1617, 1618, 1619, 1620, 1621, 1622, 1623, 1624, 1652, 1653, 1654, 1656, 1657, 1658, 1659, 1661, 1662, 1665, 1666, 1673, 1674, 1675, 1676, 1678, 1679, 1680, 1688, 1689, 1690, 1692, 1693, 1694, 1695, 1696, 1697, 1698, 1699, 1700, 1701, 1702, 1703, 1704, 1705, 1706, 1707, 1708, 1709, 1710, 1711, 1712, 1713, 1714, 1715, 1716, 1717, 1718, 1719, 1720, 1721, 1722, 1724, 1726, 1727, 1728, 1729, 1730, 1731, 1732, 1733, 1734, 1735, 1736, 1737, 1738, 1739, 1740, 1741, 1742, 1743, 1744, 1745, 1746, 1747, 1748, 1749, 1751, 1752, 1753, 1754, 1755, 1756, 1757, 1759, 1760, 1761, 1762, 1763, 1764, 1765, 1769, 1770, 1786, 1787, 1790, 1791, 1792, 1793, 1794, 1796, 1801, 1802, 1803, 1804, 1814, 1815, 1817, 1821, 1829, 1830, 1831, 1832, 1833, 1836, 1838, 1846, 1847, 1851, 1858, 1861, 1864, 1867, 1868, 1869, 1870, 1875, 1878, 1909, 1914, 1915, 1916, 1917, 1922, 1924, 1925, 1926, 1927, 1933, 1934, 1935, 1936, 1939, 1940, 1941, 1942, 1944, 1945, 1946, 1961, 1962, 1963 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L00_002E5238"
+      }
+    },
+    {
+      "id": "rac1.moby.gadgebot.update",
+      "name": "Moby_Gadgebot_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 857 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L06_002F1470"
+      }
+    },
+    {
+      "id": "rac1.moby.grass.update",
+      "name": "Moby_BombthrowerGrass_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby classes 492, 724, 725, 766, 767, 1781, 1782 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L00_002E5158"
+      }
+    },
+    {
+      "id": "rac1.moby.gunship.update",
+      "name": "Moby_BomberJet_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 688 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental."
+    },
+    {
+      "id": "rac1.moby.helicopter.update",
+      "name": "Moby_Helicopter233_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 233 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L15_002C6950"
+      }
+    },
+    {
+      "id": "rac1.moby.hoven_homing_mine.update",
+      "name": "Moby_Mine1269_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1269 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L12_003061E0"
+      }
+    },
+    {
+      "id": "rac1.moby.jet_fighter.update",
+      "name": "Moby_JetFighter_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1242 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental."
+    },
+    {
+      "id": "rac1.moby.kerwan_mine.update",
+      "name": "Moby_Mine627_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 627 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L03_002CD270"
+      }
+    },
+    {
+      "id": "rac1.moby.lobber_enemy.update",
+      "name": "Moby_Bombomatic_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1041 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L07_0030E8B8"
+      }
+    },
+    {
+      "id": "rac1.moby.mine.update",
+      "name": "Moby_Mine_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 74 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L00_002AB910"
+      }
+    },
+    {
+      "id": "rac1.moby.mine_l14.update",
+      "name": "Moby_Mine643_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 643 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L14_002EDC70"
+      }
+    },
+    {
+      "id": "rac1.moby.miner.update",
+      "name": "Moby_Miner_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 282 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L12_002E7FC8"
+      }
+    },
+    {
+      "id": "rac1.moby.moby1178.update",
+      "name": "Moby_SeesawPlatform_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1178 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L11_00310058"
+      }
+    },
+    {
+      "id": "rac1.moby.moby1264.update",
+      "name": "Moby_OilTankerFront_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1264 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L11_00318730"
+      }
+    },
+    {
+      "id": "rac1.moby.moby1302.update",
+      "name": "Moby_BotDoorLock_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1302 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L06_00309170"
+      }
+    },
+    {
+      "id": "rac1.moby.moby1428.update",
+      "name": "Moby_Codebot_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1428 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L15_002ED168"
+      }
+    },
+    {
+      "id": "rac1.moby.moby1434.update",
+      "name": "Moby_DeplanetizerGun_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby classes 1434, 1435 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L18_002F8F38"
+      }
+    },
+    {
+      "id": "rac1.moby.moby1454.update",
+      "name": "Moby_RocketTank_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1454 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L18_002F90A0"
+      }
+    },
+    {
+      "id": "rac1.moby.moby1568.update",
+      "name": "Moby_DeplanetizerGun1568_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1568 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L18_002FBAA0"
+      }
+    },
+    {
+      "id": "rac1.moby.moby1805.update",
+      "name": "Moby_BlargShip1805_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1805 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental."
+    },
+    {
+      "id": "rac1.moby.moby1843.update",
+      "name": "Moby_BlargShip1843_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1843 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L17_002F5C18"
+      }
+    },
+    {
+      "id": "rac1.moby.moby1885.update",
+      "name": "Moby_Spawner1885_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1885 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental."
+    },
+    {
+      "id": "rac1.moby.moby1886.update",
+      "name": "Moby_SpawnerEgg_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1886 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L09_0030C7F0"
+      }
+    },
+    {
+      "id": "rac1.moby.moby1906.update",
+      "name": "Moby_Gadgebot1906_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1906 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L18_002FD058"
+      }
+    },
+    {
+      "id": "rac1.moby.moby250.update",
+      "name": "Moby_PlasmabotHatch_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 250 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L14_002DAA70"
+      }
+    },
+    {
+      "id": "rac1.moby.moby302.update",
+      "name": "Moby_GadgebotSpawnContainer_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 302 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L06_002D9970"
+      }
+    },
+    {
+      "id": "rac1.moby.moby303.update",
+      "name": "Moby_GadgebotSpawnPad_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 303 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L06_002D9FF0"
+      }
+    },
+    {
+      "id": "rac1.moby.moby336.update",
+      "name": "Moby_Helicopter_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 336 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L12_002ED228"
+      }
+    },
+    {
+      "id": "rac1.moby.moby568.update",
+      "name": "Moby_Mine568_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 568 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L18_002D6D08"
+      }
+    },
+    {
+      "id": "rac1.moby.moby604.update",
+      "name": "Moby_SandmouseHouse_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 604 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L01_002F3F40"
+      }
+    },
+    {
+      "id": "rac1.moby.moby612.update",
+      "name": "Moby_Constructorbot_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 612 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L02_002D8B80"
+      }
+    },
+    {
+      "id": "rac1.moby.moby755.update",
+      "name": "Moby_SandsharkEgg_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 755 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L02_002E16B8"
+      }
+    },
+    {
+      "id": "rac1.moby.moby77.update",
+      "name": "Moby_Mine77_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 77 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L15_002A3668"
+      }
+    },
+    {
+      "id": "rac1.moby.moby8.update",
+      "name": "Moby_BlargHeavyInterceptor_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 8 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L14_002AD858"
+      }
+    },
+    {
+      "id": "rac1.moby.moby83.update",
+      "name": "Moby_Mine83_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 83 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L13_002C32D0"
+      }
+    },
+    {
+      "id": "rac1.moby.moby914.update",
+      "name": "Moby_RobotQwark_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 914 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental."
+    },
+    {
+      "id": "rac1.moby.mouse_critter.update",
+      "name": "Moby_Sandmouse_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1818 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L01_0030F318"
+      }
+    },
+    {
+      "id": "rac1.moby.near_hero_sparkle.update",
+      "name": "Moby_GadgebotTelepotPad_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby classes 351, 1301 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L10_002BFBB8"
+      }
+    },
+    {
+      "id": "rac1.moby.path_vehicle.update",
+      "name": "Moby_SnowPlow_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby classes 466, 480, 485, 486, 488, 490, 493, 494, 495, 498, 555 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental."
+    },
+    {
+      "id": "rac1.moby.qwark_starfighter_part.update",
+      "name": "Moby_QwarksStarfighterPart_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 388 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L13_002EC4D0"
+      }
+    },
+    {
+      "id": "rac1.moby.rocket_door1.update",
+      "name": "Moby_RocketDoor1_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby classes 735, 736 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L02_002E0D80"
+      }
+    },
+    {
+      "id": "rac1.moby.rocket_launcher.update",
+      "name": "Moby_RocketLauncher_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 733 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L02_002E0810"
+      }
+    },
+    {
+      "id": "rac1.moby.sand_mouse.update",
+      "name": "Moby_SandMouse_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 437 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L01_002E5298"
+      }
+    },
+    {
+      "id": "rac1.moby.sand_shark_nest.update",
+      "name": "Moby_SandSharkNest_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 668 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L02_002DDF70"
+      }
+    },
+    {
+      "id": "rac1.moby.sentrybot_alarm.update",
+      "name": "Moby_SentrybotAlarm_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 408 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L15_002CC858"
+      }
+    },
+    {
+      "id": "rac1.moby.shard_debris.update",
+      "name": "Moby_Constructorbot1208_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1208 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L02_002ED358"
+      }
+    },
+    {
+      "id": "rac1.moby.snagglebeast.update",
+      "name": "Moby_Snagglebeast_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1106 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental."
+    },
+    {
+      "id": "rac1.moby.spawn_child_and_delete.update",
+      "name": "Moby_Mushroom_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby classes 1650, 1655, 1663, 1677 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental."
+    },
+    {
+      "id": "rac1.moby.starfighter_part.update",
+      "name": "Moby_QwarksStarfighterPart389_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby classes 389, 390, 391, 392, 393, 394, 395, 396, 399, 400, 401 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L13_002EE238"
+      }
+    },
+    {
+      "id": "rac1.moby.swooper.update",
+      "name": "Moby_Mine1112_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1112 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L07_0031AAB0"
+      }
+    },
+    {
+      "id": "rac1.moby.tethered_mine.update",
+      "name": "Moby_FighterJet_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 660 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental."
+    },
+    {
+      "id": "rac1.moby.timed_shooter.update",
+      "name": "Moby_BombthrowerGrass939_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 939 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L10_002D9FC0"
+      }
+    },
+    {
+      "id": "rac1.moby.ultramech.update",
+      "name": "Moby_UltramechUnlimited_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 491 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L15_002D0798"
+      }
+    },
+    {
+      "id": "rac1.moby.vendor.update",
+      "name": "Moby_VeldinRobotEnemy_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of moby class 1440 (the behaviour catalogue's update function; a mod filters by the moby's class). Experimental.",
+      "symbols": {
+        "pal": "func_L00_002E2038"
+      }
+    },
+    {
+      "id": "rac1.omni.damage.build_hit",
+      "name": "Damage_BuildHit",
+      "signature": "void(f32,u32,u32,u32,u32)",
+      "params": [
+        "damage",
+        "desc",
+        "attacker",
+        "mask",
+        "dir"
+      ],
+      "about": "hit_desc_build: fills a hit descriptor (0x24+ bytes) for a hit on an enemy: the 16-byte direction vector at +0, attacker moby +0x10, mask +0x14, damage f32 +0x1c, +0x20 = 1. Every attack that hurts an enemy builds one (the wrench on the stack right before its swing sweep), so a hook that calls the original with another damage changes what is dealt. Checked against the wrench update's call (a0 = descriptor on the stack, a1 = attacker moby, a2 = mask, a3 = vec4 direction, f12 = damage). Every level.",
+      "symbols": {
+        "pal": "func_L00_0025A8C0"
+      }
+    },
+    {
+      "id": "rac1.omni.damage.hit_victim",
+      "name": "Damage_HitVictim",
+      "signature": "void(u32,u32)",
+      "params": [
+        "victim",
+        "desc"
+      ],
+      "about": "hit_ring_write: posts a hit descriptor on the victim moby into the 64-entry hit queue at 0x178100 (stride 0x40) unless the victim already holds a stronger hit this tick (victim byte +0xa4 = queue slot); the victim reads it in MobyGetHitMessage (rac1.combat.get_hit). To hurt an enemy from a mod: build a descriptor with omni.with_stack and the build_hit function, then call this. a0 = victim, a1 = descriptor (asm of the prologue). Every level.",
+      "symbols": {
+        "pal": "func_L00_0025AAC0"
+      }
+    },
+    {
+      "id": "rac1.omni.wrench.swing",
+      "name": "Wrench_SwingSweep",
+      "signature": "u32(u32,u32,u32,u32,u32,u32,i32)",
+      "params": [
+        "prev_a",
+        "prev_b",
+        "cur_a",
+        "cur_b",
+        "owner",
+        "attack",
+        "steps"
+      ],
+      "about": "The wrench swing sweep: five segment casts between the previous and the current wrench joint poses (four vec4 pointers into the hero struct +0x9f0, +0xa00, +0xa10, +0xa20), owner = the word at hero +0x2080, attack = the hit descriptor built just before (damage at +0x1c), steps = 5. Returns 1 when something was hit. Only caller: the class 71 update. Argument registers a0..a3, t0, t1, t2 checked in the caller's asm. Every level.",
+      "symbols": {
+        "pal": "func_L00_0025AD60"
+      }
+    },
+    {
+      "id": "rac1.omni.wrench.throw",
+      "name": "Wrench_ThrowRelease",
+      "signature": "void()",
+      "params": [],
+      "about": "Comet-Strike release: aims and launches the thrown wrench (sets the wrench byte +0x20 = 10 and the byte at 0x1403fa). No arguments (the callers set none for it). Callers: the try-fire dispatcher and 0x217550 (Veldin). Every level.",
+      "symbols": {
+        "pal": "func_L00_00217DE0"
+      }
+    },
+    {
+      "id": "rac1.omni.wrench.update",
+      "name": "Wrench_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of the held Omniwrench (moby class 71): combo state, swing damage literals, calls the swing sweep and the hit descriptor builder. Every level.",
+      "symbols": {
+        "pal": "func_L00_002A9768"
+      }
+    },
+    {
+      "id": "rac1.omni.weapon.suck_cannon.update",
+      "name": "Weapon_SuckCannon_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of the held Suck Cannon (moby class 849, the class table's update function; a mod reads omni.weapon.* fields and the hero state). Every level.",
+      "symbols": {
+        "pal": "func_L00_002DBC40"
+      }
+    },
+    {
+      "id": "rac1.omni.weapon.bomb_glove.update",
+      "name": "Weapon_BombGlove_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of the held Bomb Glove (moby class 192, the class table's update function; a mod reads omni.weapon.* fields and the hero state). Every level.",
+      "symbols": {
+        "pal": "func_L00_002C39D0"
+      }
+    },
+    {
+      "id": "rac1.omni.weapon.devastator.update",
+      "name": "Weapon_Devastator_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of the held Devastator (moby class 157, the class table's update function; a mod reads omni.weapon.* fields and the hero state). Every level.",
+      "symbols": {
+        "pal": "func_L00_002B33E8"
+      }
+    },
+    {
+      "id": "rac1.omni.weapon.visibomb.update",
+      "name": "Weapon_Visibomb_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of the held Visibomb Gun (moby class 163, the class table's update function; a mod reads omni.weapon.* fields and the hero state). Every level."
+    },
+    {
+      "id": "rac1.omni.weapon.taunter.update",
+      "name": "Weapon_Taunter_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of the held Taunter (moby class 175, the class table's update function; a mod reads omni.weapon.* fields and the hero state). Every level.",
+      "symbols": {
+        "pal": "func_L00_002B8208"
+      }
+    },
+    {
+      "id": "rac1.omni.weapon.blaster.update",
+      "name": "Weapon_Blaster_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of the held Blaster (moby class 168, the class table's update function; a mod reads omni.weapon.* fields and the hero state). Every level.",
+      "symbols": {
+        "pal": "func_L00_002B5C98"
+      }
+    },
+    {
+      "id": "rac1.omni.weapon.pyrocitor.update",
+      "name": "Weapon_Pyrocitor_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of the held Pyrocitor (moby class 176, the class table's update function; a mod reads omni.weapon.* fields and the hero state). Every level.",
+      "symbols": {
+        "pal": "func_L00_002B8AE8"
+      }
+    },
+    {
+      "id": "rac1.omni.weapon.mine_glove.update",
+      "name": "Weapon_MineGlove_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of the held Mine Glove (moby class 190, the class table's update function; a mod reads omni.weapon.* fields and the hero state). Every level.",
+      "symbols": {
+        "pal": "func_L00_002C2DD8"
+      }
+    },
+    {
+      "id": "rac1.omni.weapon.walloper.update",
+      "name": "Weapon_Walloper_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of the held Walloper (moby class 180, the class table's update function; a mod reads omni.weapon.* fields and the hero state). Every level.",
+      "symbols": {
+        "pal": "func_L00_002BC860"
+      }
+    },
+    {
+      "id": "rac1.omni.weapon.tesla_claw.update",
+      "name": "Weapon_TeslaClaw_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of the held Tesla Claw (moby class 177, the class table's update function; a mod reads omni.weapon.* fields and the hero state). Every level.",
+      "symbols": {
+        "pal": "func_L00_002B9AD8"
+      }
+    },
+    {
+      "id": "rac1.omni.weapon.glove_of_doom.update",
+      "name": "Weapon_GloveOfDoom_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of the held Glove of Doom (moby class 229, the class table's update function; a mod reads omni.weapon.* fields and the hero state). Every level.",
+      "symbols": {
+        "pal": "func_L00_002C8DB8"
+      }
+    },
+    {
+      "id": "rac1.omni.weapon.morph_o_ray.update",
+      "name": "Weapon_MorphORay_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of the held Morph-o-Ray (moby class 185, the class table's update function; a mod reads omni.weapon.* fields and the hero state). Every level."
+    },
+    {
+      "id": "rac1.omni.weapon.ryno.update",
+      "name": "Weapon_Ryno_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of the held R.Y.N.O. (moby class 454, the class table's update function; a mod reads omni.weapon.* fields and the hero state). Every level.",
+      "symbols": {
+        "pal": "func_L00_002CDAB8"
+      }
+    },
+    {
+      "id": "rac1.omni.weapon.decoy.update",
+      "name": "Weapon_Decoy_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of the held Decoy Glove (moby class 562, the class table's update function; a mod reads omni.weapon.* fields and the hero state). Every level.",
+      "symbols": {
+        "pal": "func_L00_002D3B20"
+      }
+    },
+    {
+      "id": "rac1.omni.ammo.pickup",
+      "name": "Ammo_Pickup",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of an ammo pickup moby (Veldin 0x2c4d68, names row func_L00_002C6720; classes 204 213 214 222 223 225 226 1006 1438 1447 1449, the broken crates' ammo): physics in states 1/3/4, and in the waiting state a jump-table case INLINES the pickup (distance to the hero, AddAmmo, banner, state 2). Every ammo the hero collects by walking into a pickup is given inside this call, so a mod that wraps `original` sees AddAmmo (rac1.omni.ammo.add) run inside it and can tell a pickup from a vendor purchase. The moby's pvar (moby+0x78) holds pvar[0] = amount, pvar[2] = item id, readable before `original`. Stage AP1: this id used to be the collect helper 0x2c5590, which this path never calls (see rac1.omni.ammo.collect). Every level.",
+      "symbols": {
+        "pal": "func_L00_002C6720"
+      }
+    },
+    {
+      "id": "rac1.omni.ammo.add",
+      "name": "Ammo_Add",
+      "signature": "i32(i32,i32)",
+      "params": [
+        "item",
+        "amount"
+      ],
+      "about": "AddAmmo: adds amount to the ammo int of item (0x13d428 + item * 4) and caps it at the max ammo of the price row; returns the overflow. Shared by pickups, the vendor and UnlockGadget. Every level.",
+      "symbols": {
+        "pal": "func_L00_002346C0"
+      }
+    },
+    {
+      "id": "rac1.omni.weapon.select",
+      "name": "Hero_ItemRequestApply",
+      "signature": "void(u32)",
+      "params": [
+        "slot"
+      ],
+      "about": "Applies the requested item (0x141408 and the kind words) for hero item slot `slot`; the equip path of Square (wrench), Circle (last weapon) and the quick-select commit. Decomp name hero_item_request_apply, names tsv label UpdateWrenchSelected; 2216 bytes, callers 0x210290 and 0x229750 (Veldin). Not in the code of Rilgar (5) and Kalebo III (16): no hook there. Argument a0 = slot checked in the caller's asm and the Ghidra C.",
+      "symbols": {
+        "pal": "func_L00_00210558"
+      }
+    },
+    {
+      "id": "rac1.omni.weapon.quick_select",
+      "name": "QuickSelect_Update",
+      "signature": "void(u32)",
+      "params": [
+        "state"
+      ],
+      "about": "The quick-select wheel's per-tick update (QuickSelectUpdate; caller 0x229750 in Veldin): reads the pad, commits the chosen item to 0x141408 on release. a0 = the wheel state struct (fields at +0x70.. in the C). Every level.",
+      "symbols": {
+        "pal": "func_L00_00238530"
+      }
+    },
+    {
+      "id": "rac1.omni.vendor.open",
+      "name": "Vendor_Open",
+      "signature": "void(u32)",
+      "params": [
+        "vendor"
+      ],
+      "about": "Opens the vendor (PDA / ammo shop): clears the shop state, spawns the vendor moby (class 0xb) when a0 = 0. Ghidra C: FUN_0029a058(long). Unnamed in the names tsv (no v2 symbol); copies found by code. Every level."
+    },
+    {
+      "id": "rac1.omni.vendor.buy",
+      "name": "Vendor_BuyState",
+      "signature": "void(u32)",
+      "params": [],
+      "about": "The vendor purchase state machine, once per frame while the shop is open: on success writes have/ammo/stock and calls UnlockGadget or AddAmmo. No arguments (Ghidra C void, no argument register read). Unnamed in the names tsv (no v2 symbol); copies found by code. Every level."
+    },
+    {
+      "id": "rac1.omni.menu.weapons_page.update",
+      "name": "PauseWeaponsPage_Update",
+      "signature": "void(u32)",
+      "params": [
+        "page"
+      ],
+      "about": "The pause menu's Weapons page item model state machine (panel item 0x1b4f28, page 3): spawns the selected item's model class and spins it; a0 = the panel item. Returns a 64-bit status. Every level.",
+      "symbols": {
+        "pal": "func_L00_0027CE40"
+      }
+    },
+    {
+      "id": "rac1.omni.menu.weapons_page.draw",
+      "name": "PauseWeaponsPage_Draw",
+      "signature": "void(u32)",
+      "params": [
+        "page"
+      ],
+      "about": "The Weapons page draw: tests the have byte of the selected item (0x13d4c0 + id) to decide what to draw; a0 = the panel item. Every level.",
+      "symbols": {
+        "pal": "func_L00_0027D218"
+      }
+    },
+    {
+      "id": "rac1.omni.damage.resolve",
+      "name": "Damage_Resolve",
+      "signature": "u32(u32,u32,u32,u32,u32,u32,u32,u32)",
+      "params": [
+        "victim",
+        "entry",
+        "component",
+        "arg3",
+        "status_out",
+        "strength_out",
+        "extra_out",
+        "mode"
+      ],
+      "about": "The shared hit resolver (Veldin FUN_0025a088, names row hit_knockback): every enemy class calls it once per tick from its prestep with the hit entry that rac1.combat.get_hit returned. a0 = the victim moby, a1 = the hit queue entry (0 = none; +0x20 attacker moby, +0x2c strength), a2 = the victim's component block (pvar +0x20: the health float, +8 the component byte), a3 = 0 in every caller read, t0 = u32 out (status: 0, or 1 = no usable hit), t1 = f32 out (the STRENGTH the class subtracts from its health; may be 0 = no pointer), t2 = u32 out (-1 or untouched, may be 0), t3 = mode (4 = take it from the component byte). The return value is the reaction class (0 nothing, 0xb, 0xd, jump-table cases), NOT the strength: the strength is written to *t1 (= entry +0x2c, which the resolver sets from the attacker table for Blaster classes 0x131 and 0xa8). A mod scales damage dealt to enemies by calling original and then multiplying the f32 at strength_out (when it is not 0) and entry +0x2c; it reads the victim's health first through the pvars/structs (enemy.health). Signature checked in the asm prologue (a0..a3, t0..t3 stored/used) and the Ghidra C (8 parameters) and a caller (toad prestep FUN_002d4b08: a0 victim, a1 entry, a2 pvar+0x20, a3 0, t0 &status, t1 &strength, t2 0, t3 4). Every level.",
+      "symbols": {
+        "pal": "func_L00_0025B4D0"
+      }
+    },
+    {
+      "id": "rac1.omni.weapon.flame.create",
+      "name": "Pyrocitor_FlameCreate",
+      "signature": "u32(f32,u32,u32,u32)",
+      "params": [
+        "range",
+        "pos",
+        "vel",
+        "flags"
+      ],
+      "about": "The Pyrocitor flame effect creator (names tsv PartType12Spawn; shared with the flame effect of other callers): f12 = the flame reach / life float, a0 = position vec4 address, a1 = velocity vec4 address, a2 = flags byte (bit 2 always set, bit 0 = lead flame vs trailing). The held update calls it 2 leading and 2 trailing times per tick. A mod calls original again with its own vel vector (omni.with_stack) for extra flames. Argument registers checked by argscan and the caller at 0x2b7880 (Ghidra C: FUN_0026abc0(float, vec*, vec*, byte)). Every level.",
+      "symbols": {
+        "pal": "func_L00_0026C0D0"
+      }
+    },
+    {
+      "id": "rac1.omni.weapon.bomb_glove.fire",
+      "name": "Weapon_BombGlove_Fire",
+      "signature": "void(u32,u32,u32)",
+      "params": [
+        "pos_ptr",
+        "bomb",
+        "pvar"
+      ],
+      "about": "Launches the held bomb (FUN_002ac980, state 3 of the held update 0x2c2070 once per throw, then the held bomb pointer is cleared): a0 = a stack vec (aim), a1 = the bomb moby (spawned by FUN_002ac818), a2 = its pvar (moby +0x78). Every level.",
+      "symbols": {
+        "pal": "func_L00_002AE278"
+      }
+    },
+    {
+      "id": "rac1.omni.weapon.mine_glove.fire",
+      "name": "Weapon_MineGlove_Fire",
+      "signature": "void(u32,u32,u32)",
+      "params": [
+        "pos_ptr",
+        "mine",
+        "pvar"
+      ],
+      "about": "Launches the held mine (FUN_002a99b0, state 3 of the held update 0x2c1478 once per throw): a0 = a stack vec (aim), a1 = the mine moby (class 74, created by FUN_002a9878), a2 = its pvar (moby +0x78). Every level.",
+      "symbols": {
+        "pal": "func_L00_002AB2A8"
+      }
+    },
+    {
+      "id": "rac1.omni.weapon.glove_of_doom.fire",
+      "name": "Weapon_GloveOfDoom_Fire",
+      "signature": "void(u32,u32,u32)",
+      "params": [
+        "pos_ptr",
+        "capsule",
+        "pvar"
+      ],
+      "about": "Launches the held Glove of Doom capsule (FUN_002c7c98, once per shot; the caller then clears the held pointer): a0 = hero + 0x40 vec, a1 = the capsule moby (class 230, created by FUN_002c7bc0), a2 = its pvar (moby +0x78). Every level.",
+      "symbols": {
+        "pal": "func_L00_002C96D0"
+      }
+    },
+    {
+      "id": "rac1.omni.weapon.devastator.fire",
+      "name": "Weapon_Devastator_Fire",
+      "signature": "u32(u32,u32,u32,f32,f32,f32,f32,f32)",
+      "params": [
+        "pvar_arg",
+        "pos",
+        "owner",
+        "f0",
+        "f1",
+        "f2",
+        "f3",
+        "f4"
+      ],
+      "about": "Creates a Devastator rocket (FUN_002af618, class 153; once per rocket, two call sites in the held update 0x2b1aa8): a0 = word stored in the rocket pvar +0x10, a1 = spawn position vec4 address, a2 = the owner moby (its component is read), f12 = float stored at the rocket pvar +0x2c, f13 and f14 = floats kept in the creator, f15 = stored at moby +0x48, f16 = stored at moby +0x44 (meaning of the floats [?]); returns the rocket moby. Register reads checked by argscan and the prologue asm (a0, a1, a2, f12..f16; Ghidra's 8 parameters are an artefact). Every level.",
+      "symbols": {
+        "pal": "func_L00_002B0F58"
+      }
+    },
+    {
+      "id": "rac1.omni.weapon.visibomb.fire",
+      "name": "Weapon_Visibomb_Fire",
+      "signature": "u32(f32,f32,u32,u32)",
+      "params": [
+        "f0",
+        "f1",
+        "owner",
+        "dir"
+      ],
+      "about": "Creates the Visibomb missile (FUN_002b5280, class 172; once per shot from the held update 0x2b2a00): f12, f13 = floats (speed / aim [?]), a0 = the owner moby, a1 = a vec4 address (launch direction); returns the missile moby (stored in the held pvar word 1). Registers by argscan. Every level.",
+      "symbols": {
+        "pal": "func_L00_002B6BC8"
+      }
+    },
+    {
+      "id": "rac1.omni.weapon.blaster.fire",
+      "name": "Weapon_Blaster_Fire",
+      "signature": "u32(f32,f32,f32,f32,u32,u32,u32)",
+      "params": [
+        "f0",
+        "f1",
+        "f2",
+        "f3",
+        "iarg",
+        "vec",
+        "target"
+      ],
+      "about": "Creates a Blaster shot (FUN_002ca918, class 305 = 0x131, the attacker class whose strength comes from the table at gp -0x6bc0; once per shot from the held update 0x2b4350): f12..f15 = four floats (shot speed / direction components [?]), a0 = the word at 0x1413d0, a1 = a vec address, a2 = a moby pointer; returns the shot moby. Registers by argscan and the caller (7 parameters in the Ghidra C). Every level.",
+      "symbols": {
+        "pal": "func_L00_002CC3C0"
+      }
+    },
+    {
+      "id": "rac1.omni.moby.create",
+      "name": "moby_create",
+      "signature": "u32(u32)",
+      "params": [
+        "class"
+      ],
+      "about": "Retail CreateMoby (Veldin 0x24e448): allocates a moby of a class with its pvar block, returns the moby (0 when full). The class init then runs on its first update. Every level. Every dynamic spawn of the game (projectiles, sparks, glow spheres, debris) goes through it; placed mobies of a level do not (use level_loaded + mobys). Hot: hundreds of calls per second in a fight, so a mod filters by class first and returns. A hook must not spawn the same class from inside it.",
+      "symbols": {
+        "pal": "func_L00_0024F870"
+      }
+    },
+    {
+      "id": "rac1.omni.moby.delete",
+      "name": "moby_delete",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Retail moby_delete (Veldin 0x24e778): removes a moby (projectile death). Every level. The only code that writes the deleted state 0xfd/0xfe: every enemy death, projectile end and debris expiry calls it. Hot (see moby.create).",
+      "symbols": {
+        "pal": "func_L00_0024FBA0"
+      }
+    },
+    {
+      "id": "rac1.omni.projectile.bomb.update",
+      "name": "projectile_bomb_update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Bomb Glove bomb (class 121) per-tick update (Veldin 0x2ad4d8, 6.3 KB). Every level."
+    },
+    {
+      "id": "rac1.omni.projectile.mine.update",
+      "name": "projectile_mine_update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Mine Glove mine (class 74) per-tick update (Veldin 0x2aa018). Every level.",
+      "symbols": {
+        "pal": "func_L00_002AB910"
+      }
+    },
+    {
+      "id": "rac1.omni.projectile.blaster_shot.update",
+      "name": "projectile_blaster_shot_update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Blaster shot (class 305) per-tick update (Veldin 0x2cadc0): steers to the point in pvar+0, moves 0.8 u/tick along yaw/pitch, ray test, gold bounce. Every level.",
+      "symbols": {
+        "pal": "func_L00_002CC868"
+      }
+    },
+    {
+      "id": "rac1.omni.projectile.ryno_rocket.update",
+      "name": "projectile_ryno_rocket_update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "R.Y.N.O. rocket (class 457) per-tick update (Veldin 0x2ccb98): homes on the moby in pvar+0x28. Every level.",
+      "symbols": {
+        "pal": "func_L00_002CE6A0"
+      }
+    },
+    {
+      "id": "rac1.omni.projectile.doom_agent.update",
+      "name": "projectile_doom_agent_update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Glove of Doom agent (class 186) per-tick update (Veldin 0x2bf950): state machine, state 0xb = explode. Every level.",
+      "symbols": {
+        "pal": "func_L00_002C12B0"
+      }
+    },
+    {
+      "id": "rac1.omni.projectile.doom_capsule.update",
+      "name": "projectile_doom_capsule_update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Glove of Doom capsule (class 230) per-tick update (Veldin 0x2c8390). Every level.",
+      "symbols": {
+        "pal": "func_L00_002C9DC8"
+      }
+    },
+    {
+      "id": "rac1.omni.projectile.visibomb.update",
+      "name": "projectile_visibomb_update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Visibomb missile (class 172) per-tick update (Veldin 0x2b5ae8; player-steered missile). Every level."
+    },
+    {
+      "id": "rac1.omni.projectile.devastator_rocket.update",
+      "name": "projectile_devastator_rocket_update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Devastator rocket (class 153) per-tick update (Veldin 0x2afd48): steers to its target, gold bounces 3 times. Every level.",
+      "symbols": {
+        "pal": "func_L00_002B1688"
+      }
+    },
+    {
+      "id": "rac1.omni.collide.segment",
+      "name": "collide_segment",
+      "signature": "u32(u32,u32,u32,u32,u32)",
+      "params": [
+        "start",
+        "end",
+        "mask",
+        "self",
+        "attack"
+      ],
+      "about": "Retail seg_collide (Veldin 0x1efbf0): segment start..end vs mobys and terrain; a3 = moby to ignore, t0 = hit descriptor (0 = none; when set and the hit moby takes hits the hit is posted into the hit ring). Returns 1 on a hit; result block at the level block RES (Veldin 0x173e40): +0x18 hit moby (0 = terrain), +0x1c record word, +0x20 contact point vec4, +0x40 surface normal vec4. Hot function (every projectile, the camera, the hero). Every level."
+    },
+    {
+      "id": "rac1.omni.collide.sphere_mobys",
+      "name": "collide_sphere_mobys",
+      "signature": "u32(f32,u32,u32,u32,u32)",
+      "params": [
+        "radius",
+        "pos",
+        "mask",
+        "self",
+        "filter"
+      ],
+      "about": "Retail sphere_list_mobys (Veldin 0x1f27e8): list the mobys within radius of pos (mask 0x10 = hittable); the list lands at 0x177f00 (Veldin), returns the count. Blasts call it right before blast.apply. Every level.",
+      "symbols": {
+        "pal": "func_L00_001F2BE8"
+      }
+    },
+    {
+      "id": "rac1.omni.blast.apply",
+      "name": "blast_apply",
+      "signature": "void(f32,f32,f32,u32,u32,u32,u32,u32,u32,u32,u32)",
+      "params": [
+        "strength",
+        "hscale",
+        "vimpulse",
+        "attacker",
+        "pos",
+        "list",
+        "count",
+        "exclude",
+        "mask",
+        "cat",
+        "sub"
+      ],
+      "about": "Retail apply_blast_damage (Veldin 0x25a608): posts one hit (hit_desc_build + hit_ring_write) per listed moby; attacker = the projectile (its class is the weapon). Every level.",
+      "symbols": {
+        "pal": "func_L00_0025BA50"
+      }
+    },
+    {
+      "id": "rac1.omni.fx.explode",
+      "name": "fx_explode",
+      "signature": "void(f32,f32,f32,f32,f32,f32,u32,u32,u32)",
+      "params": [
+        "radius",
+        "size",
+        "f2",
+        "f3",
+        "f4",
+        "f5",
+        "dmg_bits",
+        "self",
+        "pos"
+      ],
+      "about": "Retail explode (Veldin 0x25e060): generic explosion effect (embers, sparks, flames, light, shake); damage only when f12 radius > 0. Only the first 9 of its 18 parameters are declared (f12 radius, f13..f17 = params 3..7, a0 = param 2, a1 = param 8 (moby), a2 = param 9 (pos)). Every level."
+    },
+    {
+      "id": "rac1.omni.weapon.devastator.retarget",
+      "name": "weapon_devastator_retarget",
+      "signature": "void(u32,u32,u32)",
+      "params": [
+        "rocket",
+        "pvar",
+        "ignore"
+      ],
+      "about": "Devastator gold-bounce retarget (Veldin 0x2af950): picks the nearest line-of-sight enemy of the registry within 40 and writes pvar+0x18 target, +0x2c yaw, +0x30 pitch, +0x38 flag. Every level.",
+      "symbols": {
+        "pal": "func_L00_002B1290"
+      }
+    },
+    {
+      "id": "rac1.omni.weapon.blaster.aim_search",
+      "name": "weapon_blaster_aim_search",
+      "signature": "u32(u32,u32,u32,u32)",
+      "params": [
+        "a0",
+        "a1",
+        "a2",
+        "a3"
+      ],
+      "about": "Blaster third-person lock-on search (Veldin 0x2b4050): registry list, flag 0x1000, d<=20, nearest, cone 0.157 rad, camera and muzzle LOS (mask 6). Argument meaning [?]. Every level.",
+      "symbols": {
+        "pal": "func_L00_002B5998"
+      }
+    },
+    {
+      "id": "rac1.omni.weapon.ryno.fire",
+      "name": "weapon_ryno_fire",
+      "signature": "u32(f32,f32,f32,u32,u32,u32)",
+      "params": [
+        "height",
+        "yaw",
+        "pitch",
+        "owner",
+        "pos",
+        "target"
+      ],
+      "about": "Creates an R.Y.N.O. rocket (Veldin 0x2cc888, class 457): f12 = height offset added to the target aim point (pvar+0x2c), f13 = yaw (moby+0x48), f14 = pitch (moby+0x44), a0 = owner moby (pvar+0x20), a1 = start vec4*, a2 = target moby (0 = no homing; its class goes to pvar+0x58). Returns the rocket moby. Every level.",
+      "symbols": {
+        "pal": "func_L00_002CE390"
+      }
+    },
+    {
+      "id": "rac1.omni.projectile.hit_face_id",
+      "name": "projectile_hit_face_id",
+      "signature": "u32()",
+      "params": [],
+      "about": "Retail hit_face_id (Veldin 0x1f3558): the surface id (0..31) of the last seg_collide hit (global & 0x1f); tiny. Every level.",
+      "symbols": {
+        "pal": "func_L00_001F3958"
+      }
+    },
+    {
+      "id": "rac1.omni.goldcase.update",
+      "name": "GoldCase_Update",
+      "signature": "void(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "Per-tick update of a Gold Weapon Case (moby class 304) and of its display moby (classes 1456..1465), the retail seller of gold weapons (Novalis and Gemlik Base only; the odd cases from the first run, all ten in New Game+). State byte moby+0x20: 0 spawn, 1 offering, 2 display, 3 done, 4 bought (autosave wait). In state 1 the game's dialogue runs inside this call; on Triangle in the last record it writes the item's gold byte = 1, takes the gold price from the bolts and plays the fanfare scene (a blocking loop). The case index is the i32 at pvar+0x40 (struct gold_case). Two levels."
+    },
+    {
+      "id": "rac1.gold_bolt.count_spare",
+      "name": "GoldBolts_CountSpare",
+      "signature": "i32()",
+      "params": [],
+      "about": "The gold bolts still to spend (spare_gold_bolts): clamp(collected - 4 * gold weapons owned, 0, 40), where collected = rac1.gold_bolt.count_collected and gold weapons = the nonzero bytes of the gold byte table. The Gold Weapon Cases need more than 3 of it; the pause screen's Gold Bolts page shows it as Available."
+    },
+    {
+      "id": "rac1.omni.hero.items_attach",
+      "name": "HeroItems_Attach",
+      "signature": "void()",
+      "params": [],
+      "about": "Retail HeroItemsAttach (Veldin 0x20f0c8, names row HeroItemsAttach, shared code, once per tick, no arguments): glues every item the hero holds to the hero. For each hero item slot (table 0x1403e0, stride 0x50) it copies the attach matrix of the item's attach point (the Blaster and other weapons: the right hand) into the held moby: position +0x10, basis rows +0xc0/0xd0/0xe0, pitch/yaw, sets moby flags |= 6 (not scheduled, no transform) and copies the light words from the hero. Hook it after `original` to place or update extra mobies that follow the hero (read omni.hero.held_moby; the held weapon is already in its final place for this tick).",
+      "symbols": {
+        "pal": "func_L00_0020FC18"
+      }
+    },
+    {
+      "id": "rac1.omni.ammo.collect",
+      "name": "Ammo_Collect",
+      "signature": "u32(u32)",
+      "params": [
+        "moby"
+      ],
+      "about": "The ammo pickup collect helper (Veldin 0x2c5590, names row func_L00_002C6F48, 480 bytes), the second way an ammo pickup is collected: called by the code that scans the mobys near the hero or a blast (Veldin callers 0x2a7c68 and 0x2deb88), NOT by the pickup moby's own update (rac1.omni.ammo.pickup inlines the same job). pvar[0] = amount, pvar[2] = item id; adds it with AddAmmo, shows the banner, returns 1 when collected. A mod that changes pickup ammo wraps both ids the same way. Stage AP1: this was rac1.omni.ammo.pickup before. Every level.",
+      "symbols": {
+        "pal": "func_L00_002C6F48"
+      }
+    },
+    {
+      "id": "rac1.omni.hud.health_draw",
+      "name": "Hud_HealthDraw",
+      "signature": "u32(u32)",
+      "params": [
+        "element"
+      ],
+      "about": "Draws the HUD's nanotech meter (the health orbs and their bar) for its HUD element and returns the word at element +0x58. The meter fades in and out in steps 0..8 (struct hud_health: fade_bar at +0x70, fade_orbs at +0x71); it shows 100 ticks after the health changes (180 at a level start) and stays up at 1 orb. A mod that draws its own health replaces it: skip the original and return the word at +0x58 (hud_health.result). Every level.",
+      "symbols": {
+        "pal": "func_L00_0023A1A0"
+      }
+    }
+  ],
+  "functions": [
+    {
+      "name": "hit_desc_build",
+      "signature": "void(f32,u32,u32,u32,u32)",
+      "symbols": {
+        "pal": "FUN_0025a8c0",
+        "ntsc": "FUN_00259498"
+      },
+      "about": "Fills a hit descriptor: damage (f12), descriptor address, attacker moby, mask, direction vec4 address (see hook rac1.omni.damage.build_hit)."
+    },
+    {
+      "name": "hit_ring_write",
+      "signature": "void(u32,u32)",
+      "symbols": {
+        "pal": "FUN_0025aac0",
+        "ntsc": "FUN_00259698"
+      },
+      "about": "Posts the hit descriptor on the victim moby into the hit queue (see hook rac1.omni.damage.hit_victim)."
+    },
+    {
+      "name": "flame_create",
+      "signature": "u32(f32,u32,u32,u32)",
+      "symbols": {
+        "pal": "FUN_0026c0d0",
+        "ntsc": "FUN_0026abc0"
+      },
+      "about": "Pyrocitor flame effect creator (names tsv PartType12Spawn; the held update calls it 2 leading + 2 trailing per tick). Ghidra C FUN_0026abc0(float, vec*, vec*, byte) -> long: f12 = float (size / speed [?]), a0 and a1 = vec4 addresses (position, direction [?]), a2 = byte; returns the effect [?]. Argument meaning not yet confirmed from the caller (next stage)."
+    },
+    {
+      "name": "tesla_chain",
+      "signature": "void(u32)",
+      "symbols": {
+        "pal": "FUN_002ba7c8",
+        "ntsc": "FUN_002b8e78"
+      },
+      "about": "Tesla Claw attack / chain helper (1412 words): called by the held update with the Tesla moby; picks targets and draws the lightning chain. Unnamed in the names tsv. The pal number (v2.00 address) is inferred from the neighbouring rows [I]."
+    },
+    {
+      "name": "add_ammo",
+      "signature": "i32(i32,i32)",
+      "symbols": {
+        "pal": "FUN_002346c0",
+        "ntsc": "FUN_00233a20"
+      },
+      "about": "AddAmmo(item, amount): adds ammo, returns the overflow above the max."
+    },
+    {
+      "name": "get_ammo",
+      "signature": "i32(i32)",
+      "symbols": {
+        "pal": "FUN_00234718",
+        "ntsc": "FUN_00233a78"
+      },
+      "about": "GetAmmo(item): the ammo int of item."
+    },
+    {
+      "name": "rand_vec",
+      "signature": "void(u32)",
+      "symbols": {
+        "pal": "FUN_00258db0",
+        "ntsc": "FUN_00257988"
+      },
+      "about": "Writes a random vector to the float[4] at the argument (the game's own random)."
+    },
+    {
+      "name": "create_moby",
+      "signature": "u32(u32)",
+      "symbols": {
+        "pal": "FUN_0024f870",
+        "ntsc": "FUN_0024e448"
+      },
+      "about": "Spawns a moby of class (arg) in the dynamic pool and returns it (0 when the pool is full). Sets the class's update function and a zeroed 0x80-byte pvar; position, rotation and pvar contents are the caller's job (write moby.x/y/z, then the class's pvar). The moby updates from next tick. Only spawn classes that are loaded: the weapon classes 121 bomb, 74 mine, 457 R.Y.N.O. rocket, 186 Doom agent, 172 Visibomb missile, 153 Devastator rocket, 122 spark, 1192 glow sphere, 112 fireball are resident in all 19 levels; a class without updater yields an inert slot."
+    },
+    {
+      "name": "delete_moby",
+      "signature": "void(u32)",
+      "symbols": {
+        "pal": "FUN_0024fba0",
+        "ntsc": "FUN_0024e778"
+      },
+      "about": "Removes a moby (state 0xfd/0xfe, leaves the collision grid); the slot is reusable after 2 ticks. Safe on any live moby, including from its own update."
+    },
+    {
+      "name": "target_component",
+      "signature": "u32(u32)",
+      "symbols": {
+        "pal": "FUN_00261448",
+        "ntsc": "FUN_0025bf48"
+      },
+      "about": "The target block of an enemy (health at +0), or 0: pvar word 0 when moby flag 0x20 is set."
+    },
+    {
+      "name": "blaster_aim_search",
+      "signature": "u32(u32,u32,u32,u32)",
+      "symbols": {
+        "pal": "FUN_002b5998",
+        "ntsc": "FUN_002b4050"
+      },
+      "about": "The game's own lock-on (the Blaster's): args (self moby, vec4 origin address, f32 yaw address, f32 pitch address). Returns the nearest registry moby within 20 m inside a 9 degree cone of yaw/pitch with a clear line (mask 6), or 0; writes the aim yaw (if within 10 degrees) and pitch back."
+    },
+    {
+      "name": "spark_spawn",
+      "signature": "u32(u32,u32,u32,u32,u32)",
+      "symbols": {
+        "pal": "FUN_002b0738",
+        "ntsc": "FUN_002aedf8"
+      },
+      "about": "Spawns a class 122 explosion spark: (vec4 position address, vec4 velocity address, u16, long, char); argument meaning beyond the two vectors is [?]."
+    },
+    {
+      "name": "glow_flare_spawn",
+      "signature": "u32(f32,u32,u32,u32,u32,u32,u32,u32,u32)",
+      "symbols": {
+        "pal": "FUN_002e0cb8",
+        "ntsc": "FUN_002df1b0"
+      },
+      "about": "Spawns a class 1192 glow sphere (the bomb blast flash): (f32 size; owner moby, position vec4 address, base vec4 address, life ticks, r, g, b, alpha). Bomb values: size 3 to 4, life 13 to 24, colours (0x7f,0x3f,0) alpha 0x30."
+    },
+    {
+      "name": "moby_cue",
+      "signature": "i32(i32,u32,u32)",
+      "symbols": {
+        "pal": "FUN_0028eec0",
+        "ntsc": "FUN_0028d590"
+      },
+      "about": "Plays the sound cue number (arg 0) of a moby's class on it: (cue, arg 1 usually 0, moby)."
+    },
+    {
+      "name": "moby_attach_to_joint",
+      "signature": "void(u32,u32,u32)",
+      "symbols": {
+        "pal": "FUN_00250760",
+        "ntsc": "FUN_0024f338"
+      },
+      "about": "World matrix of an attach point of a moby's model: (moby, attach index, out). Writes 0x40 bytes to `out` (struct matrix4: three basis rows, translation at +0x30, world space). The attach index picks a joint through the class's attach table (class_ptr+0x1c): for the hero 0 = right hand (weapon grip), 14 = left hand, 12 = right shoulder, 13 = left shoulder. `out` must be game memory (use with_stack(0x40, ...)); the third argument is that address, not a number."
+    }
+  ],
+  "structs": {
+    "moby": {
+      "about": "A moby record (an object of the level: enemy, crate, weapon projectile, hero), 0x100 bytes; the pointer comes from hooks (victim, owner, ...).",
+      "fields": [
+        {
+          "name": "x",
+          "offset": "0x10",
+          "type": "f32",
+          "about": "World position, metres (x east-west; proven on the Kerwan fight: victims, projectiles and effect mobys sit within a few metres of the hero's position and move smoothly; y is the same, z is up)."
+        },
+        {
+          "name": "y",
+          "offset": "0x14",
+          "type": "f32",
+          "about": "World position y, metres."
+        },
+        {
+          "name": "z",
+          "offset": "0x18",
+          "type": "f32",
+          "about": "World position z (up), metres; a standing enemy has the ground height of the hero's feet."
+        },
+        {
+          "name": "state",
+          "offset": "0x20",
+          "type": "u8",
+          "readonly": true,
+          "about": "The class's state number (its update's switch)."
+        },
+        {
+          "name": "flags",
+          "offset": "0x34",
+          "type": "u16",
+          "readonly": true,
+          "about": "Moby flags: 0x1000 in the target registry, 0x4000 hittable, 0x20 has a component (pvar word 0), 0x10 tint, 0x40 no anim, 0x4 no transform, 0x2 not updated, 0x100 explicit basis (bit 0 and 0x1000 are set/cleared by enemy prestep code)."
+        },
+        {
+          "name": "pvar",
+          "offset": "0x78",
+          "type": "u32",
+          "readonly": true,
+          "about": "Pointer to the class's own variables (enemies: the \"enemy\" struct)."
+        },
+        {
+          "name": "hit_slot",
+          "offset": "0xa4",
+          "type": "u8",
+          "about": "Slot of the hit waiting in the hit queue this tick (0xff none)."
+        },
+        {
+          "name": "class",
+          "offset": "0xa6",
+          "type": "i16",
+          "readonly": true,
+          "about": "The class id (what the level data and the class table call it)."
+        },
+        {
+          "name": "bolts",
+          "offset": "0xb4",
+          "type": "i16",
+          "about": "Bolts it drops when it dies (copy of its placement record)."
+        },
+        {
+          "name": "rot_x",
+          "offset": "0x40",
+          "type": "f32",
+          "about": "Euler rotation x (radians); the update rebuilds the basis rows from rot x/y/z every tick unless flags 0x100 or 4."
+        },
+        {
+          "name": "rot_y",
+          "offset": "0x44",
+          "type": "f32",
+          "about": "Euler rotation y."
+        },
+        {
+          "name": "yaw",
+          "offset": "0x48",
+          "type": "f32",
+          "about": "Euler rotation z = heading (radians)."
+        },
+        {
+          "name": "scale",
+          "offset": "0x2c",
+          "type": "f32",
+          "about": "Draw/collision scale (class scale * placement scale); the loader writes it once."
+        },
+        {
+          "name": "class_ptr",
+          "offset": "0x24",
+          "type": "u32",
+          "readonly": true,
+          "about": "Class record; *(s16*)(class_ptr+0x46) is the type: 5 enemy, 9 crate, 11 other targetable."
+        },
+        {
+          "name": "next",
+          "offset": "0x28",
+          "type": "u32",
+          "readonly": true,
+          "about": "Next moby of this frame's update list (rebuilt every frame)."
+        },
+        {
+          "name": "update",
+          "offset": "0x74",
+          "type": "u32",
+          "about": "Update function the game calls once per frame as fn(moby); 0 or flag 2 = not updated."
+        },
+        {
+          "name": "index",
+          "offset": "0xac",
+          "type": "u32",
+          "readonly": true,
+          "about": "Slot number from the array start (hero = 0)."
+        },
+        {
+          "name": "mission",
+          "offset": "0xb0",
+          "type": "u8",
+          "about": "Mission slot of the placement."
+        },
+        {
+          "name": "hit_flag",
+          "offset": "0xbc",
+          "type": "u8",
+          "about": "Per-class flag; projectile classes treat 1 as \"hit something / detonate\" (bomb, mine)."
+        },
+        {
+          "name": "tint",
+          "offset": "0x90",
+          "type": "u32",
+          "about": "RGBA tint used when flags & 0x10."
+        },
+        {
+          "name": "visible",
+          "offset": "0x31",
+          "type": "u8",
+          "about": "Draw flag byte: 0 hides the moby from the renderer's moby list, nonzero draws it (the hero's held items copy it from the hero)."
+        },
+        {
+          "name": "light0",
+          "offset": "0x38",
+          "type": "u32",
+          "about": "Light/tint word 0 (the 8 bytes at +0x38 are the moby's ambient light colours; held items copy them from the hero every tick)."
+        },
+        {
+          "name": "light1",
+          "offset": "0x3c",
+          "type": "u32",
+          "about": "Light/tint word 1 (+0x3c)."
+        },
+        {
+          "name": "clock0",
+          "offset": "0x50",
+          "type": "u32",
+          "about": "Animation clock word 0 (+0x50; the 16 bytes +0x50..+0x5f hold the animation clock, field meaning [?]). Copy all four words to play a second model in step with the first."
+        },
+        {
+          "name": "clock1",
+          "offset": "0x54",
+          "type": "u32",
+          "about": "Animation clock word 1 (+0x54)."
+        },
+        {
+          "name": "clock2",
+          "offset": "0x58",
+          "type": "u32",
+          "about": "Animation clock word 2 (+0x58)."
+        },
+        {
+          "name": "clock3",
+          "offset": "0x5c",
+          "type": "u32",
+          "about": "Animation clock word 3 (+0x5c)."
+        },
+        {
+          "name": "row0_x",
+          "offset": "0xc0",
+          "type": "f32",
+          "about": "Basis row 0 of the model-to-world matrix, component x (the rows at +0xc0/+0xd0/+0xe0 are the x, y, z axis of the model in world space; the update rebuilds them from rot_x/rot_y/yaw every tick unless flags 0x100 or 0x4 are set, so write them together with flags_w |= 0x4). Row 1 is negated (determinant -1) on a mirrored moby (flags_w 0x8000)."
+        },
+        {
+          "name": "row0_y",
+          "offset": "0xc4",
+          "type": "f32",
+          "about": "Basis row 0 of the model-to-world matrix, component y (the rows at +0xc0/+0xd0/+0xe0 are the x, y, z axis of the model in world space; the update rebuilds them from rot_x/rot_y/yaw every tick unless flags 0x100 or 0x4 are set, so write them together with flags_w |= 0x4). Row 1 is negated (determinant -1) on a mirrored moby (flags_w 0x8000)."
+        },
+        {
+          "name": "row0_z",
+          "offset": "0xc8",
+          "type": "f32",
+          "about": "Basis row 0 of the model-to-world matrix, component z (the rows at +0xc0/+0xd0/+0xe0 are the x, y, z axis of the model in world space; the update rebuilds them from rot_x/rot_y/yaw every tick unless flags 0x100 or 0x4 are set, so write them together with flags_w |= 0x4). Row 1 is negated (determinant -1) on a mirrored moby (flags_w 0x8000)."
+        },
+        {
+          "name": "row0_w",
+          "offset": "0xcc",
+          "type": "f32",
+          "about": "Basis row 0 of the model-to-world matrix, component w (the rows at +0xc0/+0xd0/+0xe0 are the x, y, z axis of the model in world space; the update rebuilds them from rot_x/rot_y/yaw every tick unless flags 0x100 or 0x4 are set, so write them together with flags_w |= 0x4). Row 1 is negated (determinant -1) on a mirrored moby (flags_w 0x8000)."
+        },
+        {
+          "name": "row1_x",
+          "offset": "0xd0",
+          "type": "f32",
+          "about": "Basis row 1 of the model-to-world matrix, component x (the rows at +0xc0/+0xd0/+0xe0 are the x, y, z axis of the model in world space; the update rebuilds them from rot_x/rot_y/yaw every tick unless flags 0x100 or 0x4 are set, so write them together with flags_w |= 0x4). Row 1 is negated (determinant -1) on a mirrored moby (flags_w 0x8000)."
+        },
+        {
+          "name": "row1_y",
+          "offset": "0xd4",
+          "type": "f32",
+          "about": "Basis row 1 of the model-to-world matrix, component y (the rows at +0xc0/+0xd0/+0xe0 are the x, y, z axis of the model in world space; the update rebuilds them from rot_x/rot_y/yaw every tick unless flags 0x100 or 0x4 are set, so write them together with flags_w |= 0x4). Row 1 is negated (determinant -1) on a mirrored moby (flags_w 0x8000)."
+        },
+        {
+          "name": "row1_z",
+          "offset": "0xd8",
+          "type": "f32",
+          "about": "Basis row 1 of the model-to-world matrix, component z (the rows at +0xc0/+0xd0/+0xe0 are the x, y, z axis of the model in world space; the update rebuilds them from rot_x/rot_y/yaw every tick unless flags 0x100 or 0x4 are set, so write them together with flags_w |= 0x4). Row 1 is negated (determinant -1) on a mirrored moby (flags_w 0x8000)."
+        },
+        {
+          "name": "row1_w",
+          "offset": "0xdc",
+          "type": "f32",
+          "about": "Basis row 1 of the model-to-world matrix, component w (the rows at +0xc0/+0xd0/+0xe0 are the x, y, z axis of the model in world space; the update rebuilds them from rot_x/rot_y/yaw every tick unless flags 0x100 or 0x4 are set, so write them together with flags_w |= 0x4). Row 1 is negated (determinant -1) on a mirrored moby (flags_w 0x8000)."
+        },
+        {
+          "name": "row2_x",
+          "offset": "0xe0",
+          "type": "f32",
+          "about": "Basis row 2 of the model-to-world matrix, component x (the rows at +0xc0/+0xd0/+0xe0 are the x, y, z axis of the model in world space; the update rebuilds them from rot_x/rot_y/yaw every tick unless flags 0x100 or 0x4 are set, so write them together with flags_w |= 0x4). Row 1 is negated (determinant -1) on a mirrored moby (flags_w 0x8000)."
+        },
+        {
+          "name": "row2_y",
+          "offset": "0xe4",
+          "type": "f32",
+          "about": "Basis row 2 of the model-to-world matrix, component y (the rows at +0xc0/+0xd0/+0xe0 are the x, y, z axis of the model in world space; the update rebuilds them from rot_x/rot_y/yaw every tick unless flags 0x100 or 0x4 are set, so write them together with flags_w |= 0x4). Row 1 is negated (determinant -1) on a mirrored moby (flags_w 0x8000)."
+        },
+        {
+          "name": "row2_z",
+          "offset": "0xe8",
+          "type": "f32",
+          "about": "Basis row 2 of the model-to-world matrix, component z (the rows at +0xc0/+0xd0/+0xe0 are the x, y, z axis of the model in world space; the update rebuilds them from rot_x/rot_y/yaw every tick unless flags 0x100 or 0x4 are set, so write them together with flags_w |= 0x4). Row 1 is negated (determinant -1) on a mirrored moby (flags_w 0x8000)."
+        },
+        {
+          "name": "row2_w",
+          "offset": "0xec",
+          "type": "f32",
+          "about": "Basis row 2 of the model-to-world matrix, component w (the rows at +0xc0/+0xd0/+0xe0 are the x, y, z axis of the model in world space; the update rebuilds them from rot_x/rot_y/yaw every tick unless flags 0x100 or 0x4 are set, so write them together with flags_w |= 0x4). Row 1 is negated (determinant -1) on a mirrored moby (flags_w 0x8000)."
+        },
+        {
+          "name": "flags_w",
+          "offset": "0x34",
+          "type": "u16",
+          "about": "Writable alias of `flags` (same offset +0x34, same u16). Bits a mod sets: 0x4 = no transform: the moby's update does not rebuild the basis rows (+0xc0/0xd0/0xe0) from rot_x/rot_y/yaw, the rows you write stay; 0x2 = not scheduled: the scheduler skips the moby's update function (the hero's held items are driven by the hero code instead; HeroItemsAttach sets 0x6 on them); 0x8000 = mirror: the basis is left-handed (determinant -1, row 1 negated) and the moby is drawn mirrored (the renderer reads this bit; the Blaster has no one-sided faces, so a mirrored copy does not turn inside out). A mirrored clone uses 0x8000|0x4 (and 0x2 so it runs no update). Other bits drive collision and AI (0x1000 target registry, 0x20 has a component, 0x4000 hittable, 0x100 explicit basis, 0x10 tint, 0x40 no anim, 0x1 hidden): read `flags`, change only your bit, write the whole word. A wrong word can crash the moby's own update."
+        },
+        {
+          "name": "sphere_x",
+          "offset": "0x00",
+          "type": "f32",
+          "about": "Draw sphere centre x in 1/1024 m (world position x 1024; the renderer's per-moby depth test and the draw-distance fade read it, decomp moby_draw_build FUN_0026a338). A copy of a moby that is placed elsewhere must move this sphere with it, or the draw pass culls the copy."
+        },
+        {
+          "name": "sphere_y",
+          "offset": "0x04",
+          "type": "f32",
+          "about": "Draw sphere centre y in 1/1024 m."
+        },
+        {
+          "name": "sphere_z",
+          "offset": "0x08",
+          "type": "f32",
+          "about": "Draw sphere centre z in 1/1024 m."
+        },
+        {
+          "name": "sphere_r",
+          "offset": "0x0c",
+          "type": "f32",
+          "about": "Draw sphere radius in 1/1024 m."
+        },
+        {
+          "name": "update_dist",
+          "offset": "0x30",
+          "type": "u8",
+          "about": "Update distance byte: the scheduler skips the class update beyond it; 0xff = always updated (spawners and many updates write 0xff)."
+        },
+        {
+          "name": "draw_dist",
+          "offset": "0x32",
+          "type": "i16",
+          "about": "Draw distance in metres (s16): the moby fades out over its last 8 m and is not drawn beyond min(draw_dist, 500); placed mobies copy their placement record +0x20, spawned ones their creator's literal (decomp moby_format.md MOBY-FADE)."
+        }
+      ]
+    },
+    "enemy": {
+      "about": "The pvar block of an enemy class (pointer: moby.pvar). Health is set by class code in state 0, no separate max.",
+      "fields": [
+        {
+          "name": "health",
+          "offset": "0x20",
+          "type": "f32",
+          "about": "Current health; the class subtracts the resolved strength each hit and dies at <= 0 (class dependent)."
+        }
+      ]
+    },
+    "hit": {
+      "about": "A hit queue entry (the pointer rac1.combat.get_hit returns and damage.resolve gets as `entry`; 64 entries of 0x40 bytes at 0x178100).",
+      "fields": [
+        {
+          "name": "attacker",
+          "offset": "0x20",
+          "type": "u32",
+          "about": "The attacker moby (its class decides special strengths: Blaster classes 0x131 and 0xa8)."
+        },
+        {
+          "name": "strength",
+          "offset": "0x2c",
+          "type": "f32",
+          "about": "The strength the resolver hands the victim class (the damage written by hit_desc_build, or the Blaster table value)."
+        }
+      ]
+    },
+    "hit_desc": {
+      "about": "A hit descriptor as hit_desc_build fills it (damage.build_hit 's `desc`; the hit queue entry is made from it).",
+      "fields": [
+        {
+          "name": "attacker",
+          "offset": "0x10",
+          "type": "u32",
+          "about": "The attacker moby."
+        },
+        {
+          "name": "mask",
+          "offset": "0x14",
+          "type": "u32",
+          "about": "Collision mask of the attack."
+        },
+        {
+          "name": "damage",
+          "offset": "0x1c",
+          "type": "f32",
+          "about": "Damage dealt to an enemy."
+        },
+        {
+          "name": "one",
+          "offset": "0x20",
+          "type": "u8",
+          "about": "Always 1 (valid flag)."
+        },
+        {
+          "name": "type",
+          "offset": "0x18",
+          "type": "u8",
+          "about": "Attack type byte (wrench 0, weapon hits 5)."
+        },
+        {
+          "name": "strength_class",
+          "offset": "0x19",
+          "type": "u8",
+          "about": "Strength class byte (1 for the attacks read so far)."
+        },
+        {
+          "name": "attacker_class",
+          "offset": "0x1a",
+          "type": "u16",
+          "about": "Attacker class word: the class of the weapon moby (wrench 71)."
+        }
+      ]
+    },
+    "pvar0": {
+      "about": "The first word of a moby's pvar block: for enemies and crates (moby.flags & 0x20) the pointer to their target block (struct component). Pointer: moby.pvar.",
+      "fields": [
+        {
+          "name": "component",
+          "offset": "0x00",
+          "type": "u32",
+          "about": "Pointer to the target block (health at +0), or 0."
+        }
+      ]
+    },
+    "component": {
+      "about": "Target block of an enemy/crate (pointer = struct pvar0 .component = *(pvar) when moby.flags & 0x20; for enemies pvar+0x20, i.e. the same block as struct enemy).",
+      "fields": [
+        {
+          "name": "health",
+          "offset": "0x00",
+          "type": "f32",
+          "about": "Current health."
+        },
+        {
+          "name": "reaction",
+          "offset": "0x08",
+          "type": "u8",
+          "about": "Reaction index used by the hit resolver's repeat gate."
+        },
+        {
+          "name": "radius8",
+          "offset": "0x0a",
+          "type": "u8",
+          "about": "Target radius in eighths of a metre (aim cone widening)."
+        },
+        {
+          "name": "aim_height",
+          "offset": "0x10",
+          "type": "f32",
+          "about": "Aim point above the moby origin (metres)."
+        },
+        {
+          "name": "alert",
+          "offset": "0x18",
+          "type": "u32",
+          "readonly": true,
+          "about": "The Taunter moby that last taunted this enemy (the Taunter's alert scan writes it into every registry enemy within range), 0 = not taunted."
+        }
+      ]
+    },
+    "blaster_shot": {
+      "about": "Pvar block of a Blaster shot (class 305; pointer: moby.pvar). The shot steers to the point (aim_x..z); all zero = no target.",
+      "fields": [
+        {
+          "name": "aim_x",
+          "offset": "0x00",
+          "type": "f32",
+          "about": "Aim point x the shot steers to."
+        },
+        {
+          "name": "aim_y",
+          "offset": "0x04",
+          "type": "f32",
+          "about": "Aim point y."
+        },
+        {
+          "name": "aim_z",
+          "offset": "0x08",
+          "type": "f32",
+          "about": "Aim point z."
+        },
+        {
+          "name": "yaw_vel",
+          "offset": "0x10",
+          "type": "f32",
+          "about": "Yaw smoothing velocity."
+        },
+        {
+          "name": "pitch_vel",
+          "offset": "0x14",
+          "type": "f32",
+          "about": "Pitch smoothing velocity."
+        },
+        {
+          "name": "fallback_yaw",
+          "offset": "0x18",
+          "type": "f32",
+          "about": "Yaw it flies on with no target."
+        },
+        {
+          "name": "fallback_pitch",
+          "offset": "0x1c",
+          "type": "f32",
+          "about": "Pitch it flies on with no target."
+        },
+        {
+          "name": "owner",
+          "offset": "0x20",
+          "type": "u32",
+          "about": "The firing moby."
+        },
+        {
+          "name": "life",
+          "offset": "0x24",
+          "type": "i16",
+          "about": "Life counter (counts down)."
+        },
+        {
+          "name": "life_max",
+          "offset": "0x26",
+          "type": "i16",
+          "about": "Initial life."
+        },
+        {
+          "name": "bounces",
+          "offset": "0x28",
+          "type": "i32",
+          "about": "Bounce count (gold bounces up to gold+5 times)."
+        }
+      ]
+    },
+    "ryno_rocket": {
+      "about": "Pvar block of an R.Y.N.O. rocket (class 457). It homes on `target` when target and target_class are set.",
+      "fields": [
+        {
+          "name": "aim_x",
+          "offset": "0x00",
+          "type": "f32",
+          "about": "Aim point x."
+        },
+        {
+          "name": "aim_y",
+          "offset": "0x04",
+          "type": "f32",
+          "about": "Aim point y."
+        },
+        {
+          "name": "aim_z",
+          "offset": "0x08",
+          "type": "f32",
+          "about": "Aim point z."
+        },
+        {
+          "name": "owner",
+          "offset": "0x20",
+          "type": "u32",
+          "about": "The firing moby."
+        },
+        {
+          "name": "age",
+          "offset": "0x24",
+          "type": "i32",
+          "about": "Age in ticks."
+        },
+        {
+          "name": "target",
+          "offset": "0x28",
+          "type": "u32",
+          "about": "The moby it homes on (0 = none)."
+        },
+        {
+          "name": "aim_height",
+          "offset": "0x2c",
+          "type": "f32",
+          "about": "Aim point height above the target origin."
+        },
+        {
+          "name": "speed",
+          "offset": "0x30",
+          "type": "f32",
+          "about": "Speed (units per tick)."
+        },
+        {
+          "name": "turn_yaw",
+          "offset": "0x34",
+          "type": "f32",
+          "about": "Yaw turn state."
+        },
+        {
+          "name": "turn_pitch",
+          "offset": "0x38",
+          "type": "f32",
+          "about": "Pitch turn state."
+        },
+        {
+          "name": "wobble",
+          "offset": "0x44",
+          "type": "f32",
+          "about": "Wobble phase."
+        },
+        {
+          "name": "target_class",
+          "offset": "0x58",
+          "type": "i32",
+          "about": "Class of the target moby."
+        }
+      ]
+    },
+    "devastator_rocket": {
+      "about": "Pvar block of a Devastator rocket (class 153).",
+      "fields": [
+        {
+          "name": "last_hit",
+          "offset": "0x10",
+          "type": "u32",
+          "about": "Last moby hit."
+        },
+        {
+          "name": "life",
+          "offset": "0x14",
+          "type": "i32",
+          "about": "Life countdown."
+        },
+        {
+          "name": "target",
+          "offset": "0x18",
+          "type": "u32",
+          "about": "Target moby (written by the retarget function)."
+        },
+        {
+          "name": "aim_height",
+          "offset": "0x2c",
+          "type": "f32",
+          "about": "Creator parameter f12."
+        },
+        {
+          "name": "bounces",
+          "offset": "0x40",
+          "type": "i32",
+          "about": "Bounce count (gold ends at 3)."
+        },
+        {
+          "name": "rearm",
+          "offset": "0x44",
+          "type": "i32",
+          "about": "Re-arm countdown."
+        },
+        {
+          "name": "max_dist",
+          "offset": "0x48",
+          "type": "f32",
+          "about": "Maximum distance from the hero."
+        }
+      ]
+    },
+    "bomb": {
+      "about": "Pvar block of a Bomb Glove bomb (class 121). Position advances by (vx,vy,vz) per tick; vz falls.",
+      "fields": [
+        {
+          "name": "vx",
+          "offset": "0x00",
+          "type": "f32",
+          "about": "Velocity x per tick."
+        },
+        {
+          "name": "vy",
+          "offset": "0x04",
+          "type": "f32",
+          "about": "Velocity y per tick."
+        },
+        {
+          "name": "vz",
+          "offset": "0x08",
+          "type": "f32",
+          "about": "Velocity z per tick."
+        },
+        {
+          "name": "owner",
+          "offset": "0x50",
+          "type": "u32",
+          "about": "The glove (owner)."
+        },
+        {
+          "name": "fuse",
+          "offset": "0x54",
+          "type": "i16",
+          "about": "Fuse counter, counts down; 0 detonates."
+        },
+        {
+          "name": "water",
+          "offset": "0x68",
+          "type": "i16",
+          "about": "Water counter."
+        },
+        {
+          "name": "tint",
+          "offset": "0x6a",
+          "type": "i16",
+          "about": "Tint counter."
+        }
+      ]
+    },
+    "mine": {
+      "about": "Pvar block of a Mine Glove mine (class 74).",
+      "fields": [
+        {
+          "name": "vx",
+          "offset": "0x00",
+          "type": "f32",
+          "about": "Velocity x per tick."
+        },
+        {
+          "name": "vy",
+          "offset": "0x04",
+          "type": "f32",
+          "about": "Velocity y per tick."
+        },
+        {
+          "name": "vz",
+          "offset": "0x08",
+          "type": "f32",
+          "about": "Velocity z per tick."
+        },
+        {
+          "name": "owner",
+          "offset": "0x30",
+          "type": "u32",
+          "about": "The glove (owner)."
+        },
+        {
+          "name": "stuck_to",
+          "offset": "0x4c",
+          "type": "u32",
+          "about": "The moby it is stuck to (0 = none)."
+        },
+        {
+          "name": "landed",
+          "offset": "0x50",
+          "type": "i16",
+          "about": "Landed counter / flag."
+        },
+        {
+          "name": "target",
+          "offset": "0x54",
+          "type": "u32",
+          "readonly": true,
+          "about": "The enemy a landed mine rolls to (set by the landed-mine scan, 0 = none)."
+        },
+        {
+          "name": "age",
+          "offset": "0x5c",
+          "type": "u32",
+          "about": "Age key the Mine Glove uses to pick the oldest mine; the game writes 0xffffffff to make the mine's own update delete it."
+        },
+        {
+          "name": "chase_wide",
+          "offset": "0x78",
+          "type": "u32",
+          "about": "Nonzero = the landed-mine scan reaches 3x as far; the game clears it at the end of every mine update."
+        }
+      ]
+    },
+    "doom_agent": {
+      "about": "Pvar block of a Glove of Doom agent (class 186; moby state 0xb = explode).",
+      "fields": [
+        {
+          "name": "goal_x",
+          "offset": "0x00",
+          "type": "f32",
+          "about": "Goal x."
+        },
+        {
+          "name": "goal_y",
+          "offset": "0x04",
+          "type": "f32",
+          "about": "Goal y."
+        },
+        {
+          "name": "goal_z",
+          "offset": "0x08",
+          "type": "f32",
+          "about": "Goal z."
+        },
+        {
+          "name": "vx",
+          "offset": "0x10",
+          "type": "f32",
+          "about": "Velocity x."
+        },
+        {
+          "name": "vy",
+          "offset": "0x14",
+          "type": "f32",
+          "about": "Velocity y."
+        },
+        {
+          "name": "vz",
+          "offset": "0x18",
+          "type": "f32",
+          "about": "Velocity z."
+        },
+        {
+          "name": "age",
+          "offset": "0x34",
+          "type": "i32",
+          "about": "Age in ticks."
+        },
+        {
+          "name": "target",
+          "offset": "0x38",
+          "type": "u32",
+          "about": "Target moby."
+        },
+        {
+          "name": "speed",
+          "offset": "0x5c",
+          "type": "f32",
+          "about": "Speed."
+        },
+        {
+          "name": "owner",
+          "offset": "0x60",
+          "type": "u32",
+          "about": "Owner moby."
+        }
+      ]
+    },
+    "visibomb": {
+      "about": "Pvar block of a Visibomb missile (class 172; player-steered).",
+      "fields": [
+        {
+          "name": "life",
+          "offset": "0x10",
+          "type": "i32",
+          "about": "Life counter."
+        },
+        {
+          "name": "speed",
+          "offset": "0x48",
+          "type": "f32",
+          "about": "Speed."
+        }
+      ]
+    },
+    "gold_case": {
+      "about": "The pvar block of a Gold Weapon Case or its display moby (pointer: moby.pvar).",
+      "fields": [
+        {
+          "name": "index",
+          "offset": "0x40",
+          "type": "i32",
+          "readonly": true,
+          "about": "Case number 0..9 -> item: 0 tesla_claw, 1 bomb_glove, 2 devastator, 3 pyrocitor, 4 mine_glove, 5 blaster, 6 morph_o_ray, 7 glove_of_doom, 8 decoy, 9 suck_cannon. Even numbers exist only in New Game+."
+        }
+      ]
+    },
+    "matrix4": {
+      "about": "A 4x4 float matrix as the game stores it (0x40 bytes, row major): rows 0..2 are the x, y, z axis (basis), row 3 (+0x30) is the translation. Attach matrices, moby_attach_to_joint results.",
+      "fields": [
+        {
+          "name": "m00",
+          "offset": "0x0",
+          "type": "f32",
+          "about": "Row 0, column 0."
+        },
+        {
+          "name": "m01",
+          "offset": "0x4",
+          "type": "f32",
+          "about": "Row 0, column 1."
+        },
+        {
+          "name": "m02",
+          "offset": "0x8",
+          "type": "f32",
+          "about": "Row 0, column 2."
+        },
+        {
+          "name": "m03",
+          "offset": "0xc",
+          "type": "f32",
+          "about": "Row 0, column 3."
+        },
+        {
+          "name": "m10",
+          "offset": "0x10",
+          "type": "f32",
+          "about": "Row 1, column 0."
+        },
+        {
+          "name": "m11",
+          "offset": "0x14",
+          "type": "f32",
+          "about": "Row 1, column 1."
+        },
+        {
+          "name": "m12",
+          "offset": "0x18",
+          "type": "f32",
+          "about": "Row 1, column 2."
+        },
+        {
+          "name": "m13",
+          "offset": "0x1c",
+          "type": "f32",
+          "about": "Row 1, column 3."
+        },
+        {
+          "name": "m20",
+          "offset": "0x20",
+          "type": "f32",
+          "about": "Row 2, column 0."
+        },
+        {
+          "name": "m21",
+          "offset": "0x24",
+          "type": "f32",
+          "about": "Row 2, column 1."
+        },
+        {
+          "name": "m22",
+          "offset": "0x28",
+          "type": "f32",
+          "about": "Row 2, column 2."
+        },
+        {
+          "name": "m23",
+          "offset": "0x2c",
+          "type": "f32",
+          "about": "Row 2, column 3."
+        },
+        {
+          "name": "m30",
+          "offset": "0x30",
+          "type": "f32",
+          "about": "Row 3, column 0 (translation x)."
+        },
+        {
+          "name": "m31",
+          "offset": "0x34",
+          "type": "f32",
+          "about": "Row 3, column 1 (translation y)."
+        },
+        {
+          "name": "m32",
+          "offset": "0x38",
+          "type": "f32",
+          "about": "Row 3, column 2 (translation z)."
+        },
+        {
+          "name": "m33",
+          "offset": "0x3c",
+          "type": "f32",
+          "about": "Row 3, column 3."
+        }
+      ]
+    },
+    "decoy": {
+      "about": "Pvar block of a Decoy (class 203, gold 1900; pointer: moby.pvar). States 3/4 active, 5 expiring, 6 delete.",
+      "fields": [
+        {
+          "name": "timer",
+          "offset": "0x44",
+          "type": "i16",
+          "about": "Active timer (scaled 600 ticks, counted down in state 4)."
+        },
+        {
+          "name": "health",
+          "offset": "0x48",
+          "type": "f32",
+          "about": "Health ((gold+1)*4 at the start, minus each hit's strength); below 0 the decoy is destroyed."
+        }
+      ]
+    },
+    "drone": {
+      "about": "Pvar block of a Drone Device drone (class 479; pointer: moby.pvar).",
+      "fields": [
+        {
+          "name": "attacks_left",
+          "offset": "0x56",
+          "type": "i16",
+          "about": "Attack counter: 100 at the start, -1 per attack, below 1 the drone dies."
+        }
+      ]
+    },
+    "held_taunter": {
+      "about": "Pvar block of the held Taunter (class 175; pointer: moby.pvar of the held moby).",
+      "fields": [
+        {
+          "name": "range",
+          "offset": "0x08",
+          "type": "f32",
+          "about": "Alert range in metres (the held update sets 30.0 when it is 0; the alert scan uses it every 4th tick while firing)."
+        }
+      ]
+    },
+    "held_morph": {
+      "about": "Pvar block of the held Morph-o-Ray (class 185; pointer: moby.pvar of the held moby; decomp morph_held_update FUN_002d1d80 OV:130805-130838).",
+      "fields": [
+        {
+          "name": "target",
+          "offset": "0x10",
+          "type": "u32",
+          "readonly": true,
+          "about": "The locked target moby (0 = none)."
+        },
+        {
+          "name": "max",
+          "offset": "0x14",
+          "type": "f32",
+          "about": "Morph strength of the target (its component short +4 as a float). A target whose max is 1.0 or less morphs on the tick it is locked (time_left is set to 0 at once)."
+        },
+        {
+          "name": "time_left",
+          "offset": "0x18",
+          "type": "f32",
+          "about": "Morph time left: the target's health when locked, drained each tick by 3.0 x dt x (gold x 0.33 + 1); 0 or less turns the target into a sheep."
+        },
+        {
+          "name": "lock",
+          "offset": "0x44",
+          "type": "i32",
+          "about": "Lock cooldown in ticks: scale(30) = 25 PAL ticks when a new target is locked, counted down every active tick; a new target needs 0."
+        }
+      ]
+    },
+    "tesla_claw": {
+      "about": "Pvar block of the held Tesla Claw (class 177; pointer: moby.pvar of the held moby).",
+      "fields": [
+        {
+          "name": "target1",
+          "offset": "0x20",
+          "type": "u32",
+          "readonly": true,
+          "about": "First target of the chain (0 = none)."
+        },
+        {
+          "name": "target2",
+          "offset": "0x38",
+          "type": "u32",
+          "readonly": true,
+          "about": "Second target of the chain (gold claw only, 0 = none)."
+        },
+        {
+          "name": "marker",
+          "offset": "0x3e",
+          "type": "i16",
+          "about": "Set to 20 on every tick the chain runs."
+        }
+      ]
+    },
+    "flame": {
+      "about": "A Pyrocitor flame particle (the record rac1.omni.weapon.flame.create returns; particle type 12).",
+      "fields": [
+        {
+          "name": "life",
+          "offset": "0x0a",
+          "type": "u16",
+          "about": "Remaining life in ticks; how far the flame flies is set by its life, not by the creator's range argument."
+        },
+        {
+          "name": "start_life",
+          "offset": "0x3d",
+          "type": "u8",
+          "about": "The life it started with (the flame's hit sphere grows with life / start_life)."
+        }
+      ]
+    },
+    "vec4": {
+      "about": "Four floats x, y, z, w: a vector the game passes by address (hook arguments such as positions and velocities, or a buffer from omni.with_stack).",
+      "fields": [
+        {
+          "name": "x",
+          "offset": "0x00",
+          "type": "f32",
+          "about": "x."
+        },
+        {
+          "name": "y",
+          "offset": "0x04",
+          "type": "f32",
+          "about": "y."
+        },
+        {
+          "name": "z",
+          "offset": "0x08",
+          "type": "f32",
+          "about": "z."
+        },
+        {
+          "name": "w",
+          "offset": "0x0c",
+          "type": "f32",
+          "about": "w."
+        }
+      ]
+    },
+    "hud_health": {
+      "about": "The HUD element of the nanotech meter: the argument of the hook rac1.omni.hud.health_draw.",
+      "fields": [
+        {
+          "name": "fade_bar",
+          "offset": "0x70",
+          "type": "u8",
+          "readonly": true,
+          "about": "Fade step of the meter's bar, 0 (hidden) .. 8 (shown). It rises first when the meter appears and falls last."
+        },
+        {
+          "name": "fade_orbs",
+          "offset": "0x71",
+          "type": "u8",
+          "readonly": true,
+          "about": "Fade step of the orbs, 0 .. 8, after the bar's."
+        },
+        {
+          "name": "result",
+          "offset": "0x58",
+          "type": "u32",
+          "readonly": true,
+          "about": "The word the draw returns (a hook that skips the original returns this)."
+        }
+      ]
+    }
+  },
+  "pvars": {
+    "8": "enemy",
+    "28": "enemy",
+    "30": "enemy",
+    "31": "enemy",
+    "44": "enemy",
+    "52": "enemy",
+    "63": "enemy",
+    "101": "enemy",
+    "111": "enemy",
+    "170": "enemy",
+    "217": "enemy",
+    "231": "enemy",
+    "233": "enemy",
+    "238": "enemy",
+    "252": "enemy",
+    "253": "enemy",
+    "294": "enemy",
+    "326": "enemy",
+    "333": "enemy",
+    "340": "enemy",
+    "347": "enemy",
+    "427": "enemy",
+    "455": "enemy",
+    "459": "enemy",
+    "491": "enemy",
+    "541": "enemy",
+    "563": "enemy",
+    "572": "enemy",
+    "573": "enemy",
+    "574": "enemy",
+    "577": "enemy",
+    "578": "enemy",
+    "580": "enemy",
+    "612": "enemy",
+    "623": "enemy",
+    "625": "enemy",
+    "631": "enemy",
+    "638": "enemy",
+    "643": "enemy",
+    "668": "enemy",
+    "749": "enemy",
+    "827": "enemy",
+    "865": "enemy",
+    "866": "enemy",
+    "871": "enemy",
+    "1023": "enemy",
+    "1041": "enemy",
+    "1048": "enemy",
+    "1051": "enemy",
+    "1059": "enemy",
+    "1068": "enemy",
+    "1110": "enemy",
+    "1112": "enemy",
+    "1126": "enemy",
+    "1172": "enemy",
+    "1196": "enemy",
+    "1202": "enemy",
+    "1229": "enemy",
+    "1231": "enemy",
+    "1246": "enemy",
+    "1261": "enemy",
+    "1262": "enemy",
+    "1269": "enemy",
+    "1356": "enemy",
+    "1382": "enemy",
+    "1440": "enemy",
+    "1454": "enemy",
+    "1805": "enemy",
+    "1885": "enemy",
+    "1906": "enemy",
+    "305": "blaster_shot",
+    "457": "ryno_rocket",
+    "153": "devastator_rocket",
+    "121": "bomb",
+    "74": "mine",
+    "186": "doom_agent",
+    "172": "visibomb",
+    "304": "gold_case",
+    "1456": "gold_case",
+    "1457": "gold_case",
+    "1458": "gold_case",
+    "1459": "gold_case",
+    "1460": "gold_case",
+    "1461": "gold_case",
+    "1462": "gold_case",
+    "1463": "gold_case",
+    "1464": "gold_case",
+    "1465": "gold_case",
+    "175": "held_taunter",
+    "177": "tesla_claw",
+    "185": "held_morph",
+    "203": "decoy",
+    "1900": "decoy",
+    "479": "drone"
+  },
+  "mobys": {
+    "about": "Data for the host's moby walk (omni/mobys.rs): the pool of mobies, their slot layout and the target registry. Offsets are hex strings; cells and registry are in the overlay window (0x40000000 + NTSC-U level-0 address). A missing section = moby queries are not supported.",
+    "cells": "0x4015FFD8",
+    "start_word": "0x0",
+    "pool_start_word": "0x4",
+    "end_word": "0x8",
+    "stride": "0x100",
+    "state": "0x20",
+    "dead_from": "0x80",
+    "tail": "0xff",
+    "class": "0xa6",
+    "pos": "0x10",
+    "flags": "0x34",
+    "registered_flag": "0x1000",
+    "has_component_flag": "0x20",
+    "class_ptr": "0x24",
+    "class_type": "0x46",
+    "enemy_type": 5,
+    "pvar": "0x78",
+    "registry": "0x401ABA00",
+    "max_slots": 4096
+  },
+  "skeletons": {
+    "hero": {
+      "about": "Hero skeleton for pose overrides (omni/pose.rs; loader omni.pose). Class 0, 111 joints; names, chains and mirror pairs are the loader's, `centre` joints are their own mirror image, `chest` (joint 6, parent of both shoulders) is attach point `chest_attach` of the class (the plane of pose.mirrored). `readable` = joints with a retail attach point. Source: scratch_omni research POSE_OVERRIDE.md.",
+      "class": 0,
+      "joint_count": 111,
+      "joints": {
+        "root": 0, "pelvis": 1, "spine_1": 2, "spine_2": 3, "spine_3": 4, "spine_4": 5,
+        "chest": 6, "neck": 7, "head": 8, "jaw": 10, "right_leg_hip": 92, "right_knee": 93,
+        "right_ankle": 94, "right_foot": 95, "right_toe": 96, "left_leg_hip": 98, "left_knee": 99, "left_ankle": 100,
+        "left_foot": 101, "left_toe": 102, "right_clavicle": 52, "right_shoulder": 53, "right_elbow": 54, "right_wrist": 55,
+        "right_hand": 56, "left_clavicle": 72, "left_shoulder": 73, "left_elbow": 74, "left_wrist": 75, "left_hand": 76,
+        "right_thumb": 69, "left_thumb": 89, "right_finger_1": 57, "right_finger_2": 60, "right_finger_3": 63, "right_finger_4": 66,
+        "left_finger_1": 77, "left_finger_2": 80, "left_finger_3": 83, "left_finger_4": 86, "right_ear": 44, "left_ear": 41,
+        "tail_1": 104, "tail_2": 105, "tail_3": 106, "tail_4": 107, "tail_5": 108, "tail_6": 109,
+        "tail_7": 110, "right_eye": 22, "left_eye": 24, "right_eye_socket": 21, "left_eye_socket": 23
+      },
+      "chains": {
+        "right_arm": [52, 72], "left_arm": [72, 92], "right_hand": [56, 71], "left_hand": [76, 91], "right_leg": [92, 98],
+        "left_leg": [98, 104], "tail": [104, 111], "spine": [1, 7], "ears_right": [44, 47], "ears_left": [41, 44]
+      },
+      "mirror_pairs": [
+        [16, 17], [19, 20], [21, 23], [22, 24], [25, 29], [26, 30], [27, 31], [28, 32],
+        [33, 35], [34, 36], [39, 40], [41, 44], [42, 45], [43, 46], [47, 48], [49, 50],
+        [52, 72], [53, 73], [54, 74], [55, 75], [56, 76], [57, 77], [58, 78], [59, 79],
+        [60, 80], [61, 81], [62, 82], [63, 83], [64, 84], [65, 85], [66, 86], [67, 87],
+        [68, 88], [69, 89], [70, 90], [71, 91], [92, 98], [93, 99], [94, 100], [95, 101],
+        [96, 102], [97, 103]
+      ],
+      "centre": [
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+        18, 37, 38, 51, 104, 105, 106, 107, 108, 109, 110
+      ],
+      "chest": 6,
+      "chest_attach": 11,
+      "readable": [
+        0, 2, 3, 5, 6, 7, 8, 18, 21, 22, 23, 24, 49, 50, 52, 54,
+        55, 56, 72, 74, 75, 76, 92, 93, 94, 98, 99, 100, 104, 106, 108, 110
+      ]
+    }
+  },
+  "bases": {
+    "hero": {
+      "pal": "0x0013F450",
+      "ntsc": "0x0013F350",
+      "about": "The hero's state (HERO in the port's rac1/host C)."
+    }
+  },
+  "fields": [
+    {
+      "name": "hero.position.x",
+      "type": "f32",
+      "base": "hero",
+      "offset": "0x80",
+      "about": "Where the hero is (gHeroPos)."
+    },
+    {
+      "name": "hero.position.y",
+      "type": "f32",
+      "base": "hero",
+      "offset": "0x84"
+    },
+    {
+      "name": "hero.position.z",
+      "type": "f32",
+      "base": "hero",
+      "offset": "0x88"
+    },
+    {
+      "name": "hero.facing",
+      "type": "f32",
+      "base": "hero",
+      "offset": "0x98",
+      "about": "The way he faces (rot.z), in radians."
+    },
+    {
+      "name": "hero.move_yaw",
+      "type": "f32",
+      "base": "hero",
+      "offset": "0x180",
+      "about": "Where the stick moves him: the stick's angle plus the camera's yaw."
+    },
+    {
+      "name": "hero.state",
+      "type": "i32",
+      "base": "hero",
+      "offset": "0x2084",
+      "readonly": true,
+      "about": "His state: 0 standing, 2 running, 7 jumping, ..."
+    },
+    {
+      "name": "bolts",
+      "type": "i32",
+      "address": {
+        "pal": "0x0015EE98",
+        "ntsc": "0x0015ED98"
+      },
+      "about": "The player's bolts."
+    },
+    {
+      "name": "omni.weapon.wrench.have",
+      "type": "u8",
+      "address": {
+        "pal": "0x0013D5C8",
+        "ntsc": "0x0013D4C8"
+      },
+      "about": "Omniwrench (item 8): 1 when the player owns it (the have byte table at 0x13d4c0)."
+    },
+    {
+      "name": "omni.weapon.suck_cannon.have",
+      "type": "u8",
+      "address": {
+        "pal": "0x0013D5C9",
+        "ntsc": "0x0013D4C9"
+      },
+      "about": "Suck Cannon (item 9): 1 when the player owns it (the have byte table at 0x13d4c0)."
+    },
+    {
+      "name": "omni.weapon.suck_cannon.ammo",
+      "type": "i32",
+      "address": {
+        "pal": "0x0013D54C",
+        "ntsc": "0x0013D44C"
+      },
+      "about": "Suck Cannon (item 9): its ammo (the ammo int table at 0x13d428)."
+    },
+    {
+      "name": "omni.weapon.suck_cannon.gold",
+      "type": "u8",
+      "address": {
+        "pal": "0x0013E629",
+        "ntsc": "0x0013E529"
+      },
+      "about": "Suck Cannon (item 9): 1 when it is the gold version (byte table at 0x13e520, saved with the game)."
+    },
+    {
+      "name": "omni.weapon.bomb_glove.have",
+      "type": "u8",
+      "address": {
+        "pal": "0x0013D5CA",
+        "ntsc": "0x0013D4CA"
+      },
+      "about": "Bomb Glove (item 10): 1 when the player owns it (the have byte table at 0x13d4c0)."
+    },
+    {
+      "name": "omni.weapon.bomb_glove.ammo",
+      "type": "i32",
+      "address": {
+        "pal": "0x0013D550",
+        "ntsc": "0x0013D450"
+      },
+      "about": "Bomb Glove (item 10): its ammo (the ammo int table at 0x13d428)."
+    },
+    {
+      "name": "omni.weapon.bomb_glove.gold",
+      "type": "u8",
+      "address": {
+        "pal": "0x0013E62A",
+        "ntsc": "0x0013E52A"
+      },
+      "about": "Bomb Glove (item 10): 1 when it is the gold version (byte table at 0x13e520, saved with the game)."
+    },
+    {
+      "name": "omni.weapon.devastator.have",
+      "type": "u8",
+      "address": {
+        "pal": "0x0013D5CB",
+        "ntsc": "0x0013D4CB"
+      },
+      "about": "Devastator (item 11): 1 when the player owns it (the have byte table at 0x13d4c0)."
+    },
+    {
+      "name": "omni.weapon.devastator.ammo",
+      "type": "i32",
+      "address": {
+        "pal": "0x0013D554",
+        "ntsc": "0x0013D454"
+      },
+      "about": "Devastator (item 11): its ammo (the ammo int table at 0x13d428)."
+    },
+    {
+      "name": "omni.weapon.devastator.gold",
+      "type": "u8",
+      "address": {
+        "pal": "0x0013E62B",
+        "ntsc": "0x0013E52B"
+      },
+      "about": "Devastator (item 11): 1 when it is the gold version (byte table at 0x13e520, saved with the game)."
+    },
+    {
+      "name": "omni.weapon.visibomb.have",
+      "type": "u8",
+      "address": {
+        "pal": "0x0013D5CD",
+        "ntsc": "0x0013D4CD"
+      },
+      "about": "Visibomb Gun (item 13): 1 when the player owns it (the have byte table at 0x13d4c0)."
+    },
+    {
+      "name": "omni.weapon.visibomb.ammo",
+      "type": "i32",
+      "address": {
+        "pal": "0x0013D55C",
+        "ntsc": "0x0013D45C"
+      },
+      "about": "Visibomb Gun (item 13): its ammo (the ammo int table at 0x13d428)."
+    },
+    {
+      "name": "omni.weapon.visibomb.gold",
+      "type": "u8",
+      "address": {
+        "pal": "0x0013E62D",
+        "ntsc": "0x0013E52D"
+      },
+      "about": "Visibomb Gun (item 13): 1 when it is the gold version (byte table at 0x13e520, saved with the game)."
+    },
+    {
+      "name": "omni.weapon.taunter.have",
+      "type": "u8",
+      "address": {
+        "pal": "0x0013D5CE",
+        "ntsc": "0x0013D4CE"
+      },
+      "about": "Taunter (item 14): 1 when the player owns it (the have byte table at 0x13d4c0)."
+    },
+    {
+      "name": "omni.weapon.taunter.ammo",
+      "type": "i32",
+      "address": {
+        "pal": "0x0013D560",
+        "ntsc": "0x0013D460"
+      },
+      "about": "Taunter (item 14): its ammo (the ammo int table at 0x13d428)."
+    },
+    {
+      "name": "omni.weapon.taunter.gold",
+      "type": "u8",
+      "address": {
+        "pal": "0x0013E62E",
+        "ntsc": "0x0013E52E"
+      },
+      "about": "Taunter (item 14): 1 when it is the gold version (byte table at 0x13e520, saved with the game)."
+    },
+    {
+      "name": "omni.weapon.blaster.have",
+      "type": "u8",
+      "address": {
+        "pal": "0x0013D5CF",
+        "ntsc": "0x0013D4CF"
+      },
+      "about": "Blaster (item 15): 1 when the player owns it (the have byte table at 0x13d4c0)."
+    },
+    {
+      "name": "omni.weapon.blaster.ammo",
+      "type": "i32",
+      "address": {
+        "pal": "0x0013D564",
+        "ntsc": "0x0013D464"
+      },
+      "about": "Blaster (item 15): its ammo (the ammo int table at 0x13d428)."
+    },
+    {
+      "name": "omni.weapon.blaster.gold",
+      "type": "u8",
+      "address": {
+        "pal": "0x0013E62F",
+        "ntsc": "0x0013E52F"
+      },
+      "about": "Blaster (item 15): 1 when it is the gold version (byte table at 0x13e520, saved with the game)."
+    },
+    {
+      "name": "omni.weapon.pyrocitor.have",
+      "type": "u8",
+      "address": {
+        "pal": "0x0013D5D0",
+        "ntsc": "0x0013D4D0"
+      },
+      "about": "Pyrocitor (item 16): 1 when the player owns it (the have byte table at 0x13d4c0)."
+    },
+    {
+      "name": "omni.weapon.pyrocitor.ammo",
+      "type": "i32",
+      "address": {
+        "pal": "0x0013D568",
+        "ntsc": "0x0013D468"
+      },
+      "about": "Pyrocitor (item 16): its ammo (the ammo int table at 0x13d428)."
+    },
+    {
+      "name": "omni.weapon.pyrocitor.gold",
+      "type": "u8",
+      "address": {
+        "pal": "0x0013E630",
+        "ntsc": "0x0013E530"
+      },
+      "about": "Pyrocitor (item 16): 1 when it is the gold version (byte table at 0x13e520, saved with the game)."
+    },
+    {
+      "name": "omni.weapon.mine_glove.have",
+      "type": "u8",
+      "address": {
+        "pal": "0x0013D5D1",
+        "ntsc": "0x0013D4D1"
+      },
+      "about": "Mine Glove (item 17): 1 when the player owns it (the have byte table at 0x13d4c0)."
+    },
+    {
+      "name": "omni.weapon.mine_glove.ammo",
+      "type": "i32",
+      "address": {
+        "pal": "0x0013D56C",
+        "ntsc": "0x0013D46C"
+      },
+      "about": "Mine Glove (item 17): its ammo (the ammo int table at 0x13d428)."
+    },
+    {
+      "name": "omni.weapon.mine_glove.gold",
+      "type": "u8",
+      "address": {
+        "pal": "0x0013E631",
+        "ntsc": "0x0013E531"
+      },
+      "about": "Mine Glove (item 17): 1 when it is the gold version (byte table at 0x13e520, saved with the game)."
+    },
+    {
+      "name": "omni.weapon.walloper.have",
+      "type": "u8",
+      "address": {
+        "pal": "0x0013D5D2",
+        "ntsc": "0x0013D4D2"
+      },
+      "about": "Walloper (item 18): 1 when the player owns it (the have byte table at 0x13d4c0)."
+    },
+    {
+      "name": "omni.weapon.walloper.ammo",
+      "type": "i32",
+      "address": {
+        "pal": "0x0013D570",
+        "ntsc": "0x0013D470"
+      },
+      "about": "Walloper (item 18): its ammo (the ammo int table at 0x13d428)."
+    },
+    {
+      "name": "omni.weapon.walloper.gold",
+      "type": "u8",
+      "address": {
+        "pal": "0x0013E632",
+        "ntsc": "0x0013E532"
+      },
+      "about": "Walloper (item 18): 1 when it is the gold version (byte table at 0x13e520, saved with the game)."
+    },
+    {
+      "name": "omni.weapon.tesla_claw.have",
+      "type": "u8",
+      "address": {
+        "pal": "0x0013D5D3",
+        "ntsc": "0x0013D4D3"
+      },
+      "about": "Tesla Claw (item 19): 1 when the player owns it (the have byte table at 0x13d4c0)."
+    },
+    {
+      "name": "omni.weapon.tesla_claw.ammo",
+      "type": "i32",
+      "address": {
+        "pal": "0x0013D574",
+        "ntsc": "0x0013D474"
+      },
+      "about": "Tesla Claw (item 19): its ammo (the ammo int table at 0x13d428)."
+    },
+    {
+      "name": "omni.weapon.tesla_claw.gold",
+      "type": "u8",
+      "address": {
+        "pal": "0x0013E633",
+        "ntsc": "0x0013E533"
+      },
+      "about": "Tesla Claw (item 19): 1 when it is the gold version (byte table at 0x13e520, saved with the game)."
+    },
+    {
+      "name": "omni.weapon.glove_of_doom.have",
+      "type": "u8",
+      "address": {
+        "pal": "0x0013D5D4",
+        "ntsc": "0x0013D4D4"
+      },
+      "about": "Glove of Doom (item 20): 1 when the player owns it (the have byte table at 0x13d4c0)."
+    },
+    {
+      "name": "omni.weapon.glove_of_doom.ammo",
+      "type": "i32",
+      "address": {
+        "pal": "0x0013D578",
+        "ntsc": "0x0013D478"
+      },
+      "about": "Glove of Doom (item 20): its ammo (the ammo int table at 0x13d428)."
+    },
+    {
+      "name": "omni.weapon.glove_of_doom.gold",
+      "type": "u8",
+      "address": {
+        "pal": "0x0013E634",
+        "ntsc": "0x0013E534"
+      },
+      "about": "Glove of Doom (item 20): 1 when it is the gold version (byte table at 0x13e520, saved with the game)."
+    },
+    {
+      "name": "omni.weapon.morph_o_ray.have",
+      "type": "u8",
+      "address": {
+        "pal": "0x0013D5D5",
+        "ntsc": "0x0013D4D5"
+      },
+      "about": "Morph-o-Ray (item 21): 1 when the player owns it (the have byte table at 0x13d4c0)."
+    },
+    {
+      "name": "omni.weapon.morph_o_ray.ammo",
+      "type": "i32",
+      "address": {
+        "pal": "0x0013D57C",
+        "ntsc": "0x0013D47C"
+      },
+      "about": "Morph-o-Ray (item 21): its ammo (the ammo int table at 0x13d428)."
+    },
+    {
+      "name": "omni.weapon.morph_o_ray.gold",
+      "type": "u8",
+      "address": {
+        "pal": "0x0013E635",
+        "ntsc": "0x0013E535"
+      },
+      "about": "Morph-o-Ray (item 21): 1 when it is the gold version (byte table at 0x13e520, saved with the game)."
+    },
+    {
+      "name": "omni.weapon.ryno.have",
+      "type": "u8",
+      "address": {
+        "pal": "0x0013D5D7",
+        "ntsc": "0x0013D4D7"
+      },
+      "about": "R.Y.N.O. (item 23): 1 when the player owns it (the have byte table at 0x13d4c0)."
+    },
+    {
+      "name": "omni.weapon.ryno.ammo",
+      "type": "i32",
+      "address": {
+        "pal": "0x0013D584",
+        "ntsc": "0x0013D484"
+      },
+      "about": "R.Y.N.O. (item 23): its ammo (the ammo int table at 0x13d428)."
+    },
+    {
+      "name": "omni.weapon.ryno.gold",
+      "type": "u8",
+      "address": {
+        "pal": "0x0013E637",
+        "ntsc": "0x0013E537"
+      },
+      "about": "R.Y.N.O. (item 23): 1 when it is the gold version (byte table at 0x13e520, saved with the game)."
+    },
+    {
+      "name": "omni.weapon.drone_device.have",
+      "type": "u8",
+      "address": {
+        "pal": "0x0013D5D8",
+        "ntsc": "0x0013D4D8"
+      },
+      "about": "Drone Device (item 24): 1 when the player owns it (the have byte table at 0x13d4c0)."
+    },
+    {
+      "name": "omni.weapon.drone_device.ammo",
+      "type": "i32",
+      "address": {
+        "pal": "0x0013D588",
+        "ntsc": "0x0013D488"
+      },
+      "about": "Drone Device (item 24): its ammo (the ammo int table at 0x13d428)."
+    },
+    {
+      "name": "omni.weapon.drone_device.gold",
+      "type": "u8",
+      "address": {
+        "pal": "0x0013E638",
+        "ntsc": "0x0013E538"
+      },
+      "about": "Drone Device (item 24): 1 when it is the gold version (byte table at 0x13e520, saved with the game)."
+    },
+    {
+      "name": "omni.weapon.decoy.have",
+      "type": "u8",
+      "address": {
+        "pal": "0x0013D5D9",
+        "ntsc": "0x0013D4D9"
+      },
+      "about": "Decoy Glove (item 25): 1 when the player owns it (the have byte table at 0x13d4c0)."
+    },
+    {
+      "name": "omni.weapon.decoy.ammo",
+      "type": "i32",
+      "address": {
+        "pal": "0x0013D58C",
+        "ntsc": "0x0013D48C"
+      },
+      "about": "Decoy Glove (item 25): its ammo (the ammo int table at 0x13d428)."
+    },
+    {
+      "name": "omni.weapon.decoy.gold",
+      "type": "u8",
+      "address": {
+        "pal": "0x0013E639",
+        "ntsc": "0x0013E539"
+      },
+      "about": "Decoy Glove (item 25): 1 when it is the gold version (byte table at 0x13e520, saved with the game)."
+    },
+    {
+      "name": "omni.weapon.equipped",
+      "type": "i32",
+      "address": {
+        "pal": "0x00140508",
+        "ntsc": "0x00140408"
+      },
+      "about": "The item id in the hero's first item slot (the equipped weapon: 8 wrench, 10 Bomb Glove, ...; slot table 0x1403e0, stride 0x50, id at +0x28). The pal column of every omni.* field is ntsc + 0x100 [?: unverified, the script binding replaces it with the ntsc column on this disc]."
+    },
+    {
+      "name": "omni.weapon.quick_select",
+      "type": "i32",
+      "address": {
+        "pal": "0x00141FA0",
+        "ntsc": "0x00141EA0"
+      },
+      "about": "Quick-select wheel entry 0: an item id (0 = empty). The wheel has 8 entries of 4 bytes: omni.weapon.quick_select.1 .. .7 are the others."
+    },
+    {
+      "name": "omni.weapon.quick_select.1",
+      "type": "i32",
+      "address": {
+        "pal": "0x00141FA4",
+        "ntsc": "0x00141EA4"
+      },
+      "about": "Quick-select wheel entry 1: an item id (0 = empty)."
+    },
+    {
+      "name": "omni.weapon.quick_select.2",
+      "type": "i32",
+      "address": {
+        "pal": "0x00141FA8",
+        "ntsc": "0x00141EA8"
+      },
+      "about": "Quick-select wheel entry 2: an item id (0 = empty)."
+    },
+    {
+      "name": "omni.weapon.quick_select.3",
+      "type": "i32",
+      "address": {
+        "pal": "0x00141FAC",
+        "ntsc": "0x00141EAC"
+      },
+      "about": "Quick-select wheel entry 3: an item id (0 = empty)."
+    },
+    {
+      "name": "omni.weapon.quick_select.4",
+      "type": "i32",
+      "address": {
+        "pal": "0x00141FB0",
+        "ntsc": "0x00141EB0"
+      },
+      "about": "Quick-select wheel entry 4: an item id (0 = empty)."
+    },
+    {
+      "name": "omni.weapon.quick_select.5",
+      "type": "i32",
+      "address": {
+        "pal": "0x00141FB4",
+        "ntsc": "0x00141EB4"
+      },
+      "about": "Quick-select wheel entry 5: an item id (0 = empty)."
+    },
+    {
+      "name": "omni.weapon.quick_select.6",
+      "type": "i32",
+      "address": {
+        "pal": "0x00141FB8",
+        "ntsc": "0x00141EB8"
+      },
+      "about": "Quick-select wheel entry 6: an item id (0 = empty)."
+    },
+    {
+      "name": "omni.weapon.quick_select.7",
+      "type": "i32",
+      "address": {
+        "pal": "0x00141FBC",
+        "ntsc": "0x00141EBC"
+      },
+      "about": "Quick-select wheel entry 7: an item id (0 = empty)."
+    },
+    {
+      "name": "omni.weapon.bomb_glove.max_ammo",
+      "type": "u16",
+      "address": {
+        "pal": "0x401C41AE",
+        "ntsc": "0x401C41AE"
+      },
+      "about": "Bomb Glove (item 10): the most ammo it can hold (u16 at +0xe of its price row; AddAmmo caps at it; retail 40). Overlay data: the address is in the host's overlay window (0x40000000 + the NTSC-U level-0 address, the host maps it to the level now loaded), so a read or write works in a level and fails on the title screen / between levels; the game reloads the table with every level, so a mod writes it again on `level_loaded`."
+    },
+    {
+      "name": "omni.weapon.devastator.max_ammo",
+      "type": "u16",
+      "address": {
+        "pal": "0x401C41C6",
+        "ntsc": "0x401C41C6"
+      },
+      "about": "Devastator (item 11): the most ammo it can hold (u16 at +0xe of its price row; AddAmmo caps at it; retail 20). Overlay data: the address is in the host's overlay window (0x40000000 + the NTSC-U level-0 address, the host maps it to the level now loaded), so a read or write works in a level and fails on the title screen / between levels; the game reloads the table with every level, so a mod writes it again on `level_loaded`."
+    },
+    {
+      "name": "omni.weapon.visibomb.max_ammo",
+      "type": "u16",
+      "address": {
+        "pal": "0x401C41F6",
+        "ntsc": "0x401C41F6"
+      },
+      "about": "Visibomb Gun (item 13): the most ammo it can hold (u16 at +0xe of its price row; AddAmmo caps at it; retail 20). Overlay data: the address is in the host's overlay window (0x40000000 + the NTSC-U level-0 address, the host maps it to the level now loaded), so a read or write works in a level and fails on the title screen / between levels; the game reloads the table with every level, so a mod writes it again on `level_loaded`."
+    },
+    {
+      "name": "omni.weapon.blaster.max_ammo",
+      "type": "u16",
+      "address": {
+        "pal": "0x401C4226",
+        "ntsc": "0x401C4226"
+      },
+      "about": "Blaster (item 15): the most ammo it can hold (u16 at +0xe of its price row; AddAmmo caps at it; retail 200). Overlay data: the address is in the host's overlay window (0x40000000 + the NTSC-U level-0 address, the host maps it to the level now loaded), so a read or write works in a level and fails on the title screen / between levels; the game reloads the table with every level, so a mod writes it again on `level_loaded`."
+    },
+    {
+      "name": "omni.weapon.pyrocitor.max_ammo",
+      "type": "u16",
+      "address": {
+        "pal": "0x401C423E",
+        "ntsc": "0x401C423E"
+      },
+      "about": "Pyrocitor (item 16): the most ammo it can hold (u16 at +0xe of its price row; AddAmmo caps at it; retail 240). Overlay data: the address is in the host's overlay window (0x40000000 + the NTSC-U level-0 address, the host maps it to the level now loaded), so a read or write works in a level and fails on the title screen / between levels; the game reloads the table with every level, so a mod writes it again on `level_loaded`."
+    },
+    {
+      "name": "omni.weapon.mine_glove.max_ammo",
+      "type": "u16",
+      "address": {
+        "pal": "0x401C4256",
+        "ntsc": "0x401C4256"
+      },
+      "about": "Mine Glove (item 17): the most ammo it can hold (u16 at +0xe of its price row; AddAmmo caps at it; retail 50). Overlay data: the address is in the host's overlay window (0x40000000 + the NTSC-U level-0 address, the host maps it to the level now loaded), so a read or write works in a level and fails on the title screen / between levels; the game reloads the table with every level, so a mod writes it again on `level_loaded`."
+    },
+    {
+      "name": "omni.weapon.tesla_claw.max_ammo",
+      "type": "u16",
+      "address": {
+        "pal": "0x401C4286",
+        "ntsc": "0x401C4286"
+      },
+      "about": "Tesla Claw (item 19): the most ammo it can hold (u16 at +0xe of its price row; AddAmmo caps at it; retail 240). Overlay data: the address is in the host's overlay window (0x40000000 + the NTSC-U level-0 address, the host maps it to the level now loaded), so a read or write works in a level and fails on the title screen / between levels; the game reloads the table with every level, so a mod writes it again on `level_loaded`."
+    },
+    {
+      "name": "omni.weapon.glove_of_doom.max_ammo",
+      "type": "u16",
+      "address": {
+        "pal": "0x401C429E",
+        "ntsc": "0x401C429E"
+      },
+      "about": "Glove of Doom (item 20): the most ammo it can hold (u16 at +0xe of its price row; AddAmmo caps at it; retail 10). Overlay data: the address is in the host's overlay window (0x40000000 + the NTSC-U level-0 address, the host maps it to the level now loaded), so a read or write works in a level and fails on the title screen / between levels; the game reloads the table with every level, so a mod writes it again on `level_loaded`."
+    },
+    {
+      "name": "omni.weapon.ryno.max_ammo",
+      "type": "u16",
+      "address": {
+        "pal": "0x401C42E6",
+        "ntsc": "0x401C42E6"
+      },
+      "about": "R.Y.N.O. (item 23): the most ammo it can hold (u16 at +0xe of its price row; AddAmmo caps at it; retail 50). Overlay data: the address is in the host's overlay window (0x40000000 + the NTSC-U level-0 address, the host maps it to the level now loaded), so a read or write works in a level and fails on the title screen / between levels; the game reloads the table with every level, so a mod writes it again on `level_loaded`."
+    },
+    {
+      "name": "omni.weapon.drone_device.max_ammo",
+      "type": "u16",
+      "address": {
+        "pal": "0x401C42FE",
+        "ntsc": "0x401C42FE"
+      },
+      "about": "Drone Device (item 24): the most ammo it can hold (u16 at +0xe of its price row; AddAmmo caps at it; retail 10). Overlay data: the address is in the host's overlay window (0x40000000 + the NTSC-U level-0 address, the host maps it to the level now loaded), so a read or write works in a level and fails on the title screen / between levels; the game reloads the table with every level, so a mod writes it again on `level_loaded`."
+    },
+    {
+      "name": "omni.weapon.decoy.max_ammo",
+      "type": "u16",
+      "address": {
+        "pal": "0x401C4316",
+        "ntsc": "0x401C4316"
+      },
+      "about": "Decoy Glove (item 25): the most ammo it can hold (u16 at +0xe of its price row; AddAmmo caps at it; retail 20). Overlay data: the address is in the host's overlay window (0x40000000 + the NTSC-U level-0 address, the host maps it to the level now loaded), so a read or write works in a level and fails on the title screen / between levels; the game reloads the table with every level, so a mod writes it again on `level_loaded`."
+    },
+    {
+      "name": "omni.menu.weapons_page.highlight_class",
+      "type": "u32",
+      "address": {
+        "pal": "0x401B9E10",
+        "ntsc": "0x401B9E10"
+      },
+      "about": "Pause menu, Weapons page: the moby class of the 3D model of the highlighted item (overlay global 0x1b9e10 in Veldin, written by the page's item function 0x27b808 when the cursor lands on a weapon; 0xFFFFFFFF = nothing yet; e.g. Bomb Glove 192, item 16 -> 176, item 15 -> 168, item 11 -> 157, item 19 -> 177; it follows the cursor one tick later). Overlay data in the host's overlay window: reads fail outside a level. It is the model class, not the item id: the id is *(u16*)(*(S+0x48) + *(S+0x3c)*10 + 6) with S = *(*(0x1b9cf4)+0x40) (a pointer chain, no plain field)."
+    },
+    {
+      "name": "omni.hud.ammo_box.max",
+      "type": "u32",
+      "address": {
+        "pal": "0x4017DC58",
+        "ntsc": "0x4017DC58"
+      },
+      "about": "The HUD ammo box: the maximum it shows right now, the N of the printed \"count/N\" (element +0x08). The game copies it from the weapon's cap only when the box is created, so after a cap change on the weapon that stays held (a level-up) the box keeps the old N until the weapon is switched or holstered; a mod writes the new cap here (and to def_max) and the box shows it on the next frame. Meaningful only while the box shows (the id field says which weapon it belongs to). Overlay data in the host's overlay window (0x40000000 + the NTSC-U level-0 address, the host maps it to the level now loaded), so a read or write works in a level and fails on the title screen / between levels. Slot 0 of the game's 4-slot HUD element array (stride 0x90; Veldin 0x17dc50) is the ammo box."
+    },
+    {
+      "name": "omni.hud.ammo_box.def_max",
+      "type": "u32",
+      "address": {
+        "pal": "0x4017DC78",
+        "ntsc": "0x4017DC78"
+      },
+      "about": "The HUD ammo box: the maximum the game compares when it re-requests the box every tick (element +0x28). If it differs from the weapon's current cap the game restarts the box (fade out, fade in) to load the new one; write the same value as omni.hud.ammo_box.max so the compare finds an identical request and no restart happens. Overlay data in the host's overlay window (0x40000000 + the NTSC-U level-0 address, the host maps it to the level now loaded), so a read or write works in a level and fails on the title screen / between levels. Slot 0 of the game's 4-slot HUD element array (stride 0x90; Veldin 0x17dc50) is the ammo box."
+    },
+    {
+      "name": "omni.hud.ammo_box.id",
+      "type": "u32",
+      "address": {
+        "pal": "0x4017DC70",
+        "ntsc": "0x4017DC70"
+      },
+      "about": "The HUD ammo box: the id of the element in slot 0 (element +0x20): 60000 + the item id of the weapon the box shows, 0xFFFF when the slot is empty. Read-only for mods; check it before writing max / def_max. Overlay data in the host's overlay window (0x40000000 + the NTSC-U level-0 address, the host maps it to the level now loaded), so a read or write works in a level and fails on the title screen / between levels. Slot 0 of the game's 4-slot HUD element array (stride 0x90; Veldin 0x17dc50) is the ammo box."
+    },
+    {
+      "name": "omni.weapon.suck_cannon.gold_price",
+      "type": "u16",
+      "address": {
+        "pal": "0x401C419C",
+        "ntsc": "0x401C419C"
+      },
+      "about": "Suck Cannon (item 9): the price of its gold version in bolts (u16 at +0x14 of its price row; retail 10000). The Gold Weapon Cases charge this and print it in their offer text. Overlay data: the address is in the host's overlay window (0x40000000 + the NTSC-U level-0 address, the host maps it to the level now loaded); the game reloads the table with every level, so a mod writes it again on `level_loaded`. A u16: at most 65535."
+    },
+    {
+      "name": "omni.weapon.bomb_glove.gold_price",
+      "type": "u16",
+      "address": {
+        "pal": "0x401C41B4",
+        "ntsc": "0x401C41B4"
+      },
+      "about": "Bomb Glove (item 10): the price of its gold version in bolts (u16 at +0x14 of its price row; retail 20000). The Gold Weapon Cases charge this and print it in their offer text. Overlay data: the address is in the host's overlay window (0x40000000 + the NTSC-U level-0 address, the host maps it to the level now loaded); the game reloads the table with every level, so a mod writes it again on `level_loaded`. A u16: at most 65535."
+    },
+    {
+      "name": "omni.weapon.devastator.gold_price",
+      "type": "u16",
+      "address": {
+        "pal": "0x401C41CC",
+        "ntsc": "0x401C41CC"
+      },
+      "about": "Devastator (item 11): the price of its gold version in bolts (u16 at +0x14 of its price row; retail 60000). The Gold Weapon Cases charge this and print it in their offer text. Overlay data: the address is in the host's overlay window (0x40000000 + the NTSC-U level-0 address, the host maps it to the level now loaded); the game reloads the table with every level, so a mod writes it again on `level_loaded`. A u16: at most 65535."
+    },
+    {
+      "name": "omni.weapon.blaster.gold_price",
+      "type": "u16",
+      "address": {
+        "pal": "0x401C422C",
+        "ntsc": "0x401C422C"
+      },
+      "about": "Blaster (item 15): the price of its gold version in bolts (u16 at +0x14 of its price row; retail 20000). The Gold Weapon Cases charge this and print it in their offer text. Overlay data: the address is in the host's overlay window (0x40000000 + the NTSC-U level-0 address, the host maps it to the level now loaded); the game reloads the table with every level, so a mod writes it again on `level_loaded`. A u16: at most 65535."
+    },
+    {
+      "name": "omni.weapon.pyrocitor.gold_price",
+      "type": "u16",
+      "address": {
+        "pal": "0x401C4244",
+        "ntsc": "0x401C4244"
+      },
+      "about": "Pyrocitor (item 16): the price of its gold version in bolts (u16 at +0x14 of its price row; retail 30000). The Gold Weapon Cases charge this and print it in their offer text. Overlay data: the address is in the host's overlay window (0x40000000 + the NTSC-U level-0 address, the host maps it to the level now loaded); the game reloads the table with every level, so a mod writes it again on `level_loaded`. A u16: at most 65535."
+    },
+    {
+      "name": "omni.weapon.mine_glove.gold_price",
+      "type": "u16",
+      "address": {
+        "pal": "0x401C425C",
+        "ntsc": "0x401C425C"
+      },
+      "about": "Mine Glove (item 17): the price of its gold version in bolts (u16 at +0x14 of its price row; retail 10000). The Gold Weapon Cases charge this and print it in their offer text. Overlay data: the address is in the host's overlay window (0x40000000 + the NTSC-U level-0 address, the host maps it to the level now loaded); the game reloads the table with every level, so a mod writes it again on `level_loaded`. A u16: at most 65535."
+    },
+    {
+      "name": "omni.weapon.tesla_claw.gold_price",
+      "type": "u16",
+      "address": {
+        "pal": "0x401C428C",
+        "ntsc": "0x401C428C"
+      },
+      "about": "Tesla Claw (item 19): the price of its gold version in bolts (u16 at +0x14 of its price row; retail 60000). The Gold Weapon Cases charge this and print it in their offer text. Overlay data: the address is in the host's overlay window (0x40000000 + the NTSC-U level-0 address, the host maps it to the level now loaded); the game reloads the table with every level, so a mod writes it again on `level_loaded`. A u16: at most 65535."
+    },
+    {
+      "name": "omni.weapon.glove_of_doom.gold_price",
+      "type": "u16",
+      "address": {
+        "pal": "0x401C42A4",
+        "ntsc": "0x401C42A4"
+      },
+      "about": "Glove of Doom (item 20): the price of its gold version in bolts (u16 at +0x14 of its price row; retail 10000). The Gold Weapon Cases charge this and print it in their offer text. Overlay data: the address is in the host's overlay window (0x40000000 + the NTSC-U level-0 address, the host maps it to the level now loaded); the game reloads the table with every level, so a mod writes it again on `level_loaded`. A u16: at most 65535."
+    },
+    {
+      "name": "omni.weapon.morph_o_ray.gold_price",
+      "type": "u16",
+      "address": {
+        "pal": "0x401C42BC",
+        "ntsc": "0x401C42BC"
+      },
+      "about": "Morph-o-Ray (item 21): the price of its gold version in bolts (u16 at +0x14 of its price row; retail 20000). The Gold Weapon Cases charge this and print it in their offer text. Overlay data: the address is in the host's overlay window (0x40000000 + the NTSC-U level-0 address, the host maps it to the level now loaded); the game reloads the table with every level, so a mod writes it again on `level_loaded`. A u16: at most 65535."
+    },
+    {
+      "name": "omni.weapon.decoy.gold_price",
+      "type": "u16",
+      "address": {
+        "pal": "0x401C431C",
+        "ntsc": "0x401C431C"
+      },
+      "about": "Decoy Glove (item 25): the price of its gold version in bolts (u16 at +0x14 of its price row; retail 10000). The Gold Weapon Cases charge this and print it in their offer text. Overlay data: the address is in the host's overlay window (0x40000000 + the NTSC-U level-0 address, the host maps it to the level now loaded); the game reloads the table with every level, so a mod writes it again on `level_loaded`. A u16: at most 65535."
+    },
+    {
+      "name": "omni.challenge",
+      "type": "i32",
+      "address": {
+        "pal": "0x0015EF20",
+        "ntsc": "0x0015EE20"
+      },
+      "about": "The New Game+ (challenge mode) counter: 0 on the first playthrough, +1 each time New Game+ is started (kept in the save)."
+    },
+    {
+      "name": "omni.hero.held_moby",
+      "type": "u32",
+      "address": {
+        "pal": "0x001404E0",
+        "ntsc": "0x001403E0"
+      },
+      "about": "The moby of the weapon in Ratchet's hand: word 0 of hero item slot 0 (slot table 0x1403e0, stride 0x50). 0 when nothing is held. The Blaster is class 168 (item 15; the Bomb Glove is 192); read its class with struct(\"moby\", addr).class. The pal column of every omni.* field is ntsc + 0x100 [?: unverified, the script binding replaces it with the ntsc column on this disc]."
+    },
+    {
+      "name": "omni.hero.moby",
+      "type": "u32",
+      "address": {
+        "pal": "0x001414D0",
+        "ntsc": "0x001413D0"
+      },
+      "about": "Ratchet's own moby (a pointer cell; the owner argument of the weapon creators; class 0). Read it as struct(\"moby\", addr): position x/y/z, basis rows row0_x..row2_w. The pal column of every omni.* field is ntsc + 0x100 [?: unverified, the script binding replaces it with the ntsc column on this disc]."
+    },
+    {
+      "name": "omni.hero.health",
+      "type": "i32",
+      "address": {
+        "pal": "0x001416F8",
+        "ntsc": "0x001415F8"
+      },
+      "about": "Ratchet's health: the nanotech orbs the HUD shows (1 to omni.hero.max_health; 0 = dead). Hero_TakeDamage takes at most 1 a call; the game sets it to the maximum when a level starts and after a death, a nanotech pickup adds 1 (up to the maximum). A mod may write it (1 .. max while he is alive): the HUD meter shows the new value. Checked on both discs (PAL v1.00 and USA use the same address, 2026-10-25); the pal column is ntsc + 0x100 [?: unverified, the script binding reads the ntsc column on this disc]."
+    },
+    {
+      "name": "omni.hero.max_health",
+      "type": "i32",
+      "address": {
+        "pal": "0x0015EEA0",
+        "ntsc": "0x0015EDA0"
+      },
+      "about": "Ratchet's maximum health in nanotech orbs: 4, 5 with Premium Nanotech, 8 with Ultra Nanotech (the game sets it from the upgrades; its HUD draws at most 8). Checked on both discs (same address, initial value 4 in the boot data, 2026-10-25); the pal column is ntsc + 0x100 [?: unverified, the script binding reads the ntsc column on this disc]."
+    },
+    {
+      "name": "omni.hero.right_hand.x",
+      "type": "f32",
+      "address": {
+        "pal": "0x0013FF40",
+        "ntsc": "0x0013FE40"
+      },
+      "about": "World x (metres) of the hero's right hand attach point (attach matrix 0, the weapon grip: the translation row at +0x30 of the 4x4 world matrix at 0x13fe10 that HeroComputeAttachMatrices fills each tick). A held weapon sits exactly here after HeroItemsAttach. The other attach matrices (9 of them, stride 0x40) are not fields: call moby_attach_to_joint (left hand = attach 14). The pal column of every omni.* field is ntsc + 0x100 [?: unverified, the script binding replaces it with the ntsc column on this disc]."
+    },
+    {
+      "name": "omni.hero.right_hand.y",
+      "type": "f32",
+      "address": {
+        "pal": "0x0013FF44",
+        "ntsc": "0x0013FE44"
+      },
+      "about": "World y (metres) of the hero's right hand attach point (attach matrix 0, the weapon grip: the translation row at +0x30 of the 4x4 world matrix at 0x13fe10 that HeroComputeAttachMatrices fills each tick). A held weapon sits exactly here after HeroItemsAttach. The other attach matrices (9 of them, stride 0x40) are not fields: call moby_attach_to_joint (left hand = attach 14). The pal column of every omni.* field is ntsc + 0x100 [?: unverified, the script binding replaces it with the ntsc column on this disc]."
+    },
+    {
+      "name": "omni.hero.right_hand.z",
+      "type": "f32",
+      "address": {
+        "pal": "0x0013FF48",
+        "ntsc": "0x0013FE48"
+      },
+      "about": "World z (metres) of the hero's right hand attach point (attach matrix 0, the weapon grip: the translation row at +0x30 of the 4x4 world matrix at 0x13fe10 that HeroComputeAttachMatrices fills each tick). A held weapon sits exactly here after HeroItemsAttach. The other attach matrices (9 of them, stride 0x40) are not fields: call moby_attach_to_joint (left hand = attach 14). The pal column of every omni.* field is ntsc + 0x100 [?: unverified, the script binding replaces it with the ntsc column on this disc]."
+    }
+  ]
+}

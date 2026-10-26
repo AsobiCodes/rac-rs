@@ -1,3 +1,6 @@
+//! Data types of the blast effect pool: ember (0x0f), water debris (0x40), spark (0x0b), flame (8), puff and smoke, each with the
+//! retail spawn and update functions it follows.
+//! Leftover from the retired hand port; still compiled because retail mode and the renderer still use parts of `particles` (`Rng`, sprite and quad types). Do not extend.
 
 /// Type 0x0f ember (spawn FUN_002804e8, update FUN_00280620). Colour runs `c1` -> `c0` as life ends.
 /// With `trail` set (flag word nonzero) every odd global tick skips the drag and drops a trail ember.

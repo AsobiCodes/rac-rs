@@ -13,8 +13,11 @@
 //!   by order among the items of the same kind; an item without a partner, of another kind or `SNAP_DIST` away is drawn as the
 //!   field has it.
 //! - Cuts (one field drawn unblended): the camera jumped or turned far beyond its motion of the field before, or zoomed abruptly
-//!   (`cam_cut`); the level, game mode or scene view changed; a frozen or held field (menus, pause, the front end); the first field
+//!   (`cam_cut`; in game view, where the camera follows the hero, only a hero teleport or a boom snap: a player turn of any speed
+//!   blends); the level, game mode or scene view changed; a frozen or held field (menus, pause, the front end); the first field
 //!   after a load.
+//! - Effect meshes stay watertight (`weld`: one move per shared vertex) and a standing mesh missing for one field is carried
+//!   over from the field before (`still::hold`).
 //! Not blended: the HUD and every 2D overlay (retail's GS picture), lightning arc strands (new random strands each field), water
 //! and ocean surfaces from RAM, sky sprites, the swing rope (built from the blended hero).
 //! Off: `frame` answers false and clears the copy, so every frame draws the newest field exactly as without this module.
@@ -25,6 +28,9 @@ use crate::retail::{Cam, Retail, RetailFx, RetailShadows, SmoothDraw};
 use crate::shadows::RecPrim;
 use std::cell::RefCell;
 use std::collections::HashMap;
+
+mod still;
+mod weld;
 
 type V3 = [f32; 3];
 
@@ -37,6 +43,8 @@ struct Field {
 	cam: Option<Cam>,
 	/// (level, game mode, scene view, frozen / held / front end).
 	key: (u32, u32, bool, bool),
+	/// The retail snapshot's serial (`Retail::shown_field`): a tick that brought no new field keeps it.
+	shown: u32,
 }
 
 #[derive(Default)]
@@ -57,6 +65,13 @@ struct State {
 	stat: (u64, f64, f64, f64),
 	/// The queue-A and queue-B quads that blend between `prev` and `cur` (`quad_pairs`), once per field.
 	quads: [Vec<(u32, u32)>; 2],
+	/// The standing quads of queue A and queue B with their partners of the field before (`still::still_pairs`), once per field.
+	still: [Vec<still::StillPair>; 2],
+	/// The queue-A / queue-B corners' welded moves towards the field before (`weld::weld`), once per field.
+	weld: weld::Weld,
+	/// The standing kinds of queue A and queue B at the newest field (`still_kinds`), and the kinds `still::hold` carried into it.
+	standing: [std::collections::HashSet<(usize, bool)>; 2],
+	held: [Vec<(usize, bool)>; 2],
 }
 
 /// [PC] FxHash-style hasher for the per-field pairing maps (`pair_ordered`, `still_kinds`): with std's SipHash, Pokitaru's pool
@@ -132,16 +147,35 @@ fn fwd(c: &Cam) -> V3 {
 	[cy * cp, sy * cp, sp]
 }
 
-/// A camera cut between two fields: a move or turn far beyond the one of the field before (`last` = its eye distance, turn,
-/// zoom change), or an abrupt zoom. Gameplay cameras (running, the hoverboard, the ship, a quick mouse turn) move steadily and
-/// stay well inside; a scene cut or a respawn jumps.
-fn cam_cut(a: &Cam, b: &Cam, last: (f32, f32, f32)) -> ((f32, f32, f32), bool) {
-	let d = (0..3).map(|i| (b.0[i] - a.0[i]) * (b.0[i] - a.0[i])).sum::<f32>().sqrt();
+fn dist(a: V3, b: V3) -> f32 {
+	(0..3).map(|i| (b[i] - a[i]) * (b[i] - a[i])).sum::<f32>().sqrt()
+}
+
+/// A camera cut between two fields: a move or turn far beyond the one of the field before (`last` = its move, turn, zoom
+/// change), or an abrupt zoom. Gameplay cameras (running, the hoverboard, the ship) move steadily and stay well inside; a scene
+/// cut or a respawn jumps.
+/// [PC] `hero` (the hero's position at both fields, game view only): the camera follows the hero there (retail's camera and the
+/// Modern camera), so the move is the hero's own jump (a teleport or respawn) or the boom's length change beyond `BOOM_SNAP`
+/// (the boom also pulls in and out by 1.5-3 m around walls and with the pitch of a flick), and a turn of any speed is not a
+/// cut: a fast mouse flick turns the boom by 0.4-1.2 rad in one field and swings the eye 2-5 m around the hero; taking that for
+/// a cut drew the newest field unblended for a whole field at every flick start (lane yflk, Kalebo III real-clock flick run: 30
+/// cuts in 640 fields, all flick starts; the picture stopped and jumped, the user's "camera off" frames).
+fn cam_cut(a: &Cam, b: &Cam, hero: Option<(V3, V3)>, last: (f32, f32, f32)) -> ((f32, f32, f32), bool) {
+	const BOOM_SNAP: f32 = 4.0;
+	let (d, follow, jump) = match hero {
+		Some((ha, hb)) => {
+			let (h, boom) = (dist(ha, hb), (dist(a.0, ha) - dist(b.0, hb)).abs());
+			(h.max(boom), true, (h > 1.5 || boom > BOOM_SNAP) && h.max(boom) > 3.0 * last.0 + 0.75)
+		}
+		None => {
+			let d = dist(a.0, b.0);
+			(d, false, d > 1.5 && d > 3.0 * last.0 + 0.75)
+		}
+	};
 	let (fa, fb) = (fwd(a), fwd(b));
 	let turn = (fa[0] * fb[0] + fa[1] * fb[1] + fa[2] * fb[2]).clamp(-1.0, 1.0).acos();
 	let zoom = if a.3 > 1e-6 && b.3 > 1e-6 { (b.3 / a.3).ln().abs() } else { 0.0 };
-	let jump = d > 1.5 && d > 3.0 * last.0 + 0.75;
-	let swing = turn > 0.6 && turn > 3.0 * last.1 + 0.2;
+	let swing = !follow && turn > 0.6 && turn > 3.0 * last.1 + 0.2;
 	let zoomed = zoom > 0.22 && zoom > 3.0 * last.2 + 0.05;
 	((d, turn, zoom), jump || swing || zoomed)
 }
@@ -158,18 +192,34 @@ pub(super) fn field(r: &Retail, on: bool) {
 			s.cur = None;
 			s.cut = true;
 			s.quads = Default::default();
+			s.still = Default::default();
+			s.weld = Default::default();
+			s.standing = Default::default();
+			s.held = Default::default();
 		});
 		return;
 	}
 	let (fx, sh, orbs, key) = r.smooth_src();
-	let f = Field { fx: fx.cloned(), shadows: sh.cloned(), orbs: orbs.map(<[OrbDraw]>::to_vec), cam: Some(r.camera(1.0)), key };
+	// [PC] A tick that brought no new field (the game thread held: a shot's field hold, the movie hook) changes nothing: taking
+	// it as a field made prev == cur (no blend for a whole field) and its zero camera move turned the next field of a steady fast
+	// mouse turn into a cut (lane yflk, Kalebo III flick runs: every turning field was a cut, drawn with the newest camera).
+	if ST.with(|s| s.borrow().cur.as_ref().is_some_and(|c| c.shown == r.shown_field() && c.key == key)) {
+		return;
+	}
+	let mut f = Field { fx: fx.cloned(), shadows: sh.cloned(), orbs: orbs.map(<[OrbDraw]>::to_vec), cam: Some(r.camera(1.0)), key, shown: r.shown_field() };
 	ST.with(|s| {
 		let mut s = s.borrow_mut();
 		s.fields += 1;
 		let prev = s.cur.take();
 		let (mv, cut) = match prev.as_ref() {
 			Some(p) if p.key == f.key && !f.key.3 => match (&p.cam, &f.cam) {
-				(Some(a), Some(b)) => cam_cut(a, b, s.last_move),
+				(Some(a), Some(b)) => {
+					let hero = match (p.fx.as_ref().and_then(|x| x.hero), f.fx.as_ref().and_then(|x| x.hero)) {
+						(Some(ha), Some(hb)) if !f.key.2 => Some((ha, hb)),
+						_ => None,
+					};
+					cam_cut(a, b, hero, s.last_move)
+				}
 				_ => ((0.0, 0.0, 0.0), true),
 			},
 			_ => ((0.0, 0.0, 0.0), true),
@@ -182,8 +232,28 @@ pub(super) fn field(r: &Retail, on: bool) {
 				eprintln!("smooth: cut {} of {} fields at field {} (move {:.2} m, turn {:.2} rad, zoom {:.2}, key {:?})", s.cuts, s.fields, r.field_count(), mv.0, mv.1, mv.2, f.key);
 			}
 		}
-		s.quads = match (prev.as_ref().and_then(|p| p.fx.as_ref()), f.fx.as_ref()) {
-			(Some(a), Some(b)) if !cut => [quad_pairs(&a.qa, &b.qa), quad_pairs(&a.qb, &b.qb)],
+		// A standing mesh missing for one field is carried over from the field before (`still::hold`).
+		let held = match (prev.as_ref().and_then(|p| p.fx.as_ref()), f.fx.as_mut()) {
+			(Some(a), Some(b)) if !cut => [still::hold(&a.qa, &mut b.qa, &s.standing[0], &s.held[0]), still::hold(&a.qb, &mut b.qb, &s.standing[1], &s.held[1])],
+			_ => Default::default(),
+		};
+		if held.iter().any(|h| !h.is_empty()) && std::env::var_os("RAC_SMOOTH_LOG").is_some() {
+			eprintln!("smooth: hold field {}: kinds {held:?}", r.field_count());
+		}
+		s.held = held;
+		let ((qa, sa, ka), (qb, sb, kb)) = match (prev.as_ref().and_then(|p| p.fx.as_ref()), f.fx.as_ref()) {
+			(Some(a), Some(b)) if !cut => (all_pairs(&a.qa, &b.qa), all_pairs(&a.qb, &b.qb)),
+			_ => Default::default(),
+		};
+		(s.quads, s.still, s.standing) = ([qa, qb], [sa, sb], [ka, kb]);
+		s.weld = match (prev.as_ref().and_then(|p| p.fx.as_ref()), f.fx.as_ref()) {
+			(Some(a), Some(b)) if !cut => {
+				let (w, st) = weld::weld([&a.qa, &a.qb], [&b.qa, &b.qb], &s.quads, &s.still);
+				if (st.split > 0 || st.carried > 0) && std::env::var_os("RAC_SMOOTH_LOG").is_some() {
+					eprintln!("smooth: weld field {}: {st:?}", r.field_count());
+				}
+				w
+			}
 			_ => Default::default(),
 		};
 		s.prev = prev;
@@ -211,7 +281,11 @@ pub(super) fn frame(r: Option<&mut Retail>, want: bool, alpha: f32) -> bool {
 		match (want && !s.cut && !r.paused(), &s.prev, &s.cur) {
 			(true, Some(p), Some(c)) => Some(SmoothDraw {
 				fx: match (&p.fx, &c.fx) {
-					(Some(a), Some(b)) => Some(blend_fx(a, b, alpha, &s.quads)),
+					(Some(a), Some(b)) => {
+						let mut o = still::blend(blend_fx(a, b, alpha, &s.quads), a, alpha, &s.still);
+						weld::apply(&mut o.qa, &mut o.qb, alpha, &s.weld);
+						Some(o)
+					}
 					_ => None,
 				},
 				shadows: match (&p.shadows, &c.shadows) {
@@ -228,9 +302,9 @@ pub(super) fn frame(r: Option<&mut Retail>, want: bool, alpha: f32) -> bool {
 	});
 	let on = blend.is_some();
 	r.set_smooth(blend);
+	let cost = t0.elapsed().as_secs_f64();
 	if on {
 		let late = (1.0 - alpha as f64) * crate::retail::disc::field_dt() as f64;
-		let cost = t0.elapsed().as_secs_f64();
 		ST.with(|s| {
 			let st = &mut s.borrow_mut().stat;
 			*st = (st.0 + 1, st.1 + late, st.2.max(late), st.3 + cost);
@@ -359,8 +433,7 @@ fn kind_of(q: &WorldQuad) -> (usize, bool) {
 /// The quads of `cur` that blend with one of `prev` as (index in `cur`, index in `prev`): the k-th quad of a kind pairs with the
 /// k-th of that kind (`pair_ordered`), not of a standing kind (`still_kinds`, left as they are), every corner `near`. Once per
 /// field; each display frame only lerps them (`lerp_quads`).
-fn quad_pairs(prev: &[WorldQuad], cur: &[WorldQuad]) -> Vec<(u32, u32)> {
-	let still = still_kinds(prev, cur);
+fn quad_pairs(prev: &[WorldQuad], cur: &[WorldQuad], still: &std::collections::HashSet<(usize, bool)>) -> Vec<(u32, u32)> {
 	let key = |q: &WorldQuad| (kind_of(q), q.pos[0]);
 	let pairs = pair_ordered(&prev.iter().map(key).collect::<Vec<_>>(), &cur.iter().map(key).collect::<Vec<_>>());
 	cur.iter()
@@ -373,12 +446,17 @@ fn quad_pairs(prev: &[WorldQuad], cur: &[WorldQuad]) -> Vec<(u32, u32)> {
 		.collect()
 }
 
-/// `pairs`: `quad_pairs(prev, cur)`.
+/// The moving quads' pairs (`quad_pairs`), the standing ones' (`still::still_pairs`) and the standing kinds of one queue.
+fn all_pairs(prev: &[WorldQuad], cur: &[WorldQuad]) -> (Vec<(u32, u32)>, Vec<still::StillPair>, std::collections::HashSet<(usize, bool)>) {
+	let still = still_kinds(prev, cur);
+	(quad_pairs(prev, cur, &still), still::still_pairs(prev, cur, &still), still)
+}
+
+/// `pairs`: `quad_pairs(prev, cur, ..)`. Colours only: the corners move by their welded vertex (`weld::apply`).
 fn lerp_quads(prev: &[WorldQuad], cur: &mut [WorldQuad], t: f32, pairs: &[(u32, u32)]) {
 	for &(i, j) in pairs {
 		let (a, q) = (&prev[j as usize], &mut cur[i as usize]);
 		for k in 0..4 {
-			q.pos[k] = lerp3(a.pos[k], q.pos[k], t);
 			q.colour[k] = lerp4(a.colour[k], q.colour[k], t);
 		}
 	}
@@ -555,22 +633,32 @@ mod tests {
 	fn steady_motion_is_no_cut() {
 		let cam = |x: f32, yaw: f32| -> Cam { ([x, 0.0, 0.0], yaw, 0.0, 0.7) };
 		// Hoverboard-like steady 0.8 m per field.
-		let (mv, cut) = cam_cut(&cam(0.0, 0.0), &cam(0.8, 0.0), (0.8, 0.0, 0.0));
+		let (mv, cut) = cam_cut(&cam(0.0, 0.0), &cam(0.8, 0.0), None, (0.8, 0.0, 0.0));
 		assert!(!cut, "{mv:?}");
 		// A mouse turn of 20 degrees in one field after a still one.
-		assert!(!cam_cut(&cam(0.0, 0.0), &cam(0.0, 0.35), (0.0, 0.0, 0.0)).1);
+		assert!(!cam_cut(&cam(0.0, 0.0), &cam(0.0, 0.35), None, (0.0, 0.0, 0.0)).1);
 		// Running speeds up from rest (0.25 m after 0).
-		assert!(!cam_cut(&cam(0.0, 0.0), &cam(0.25, 0.0), (0.0, 0.0, 0.0)).1);
+		assert!(!cam_cut(&cam(0.0, 0.0), &cam(0.25, 0.0), None, (0.0, 0.0, 0.0)).1);
 	}
 
 	#[test]
 	fn scene_cuts_and_teleports_are_cuts() {
 		let cam = |x: f32, yaw: f32, tan: f32| -> Cam { ([x, 0.0, 0.0], yaw, 0.0, tan) };
-		assert!(cam_cut(&cam(0.0, 0.0, 0.7), &cam(6.0, 0.0, 0.7), (0.1, 0.0, 0.0)).1, "eye jump");
-		assert!(cam_cut(&cam(0.0, 0.0, 0.7), &cam(0.5, 1.6, 0.7), (0.1, 0.01, 0.0)).1, "turned 90 degrees");
-		assert!(cam_cut(&cam(0.0, 0.0, 0.7), &cam(0.0, 0.0, 0.4), (0.0, 0.0, 0.0)).1, "zoom cut");
+		assert!(cam_cut(&cam(0.0, 0.0, 0.7), &cam(6.0, 0.0, 0.7), None, (0.1, 0.0, 0.0)).1, "eye jump");
+		assert!(cam_cut(&cam(0.0, 0.0, 0.7), &cam(0.5, 1.6, 0.7), None, (0.1, 0.01, 0.0)).1, "turned 90 degrees");
+		assert!(cam_cut(&cam(0.0, 0.0, 0.7), &cam(0.0, 0.0, 0.4), None, (0.0, 0.0, 0.0)).1, "zoom cut");
+		// Game view (the camera follows the hero): a fast orbit is not a cut, a hero teleport or a boom snap is.
+		let orbit = |yaw: f32| -> Cam { ([7.0 * yaw.cos(), 7.0 * yaw.sin(), 2.0], yaw + std::f32::consts::PI, -0.3, 0.7) };
+		let h = Some(([0.0; 3], [0.0; 3]));
+		assert!(!cam_cut(&orbit(0.0), &orbit(0.9), h, (0.0, 0.0, 0.0)).1, "mouse flick");
+		assert!(cam_cut(&orbit(0.0), &orbit(0.9), None, (0.0, 0.0, 0.0)).1, "same turn without the hero");
+		assert!(cam_cut(&orbit(0.0), &orbit(0.0), Some(([0.0; 3], [8.0, 0.0, 0.0])), (0.0, 0.0, 0.0)).1, "hero teleport");
+		let near: Cam = ([0.5, 0.0, 2.0], std::f32::consts::PI, -0.3, 0.7);
+		assert!(cam_cut(&orbit(0.0), &near, h, (0.0, 0.0, 0.0)).1, "boom snapped in");
+		let pulled: Cam = ([5.0, 0.0, 2.0], std::f32::consts::PI, -0.3, 0.7);
+		assert!(!cam_cut(&orbit(0.0), &pulled, h, (0.0, 0.0, 0.0)).1, "boom pulled in by a wall");
 		// A slow scene zoom is not.
-		assert!(!cam_cut(&cam(0.0, 0.0, 0.7), &cam(0.0, 0.0, 0.69), (0.0, 0.0, 0.015)).1);
+		assert!(!cam_cut(&cam(0.0, 0.0, 0.7), &cam(0.0, 0.0, 0.69), None, (0.0, 0.0, 0.015)).1);
 	}
 
 	#[test]
@@ -616,7 +704,7 @@ mod tests {
 		let still = still_kinds(&prev, &cur);
 		assert!(still.contains(&(42, false)), "{still:?}");
 		let mut out = cur.clone();
-		lerp_quads(&prev, &mut out, 0.5, &quad_pairs(&prev, &cur));
+		lerp_quads(&prev, &mut out, 0.5, &quad_pairs(&prev, &cur, &still_kinds(&prev, &cur)));
 		assert!(out.iter().zip(&cur).all(|(a, b)| a.pos == b.pos));
 	}
 

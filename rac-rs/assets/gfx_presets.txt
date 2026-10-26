@@ -1,0 +1,57 @@
+# Graphics presets of RAC-RS: Low, Medium and High.
+#
+# THIS IS THE ONE PLACE the values live. The game reads this file (built into the program: retail/pcext/presets.rs, include_str!) for
+# the Preset row of Pause -> Options -> Graphics, and the RAC-RS Launcher shows the same three presets on its Settings page. When the
+# launcher should read the table from an install instead of its own copy, it is this file, assets/gfx_presets.txt of the rac-rs sources
+# (copy it next to the game when you pack a release). Edit the values here only; a test checks that High is the game's default picture.
+#
+# Format: one `<preset>.<key>=<value>` per line, `#` starts a comment. Presets: low, medium, high. Keys and values are those of
+# pc_options.txt: lighting classic|enhanced, draw low|medium|high, smoothing on|off, hud sharp|original, ao / shadows / sunrays / gi
+# off|low|medium|high, water / particles classic|low|medium|high, vegetation off|moderate|lush, waves on|off, fog / clouds classic|low|medium|high, texfilter classic|smooth (only active with Lighting Enhanced).
+#
+# Never part of a preset: camera, controls, language, display mode, culling, the renderer (Vulkan / DirectX 12), debug mode.
+low.lighting=classic
+low.draw=low
+low.smoothing=off
+low.hud=original
+low.ao=low
+low.shadows=low
+low.water=low
+low.particles=low
+low.sunrays=low
+low.vegetation=off
+low.gi=off
+low.waves=off
+low.fog=classic
+low.clouds=classic
+low.texfilter=smooth
+medium.lighting=classic
+medium.draw=low
+medium.smoothing=on
+medium.hud=sharp
+medium.ao=medium
+medium.shadows=medium
+medium.water=medium
+medium.particles=medium
+medium.sunrays=medium
+medium.vegetation=moderate
+medium.gi=off
+medium.waves=on
+medium.fog=low
+medium.clouds=low
+medium.texfilter=smooth
+high.lighting=classic
+high.draw=medium
+high.smoothing=on
+high.hud=sharp
+high.ao=high
+high.shadows=high
+high.water=high
+high.particles=high
+high.sunrays=high
+high.vegetation=moderate
+high.gi=off
+high.waves=on
+high.fog=high
+high.clouds=high
+high.texfilter=smooth

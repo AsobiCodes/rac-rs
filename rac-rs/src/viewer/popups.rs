@@ -1,3 +1,5 @@
+//! Small HUD overlays drawn as `Quad` lists: the pickup popup, the Quick Select wheel with its fade, the save icon and the
+//! Galactic Map view.
 use super::*;
 
 /// The Quick Select fade counter (byte +0x70) runs 0..8 frames at 50 Hz while Triangle is held.

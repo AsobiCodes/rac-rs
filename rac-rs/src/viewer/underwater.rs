@@ -150,7 +150,8 @@ fn ign(x: vec2<f32>) -> f32 {
 		let lw = u.light.xyz;
 		let s = pw.xy - lw.xy * (ds / max(-lw.z, 0.25));
 		let facing = clamp(dot(nf, -lw) * 0.85 + 0.15, 0.0, 1.0);
-		let c = caustic(s, t, level >= 3.0) * facing * (1.0 - edge) * exp(-ds * CAUSTIC_FALL);
+		// (No sun where a roof, a bridge or a cliff keeps it off the surface point `s`: skymap.rs.)
+		let c = caustic(s, t, level >= 3.0) * facing * (1.0 - edge) * exp(-ds * CAUSTIC_FALL) * sky_vis(vec3<f32>(s, surf), ign(vec2<f32>(c0)));
 		col += (col * 0.9 + vec3<f32>(0.02) + u.wcol.rgb * 0.15) * c * u.size.y * lit;
 	}
 	// Along the water path: the colours drift to the water's hue at the picture's own brightness (retail's fog is already in the
@@ -167,7 +168,15 @@ fn ign(x: vec2<f32>) -> f32 {
 	// High: faint light shafts from the surface (bands across the view, in the distance, stronger towards the surface).
 	if (level >= 3.0 && known) {
 		let sh = vnoise(vec2<f32>(dot(dir.xy, vec2<f32>(0.7, 0.7)) * 9.0 / max(abs(dir.z) + 0.6, 0.6) + t * 0.12, t * 0.05));
-		col += hue * u.size.z * smoothstep(0.45, 0.9, sh) * lit * clamp(rd.z * 1.5 + 0.3, 0.0, 1.0) * min(fogf * 2.5, 1.0);
+		// The shafts need sunlight at the surface above the part of the ray they fill: the sky map at two points of the water path.
+		let lw = u.light.xyz;
+		let jt = ign(vec2<f32>(c0));
+		var sv = 0.0;
+		for (var k = 1; k <= 2; k++) {
+			let pe = u.eye.xyz + rd * (path * 0.5 * f32(k));
+			sv += 0.5 * sky_vis(vec3<f32>(pe.xy - lw.xy * (max(surf - pe.z, 0.0) / max(-lw.z, 0.25)), surf), jt);
+		}
+		col += hue * u.size.z * smoothstep(0.45, 0.9, sh) * lit * clamp(rd.z * 1.5 + 0.3, 0.0, 1.0) * min(fogf * 2.5, 1.0) * sv;
 	}
 	col += (ign(vec2<f32>(c0)) - 0.5) / 255.0;
 	return vec4<f32>(mix(orig, clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)), k), 1.0);
@@ -246,7 +255,7 @@ const FADE_OUT: f32 = 0.3;
 
 impl Under {
 	pub(super) fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Under {
-		let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("underwater"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("underwater", SHADER.into())) });
+		let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("underwater"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("underwater", (SHADER.to_string() + &waterfx::sky_wgsl(4, 5)).into())) });
 		let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
 			label: Some("underwater"),
 			entries: &[
@@ -254,6 +263,8 @@ impl Under {
 				wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false }, count: None },
 				wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Depth, view_dimension: wgpu::TextureViewDimension::D2, multisampled: true }, count: None },
 				wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
+				wgpu::BindGroupLayoutEntry { binding: 4, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Depth, view_dimension: wgpu::TextureViewDimension::D2, multisampled: true }, count: None },
+				wgpu::BindGroupLayoutEntry { binding: 5, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
 			],
 		});
 		let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("underwater"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
@@ -277,7 +288,7 @@ impl Under {
 	/// The amount for this frame (call every frame the water pass is on): ramps towards the flag.
 	fn ramp(&mut self, flag: bool) {
 		let now = std::time::Instant::now();
-		let dt = now.duration_since(self.last).as_secs_f32().min(0.1);
+		let dt = crate::viewer::test_clock::dt(crate::viewer::test_clock::Site::Under, || now.duration_since(self.last).as_secs_f32()).min(0.1);
 		self.last = now;
 		self.k = if flag { (self.k + dt / FADE_IN).min(1.0) } else { (self.k - dt / FADE_OUT).max(0.0) };
 		if !flag && self.k == 0.0 {
@@ -291,7 +302,7 @@ impl Under {
 	}
 
 	/// The pass: the picture in `scene` below the retail HUD, with `depth` (the level's MSAA depth, sample 0).
-	pub(super) fn run(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, enc: &mut wgpu::CommandEncoder, scene: &wgpu::TextureView, depth: &wgpu::TextureView, f: &UnderFrame) {
+	pub(super) fn run(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, enc: &mut wgpu::CommandEncoder, scene: &wgpu::TextureView, depth: &wgpu::TextureView, f: &UnderFrame, sky: &waterfx::SkyMap) {
 		self.ramp(f.flag);
 		if self.k <= 0.0 {
 			return;
@@ -326,7 +337,7 @@ impl Under {
 			right: [f.right[0], f.right[1], f.right[2], 0.0],
 			up: [f.up[0], f.up[1], f.up[2], tune()[5]],
 			size: [tune()[0], tune()[1], tune()[2], tune()[3]],
-			proj: [f.near_far[0], f.near_far[1], self.k * self.k * (3.0 - 2.0 * self.k), self.start.elapsed().as_secs_f32()],
+			proj: [f.near_far[0], f.near_far[1], self.k * self.k * (3.0 - 2.0 * self.k), crate::viewer::test_clock::secs(|| self.start.elapsed().as_secs_f32())],
 			wcol: [f.colour[0], f.colour[1], f.colour[2], f.level as f32],
 			light: [l[0] / n, l[1] / n, l[2] / n, if surf.is_some() { 1.0 } else { 0.0 }],
 		};
@@ -342,13 +353,15 @@ impl Under {
 				wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&copy_view) },
 				wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&depth_only) },
 				wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+				wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(sky.depth_view()) },
+				wgpu::BindGroupEntry { binding: 5, resource: sky.uniform().as_entire_binding() },
 			],
 		});
 		let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
 			label: Some("underwater"),
 			color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: scene, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } })],
 			depth_stencil_attachment: None,
-			timestamp_writes: None,
+			timestamp_writes: crate::viewer::passtime::rw("underwater"),
 			occlusion_query_set: None,
 			multiview_mask: None,
 		});
