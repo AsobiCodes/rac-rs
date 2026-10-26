@@ -6,6 +6,7 @@ An unofficial PC port of **Ratchet & Clank** (PlayStation 2, 2002), written in R
 > The setup reads your own copy of the disc and creates everything it needs on your PC. You need to own the game.
 
 Project site: https://asobicodes.dev
+Launcher (optional app to play, update, and manage texture packs and mods): https://github.com/AsobiCodes/rac-rs-launcher
 Support the project (no pressure tho!): https://ko-fi.com/asobicodes
 
 ## Status
