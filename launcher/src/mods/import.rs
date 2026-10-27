@@ -408,18 +408,20 @@ fn copy_counted(r: &mut impl Read, w: &mut impl Write, st: &ImportState) -> Resu
     }
 }
 
-/// PCSX2's own textures folders: `<Documents>\PCSX2\textures\<SERIAL>\` (or `<SERIAL>.zip`) for the serials we know.
-pub fn pcsx2_candidates(documents: &Path, serials: &[&str]) -> Vec<(String, Source)> {
-    let base = documents.join("PCSX2").join("textures");
+/// PCSX2's own textures folders: `<textures>/<SERIAL>/` (or `<SERIAL>.zip`) for the serials we know.
+/// `roots` are PCSX2's `textures` folders (see `platform::pcsx2_texture_roots`).
+pub fn pcsx2_candidates(roots: &[PathBuf], serials: &[&str]) -> Vec<(String, Source)> {
     let mut v = Vec::new();
-    for s in serials {
-        let d = base.join(s);
-        if d.is_dir() {
-            v.push((s.to_string(), Source::Dir(d)));
-        }
-        let z = base.join(format!("{s}.zip"));
-        if z.is_file() {
-            v.push((s.to_string(), Source::Zip(z)));
+    for base in roots {
+        for s in serials {
+            let d = base.join(s);
+            if d.is_dir() {
+                v.push((s.to_string(), Source::Dir(d)));
+            }
+            let z = base.join(format!("{s}.zip"));
+            if z.is_file() {
+                v.push((s.to_string(), Source::Zip(z)));
+            }
         }
     }
     v
@@ -746,9 +748,10 @@ mod tests {
     #[test]
     fn pcsx2_folder_discovery() {
         let d = scratch("pcsx2");
-        make_pack(&d.join("PCSX2").join("textures"), 2);
-        std::fs::write(d.join("PCSX2/textures/SCUS-97199.zip"), b"z").unwrap();
-        let v = pcsx2_candidates(&d, &["SCES-50916", "SCUS-97199"]);
+        let roots = [d.join("PCSX2").join("textures")];
+        make_pack(&roots[0], 2);
+        std::fs::write(roots[0].join("SCUS-97199.zip"), b"z").unwrap();
+        let v = pcsx2_candidates(&roots, &["SCES-50916", "SCUS-97199"]);
         assert_eq!(v.len(), 2);
         assert!(matches!(&v[0].1, Source::Dir(_)) && matches!(&v[1].1, Source::Zip(_)));
         let _ = std::fs::remove_dir_all(&d);

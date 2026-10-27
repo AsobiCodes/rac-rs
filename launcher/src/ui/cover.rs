@@ -1,4 +1,4 @@
-//! The picture of a game: the cover PCSX2 downloaded for the player (Documents\PCSX2\covers\<serial>.jpg|png) when it exists, otherwise a
+//! The picture of a game: the cover PCSX2 downloaded for the player (PCSX2's `covers/<serial>.jpg|png`) when it exists, otherwise a
 //! title card drawn in code. No game art is shipped with the launcher.
 use crate::platform;
 use egui::{pos2, Align2, Color32, CornerRadius, FontId, Rect, Sense, Stroke, StrokeKind, TextureHandle, Ui, Vec2};
@@ -15,7 +15,7 @@ pub struct Covers {
 }
 
 fn cover_dir(dir: &Option<PathBuf>) -> Option<PathBuf> {
-    dir.clone().or_else(|| platform::known_folder(platform::Known::Documents).map(|d| d.join("PCSX2").join("covers")))
+    dir.clone().or_else(platform::pcsx2_covers_dir)
 }
 
 impl Covers {

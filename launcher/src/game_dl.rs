@@ -1,6 +1,6 @@
 //! Download of the game for a new install: the latest RAC-RS RELEASE (never the main branch) of AsobiCodes/rac-rs, asset `rac-rs-<VER>.zip`,
 //! unpacked into the chosen folder. The zip holds one top folder `rac-rs-<VER>/`; it is stripped. Entries that would leave the folder are refused.
-//! The disc setup (setup.ps1 through the engine) is NOT done here: the folder is added to the library and the normal flow takes over.
+//! The disc setup (setup.sh through the engine) is NOT done here: the folder is added to the library and the normal flow takes over.
 use crate::library;
 use crate::releases::{self, Asset, Release, ReleaseError, ReleaseSource, Transfer};
 use std::fs::File;
@@ -14,7 +14,7 @@ pub const STAGE_LOOKUP: u8 = 0;
 pub const STAGE_DOWNLOAD: u8 = 1;
 pub const STAGE_UNPACK: u8 = 2;
 
-/// The oldest game version the launcher installs: every release from 0.2.1 on has a zip with a checksum and a setup.ps1 that takes -Console -Iso
+/// The oldest game version the launcher installs: every Linux release has a zip with a checksum and a setup.sh that takes --iso
 /// -SkipHash -NoShortcut (0.2.0 and 0.1.x are tags only).
 pub const MIN_INSTALLABLE: &str = "0.2.1";
 
@@ -305,7 +305,7 @@ mod tests {
         let zip = make_zip(&[
             ("rac-rs-9.9.9/", b""),
             ("rac-rs-9.9.9/VERSION", b"9.9.9\n"),
-            ("rac-rs-9.9.9/setup.ps1", b"# setup"),
+            ("rac-rs-9.9.9/setup.sh", b"# setup"),
             ("rac-rs-9.9.9/oracle/stubs.txt", b"stub"),
         ]);
         releases::write_test_release(&rel, "v9.9.9", "notes", &[("rac-rs-9.9.9.zip", &zip), ("rac-rs-launcher-windows-x64.exe", b"MZ")], &good);
@@ -395,7 +395,7 @@ mod tests {
     fn an_older_version_is_installed_by_its_number() {
         let rel = scratch("old");
         let dest = scratch("olddest").join("g");
-        let z = make_zip(&[("rac-rs-0.2.2/VERSION", b"0.2.2\n"), ("rac-rs-0.2.2/setup.ps1", b"#")]);
+        let z = make_zip(&[("rac-rs-0.2.2/VERSION", b"0.2.2\n"), ("rac-rs-0.2.2/setup.sh", b"#")]);
         releases::write_test_release(&rel, "v0.2.2", "", &[("rac-rs-0.2.2.zip", &z)], &good);
         let latest = std::fs::read_to_string(rel.join("latest.json")).unwrap();
         std::fs::write(rel.join("releases.json"), format!("[{latest}]")).unwrap();

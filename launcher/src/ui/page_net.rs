@@ -161,7 +161,7 @@ impl App {
                             }
                         }
                     });
-                    combo.response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, true, "Game version"));
+                    combo.response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Game version"));
                 });
                 let mut show = self.net.show_test;
                 if ui.checkbox(&mut show, "Show test versions").changed() {

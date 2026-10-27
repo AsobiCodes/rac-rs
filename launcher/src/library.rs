@@ -1,7 +1,7 @@
 //! The library: the list of game installs the launcher knows (id, game, folder, added date).
 //!
-//! Where the library file lives (`data_dir`): next to the launcher exe when the exe sits inside a game folder (VERSION + setup.ps1 next to it)
-//! or a `portable.txt` file is next to it; otherwise `%APPDATA%\RAC-RS Launcher\` (Linux: `$XDG_DATA_HOME/RAC-RS Launcher/`). `launcher.cfg` lives in the same folder.
+//! Where the library file lives (`data_dir`): next to the launcher exe when the exe sits inside a game folder (VERSION + setup.sh next to it)
+//! or a `portable.txt` file is next to it; otherwise `$XDG_DATA_HOME/RAC-RS Launcher/`. `launcher.cfg` lives in the same folder.
 //! The library only stores paths: removing an entry never deletes files.
 use crate::games::{self, GameDef};
 use serde::{Deserialize, Serialize};
@@ -65,7 +65,7 @@ pub enum DataMode {
     InGameFolder,
     /// `portable.txt` next to the exe.
     Portable,
-    /// `%APPDATA%\RAC-RS Launcher`.
+    /// `$XDG_DATA_HOME/RAC-RS Launcher`.
     AppData,
 }
 
@@ -74,16 +74,16 @@ pub enum DataMode {
 pub struct Found {
     pub game: &'static str,
     pub version: String,
-    /// The game is built (exe + Play.cmd + generated\play.cfg); false = an unpacked release that is not set up yet.
+    /// The game is built (binary + play.sh + generated/play.cfg); false = an unpacked release that is not set up yet.
     pub installed: bool,
 }
 
-/// VERSION and setup.ps1 are there: a rac-rs release tree (set up or not).
+/// VERSION and setup.sh are there: a rac-rs release tree (set up or not).
 pub fn is_release_tree(dir: &Path) -> bool {
-    dir.join("VERSION").is_file() && dir.join("setup.ps1").is_file()
+    dir.join("VERSION").is_file() && dir.join("setup.sh").is_file()
 }
 
-/// The data folder for the launcher exe in `exe_dir` (`appdata` = the %APPDATA% folder).
+/// The data folder for the launcher exe in `exe_dir` (`appdata` = the XDG data base folder).
 pub fn data_dir(exe_dir: &Path, appdata: Option<&Path>) -> (PathBuf, DataMode) {
     if is_release_tree(exe_dir) {
         return (exe_dir.to_path_buf(), DataMode::InGameFolder);
@@ -103,7 +103,7 @@ pub fn check_folder(dir: &Path) -> Result<Found, String> {
         return Err("That folder does not exist.".to_string());
     }
     if !is_release_tree(dir) {
-        return Err("This is not a RAC-RS game folder. It must hold the files VERSION and setup.ps1.".to_string());
+        return Err("This is not a RAC-RS game folder. It must hold the files VERSION and setup.sh.".to_string());
     }
     let version = games::local_version(dir);
     for g in games::GAMES.iter().filter(|g| g.supported) {
@@ -114,10 +114,10 @@ pub fn check_folder(dir: &Path) -> Result<Found, String> {
     Err(format!("This folder holds RAC-RS {version}, but the game was not set up here yet (its game files are missing). Use \"New install\" and choose this folder to set it up."))
 }
 
-/// Folder compare without touching the disk: case-insensitive, `/` = `\`, no trailing separator.
+/// Folder compare without touching the disk: no trailing separator.
 pub fn norm(p: &Path) -> String {
-    let mut s = p.to_string_lossy().replace('/', "\\").to_lowercase();
-    while s.len() > 3 && s.ends_with('\\') {
+    let mut s = p.to_string_lossy().to_string();
+    while s.len() > 1 && s.ends_with('/') {
         s.pop();
     }
     s
@@ -289,7 +289,7 @@ mod tests {
 
     /// A built install in `dir`.
     pub fn make_install(dir: &Path, version: &str) {
-        for (f, t) in [("VERSION", format!("{version}\n")), ("setup.ps1", "x".into()), ("Play.cmd", "x".into()), ("build/release/rac-rs.exe", "x".into()), ("generated/play.cfg", "iso=C:\\none.iso\n".into())] {
+        for (f, t) in [("VERSION", format!("{version}\n")), ("setup.sh", "x".into()), ("play.sh", "x".into()), ("build/release/rac-rs", "x".into()), ("generated/play.cfg", "iso=/none.iso\n".into())] {
             let p = dir.join(f);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, t).unwrap();
@@ -325,7 +325,7 @@ mod tests {
         let mut lib = Library::load(&d);
         assert!(lib.entries.is_empty());
         let g = games::game_by_id("rac1").unwrap();
-        let e = lib.add(g, Path::new("D:\\Games\\RAC1"));
+        let e = lib.add(g, Path::new("/games/rac1"));
         assert_eq!(e.id, "rac1");
         lib.save().unwrap();
         let again = Library::load(&d);
@@ -342,8 +342,8 @@ mod tests {
         make_install(&inst, "0.4.0");
         let e = lib.add_existing(&inst).unwrap();
         assert_eq!((e.game.as_str(), e.id.as_str()), ("rac1", "rac1"));
-        // same folder, other spelling
-        let other = PathBuf::from(inst.to_string_lossy().to_uppercase().replace('\\', "/") + "/");
+        // same folder with a trailing slash
+        let other = PathBuf::from(inst.to_string_lossy().to_string() + "/");
         assert!(lib.add_existing(&other).unwrap_err().contains("already"));
         // a second install gets another id
         let inst2 = scratch("add_inst2");
@@ -354,7 +354,7 @@ mod tests {
         assert!(lib.add_existing(&d).unwrap_err().contains("not a RAC-RS game folder"));
         let unbuilt = scratch("add_unbuilt");
         std::fs::write(unbuilt.join("VERSION"), "0.4.0\n").unwrap();
-        std::fs::write(unbuilt.join("setup.ps1"), "x").unwrap();
+        std::fs::write(unbuilt.join("setup.sh"), "x").unwrap();
         assert!(lib.add_existing(&unbuilt).unwrap_err().contains("not set up"));
         assert_eq!(lib.entries.len(), 2);
     }
@@ -369,7 +369,7 @@ mod tests {
         assert!(lib.remove(&e.id));
         assert!(!lib.remove(&e.id));
         assert!(lib.entries.is_empty());
-        assert!(inst.join("VERSION").is_file() && inst.join("build/release/rac-rs.exe").is_file());
+        assert!(inst.join("VERSION").is_file() && inst.join("build/release/rac-rs").is_file());
     }
 
     #[test]
@@ -389,14 +389,14 @@ mod tests {
         let d = scratch("bakentry");
         let mut lib = Library::load(&d);
         let g = games::game_by_id("rac1").unwrap();
-        let main = lib.add(g, Path::new("D:\\Games\\RAC1"));
+        let main = lib.add(g, Path::new("/games/rac1"));
         assert!(!main.backup && !main.pinned && main.title(g) == "Ratchet & Clank");
-        let b = lib.add_backup(g, Path::new("D:\\Games\\RAC1 (backup v0.3.1)"), "RAC1 v0.3.1 (backup)");
+        let b = lib.add_backup(g, Path::new("/games/rac1 (backup v0.3.1)"), "RAC1 v0.3.1 (backup)");
         assert!(b.backup && b.pinned);
         assert_eq!(b.title(g), "RAC1 v0.3.1 (backup)");
         assert_ne!(b.id, main.id);
         // the same folder again gives the same entry
-        assert_eq!(lib.add_backup(g, Path::new("d:/games/rac1 (backup v0.3.1)"), "other").id, b.id);
+        assert_eq!(lib.add_backup(g, Path::new("/games/rac1 (backup v0.3.1)"), "other").id, b.id);
         lib.save().unwrap();
         let again = Library::load(&d);
         assert_eq!(again.entries, lib.entries);

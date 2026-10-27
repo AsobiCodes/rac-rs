@@ -21,7 +21,7 @@ use std::sync::mpsc::{channel, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-pub const LAUNCHER_EXE: &str = "RAC-RS Launcher.exe";
+pub const LAUNCHER_EXE: &str = "rac-rs-launcher";
 pub const SHORTCUT_NAME: &str = "Ratchet & Clank (rac-rs)";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -337,7 +337,7 @@ impl App {
 
     // ------------------------------------------------------------------ the old exe left by a launcher update
 
-    /// At start: remove `RAC-RS Launcher.exe.old` NEXT TO THE RUNNING EXE (not in the data folder), retrying for ~15 s on a thread.
+    /// At start: remove `rac-rs-launcher.old` NEXT TO THE RUNNING EXE (not in the data folder), retrying for ~15 s on a thread.
     fn cleanup_old_exe(&self) {
         selfupdate::cleanup_old(self.net.self_exe.clone());
     }
@@ -346,6 +346,13 @@ impl App {
 
     pub fn check_updates(&mut self) {
         if !self.info.installed {
+            return;
+        }
+        if !crate::installer::supported() {
+            // The Linux update flow comes with the setup.sh engine; no Windows release is offered here.
+            if let Ok(mut g) = self.update.lock() {
+                *g = UpdateState::UpToDate(self.info.local_version.clone());
+            }
             return;
         }
         self.backup_forget_plan();
@@ -439,7 +446,7 @@ impl App {
                 Purpose::Iso => d.set_title("Pick your Ratchet & Clank (Europe or USA, v1.00) disc image").add_filter("Disc image (*.iso)", &["iso"]).add_filter("All files", &["*"]).pick_file(),
                 Purpose::ModZip => d.set_title("Pick a mod or texture pack (.zip)").add_filter("Zip file (*.zip)", &["zip"]).pick_file(),
                 Purpose::ModFolder => d.set_title("Pick the folder of a mod or texture pack").pick_folder(),
-                Purpose::AddInstall => d.set_title("Pick the folder of your RAC-RS game (it holds VERSION and setup.ps1)").pick_folder(),
+                Purpose::AddInstall => d.set_title("Pick the folder of your RAC-RS game (it holds VERSION and setup.sh)").pick_folder(),
                 Purpose::NewInstall => d.set_title("Pick the folder for the game").pick_folder(),
             };
             let _ = tx.send(r);

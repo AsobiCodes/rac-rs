@@ -131,7 +131,7 @@ mod tests {
     #[test]
     fn missing_and_wrong_size_files_are_refused_with_a_message() {
         let g = game_by_id("rac1").unwrap();
-        assert!(quick_check(g, Path::new("Z:\\no\\such.iso")).unwrap_err().contains("could not be found"));
+        assert!(quick_check(g, Path::new("/no/such.iso")).unwrap_err().contains("could not be found"));
         let p = std::env::temp_dir().join(format!("racl_dummy_{}.iso", std::process::id()));
         std::fs::write(&p, vec![0u8; 4096]).unwrap();
         let e = quick_check(g, &p).unwrap_err();

@@ -1,12 +1,12 @@
-//! Update check: the same sources and rules as setup.ps1 (Read-Remote, Get-ChangelogFor, Compare-Version).
-//! VERSION and CHANGELOG.md come from github.com/AsobiCodes/rac-rs (main); the update itself is done by the setup.ps1 -ApplyUpdate worker
-//! (see engine.rs). A test base (folder, file:// or http URL that serves VERSION and CHANGELOG.md) replaces GitHub.
+//! Update check against this fork: VERSION and CHANGELOG.md come from the branch that makes the Linux builds. The update
+//! itself is not wired to the Linux setup.sh engine yet (see engine.rs). A test base (folder, file:// or http URL that serves
+//! VERSION and CHANGELOG.md) replaces the branch.
 use crate::games::is_version;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-pub const REPO_RAW: &str = "https://raw.githubusercontent.com/AsobiCodes/rac-rs/main";
+pub const REPO_RAW: &str = "https://raw.githubusercontent.com/DeSynkro/rac-rs-linux/linux-0.4.0";
 
 /// -1 / 0 / 1 like [version]::CompareTo; unreadable parts count as 0. A test suffix ("0.4.0-rc1") sorts just below the same number without it.
 pub fn compare_version(a: &str, b: &str) -> std::cmp::Ordering {
@@ -26,8 +26,9 @@ pub fn compare_version(a: &str, b: &str) -> std::cmp::Ordering {
 pub fn read_remote(base: Option<&str>, name: &str, timeout: Duration) -> Option<String> {
     let base = base.unwrap_or(REPO_RAW);
     if let Some(rest) = base.strip_prefix("file://") {
-        let rest = rest.trim_start_matches('/');
-        return std::fs::read_to_string(Path::new(rest).join(name)).ok();
+        let p = Path::new(rest);
+        let p = if p.is_absolute() { p.to_path_buf() } else { Path::new(&format!("/{rest}")).to_path_buf() };
+        return std::fs::read_to_string(p.join(name)).ok();
     }
     if !(base.starts_with("http://") || base.starts_with("https://")) {
         return std::fs::read_to_string(Path::new(base).join(name)).ok();
@@ -37,8 +38,6 @@ pub fn read_remote(base: Option<&str>, name: &str, timeout: Duration) -> Option<
 
 fn http_get(url: &str, timeout: Duration) -> Option<String> {
     let cfg = ureq::Agent::config_builder().timeout_global(Some(timeout)).user_agent("rac-rs-launcher");
-    #[cfg(windows)]
-    let cfg = cfg.tls_config(ureq::tls::TlsConfig::builder().provider(ureq::tls::TlsProvider::NativeTls).build());
     let agent: ureq::Agent = cfg.build().into();
     let mut resp = agent.get(url).call().ok()?;
     resp.body_mut().read_to_string().ok()

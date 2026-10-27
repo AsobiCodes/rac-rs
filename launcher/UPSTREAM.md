@@ -24,10 +24,15 @@ that follows this import.
   run: `build.rs`, the resource script and icon, the MSVC cargo config,
   `build_release.ps1`, `check_linux.ps1`, and the upstream README and
   changelog.
-- The PowerShell setup worker (`src/engine.rs`, `src/setup_parse.rs`) and the
-  inline `cfg(windows)` branches stay in `src/` for this import commit, because
-  the install and update screens still reference them. The Linux port commit
-  replaces those callers and moves or deletes the Windows code.
+- The Linux port (the commit after the import) removed the Windows code from
+  the working crate. The PowerShell spawner is in `windows/engine_windows.rs`,
+  the Windows platform calls in `windows/platform_windows.rs`, the Windows
+  start-up in `windows/play_windows.rs`; the Windows-only tests are in
+  `windows/tests/`. `src/setup_parse.rs` stays because the Linux
+  `setup.sh --progress=launcher` mode is meant to print the same markers.
+- `src/engine.rs` now holds the cross-platform process reader and a
+  placeholder `start` that says disc installs come in a later version;
+  `installer.rs` is the Linux backend.
 - The `windows-sys`, `mslnk` and `embed-resource` dependencies were removed.
 - This crate is its own Cargo workspace, and the game's root `Cargo.toml`
   excludes `launcher`, so the two builds cannot see each other's dependencies.

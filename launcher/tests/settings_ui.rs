@@ -18,8 +18,8 @@ fn scratch(name: &str) -> PathBuf {
 fn installed(name: &str) -> PathBuf {
     let root = scratch(name);
     for (f, t) in [
-        ("build/release/rac-rs.exe", "x"),
-        ("Play.cmd", "x"),
+        ("build/release/rac-rs", "x"),
+        ("play.sh", "x"),
         ("rc.iso", "disc"),
         ("VERSION", "0.3.1\n"),
         ("generated/built_version.txt", "0.3.1\n"),

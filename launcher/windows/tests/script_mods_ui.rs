@@ -11,7 +11,7 @@ use rac_rs_launcher::ui::{theme, LauncherApp};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
-const ARSENAL: &str = include_str!("data/arsenal-mastery.omni-mod.json");
+const ARSENAL: &str = include_str!("../../tests/data/arsenal-mastery.omni-mod.json");
 
 /// A mod that has one setting of every type, for the pictures and the keybind test.
 const KITCHEN: &str = r#"{ "format": 2, "id": "quick-strafe", "name": "Quick Strafe", "version": "1.1.0", "author": "Someone", "type": "script", "api": "1.3",

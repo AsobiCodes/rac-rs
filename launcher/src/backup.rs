@@ -1,16 +1,17 @@
 //! "Back up your current version first": a playable copy of an install, made before an update touches anything.
 //!
 //! What a backup holds (found from what the game reads at run time, see `run_set`):
-//! - the game exe and the DLLs next to it (`build\release\*.exe|dll`; no build caches, no `deps`, no generated sources),
-//! - `Play.cmd`, `VERSION` and the small docs, `generated\play.cfg` (the disc path) + `generated\built_version.txt`,
-//!   `oracle\stubs.txt` + `oracle\hand\hand_skip.txt` (read by the game and by Play.cmd),
-//! - a COPY of the player folder (saves, `pc_options.txt`, log), of `profiles\` and of the small mods and `mods\active.txt`, so a newer
-//!   version's saves can never break the old one,
+//! - the game binary and the shared libraries next to it (`build/release/rac-rs`, `*.so*`; no build caches, no `deps`,
+//!   no generated sources),
+//! - `play.sh`, `VERSION` and the small docs, `generated/play.cfg` (the disc path) + `generated/built_version.txt`,
+//!   `oracle/stubs.txt` + `oracle/hand/hand_skip.txt` (read by the game),
+//! - a COPY of the player folder (saves, `pc_options.txt`, log), of `profiles/` and of the small mods and `mods/active.txt`,
+//!   so a newer version's saves can never break the old one,
 //! - big texture packs (a mod folder of 32 MB or more) as HARD LINKS to the same files (no second copy on the disk) when the drive allows it;
 //!   else they are left out and the dialog says so.
 //!
-//! `setup.ps1` and `Setup.cmd` are NOT copied: without them the old game exe cannot ask for an update on its own and nothing can update the backup.
-//! The main install is only read. A failed or cancelled backup removes its own folder.
+//! `setup.sh` is NOT copied: the backup is a finished build and is not updated. The main install is only read.
+//! A failed or cancelled backup removes its own folder.
 use crate::games::GameDef;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -21,7 +22,7 @@ pub const PACK_MIN_BYTES: u64 = 32 * 1024 * 1024;
 /// Written last into a finished backup (a folder without it is a leftover of a cut run).
 pub const MARKER: &str = "backup.txt";
 pub const CANCELLED: &str = "The backup was cancelled.";
-const TOP_FILES: [&str; 6] = ["VERSION", "Play.cmd", "CHANGELOG.md", "README.md", "LICENSE", "NOTICE.md"];
+const TOP_FILES: [&str; 6] = ["VERSION", "play.sh", "CHANGELOG.md", "README.md", "LICENSE", "NOTICE.md"];
 const FIXED_FILES: [&str; 4] = ["generated/play.cfg", "generated/built_version.txt", "oracle/stubs.txt", "oracle/hand/hand_skip.txt"];
 const MARGIN_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -169,8 +170,9 @@ pub fn run_set(root: &Path, game: &GameDef) -> Vec<Op> {
         names.sort_by_key(|e| e.file_name());
         for e in names {
             let p = PathBuf::from(e.file_name());
-            let ext = p.extension().map(|x| x.to_string_lossy().to_lowercase()).unwrap_or_default();
-            if ext == "exe" || ext == "dll" {
+            let name = p.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+            let so = name.ends_with(".so") || name.contains(".so.");
+            if name == "rac-rs" || so {
                 ops.push(Op { rel: rel_dir.join(&p), size: e.metadata().map(|m| m.len()).unwrap_or(0), mode: Mode::Copy, pack: None });
             }
         }
@@ -179,8 +181,7 @@ pub fn run_set(root: &Path, game: &GameDef) -> Vec<Op> {
         }
     }
     // the player's own data: a copy, never a link
-    let player = crate::play::saves_rel(&std::fs::read_to_string(root.join("Play.cmd")).unwrap_or_default());
-    add_dir(&mut ops, root, Path::new(&player), &|_| false);
+    add_dir(&mut ops, root, Path::new("player"), &|_| false);
     // a crash marker of the profiles belongs to the main install's run
     add_dir(&mut ops, root, Path::new(crate::profiles::DIR), &|r| r.file_name().map(|n| n == "running.txt").unwrap_or(false) && r.components().count() == 1);
     ops
@@ -466,16 +467,15 @@ pub mod tests {
     pub fn fake_install(root: &Path, version: &str) {
         put(&root.join("VERSION"), 6);
         std::fs::write(root.join("VERSION"), format!("{version}\n")).unwrap();
-        put(&root.join("setup.ps1"), 10);
-        put(&root.join("Setup.cmd"), 10);
-        std::fs::write(root.join("Play.cmd"), "set \"RAC_PLAYER_DIR=%~dp0player\"\n").unwrap();
+        put(&root.join("setup.sh"), 10);
+        std::fs::write(root.join("play.sh"), "#!/bin/sh\n").unwrap();
         put(&root.join("CHANGELOG.md"), 10);
         put(&root.join("Cargo.toml"), 10);
-        put(&root.join("RAC-RS Launcher.exe"), 10);
+        put(&root.join("rac-rs-launcher"), 10);
         put(&root.join("library.json"), 10);
         put(&root.join("launcher.cfg"), 10);
-        put(&root.join("build/release/rac-rs.exe"), 3000);
-        put(&root.join("build/release/dxcompiler.dll"), 2000);
+        put(&root.join("build/release/rac-rs"), 3000);
+        put(&root.join("build/release/libasound.so.2"), 2000);
         put(&root.join("build/release/rac-rs.d"), 500);
         put(&root.join("build/release/deps/big.rlib"), 5000);
         put(&root.join("build/release/incremental/x/y.bin"), 500);
@@ -486,7 +486,7 @@ pub mod tests {
         put(&root.join("oracle/stubs.txt"), 40);
         put(&root.join("oracle/hand/hand_skip.txt"), 40);
         put(&root.join("oracle/rec/l0/lib.rs"), 9000);
-        put(&root.join("toolchain/cargo.exe"), 9000);
+        put(&root.join("toolchain/cargo"), 9000);
         put(&root.join("player/card.bin"), 800);
         put(&root.join("player/pc_options.txt"), 30);
         put(&root.join("player/history/a.bin"), 30);
@@ -517,10 +517,10 @@ pub mod tests {
         let r = rels(&ops);
         for need in [
             "VERSION",
-            "Play.cmd",
+            "play.sh",
             "CHANGELOG.md",
-            "build/release/rac-rs.exe",
-            "build/release/dxcompiler.dll",
+            "build/release/rac-rs",
+            "build/release/libasound.so.2",
             "generated/play.cfg",
             "generated/built_version.txt",
             "oracle/stubs.txt",
@@ -537,10 +537,9 @@ pub mod tests {
             assert!(r.contains(&need.to_string()), "missing {need}: {r:?}");
         }
         for no in [
-            "setup.ps1",
-            "Setup.cmd",
+            "setup.sh",
             "Cargo.toml",
-            "RAC-RS Launcher.exe",
+            "rac-rs-launcher",
             "library.json",
             "launcher.cfg",
             "build/release/rac-rs.d",
@@ -549,7 +548,7 @@ pub mod tests {
             "generated/pgo/prof.profdata",
             "generated/logs/x.log",
             "oracle/rec/l0/lib.rs",
-            "toolchain/cargo.exe",
+            "toolchain/cargo",
             "profiles/running.txt",
             "mods/scratch.tmp/x.png",
         ] {
@@ -562,9 +561,9 @@ pub mod tests {
     #[test]
     fn a_run_set_without_optional_files_is_not_an_error() {
         let d = scratch("runset_min");
-        put(&d.join("build/release/rac-rs.exe"), 10);
+        put(&d.join("build/release/rac-rs"), 10);
         let g = game_by_id("rac1").unwrap();
-        assert_eq!(rels(&run_set(&d, g)), vec!["build/release/rac-rs.exe".to_string()]);
+        assert_eq!(rels(&run_set(&d, g)), vec!["build/release/rac-rs".to_string()]);
     }
 
     #[test]
@@ -631,11 +630,11 @@ pub mod tests {
         wait(&st).unwrap();
         // the main install is untouched
         assert_eq!(walk(&d), before);
-        // the backup holds the files, the marker, no setup.ps1
+        // the backup holds the files, the marker, no setup.sh
         let b = &p.dest;
         assert!(b.join(MARKER).is_file());
-        assert!(b.join("build/release/rac-rs.exe").is_file() && b.join("player/card.bin").is_file() && b.join("generated/play.cfg").is_file());
-        assert!(!b.join("setup.ps1").exists());
+        assert!(b.join("build/release/rac-rs").is_file() && b.join("player/card.bin").is_file() && b.join("generated/play.cfg").is_file());
+        assert!(!b.join("setup.sh").exists());
         assert_eq!(std::fs::read_to_string(b.join("VERSION")).unwrap().trim(), "0.3.1");
         assert!(crate::games::is_installed(b, g), "the backup counts as an installed game");
         // a pack file is the same file on the disk (writing through one name shows in the other); a player file is a separate copy

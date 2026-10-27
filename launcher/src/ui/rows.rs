@@ -1,5 +1,6 @@
 //! The rows of the Settings page: which option key, how it reads for a player, its choices and the game's default.
-//! Same options as the game's own Pause -> Options menu (they are the same file); the launcher adds the renderer.
+//! Same options as the game's own Pause -> Options menu (they are the same file). The Linux game renders with Vulkan only, so the
+//! Windows launcher's Graphics system (DirectX 12) row is not here; the fork's Button glyphs row is.
 use crate::pcopts::{self, Options};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,11 +39,11 @@ const LEVELS_CLASSIC: &[(&str, &str)] = &[("classic", "Classic"), ("low", "Low")
 
 pub const ROWS: &[Row] = &[
     Row {
-        key: "renderer",
-        label: "Graphics system",
-        help: "What the game draws with. Vulkan is best for most PCs. If the game does not start or the picture is broken, try DirectX 12.",
-        kind: Kind::Choice(&[("vulkan", "Vulkan"), ("dx12", "DirectX 12")]),
-        default: "vulkan",
+        key: "glyphs",
+        label: "Button glyphs",
+        help: "The pictures in the button prompts: the PlayStation shapes, Xbox letters or Nintendo Switch letters. Xbox is the default.",
+        kind: Kind::Choice(&[("playstation", "PlayStation"), ("xbox", "Xbox"), ("switch", "Switch")]),
+        default: "xbox",
         group: Group::Graphics,
     },
     Row {

@@ -11,6 +11,12 @@ than a rewrite. Provenance and the sync steps are in `../UPSTREAM.md`.
 ## The layout
 
 - `build.rs` - embeds the icon, version info and manifest into the Windows exe.
+- `engine_windows.rs`, `platform_windows.rs`, `play_windows.rs` - the Windows
+  setup spawner, the Windows OS calls and the `Play.cmd` start-up, as they
+  were before the Linux port replaced their callers.
+- `tests/` - the Windows-only tests: the PowerShell engine flow, the
+  update/backup screens, the script-mod settings UI and the real-network check
+  against the upstream releases.
 - `assets/rac-rs.ico`, `assets/launcher.rc`, `assets/launcher.manifest` - the
   icon, resource script and manifest those embed, plus the DPI/long-path settings.
 - `cargo-config.toml` - was `.cargo/config.toml`: static VC++ runtime for
@@ -22,12 +28,12 @@ than a rewrite. Provenance and the sync steps are in `../UPSTREAM.md`.
 - `upstream-README.md`, `upstream-CHANGELOG.md` - the upstream documentation
   this tree started from; the fork's own `../README.md` supersedes the README.
 
-## Still in `launcher/src` at the import commit
+## Still in `launcher/src`
 
-The PowerShell setup worker (`engine.rs`, `setup_parse.rs`), the Windows
-platform calls and the Windows release naming stay in `src/` until the Linux
-port replaces their callers. The port removes or moves them here, so the
-working crate ends up Linux-only.
+`setup_parse.rs` stays in the crate: it parses the step markers and cargo lines
+that the Linux `setup.sh --progress=launcher` mode is meant to print, so the
+same progress screen works once the Linux install engine lands. Everything
+else that was Windows-only has moved here.
 
 ## Licence
 

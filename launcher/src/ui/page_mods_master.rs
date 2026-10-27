@@ -38,6 +38,7 @@ impl App {
         let running = self.read_only();
         Master::ALL
             .into_iter()
+            .filter(|m| *m == Master::Textures || crate::mods::script_mods_supported())
             .map(|m| {
                 let (installed, switched_on) = store.master_counts(m);
                 let on = store.master_on(m);

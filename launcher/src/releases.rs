@@ -14,8 +14,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub const API_BASE: &str = "https://api.github.com/repos";
-pub const GAME_REPO: (&str, &str) = ("AsobiCodes", "rac-rs");
-pub const LAUNCHER_REPO: (&str, &str) = ("AsobiCodes", "rac-rs-launcher");
+pub const GAME_REPO: (&str, &str) = ("DeSynkro", "rac-rs-linux");
+pub const LAUNCHER_REPO: (&str, &str) = ("DeSynkro", "rac-rs-linux");
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct Asset {
@@ -210,8 +210,6 @@ fn agent() -> ureq::Agent {
         .timeout_recv_response(Some(Duration::from_secs(20)))
         .http_status_as_error(false)
         .user_agent("rac-rs-launcher");
-    #[cfg(windows)]
-    let cfg = cfg.tls_config(ureq::tls::TlsConfig::builder().provider(ureq::tls::TlsProvider::NativeTls).build());
     cfg.build().into()
 }
 

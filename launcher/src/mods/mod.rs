@@ -23,6 +23,12 @@ pub const OTHER_REGION_NOTE: &str = "Most world textures still match; menus, HUD
 /// The kinds this launcher can enable.
 pub const KNOWN_KINDS: &[&str] = &["textures", "script", "native"];
 
+/// Whether script and native mods can run here: they need OmniLoader, and upstream only publishes the
+/// Windows DLL. Texture packs never need it, so they stay available.
+pub fn script_mods_supported() -> bool {
+    false
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ModInfo {
     #[serde(default = "one")]
@@ -212,12 +218,10 @@ impl ModStore {
         let text = std::fs::read(active_file).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
         let mut entries = Vec::new();
         if let Ok(rd) = std::fs::read_dir(dir) {
-            for e in rd.flatten() {
-                let p = e.path();
-                if !p.is_dir() {
-                    continue;
-                }
-                let id = e.file_name().to_string_lossy().to_string();
+            let mut dirs: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+            dirs.sort();
+            for p in dirs {
+                let id = p.file_name().unwrap_or_default().to_string_lossy().to_string();
                 if id.starts_with('.') || id.ends_with(".tmp") {
                     continue;
                 }

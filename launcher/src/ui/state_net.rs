@@ -340,7 +340,7 @@ mod tests {
             use std::io::Write;
             let mut w = zip::ZipWriter::new(&mut zip);
             let o = zip::write::SimpleFileOptions::default();
-            for (n, b) in [("rac-rs-9.9.9/VERSION", &b"9.9.9\n"[..]), ("rac-rs-9.9.9/setup.ps1", b"# s"), ("rac-rs-9.9.9/Play.cmd", b"x")] {
+            for (n, b) in [("rac-rs-9.9.9/VERSION", &b"9.9.9\n"[..]), ("rac-rs-9.9.9/setup.sh", b"# s"), ("rac-rs-9.9.9/play.sh", b"x")] {
                 w.start_file(n, o).unwrap();
                 w.write_all(b).unwrap();
             }
@@ -357,7 +357,7 @@ mod tests {
         assert!(app.start_game_download(home.join("other"), None).is_err());
         wait(&mut app, |a| !a.downloading());
         assert_eq!(app.net.dl_error, None);
-        assert!(dest.join("VERSION").is_file() && dest.join("setup.ps1").is_file());
+        assert!(dest.join("VERSION").is_file() && dest.join("setup.sh").is_file());
         assert!(app.library.find_folder(&dest).is_some());
         assert_eq!(app.info.local_version, "9.9.9");
         assert!(!app.info.installed); // the disc setup comes next

@@ -33,6 +33,8 @@ pub const FIRST_VERSION: &[(&str, &str)] = &[
     ("texfilter", "0.4.0"),
     // pc_options.txt: Skip intro (intro=play|skip)
     ("intro", "0.4.0"),
+    // pc_options.txt: the Button glyphs style (fork row, Graphics -> System); needs 0.4.0
+    ("glyphs", "0.4.0"),
     // texture packs (and the Mods page master ticks, graphics presets) need this game version: the next public release is 0.4.0 (0.3.2 and 0.3.5 were never released)
     (TEXTURE_PACKS, "0.4.0"),
     (SCRIPT_MODS, "0.4.0"),

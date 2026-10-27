@@ -1,4 +1,3 @@
-#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 use rac_rs_launcher::cfg::LauncherCfg;
 use rac_rs_launcher::platform;
 use rac_rs_launcher::ui::{theme, LauncherApp};
@@ -18,7 +17,7 @@ fn main() {
     // One launcher per window; after a self-update the old process may still be closing, so retry for a while.
     let until = Instant::now() + Duration::from_secs(if restarted { 10 } else { 0 });
     let guard = loop {
-        if let Some(g) = platform::single_instance("Local\\RacRsLauncher") {
+        if let Some(g) = platform::single_instance("rac-rs-launcher") {
             break Some(g);
         }
         if Instant::now() >= until {

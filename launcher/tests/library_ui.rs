@@ -26,9 +26,9 @@ fn write(p: &Path, t: &str) {
 
 /// A finished (built, disc known) install of `version` in `root`; the "game exe" is a dummy file.
 fn install(root: &Path, version: &str) {
-    write(&root.join("build/release/rac-rs.exe"), "x");
-    write(&root.join("Play.cmd"), "x");
-    write(&root.join("setup.ps1"), "x");
+    write(&root.join("build/release/rac-rs"), "x");
+    write(&root.join("play.sh"), "x");
+    write(&root.join("setup.sh"), "x");
     write(&root.join("rc.iso"), "disc");
     write(&root.join("VERSION"), &format!("{version}\n"));
     write(&root.join("generated/built_version.txt"), &format!("{version}\n"));
@@ -206,7 +206,7 @@ fn new_install_in_an_unpacked_release_tree_is_listed_and_waits_for_the_disc() {
     let (mut a, e) = lib_app("new_tree", &["0.4.0"]);
     let tree = e.data.join("unpacked");
     write(&tree.join("VERSION"), "0.3.1\n");
-    write(&tree.join("setup.ps1"), "# s");
+    write(&tree.join("setup.sh"), "# s");
     let r = a.new_install(&tree.to_string_lossy()).unwrap();
     assert!(r.contains("Pick your disc"), "{r}");
     assert_eq!(a.library.entries.len(), 2);
@@ -232,7 +232,7 @@ fn new_install_downloads_into_an_empty_folder_from_a_test_source() {
         use std::io::Write;
         let mut w = zip::ZipWriter::new(&mut zip);
         let o = zip::write::SimpleFileOptions::default();
-        for (n, b) in [("rac-rs-9.9.9/VERSION", &b"9.9.9\n"[..]), ("rac-rs-9.9.9/setup.ps1", b"# s"), ("rac-rs-9.9.9/Play.cmd", b"x")] {
+        for (n, b) in [("rac-rs-9.9.9/VERSION", &b"9.9.9\n"[..]), ("rac-rs-9.9.9/setup.sh", b"# s"), ("rac-rs-9.9.9/play.sh", b"x")] {
             w.start_file(n, o).unwrap();
             w.write_all(b).unwrap();
         }
@@ -295,7 +295,7 @@ fn a_marker_stays_while_the_game_is_still_running() {
     write(&e.roots[0].join("player/pc_options.txt"), "version=1\nwater=medium\n");
     drop(a);
     // a handle that denies sharing = what a running exe looks like to platform::exe_in_use
-    let _lock = std::fs::OpenOptions::new().read(true).share_mode(0).open(e.roots[0].join("build/release/rac-rs.exe")).unwrap();
+    let _lock = std::fs::OpenOptions::new().read(true).share_mode(0).open(e.roots[0].join("build/release/rac-rs")).unwrap();
     let lib = Library::load(&e.data);
     let b = App::with_library(e.data.clone(), lib, None, None);
     assert!(b.game_external, "a game started by another launcher is noticed");
@@ -518,8 +518,8 @@ fn the_master_ticks_are_kept_per_profile_and_reach_active_txt_as_comment_lines()
     let back = file("default");
     assert_eq!(parse_active(&back), vec!["cel"], "{back}");
     assert!(!back.contains("Load texture packs"), "{back}");
-    // nothing of the other kind exists: its tick is greyed
-    assert!(h.get_by_label("Load mods, master switch").accesskit_node().is_disabled());
+    // Linux: script mods need OmniLoader, so that tick is not offered at all
+    assert_eq!(h.query_all_by_label_contains("Load mods, master switch").count(), 0);
     cleanup(&e);
 }
 

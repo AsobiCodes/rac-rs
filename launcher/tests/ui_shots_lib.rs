@@ -8,7 +8,7 @@ use rac_rs_launcher::ui::{theme, LauncherApp};
 use std::path::{Path, PathBuf};
 
 fn shots_dir() -> PathBuf {
-    let d = std::env::var_os("RAC_LAUNCHER_SHOTS").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../shots")));
+    let d = std::env::var_os("RAC_LAUNCHER_SHOTS").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/target/shots")));
     let _ = std::fs::create_dir_all(&d);
     d
 }
@@ -22,9 +22,9 @@ fn scratch(name: &str) -> PathBuf {
 
 fn install(root: &Path, version: &str) {
     for (f, t) in [
-        ("build/release/rac-rs.exe", "x".to_string()),
-        ("Play.cmd", "x".to_string()),
-        ("setup.ps1", "x".to_string()),
+        ("build/release/rac-rs", "x".to_string()),
+        ("play.sh", "x".to_string()),
+        ("setup.sh", "x".to_string()),
         ("rc.iso", "disc".to_string()),
         ("VERSION", format!("{version}\n")),
         ("generated/built_version.txt", format!("{version}\n")),

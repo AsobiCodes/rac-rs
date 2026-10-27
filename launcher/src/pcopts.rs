@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 /// Keys in the order the game writes them (the launcher's `renderer` after `display`).
 pub const KEYS: &[&str] = &[
     "lang", "camera", "camfeel", "strafe", "buyall", "lockon", "camspeed", "mousespeed", "lighting", "ao", "shadows", "display", "renderer", "water", "particles", "sunrays",
-    "smoothing", "vegetation", "culling", "gi", "waves", "draw", "fog", "clouds", "texfilter", "hud", "intro", "debug",
+    "smoothing", "vegetation", "culling", "gi", "waves", "draw", "fog", "clouds", "texfilter", "hud", "glyphs", "intro", "debug",
 ];
 
 pub const LEVELS: [&str; 4] = ["off", "low", "medium", "high"];
@@ -80,6 +80,7 @@ pub fn canon(key: &str, v: &str) -> Option<String> {
         "water" | "particles" | "fog" | "clouds" => level(v, &LEVELS_CLASSIC),
         "display" => two(v, "fullscreen", "windowed"),
         "renderer" => one_of(v, &["vulkan", "dx12"]),
+        "glyphs" => one_of(v, &["playstation", "xbox", "switch"]),
         "vegetation" => one_of(v, &VEGETATION),
         "draw" => one_of(v, &DRAW),
         "hud" => two(v, "sharp", "original"),

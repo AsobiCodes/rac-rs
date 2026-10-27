@@ -7,7 +7,7 @@ use crate::update::UpdateState;
 use egui::{Align2, Color32, CornerRadius, FontId, Rect, Sense, Ui, Vec2};
 
 /// Version of the launcher program itself.
-pub const LAUNCHER_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const LAUNCHER_VERSION: &str = env!("RAC_RS_VERSION");
 
 fn folder_tail(folder: &str) -> String {
     std::path::Path::new(folder).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| folder.to_string())
@@ -68,7 +68,7 @@ pub fn support_link(ui: &mut Ui) {
     let galley = ui.painter().layout_no_wrap(label.to_string(), font, theme::MUTED);
     let size = Vec2::new(14.0 + 7.0 + galley.size().x, 18.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Link, true, label));
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Link, true, label));
     let hot = resp.hovered() || resp.has_focus();
     let p = ui.painter();
     let o = rect.left_top() + Vec2::new(0.0, (size.y - 12.0) / 2.0);

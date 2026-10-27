@@ -144,11 +144,15 @@ impl App {
                     self.lib_ui.dialog = Some(AddDialog::Existing { text: String::new() });
                     self.lib_ui.message = None;
                 }
-                if theme::button(ui, "New install...") {
+                let can_install = crate::installer::supported();
+                if theme::button_enabled(ui, "New install...", can_install) {
                     self.lib_ui.dialog = Some(AddDialog::New { text: library::default_install_folder().to_string_lossy().to_string() });
                     self.lib_ui.message = None;
                 }
             });
+            if !crate::installer::supported() {
+                ui.label(theme::muted("Installing from a disc comes in a later version of the Linux launcher. Run setup.sh in the game folder, then use \"Add existing install...\"."));
+            }
             match self.lib_ui.dialog.clone() {
                 Some(AddDialog::Existing { text }) => self.add_existing_form(ui, text),
                 Some(AddDialog::New { text }) => self.new_install_form(ui, text),
@@ -183,7 +187,7 @@ impl App {
         ui.add_space(6.0);
         ui.separator();
         ui.label(theme::bold("Add existing install", 15.5));
-        ui.label(theme::muted("Pick the folder of a RAC-RS game that was set up before. It must hold the files VERSION and setup.ps1 and the built game."));
+        ui.label(theme::muted("Pick the folder of a RAC-RS game that was set up before. It must hold the files VERSION and setup.sh and the built game."));
         if let Some(t) = self.folder_field(ui, &text, "Folder of the game", Purpose::AddInstall) {
             self.lib_ui.dialog = Some(AddDialog::Existing { text: t });
             self.lib_ui.message = None;

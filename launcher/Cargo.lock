@@ -2194,12 +2194,13 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rac-rs-launcher"
-version = "0.1.1"
+version = "0.4.0"
 dependencies = [
  "eframe",
  "egui",
  "egui_kittest",
  "image",
+ "libc",
  "rfd",
  "serde",
  "serde_json",

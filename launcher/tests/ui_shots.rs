@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 fn shots_dir() -> PathBuf {
-    let d = std::env::var_os("RAC_LAUNCHER_SHOTS").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../shots")));
+    let d = std::env::var_os("RAC_LAUNCHER_SHOTS").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/target/shots")));
     let _ = std::fs::create_dir_all(&d);
     d
 }
@@ -36,8 +36,8 @@ const CHANGELOG: &str = "# Changelog\n\n## v0.4.0\n- Faster start on slow PCs.\n
 /// A finished install in a scratch folder; `remote` = the version the fake update server offers.
 fn installed_root(name: &str, local: &str, remote: &str) -> (PathBuf, String) {
     let root = scratch(name);
-    write(&root.join("build/release/rac-rs.exe"), "x");
-    write(&root.join("Play.cmd"), "x");
+    write(&root.join("build/release/rac-rs"), "x");
+    write(&root.join("play.sh"), "x");
     write(&root.join("rc.iso"), "disc");
     write(&root.join("generated/play.cfg"), &format!("iso={}\n", root.join("rc.iso").display()));
     write(&root.join("generated/built_version.txt"), &format!("{local}\n"));
@@ -323,14 +323,6 @@ fn s17_mods_error() {
     select_tab(&mut a, Tab::Mods);
     a.mods_ui.add = AddState::Error("Extract the archive first: .rar files cannot be read directly. Drop the folder or a .zip instead.".into());
     shot("17_mods_error_empty", a);
-}
-
-#[test]
-fn s18_coming_soon() {
-    let (root, base) = installed_root("s18", "0.3.1", "0.3.1");
-    let mut a = make_app(root, Some(base));
-    a.sel = Sel::Game("rac2");
-    shot("18_coming_soon", a);
 }
 
 #[test]

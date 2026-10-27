@@ -1,4 +1,6 @@
-//! Reads the output of `setup.ps1 -Console` exactly as the old setup window did (Feed-Line, Update-Progress, Get-ErrorText, Get-DetailsText):
+//! Reads the setup output (step markers, cargo lines, errors). The Windows worker printed it (setup.ps1); the Linux
+//! `setup.sh --progress=launcher` mode will print the same markers, so this parser stays in use (Feed-Line, Update-Progress,
+//! Get-ErrorText, Get-DetailsText):
 //! step markers `== (a)` ... `== (e)` and `== done`, `level N done`, cargo's `Compiling` lines, `expect-compiles: N`, `ERROR:` lines.
 use std::time::{Duration, Instant};
 
@@ -252,7 +254,7 @@ mod tests {
 
     #[test]
     fn markers_levels_and_compiles_of_a_real_setup_run() {
-        // the console output of a full setup.ps1 run (RAC_TEST_SETUP_LOG), skipped when not set
+        // the console output of a full setup run (RAC_TEST_SETUP_LOG), skipped when not set
         let Some(path) = std::env::var_os("RAC_TEST_SETUP_LOG") else { return };
         let Ok(bytes) = std::fs::read(path) else { return };
         let text = String::from_utf8_lossy(&bytes).to_string();
@@ -316,8 +318,8 @@ mod tests {
         assert_eq!(p.last_error, "cannot find value `x`");
         p.feed_line("ERROR: build failed badly");
         assert_eq!(p.last_error, "build failed badly");
-        p.feed_line("  desktop shortcut created: C:\\Users\\x\\Desktop\\Ratchet & Clank (rac-rs).lnk");
-        assert_eq!(p.shortcut.as_deref(), Some("C:\\Users\\x\\Desktop\\Ratchet & Clank (rac-rs).lnk"));
+        p.feed_line("  desktop shortcut created: /home/x/Desktop/Ratchet & Clank (rac-rs).desktop");
+        assert_eq!(p.shortcut.as_deref(), Some("/home/x/Desktop/Ratchet & Clank (rac-rs).desktop"));
         assert!(p.status.starts_with("desktop shortcut created"));
     }
 

@@ -1,62 +1,39 @@
-//! The install / repair / update engine: setup.ps1 as a hidden child, its output parsed by `setup_parse::Progress`.
+//! The setup process behind the install / repair / update screens.
 //!
-//!   powershell.exe -NoProfile -ExecutionPolicy Bypass -File setup.ps1 -Console -Iso <iso> -SkipHash [-ApplyUpdate -NewVersion X [-FinishOnly]
-//!   -SkipUnblock [-TestUpdateBase D]] -NoShortcut [-Regenerate]
-//!
-//! The launcher itself makes the desktop shortcut (to the launcher), so the worker always gets -NoShortcut.
+//! The Windows launcher ran `setup.ps1` (archived in `windows/engine_windows.rs`).
+//! The Linux engine, which will run `setup.sh --iso <iso>` and read the same
+//! progress markers, comes in a later version; until then `start` says so and
+//! the screens stay closed. The process reader below is what that engine will
+//! use, so it is kept here rather than duplicated later.
 use crate::platform;
 use crate::setup_parse::Progress;
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{channel, Receiver, TryRecvError};
+use std::path::PathBuf;
+use std::process::Child;
+use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Instant;
 
 #[derive(Clone, Debug, Default)]
 pub struct EngineOpts {
     pub root: PathBuf,
     pub iso: PathBuf,
-    /// Some((version, finish_only)) = `-ApplyUpdate`.
+    /// Some((version, finish_only)): an update.
     pub update: Option<(String, bool)>,
-    /// Repair / rebuild: `-Regenerate` (makes the game code again).
+    /// Repair / rebuild: regenerate the game code too.
     pub regenerate: bool,
     pub test_update_base: Option<String>,
-    /// More switches for flow tests (`-CheckOnly`, `-NoBuild`); also from the environment variable RAC_LAUNCHER_SETUP_ARGS.
+    /// More switches for flow tests; also from the environment variable RAC_LAUNCHER_SETUP_ARGS.
     pub extra: Vec<String>,
-}
-
-/// The arguments after `powershell.exe`.
-pub fn build_args(o: &EngineOpts) -> Vec<String> {
-    let mut a: Vec<String> = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"].iter().map(|s| s.to_string()).collect();
-    a.push(o.root.join("setup.ps1").to_string_lossy().to_string());
-    a.extend(["-Console", "-Iso"].map(String::from));
-    a.push(o.iso.to_string_lossy().to_string());
-    a.push("-SkipHash".into());
-    if let Some((ver, finish)) = &o.update {
-        a.extend(["-ApplyUpdate", "-NewVersion"].map(String::from));
-        a.push(ver.clone());
-        if *finish {
-            a.push("-FinishOnly".into());
-        }
-        a.push("-SkipUnblock".into());
-        if let Some(b) = &o.test_update_base {
-            a.push("-TestUpdateBase".into());
-            a.push(b.trim_end_matches('\\').to_string());
-        }
-    }
-    a.push("-NoShortcut".into());
-    if o.regenerate {
-        a.push("-Regenerate".into());
-    }
-    a.extend(o.extra.iter().cloned());
-    a
 }
 
 pub fn env_extra_args() -> Vec<String> {
     std::env::var("RAC_LAUNCHER_SETUP_ARGS").map(|s| s.split_whitespace().map(String::from).collect()).unwrap_or_default()
 }
 
-/// A running (or finished) worker.
+/// A running (or finished) setup worker.
+///
+/// Built by the Linux engine in a later version; the reader is kept ready for it.
+#[allow(dead_code)]
 pub struct Engine {
     child: Child,
     pid: u32,
@@ -68,6 +45,7 @@ pub struct Engine {
     pub cancelled: bool,
 }
 
+#[allow(dead_code)]
 fn pump<R: std::io::Read + Send + 'static>(r: R, tx: std::sync::mpsc::Sender<String>) {
     std::thread::spawn(move || {
         let mut br = BufReader::new(r);
@@ -89,25 +67,11 @@ fn pump<R: std::io::Read + Send + 'static>(r: R, tx: std::sync::mpsc::Sender<Str
     });
 }
 
+pub const UNSUPPORTED_TEXT: &str = "Installing or repairing from a disc comes in a later version of the Linux launcher. Run setup.sh in the game folder, then use \"Add existing install...\".";
+
 impl Engine {
-    pub fn start(opts: &EngineOpts) -> std::io::Result<Engine> {
-        let script = opts.root.join("setup.ps1");
-        if !script.is_file() {
-            return Err(std::io::Error::new(std::io::ErrorKind::NotFound, format!("setup.ps1 was not found in {}", opts.root.display())));
-        }
-        let mut cmd = Command::new(platform::powershell_exe());
-        cmd.args(build_args(opts)).current_dir(&opts.root).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        platform::hidden(&mut cmd);
-        let mut child = cmd.spawn()?;
-        let (tx, rx) = channel();
-        if let Some(o) = child.stdout.take() {
-            pump(o, tx.clone());
-        }
-        if let Some(e) = child.stderr.take() {
-            pump(e, tx);
-        }
-        let pid = child.id();
-        Ok(Engine { child, pid, rx, progress: Progress::new(opts.update.is_some()), started: Instant::now(), done: None, cancelled: false })
+    pub fn start(_opts: &EngineOpts) -> std::io::Result<Engine> {
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, UNSUPPORTED_TEXT))
     }
 
     /// Reads what the worker printed since the last call and checks whether it ended. Returns true when something changed.
@@ -177,42 +141,16 @@ impl Drop for Engine {
     }
 }
 
-/// Where the setup worker's script lives (for messages).
-pub fn script_path(root: &Path) -> PathBuf {
-    root.join("setup.ps1")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn opts() -> EngineOpts {
-        EngineOpts { root: PathBuf::from("C:\\g\\rac-rs"), iso: PathBuf::from("D:\\iso\\Ratchet & Clank.iso"), ..Default::default() }
-    }
+    use std::path::PathBuf;
 
     #[test]
-    fn install_args_match_the_old_window() {
-        let a = build_args(&opts());
-        assert_eq!(
-            a,
-            vec!["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:\\g\\rac-rs\\setup.ps1", "-Console", "-Iso", "D:\\iso\\Ratchet & Clank.iso", "-SkipHash", "-NoShortcut"]
-        );
-    }
-
-    #[test]
-    fn update_and_repair_args() {
-        let mut o = opts();
-        o.update = Some(("0.4.0".into(), true));
-        o.test_update_base = Some("E:\\base\\".into());
-        o.regenerate = true;
-        let a = build_args(&o).join(" ");
-        assert!(a.contains("-SkipHash -ApplyUpdate -NewVersion 0.4.0 -FinishOnly -SkipUnblock -TestUpdateBase E:\\base -NoShortcut -Regenerate"), "{a}");
-    }
-
-    #[test]
-    fn missing_script_is_an_error_not_a_panic() {
-        let mut o = opts();
-        o.root = std::env::temp_dir().join("racl_no_such_root");
-        assert!(Engine::start(&o).is_err());
+    fn starting_says_linux_installs_come_later() {
+        let o = EngineOpts { root: PathBuf::from("/tmp/none"), iso: PathBuf::new(), ..Default::default() };
+        let e = Engine::start(&o).err().unwrap();
+        assert_eq!(e.kind(), std::io::ErrorKind::Unsupported);
+        assert!(e.to_string().contains("setup.sh"));
     }
 }

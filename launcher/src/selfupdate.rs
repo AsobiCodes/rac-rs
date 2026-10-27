@@ -1,5 +1,5 @@
-//! The launcher updates only itself, from its own repo (AsobiCodes/rac-rs-launcher, latest release); game updates are setup.ps1's job.
-//! Asset `rac-rs-launcher-windows-x64.exe` (Linux later: `rac-rs-launcher-linux-x64`), installed as `RAC-RS Launcher.exe` next to the running exe.
+//! The launcher updates only itself, from the fork's own releases (the same tag as the game); game updates are setup.sh's job.
+//! Asset `rac-rs-launcher-linux-x64`, installed as `rac-rs-launcher` next to the running exe.
 //! Steps of `apply`: download + checksum to `<exe>.new`; rename the RUNNING exe to `<exe>.old` (Windows allows that), rename `.new` to the exe name;
 //! the caller starts the new exe with `--restarted` and quits; the new start deletes `.old` (`remove_old`).
 use crate::releases::{self, Release, ReleaseError, ReleaseSource, Transfer};
@@ -8,9 +8,9 @@ use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-pub const ASSET_NAME: &str = if cfg!(windows) { "rac-rs-launcher-windows-x64.exe" } else { "rac-rs-launcher-linux-x64" };
+pub const ASSET_NAME: &str = "rac-rs-launcher-linux-x64";
 /// The launcher's own version (Cargo.toml).
-pub const OWN_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const OWN_VERSION: &str = env!("RAC_RS_VERSION");
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LauncherUpdate {
@@ -146,7 +146,7 @@ mod tests {
     fn update_swaps_the_exe_keeps_old_next_to_it_and_cleans_up() {
         let rel = scratch("rel");
         let app = scratch("app");
-        let exe = app.join("RAC-RS Launcher.exe");
+        let exe = app.join("rac-rs-launcher");
         std::fs::write(&exe, b"OLDEXE").unwrap();
         std::fs::write(old_path(&exe), b"ANCIENT").unwrap();
         releases::write_test_release(&rel, "v0.2.0", "notes", &[(ASSET_NAME, b"NEWEXE-bytes")], &good);
@@ -167,7 +167,7 @@ mod tests {
     fn failed_update_leaves_the_old_exe_alone() {
         let rel = scratch("failrel");
         let app = scratch("failapp");
-        let exe = app.join("RAC-RS Launcher.exe");
+        let exe = app.join("rac-rs-launcher");
         std::fs::write(&exe, b"OLDEXE").unwrap();
         releases::write_test_release(&rel, "v0.2.0", "", &[(ASSET_NAME, b"NEW")], &|_, _| Some(format!("sha256:{}", "a".repeat(64))));
         let src = ReleaseSource::Folder(rel.clone());

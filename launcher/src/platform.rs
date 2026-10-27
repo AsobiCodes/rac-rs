@@ -1,117 +1,54 @@
-//! The few operating-system calls (Windows-only ones behind cfg(windows), with a plain fallback elsewhere).
+//! The operating-system calls of the Linux launcher.
+//!
+//! The Windows implementations (named mutex, PowerShell, known folders, .lnk
+//! shortcuts, free space through `GetDiskFreeSpaceExW`) are archived in
+//! `windows/platform_windows.rs`; nothing here uses them.
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Keeps the single-instance lock while it lives.
+/// Keeps the single-instance lock (an open, locked file) while it lives.
 pub struct InstanceGuard {
-    #[cfg(windows)]
-    handle: windows_sys::Win32::Foundation::HANDLE,
+    _lock: std::fs::File,
 }
 
-#[cfg(windows)]
-impl Drop for InstanceGuard {
-    fn drop(&mut self) {
-        unsafe {
-            windows_sys::Win32::Foundation::CloseHandle(self.handle);
-        }
-    }
-}
-
-/// Named mutex `Local\RacRsLauncher`; None = another launcher of this user is already open.
-#[cfg(windows)]
+/// Locks `<XDG_RUNTIME_DIR>/rac-rs-launcher-<uid>.lock`; None = another launcher of this user is already open.
 pub fn single_instance(name: &str) -> Option<InstanceGuard> {
-    use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
-    use windows_sys::Win32::System::Threading::CreateMutexW;
-    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-    unsafe {
-        let h = CreateMutexW(std::ptr::null(), 0, wide.as_ptr());
-        if h.is_null() {
-            return None;
-        }
-        if GetLastError() == ERROR_ALREADY_EXISTS {
-            windows_sys::Win32::Foundation::CloseHandle(h);
-            return None;
-        }
-        Some(InstanceGuard { handle: h })
-    }
-}
-
-#[cfg(not(windows))]
-pub fn single_instance(name: &str) -> Option<InstanceGuard> {
-    // Native Linux later: a lock file in the runtime dir. For now (Proton runs the Windows exe) there is no second instance check.
     let _ = name;
-    Some(InstanceGuard {})
+    use std::os::fd::AsRawFd;
+    let dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).filter(|p| p.is_dir()).unwrap_or_else(std::env::temp_dir);
+    let uid = unsafe { libc::geteuid() };
+    let path = dir.join(format!("rac-rs-launcher-{uid}.lock"));
+    let file = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(&path).ok()?;
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc != 0 {
+        return None;
+    }
+    Some(InstanceGuard { _lock: file })
 }
 
-/// A hidden child: no console window.
+/// A child process: there is no console window to hide on Linux.
 pub fn hidden(cmd: &mut Command) -> &mut Command {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000);
-    }
     cmd
 }
 
-pub fn powershell_exe() -> PathBuf {
-    match std::env::var_os("SystemRoot") {
-        Some(r) => Path::new(&r).join("System32").join("WindowsPowerShell").join("v1.0").join("powershell.exe"),
-        None => PathBuf::from("powershell.exe"),
-    }
-}
-
-/// Kills the child and everything it started (exactly that PID's tree, as the old window did).
+/// Kills the child and everything it started (the process group when the caller made one).
 pub fn kill_tree(pid: u32) {
-    #[cfg(windows)]
-    {
-        let tk = match std::env::var_os("SystemRoot") {
-            Some(r) => Path::new(&r).join("System32").join("taskkill.exe"),
-            None => PathBuf::from("taskkill.exe"),
-        };
-        let _ = hidden(Command::new(tk).args(["/PID", &pid.to_string(), "/T", "/F"])).status();
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
-    }
+    let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
 }
 
 /// Opens a folder or a file with the system's default program.
 pub fn open_path(p: &Path) {
-    #[cfg(windows)]
-    {
-        let _ = Command::new("explorer.exe").arg(p).spawn();
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = Command::new("xdg-open").arg(p).spawn();
-    }
+    let _ = Command::new("xdg-open").arg(p).spawn();
 }
 
 /// Opens a web address in the default browser (only when the player clicked a link; never called by itself).
 pub fn open_url(url: &str) {
-    #[cfg(windows)]
-    {
-        let _ = Command::new("explorer.exe").arg(url).spawn();
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = Command::new("xdg-open").arg(url).spawn();
-    }
+    let _ = Command::new("xdg-open").arg(url).spawn();
 }
 
-/// Opens the folder of a file and selects it (plain open on other systems).
+/// Opens the folder of a file and selects it (plain open on Linux).
 pub fn reveal(p: &Path) {
-    #[cfg(windows)]
-    {
-        let mut a = std::ffi::OsString::from("/select,");
-        a.push(p.as_os_str());
-        let _ = Command::new("explorer.exe").arg(a).spawn();
-    }
-    #[cfg(not(windows))]
-    {
-        open_path(p.parent().unwrap_or(p));
-    }
+    open_path(p.parent().unwrap_or(p));
 }
 
 #[derive(Clone, Copy)]
@@ -120,72 +57,74 @@ pub enum Known {
     Desktop,
 }
 
-/// Documents / Desktop of the user (follows OneDrive redirects through the shell), with an environment fallback.
+/// The user's Documents or Desktop folder, following `~/.config/user-dirs.dirs`.
 pub fn known_folder(k: Known) -> Option<PathBuf> {
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::System::Com::CoTaskMemFree;
-        use windows_sys::Win32::UI::Shell::{FOLDERID_Desktop, FOLDERID_Documents, SHGetKnownFolderPath};
-        let id = match k {
-            Known::Documents => &FOLDERID_Documents,
-            Known::Desktop => &FOLDERID_Desktop,
-        };
-        unsafe {
-            let mut out: *mut u16 = std::ptr::null_mut();
-            let hr = SHGetKnownFolderPath(id, 0, std::ptr::null_mut(), &mut out);
-            if hr >= 0 && !out.is_null() {
-                let mut n = 0;
-                while *out.add(n) != 0 {
-                    n += 1;
-                }
-                let s = String::from_utf16_lossy(std::slice::from_raw_parts(out, n));
-                CoTaskMemFree(out as *const _);
-                return Some(PathBuf::from(s));
+    let (key, fallback) = match k {
+        Known::Documents => ("DOCUMENTS", "Documents"),
+        Known::Desktop => ("DESKTOP", "Desktop"),
+    };
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    let cfg = home.join(".config").join("user-dirs.dirs");
+    if let Ok(text) = std::fs::read_to_string(&cfg) {
+        let prefix = format!("XDG_{key}_DIR=");
+        for line in text.lines() {
+            let line = line.trim();
+            let Some(v) = line.strip_prefix(&prefix) else { continue };
+            let v = v.trim().trim_matches('"').replace("$HOME", &home.to_string_lossy());
+            if !v.is_empty() {
+                return Some(PathBuf::from(v));
             }
         }
     }
-    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
-    Some(Path::new(&home).join(match k {
-        Known::Documents => "Documents",
-        Known::Desktop => "Desktop",
-    }))
+    Some(home.join(fallback))
 }
 
-/// The per-user data base folder: `%APPDATA%` on Windows; on Linux `$XDG_DATA_HOME` or `~/.local/share` (XDG base directories).
+/// The per-user data base folder: `$XDG_DATA_HOME` or `~/.local/share`.
 pub fn data_base() -> Option<PathBuf> {
-    pick_data_base(cfg!(windows), std::env::var_os("APPDATA"), std::env::var_os("XDG_DATA_HOME"), std::env::var_os("HOME"))
-}
-
-fn pick_data_base(windows: bool, appdata: Option<std::ffi::OsString>, xdg: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) -> Option<PathBuf> {
     let nonempty = |v: Option<std::ffi::OsString>| v.filter(|s| !s.is_empty()).map(PathBuf::from);
-    if windows {
-        return nonempty(appdata);
-    }
-    nonempty(xdg).filter(|p| p.has_root()).or_else(|| nonempty(home).map(|h| h.join(".local").join("share")))
+    nonempty(std::env::var_os("XDG_DATA_HOME"))
+        .filter(|p| p.has_root())
+        .or_else(|| nonempty(std::env::var_os("HOME")).map(|h| h.join(".local").join("share")))
 }
 
-/// Free bytes for the current user on the drive that holds `dir` (an existing folder). None = unknown.
+/// Where PCSX2 keeps texture replacements on Linux: the native build and the Flatpak.
+pub fn pcsx2_texture_roots() -> Vec<PathBuf> {
+    let mut v = Vec::new();
+    if let Some(cfg) = data_config_dir() {
+        v.push(cfg.join("PCSX2").join("textures"));
+    }
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        v.push(home.join(".var/app/net.pcsx2.PCSX2/config/PCSX2/textures"));
+    }
+    v
+}
+
+/// Where PCSX2 keeps the covers it downloaded on Linux.
+pub fn pcsx2_covers_dir() -> Option<PathBuf> {
+    data_config_dir().map(|d| d.join("PCSX2").join("covers"))
+}
+
+/// `$XDG_CONFIG_HOME` or `~/.config`.
+fn data_config_dir() -> Option<PathBuf> {
+    let nonempty = |v: Option<std::ffi::OsString>| v.filter(|s| !s.is_empty()).map(PathBuf::from);
+    nonempty(std::env::var_os("XDG_CONFIG_HOME"))
+        .filter(|p| p.has_root())
+        .or_else(|| nonempty(std::env::var_os("HOME")).map(|h| h.join(".config")))
+}
+
+/// Free bytes for the current user on the file system that holds `dir`. None = unknown.
 pub fn free_bytes(dir: &Path) -> Option<u64> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
-        let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-        let (mut free, mut total, mut total_free) = (0u64, 0u64, 0u64);
-        let ok = unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut free, &mut total, &mut total_free) };
-        return (ok != 0).then_some(free);
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = dir;
-        None
-    }
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    let ok = unsafe { libc::statvfs(c.as_ptr(), &mut st) };
+    (ok == 0).then_some(st.f_bavail as u64 * st.f_frsize as u64)
 }
 
-/// Tests only: true makes `recycle` delete its (scratch) path for good, so UI tests never fill the user's Recycle Bin.
+/// Tests only: true makes `recycle` delete its (scratch) path for good, so UI tests never fill the user's trash.
 pub static TEST_NO_RECYCLE_BIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// To the Recycle Bin, never a hard delete (except under `TEST_NO_RECYCLE_BIN`).
+/// To the trash, never a hard delete (except under `TEST_NO_RECYCLE_BIN`).
 pub fn recycle(p: &Path) -> Result<(), String> {
     if TEST_NO_RECYCLE_BIN.load(std::sync::atomic::Ordering::SeqCst) {
         let r = if p.is_dir() { std::fs::remove_dir_all(p) } else { std::fs::remove_file(p) };
@@ -194,54 +133,69 @@ pub fn recycle(p: &Path) -> Result<(), String> {
     trash::delete(p).map_err(|e| e.to_string())
 }
 
-/// A running exe cannot be opened for writing on Windows: true = the game is running (also when another launcher started it).
-pub fn exe_in_use(exe: &Path) -> bool {
-    #[cfg(windows)]
-    {
-        if !exe.is_file() {
-            return false;
-        }
-        match std::fs::OpenOptions::new().write(true).open(exe) {
-            Ok(_) => false,
-            Err(e) => matches!(e.raw_os_error(), Some(5) | Some(32)),
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = exe;
-        false
-    }
+/// A running binary can be replaced on Linux, so the game can always be updated.
+pub fn exe_in_use(_exe: &Path) -> bool {
+    false
 }
 
-/// A desktop shortcut `<dir>\<name>.lnk` to `target` (the launcher), working folder `workdir`, with the icon.
+/// Quotes one argument for a `.desktop` `Exec=` line.
+fn exec_quote(p: &Path) -> String {
+    let s = p.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"").replace('`', "\\`").replace('$', "\\$");
+    format!("\"{s}\"")
+}
+
+/// Installs the launcher icon under `$XDG_DATA_HOME/icons` and returns its path.
+fn install_icon() -> Result<PathBuf, String> {
+    let dir = data_base().ok_or("The data folder was not found.")?.join("icons");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let p = dir.join("rac-rs-launcher.png");
+    if !p.is_file() {
+        std::fs::write(&p, include_bytes!("../assets/rac-rs-256.png")).map_err(|e| e.to_string())?;
+    }
+    Ok(p)
+}
+
+/// A desktop entry in `dir` that opens `target` (the launcher), working folder `workdir`.
 pub fn create_shortcut(dir: &Path, name: &str, target: &Path, workdir: &Path, icon: Option<&Path>) -> Result<PathBuf, String> {
-    #[cfg(windows)]
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let icon = match icon {
+        Some(p) if p.is_file() => p.to_path_buf(),
+        _ => install_icon()?,
+    };
+    let file = dir.join(format!("{name}.desktop"));
+    let text = format!(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Version=1.0\n\
+         Name={name}\n\
+         Comment=Install, play and configure the Ratchet & Clank PC port\n\
+         Exec={}\n\
+         Path={}\n\
+         Icon={}\n\
+         Terminal=false\n\
+         Categories=Game;\n",
+        exec_quote(target),
+        workdir.display(),
+        icon.display(),
+    );
+    std::fs::write(&file, text).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
     {
-        let mut sl = mslnk::ShellLink::new(target).map_err(|e| e.to_string())?;
-        sl.set_working_dir(Some(workdir.to_string_lossy().to_string()));
-        sl.set_name(Some(name.to_string()));
-        let ico = icon.map(|p| p.to_path_buf()).unwrap_or_else(|| target.to_path_buf());
-        sl.set_icon_location(Some(ico.to_string_lossy().to_string()));
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        let lnk = dir.join(format!("{name}.lnk"));
-        sl.create_lnk(&lnk).map_err(|e| e.to_string())?;
-        Ok(lnk)
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755));
     }
-    #[cfg(not(windows))]
-    {
-        let _ = (dir, name, target, workdir, icon);
-        Err("Desktop shortcuts are only made on Windows.".to_string())
-    }
+    Ok(file)
 }
 
-/// "Windows 10.0.26200" style text for the problem report.
+/// "Debian GNU/Linux 12 (bookworm)" style text for the problem report.
 pub fn os_text() -> String {
-    #[cfg(windows)]
-    {
-        if let Ok(o) = hidden(Command::new("cmd").args(["/C", "ver"])).output() {
-            let t = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if !t.is_empty() {
-                return t;
+    if let Ok(t) = std::fs::read_to_string("/etc/os-release") {
+        for line in t.lines() {
+            if let Some(v) = line.strip_prefix("PRETTY_NAME=") {
+                let v = v.trim().trim_matches('"');
+                if !v.is_empty() {
+                    return v.to_string();
+                }
             }
         }
     }
@@ -249,18 +203,37 @@ pub fn os_text() -> String {
 }
 
 #[cfg(test)]
-mod xdg_tests {
+mod tests {
     use super::*;
-    use std::ffi::OsString;
 
     #[test]
     fn data_base_follows_the_platform() {
-        let o = |s: &str| Some(OsString::from(s));
-        assert_eq!(pick_data_base(true, o("C:/roaming"), o("/x"), o("/home/a")), Some(PathBuf::from("C:/roaming")));
-        assert_eq!(pick_data_base(false, o("C:/x"), o("/data"), o("/home/a")), Some(PathBuf::from("/data")));
-        assert_eq!(pick_data_base(false, None, None, o("/home/a")), Some(PathBuf::from("/home/a").join(".local").join("share")));
-        assert_eq!(pick_data_base(false, None, o("relative"), o("/home/a")), Some(PathBuf::from("/home/a").join(".local").join("share")));
-        assert_eq!(pick_data_base(false, None, None, None), None);
+        // The XDG path is what this launcher uses on Linux.
+        assert_eq!(data_base_from(Some("/data"), Some("/home/a")), Some(PathBuf::from("/data")));
+        assert_eq!(data_base_from(None, Some("/home/a")), Some(PathBuf::from("/home/a/.local/share")));
+    }
+
+    fn data_base_from(xdg: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
+        let nonempty = |v: Option<&str>| v.filter(|s| !s.is_empty()).map(PathBuf::from);
+        nonempty(xdg).filter(|p| p.has_root()).or_else(|| nonempty(home).map(|h| h.join(".local").join("share")))
+    }
+
+    #[test]
+    fn desktop_entry_is_written_and_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("racl_desktop_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let target = Path::new("/opt/RAC-RS Launcher/rac-rs-launcher");
+        let icon = d.join("icon.png");
+        std::fs::write(&icon, b"png").unwrap();
+        let p = create_shortcut(&d, "Ratchet & Clank (rac-rs)", target, Path::new("/games/rac"), Some(&icon)).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.contains("Type=Application"));
+        assert!(text.contains("Exec=\"/opt/RAC-RS Launcher/rac-rs-launcher\""));
+        assert!(text.contains("Path=/games/rac"));
+        assert!(text.contains(&format!("Icon={}", icon.display())));
+        assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o755);
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
-

@@ -1,8 +1,7 @@
-//! The games table (one entry per game the launcher knows) and the install state of a game folder.
-//! Only R&C 1 is playable today; R&C 2 is announced ("coming soon"); R&C 3 is present but hidden (not announced).
+//! The game table (one entry: Ratchet & Clank) and the install state of a game folder.
 use std::path::{Path, PathBuf};
 
-/// A supported disc image (v1.00 of each region), values as in setup.ps1 `$Discs`.
+/// A supported disc image (v1.00 of each region), values as in `setup.sh`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DiscDef {
     pub serial: &'static str,
@@ -39,36 +38,12 @@ pub const GAMES: &[GameDef] = &[
         title: "Ratchet & Clank",
         short: "R&C 1",
         discs: &RAC1_DISCS,
-        exe: "build\\release\\rac-rs.exe",
-        options: "player\\pc_options.txt",
+        exe: "build/release/rac-rs",
+        options: "player/pc_options.txt",
         mods: "mods",
         visible: true,
         supported: true,
         tagline: "The 2002 original, running the retail game code from your own disc.",
-    },
-    GameDef {
-        id: "rac2",
-        title: "Ratchet & Clank 2",
-        short: "R&C 2",
-        discs: &[],
-        exe: "rac2\\build\\release\\rac-rs-2.exe",
-        options: "rac2\\player\\pc_options.txt",
-        mods: "rac2\\mods",
-        visible: true,
-        supported: false,
-        tagline: "Coming soon.",
-    },
-    GameDef {
-        id: "rac3",
-        title: "Ratchet & Clank 3",
-        short: "R&C 3",
-        discs: &[],
-        exe: "rac3\\build\\release\\rac-rs-3.exe",
-        options: "rac3\\player\\pc_options.txt",
-        mods: "rac3\\mods",
-        visible: false,
-        supported: false,
-        tagline: "",
     },
 ];
 
@@ -107,9 +82,9 @@ pub fn game_by_id(id: &str) -> Option<&'static GameDef> {
 pub struct InstallInfo {
     pub installed: bool,
     pub local_version: String,
-    /// The version the game exe was built from (generated\built_version.txt; "0.1.0" when installed before versions existed; "" = not built).
+    /// The version the game was built from (generated/built_version.txt; "0.1.0" when installed before versions existed; "" = not built).
     pub built_version: String,
-    /// The disc image path setup wrote into generated\play.cfg (Play.cmd as a fallback).
+    /// The disc image path setup wrote into generated/play.cfg.
     pub iso: Option<PathBuf>,
     pub iso_exists: bool,
     pub disc: Option<&'static DiscDef>,
@@ -136,24 +111,17 @@ pub fn local_version(root: &Path) -> String {
     read_trim(&root.join("VERSION")).filter(|v| is_version(v)).unwrap_or_else(|| "0.1.0".to_string())
 }
 
-/// Setup's own test (Test-Installed): the game exe, Play.cmd and generated\play.cfg exist.
+/// Setup's own test (Test-Installed): the game binary, play.sh and generated/play.cfg exist.
 pub fn is_installed(root: &Path, game: &GameDef) -> bool {
-    game.exe_path(root).is_file() && root.join("Play.cmd").is_file() && root.join("generated").join("play.cfg").is_file()
+    game.exe_path(root).is_file() && root.join("play.sh").is_file() && root.join("generated").join("play.cfg").is_file()
 }
 
-/// Get-InstalledIso: `iso=` of generated\play.cfg, else `set "ORACLE_ISO=..."` of Play.cmd.
+/// `iso=` of generated/play.cfg, the disc image setup used.
 pub fn installed_iso(root: &Path) -> Option<PathBuf> {
-    if let Some(t) = read_trim(&root.join("generated").join("play.cfg")) {
-        for l in t.lines() {
-            if let Some(v) = l.strip_prefix("iso=") {
-                return Some(PathBuf::from(v.trim()));
-            }
-        }
-    }
-    let t = read_trim(&root.join("Play.cmd"))?;
+    let t = read_trim(&root.join("generated").join("play.cfg"))?;
     for l in t.lines() {
-        if let Some(v) = l.trim().strip_prefix("set \"ORACLE_ISO=") {
-            return Some(PathBuf::from(v.trim_end_matches('"')));
+        if let Some(v) = l.strip_prefix("iso=") {
+            return Some(PathBuf::from(v.trim()));
         }
     }
     None
@@ -188,11 +156,10 @@ mod tests {
     }
 
     #[test]
-    fn table_has_r1_r2_visible_and_r3_hidden() {
+    fn table_has_the_one_game() {
         let v: Vec<_> = visible_games().map(|g| g.id).collect();
-        assert_eq!(v, vec!["rac1", "rac2"]);
-        assert!(game_by_id("rac3").is_some());
-        assert!(!game_by_id("rac2").unwrap().supported);
+        assert_eq!(v, vec!["rac1"]);
+        assert!(game_by_id("rac1").unwrap().supported);
         assert_eq!(RAC1_DISCS[0].sha1.len(), 40);
         assert_eq!(game_by_id("rac1").unwrap().disc_by_size(4_214_095_872).unwrap().serial, "SCUS-97199");
     }
@@ -212,25 +179,18 @@ mod tests {
         let g = game_by_id("rac1").unwrap();
         std::fs::create_dir_all(d.join("build/release")).unwrap();
         std::fs::create_dir_all(d.join("generated")).unwrap();
-        std::fs::write(d.join("build/release/rac-rs.exe"), b"x").unwrap();
-        std::fs::write(d.join("Play.cmd"), b"x").unwrap();
-        std::fs::write(d.join("generated/play.cfg"), "iso=C:\\games\\rc.iso\n").unwrap();
+        std::fs::write(d.join("build/release/rac-rs"), b"x").unwrap();
+        std::fs::write(d.join("play.sh"), b"x").unwrap();
+        std::fs::write(d.join("generated/play.cfg"), "iso=/games/rc.iso\n").unwrap();
         std::fs::write(d.join("VERSION"), "0.4.0\n").unwrap();
         let i = detect(&d, g);
         assert!(i.installed);
         assert_eq!(i.built_version, "0.1.0", "no built_version.txt: built before versions existed");
         assert!(i.finish_pending());
-        assert_eq!(i.iso.as_deref(), Some(Path::new("C:\\games\\rc.iso")));
+        assert_eq!(i.iso.as_deref(), Some(Path::new("/games/rc.iso")));
         assert!(!i.iso_exists);
         std::fs::write(d.join("generated/built_version.txt"), "0.4.0\n").unwrap();
         assert!(!detect(&d, g).finish_pending());
-    }
-
-    #[test]
-    fn iso_falls_back_to_play_cmd() {
-        let d = scratch("playcmd");
-        std::fs::write(d.join("Play.cmd"), "@echo off\r\nset \"ORACLE_ISO=D:\\x y\\rc.iso\"\r\n").unwrap();
-        assert_eq!(installed_iso(&d).as_deref(), Some(Path::new("D:\\x y\\rc.iso")));
     }
 
     #[test]

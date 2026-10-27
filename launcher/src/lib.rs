@@ -1,4 +1,4 @@
-//! RAC-RS Launcher: install, play, configure and update the PC ports of Ratchet & Clank.
+//! RAC-RS Launcher for Linux: install, play, configure and update the Ratchet & Clank PC port.
 pub mod backup;
 pub mod cfg;
 pub mod discs;

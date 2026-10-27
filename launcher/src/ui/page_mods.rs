@@ -193,7 +193,8 @@ impl App {
         let (scripts, packs): (Vec<String>, Vec<String>) = {
             let order: Vec<&ModEntry> = self.mods_ui.store.display_order();
             let (a, b): (Vec<&ModEntry>, Vec<&ModEntry>) = order.into_iter().partition(|e| e.is_script());
-            (a.iter().map(|e| e.id.clone()).collect(), b.iter().map(|e| e.id.clone()).collect())
+            let scripts = if crate::mods::script_mods_supported() { a } else { Vec::new() };
+            (scripts.iter().map(|e| e.id.clone()).collect(), b.iter().map(|e| e.id.clone()).collect())
         };
         let both = !scripts.is_empty() && !packs.is_empty();
         for (title, ids) in [("Script mods", scripts), ("Texture packs", packs)] {
@@ -242,14 +243,13 @@ impl App {
             Some(s) => vec![s],
             None => self.rac1().discs.iter().map(|d| d.serial).collect(),
         };
-        let docs = platform::known_folder(platform::Known::Documents).unwrap_or_default();
-        let found = import::pcsx2_candidates(&docs, &serials);
+        let roots = platform::pcsx2_texture_roots();
+        let found = import::pcsx2_candidates(&roots, &serials);
         self.mods_ui.add = if found.is_empty() {
-            AddState::Error(format!(
-                "No PCSX2 texture folder was found for your disc. PCSX2 keeps them in:\n{}\\PCSX2\\textures\\{}\\replacements",
-                docs.display(),
-                serials.first().copied().unwrap_or("SERIAL")
-            ))
+            let places: Vec<String> = roots.iter().map(|r| format!("  {}/{}", r.display(), serials.first().copied().unwrap_or("SERIAL"))).collect();
+            AddState::Error(format!("No PCSX2 texture folder was found for your disc. PCSX2 keeps them in:
+{}", places.join("
+")))
         } else {
             AddState::Pcsx2(found)
         };
