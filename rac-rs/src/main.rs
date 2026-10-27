@@ -74,11 +74,14 @@ const USAGE: &str = "usage:
   rac-rs dump   <disc.iso> <sector> <out>      decompress the WAD starting at <sector> into <out>
   rac-rs warm-gpu                              build the GPU capture's kernels once (the driver keeps them), then exit";
 
-/// Without a console (feature `windows_gui`) stderr goes nowhere, so panics and the final error are appended to `<player dir>/crash.log`.
-#[cfg(feature = "windows_gui")]
+/// Panics and the final error are appended to `<player dir>/crash.log`. The game may have been started from the
+/// application menu, with no terminal there to read, so the log is the record of what went wrong.
 fn crash_log(text: &str) {
 	use std::io::Write;
-	let dir = retail::memcard::player_dir();
+	// The player folder, the same one the saves go in. The game only points RAC_PLAYER_DIR at it once it
+	// starts, so a failure before that is exactly the one worth recording, and the folder is found from the
+	// exe instead.
+	let dir = install_root().map(|r| r.join("player")).unwrap_or_else(|_| retail::memcard::player_dir());
 	let _ = std::fs::create_dir_all(&dir);
 	let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
 	if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("crash.log")) {
@@ -104,11 +107,11 @@ fn message_box(text: &str) {
 
 /// The install root: the first folder from the exe's folder upwards that holds `generated/play.cfg`. Err is the text for a message box.
 fn install_root() -> Result<std::path::PathBuf, String> {
-	let exe = std::env::current_exe().map_err(|e| format!("Cannot find the game folder ({e}). Run Setup.cmd first."))?;
+	let exe = std::env::current_exe().map_err(|e| format!("Cannot find the game folder ({e}). Run setup.sh first."))?;
 	exe.parent()
 		.and_then(|d| d.ancestors().find(|d| d.join("generated").join("play.cfg").is_file()))
 		.map(|d| d.to_path_buf())
-		.ok_or_else(|| "Run Setup.cmd first: the game has not been set up yet (generated/play.cfg not found).".to_string())
+		.ok_or_else(|| "Run setup.sh first: the game has not been set up yet (generated/play.cfg not found).".to_string())
 }
 
 /// [PC] The window title: "rac-rs v0.2.1" from the install root's `generated/built_version.txt` (setup.ps1 writes it after building
@@ -181,13 +184,19 @@ fn update_check() -> bool {
 	}
 }
 
+/// The value for COLD_LANG: the play config's `lang=` when it names one the game knows, else None. None leaves the choice to
+/// the language remembered in the options file (the game's own menu saves it there) and to the default, English.
+fn cold_lang(play_cfg: Option<&str>) -> Option<String> {
+	play_cfg.filter(|l| ["en", "fr", "de", "es", "it"].contains(l)).map(str::to_string)
+}
+
 /// The no-argument start (what Play.cmd did): find the install root (the first folder from the exe's folder upwards that holds
 /// `generated/play.cfg`), read `iso=<path>` and optional `lang=en|fr|de|es|it` from it, set the environment Play.cmd set, rotate the
 /// card safety copies and return the arguments of `view <iso> 0 --retail-cold --modern-cam`. Err is the text for a message box.
 /// Runs first thing in `main`, before any thread starts (`set_var` is only sound then).
 fn launch_args() -> Result<Vec<String>, String> {
 	let root = install_root()?;
-	let cfg = std::fs::read(root.join("generated").join("play.cfg")).map_err(|e| format!("Cannot read generated/play.cfg ({e}). Run Setup.cmd again."))?;
+	let cfg = std::fs::read(root.join("generated").join("play.cfg")).map_err(|e| format!("Cannot read generated/play.cfg ({e}). Run setup.sh again."))?;
 	let cfg = String::from_utf8_lossy(&cfg);
 	let (mut iso, mut lang) = (None, None);
 	for line in cfg.trim_start_matches('\u{feff}').lines() {
@@ -199,20 +208,48 @@ fn launch_args() -> Result<Vec<String>, String> {
 			}
 		}
 	}
-	let iso = iso.filter(|i| !i.is_empty()).ok_or("Run Setup.cmd again: generated/play.cfg has no disc image path.")?;
-	if !std::path::Path::new(&iso).is_file() {
-		return Err(format!("Your disc image moved or is gone:\n{iso}\n\nRun Setup.cmd again."));
+	let iso = iso.filter(|i| !i.is_empty()).ok_or("Run setup.sh again: generated/play.cfg has no disc image path.")?;
+	// A relative path in the config is relative to the install root, so the folder can be moved (or copied to
+	// another machine) with the disc inside it and still find the disc.
+	let iso_path = std::path::Path::new(&iso);
+	let iso_path = if iso_path.is_absolute() { iso_path.to_path_buf() } else { root.join(iso_path) };
+	if !iso_path.is_file() {
+		return Err(format!("Your disc image moved or is gone:\n{}\n\nRun setup.sh again.", iso_path.display()));
 	}
+	let iso = iso_path.to_string_lossy().into_owned();
 	let player = root.join("player");
 	let _ = std::fs::create_dir_all(&player);
+	// player/capture: cpu (the safe default: the HUD capture draws on the processor and the frame is presented inline, the
+	// way v0.2.2 did) or gpu (the capture uses the graphics card, the way v0.3.0 does: faster, and the sharp HUD works in
+	// game, but on some drivers the window freezes white at the start). The environment variables win over the file.
+	let capture = std::fs::read_to_string(player.join("capture.txt")).ok().map(|s| s.trim().to_ascii_lowercase());
+	let (gpu_capture, present_thread) = match capture.as_deref() {
+		Some("gpu") => (Some("1"), Some("1")),
+		Some("cpu") => (Some("0"), Some("0")),
+		_ => (None, None),
+	};
 	// SAFETY: still single-threaded (called first in main, after the load-log clock which starts no thread).
 	unsafe {
 		std::env::set_var("ORACLE_ISO", &iso);
 		std::env::set_var("ORACLE_STUBS", root.join("oracle").join("stubs.txt"));
 		std::env::set_var("RAC_PLAYER_DIR", &player);
+		if let Some(v) = gpu_capture {
+			if std::env::var_os("RAC_GSCAP_GPU").is_none() {
+				std::env::set_var("RAC_GSCAP_GPU", v);
+			}
+		}
+		if let Some(v) = present_thread {
+			if std::env::var_os("RAC_PRESENT_THREAD").is_none() {
+				std::env::set_var("RAC_PRESENT_THREAD", v);
+			}
+		}
 		if std::env::var_os("COLD_LANG").is_none() {
-			let lang = lang.filter(|l| ["en", "fr", "de", "es", "it"].contains(&l.as_str())).unwrap_or_else(|| "en".to_string());
-			std::env::set_var("COLD_LANG", lang);
+			// The play config's language, when it names one. Otherwise the game boots in the language it remembered in the
+			// options file (its own menu saves it there), and in English when it has none: setting it here as "en" would
+			// override the remembered language (upstream issue #11).
+			if let Some(l) = cold_lang(lang.as_deref()) {
+				std::env::set_var("COLD_LANG", l);
+			}
 		}
 	}
 	// Safety copies of the save card before each start (the newest two starts).
@@ -228,8 +265,10 @@ fn launch_args() -> Result<Vec<String>, String> {
 
 pub fn main() -> ExitCode {
 	loadlog::init();
-	#[cfg(feature = "windows_gui")]
-	std::panic::set_hook(Box::new(|info| {
+	// The panic goes to the terminal as usual, and to the crash log as well, so there is a record of it even when
+	// the game was started from the application menu and there was no terminal there to read.
+	let prev_hook = std::panic::take_hook();
+	std::panic::set_hook(Box::new(move |info| {
 		let thread = std::thread::current();
 		let text = format!("panic in thread {}: {info}", thread.name().unwrap_or("?"));
 		// Also into the run log (runlog.rs), next to what led up to it.
@@ -240,6 +279,7 @@ pub fn main() -> ExitCode {
 			runlog::note_calls();
 		}
 		crash_log(&text);
+		prev_hook(info);
 	}));
 	let mut args: Vec<String> = std::env::args().skip(1).collect();
 	// Started by the player: double-clicked (no arguments: the desktop shortcut, Setup's Play) or by Play.cmd (the same cold boot with
@@ -253,11 +293,18 @@ pub fn main() -> ExitCode {
 		match launch_args() {
 			Ok(a) => args = a,
 			Err(msg) => {
+				crash_log(&msg);
 				message_box(&msg);
 				return ExitCode::from(2);
 			}
 		}
 	}
+	// The button bindings from the options file, read before any thread starts: the prompts name and draw the buttons the
+	// functions are bound to, and the font sheet (with the artwork in its cells) is built on the host thread, which can run
+	// before the retail's own thread has read the file. (The extension's own switch is not asked here: it caches the disc it
+	// sees, and the disc is not known yet. `pcext::init` puts the defaults back when the extension is off.)
+	let opts = retail::pcopts::PcOptions::load(&retail::memcard::player_dir().join("pc_options.txt"));
+	retail::binds::init(opts.extra_get("keys"), opts.extra_get("pad"));
 	// [PC] The player's run log (runlog.rs): stderr into <player dir>/log.txt when it goes nowhere (the double-clicked game).
 	// After `launch_args` (it sets RAC_PLAYER_DIR while the process is still single-threaded).
 	runlog::start(&retail::memcard::player_dir());
@@ -282,11 +329,9 @@ pub fn main() -> ExitCode {
 		}
 		Err(e) => {
 			eprintln!("error: {e}");
+			crash_log(&format!("error: {e}"));
 			#[cfg(feature = "windows_gui")]
-			{
-				crash_log(&format!("error: {e}"));
-				message_box(&format!("The game stopped: {e}\n\nDetails are in player/crash.log."));
-			}
+			message_box(&format!("The game stopped: {e}\n\nDetails are in player/crash.log."));
 			ExitCode::FAILURE
 		}
 	}
@@ -606,4 +651,19 @@ fn elf_section<'a>(elf: &'a [u8], name: &str) -> Option<&'a [u8]> {
 		}
 	}
 	None
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// The play config's language is used when it names one the game knows, and nothing is set when it does not: the game
+	/// then boots in the language it remembered in the options file, and in English when it has none (upstream issue #11).
+	#[test]
+	fn the_play_configs_language_is_only_used_when_it_names_one() {
+		assert_eq!(cold_lang(Some("de")), Some("de".to_string()));
+		assert_eq!(cold_lang(Some("en")), Some("en".to_string()));
+		assert_eq!(cold_lang(Some("xx")), None, "a language the game does not know");
+		assert_eq!(cold_lang(None), None, "the play config names no language");
+	}
 }

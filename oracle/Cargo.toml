@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 ee-core = { path = "core" }
+libc = "0.2.190"
 
 [profile.release]
 opt-level = 3

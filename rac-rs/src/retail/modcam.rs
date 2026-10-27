@@ -1042,6 +1042,14 @@ fn ramp1(r: f32, tgt: f32) -> f32 {
 	r + (tgt - r).clamp(-m, m)
 }
 
+/// The camera's turn and tilt for one field: the mouse's look counts and the right stick's deflection, with the speed factor
+/// `k`. The Reversed options (`lr`, `ud`) turn the right stick only; the mouse keeps its own direction.
+fn turn_tilt(look: [i16; 2], stick: [f32; 2], lr: f32, ud: f32, sens: f32, k: f32) -> (f32, f32) {
+	let dyaw = -(look[0] as f32) * MOUSE * sens * k + stick[0] * ROTATE_RATE * k * lr;
+	let dpitch = look[1] as f32 * MOUSE * sens * k - stick[1] * TILT_STEP * k * ud;
+	(dyaw, dpitch)
+}
+
 /// Every field, before the camera moves: the hero's velocity, jump / fall state, the idle time (`input` = the camera was used).
 fn dyn_track(c: &mut Cpu, st: &mut St, fr: &Frame, hero: [f32; 3], hero_goal: [f32; 3], input: bool) {
 	let t = tune();
@@ -1416,6 +1424,8 @@ fn step(c: &mut Cpu, lv: &'static Lv, rec: u32, st: &mut St) {
 	let rx = (st.rstick[0] as f32 - 128.0) / 127.0;
 	let ry = (st.rstick[1] as f32 - 128.0) / 127.0;
 	let dz = |v: f32| if v.abs() < 0.2 { 0.0 } else { v };
+	// The camera's Reversed options (the retail's Left / Right and Up / Down rows, still in the Camera Options page): they turn
+	// the right stick, and the mouse keeps its own direction.
 	let lr = if c.mem.rd8(OPT_LR) == 0 { -1.0 } else { 1.0 };
 	let ud = if c.mem.rd8(OPT_UD) == 0 { -1.0 } else { 1.0 };
 	// The Camera speed row (pcext.rs camopts section): percent / 50, exactly 1.0 until the player sets it.
@@ -1427,8 +1437,7 @@ fn step(c: &mut Cpu, lv: &'static Lv, rec: u32, st: &mut St) {
 	} else {
 		(dz(rx), dz(ry))
 	};
-	let dyaw = (-(inp.look[0] as f32) * MOUSE * sens * k + sx * ROTATE_RATE * k) * lr;
-	let dpitch = (inp.look[1] as f32 * MOUSE * sens * k - sy * TILT_STEP * k) * ud;
+	let (dyaw, dpitch) = turn_tilt(inp.look, [sx, sy], lr, ud, sens, k);
 	st.dist = (st.dist - inp.zoom as f32 * 0.5).clamp(ZOOM.0, ZOOM.1);
 	// Aim mode (RMB): the mouse keeps turning the camera as it does without RMB; nothing is picked or framed.
 	// Aim mode is a ground feature: on a magnetic wall retail stows the guns (0x1413fc) and the facing / aim yaw words are world-z.
@@ -1734,6 +1743,22 @@ mod tests {
 		assert_eq!(f.len(), 2);
 		assert_eq!(f[0], (10, 20, Input { look: [5, -3], aim: true, zoom: 0, toggle: false }));
 		assert_eq!(f[1].2.zoom, 2);
+	}
+
+	#[test]
+	fn the_reversed_options_turn_the_stick_and_not_the_mouse() {
+		// The mouse alone turns the camera the same way whether the options are reversed or not.
+		let (y, p) = turn_tilt([10, 5], [0.0, 0.0], 1.0, 1.0, 1.0, 1.0);
+		let (yr, pr) = turn_tilt([10, 5], [0.0, 0.0], -1.0, -1.0, 1.0, 1.0);
+		assert!((y - yr).abs() < 1e-6, "the mouse's turn");
+		assert!((p - pr).abs() < 1e-6, "the mouse's tilt");
+		// The stick is turned the other way: the stick's part of the turn changes sign, the mouse's does not.
+		let (y, p) = turn_tilt([10, 5], [0.5, 0.25], 1.0, 1.0, 1.0, 1.0);
+		let (yr, pr) = turn_tilt([10, 5], [0.5, 0.25], -1.0, -1.0, 1.0, 1.0);
+		assert!((y - (-10.0 * MOUSE + 0.5 * ROTATE_RATE)).abs() < 1e-6, "the turn");
+		assert!((yr - (-10.0 * MOUSE - 0.5 * ROTATE_RATE)).abs() < 1e-6, "the reversed turn");
+		assert!((p - (5.0 * MOUSE - 0.25 * TILT_STEP)).abs() < 1e-6, "the tilt");
+		assert!((pr - (5.0 * MOUSE + 0.25 * TILT_STEP)).abs() < 1e-6, "the reversed tilt");
 	}
 
 	#[test]

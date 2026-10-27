@@ -503,6 +503,10 @@ pub struct Menu {
 	pub press_lang: usize,
 	/// Retail mode: the text ids of the Options rows as the game lists them (viewer/front_mirror.rs); empty = the PAL rows.
 	pub front_rows: Vec<u32>,
+	/// Retail mode: the text ids of the Language page's five languages, as the game lists them (viewer/front_mirror.rs); empty =
+	/// the disc's own order. The game lists the languages in the console's order and the disc's ids are in the game's, which puts
+	/// German and Spanish the other way round, so the rows follow the game.
+	pub lang_rows: Vec<u32>,
 }
 
 /// Where a page's panels, header and rows go (PAL 512x448): the rest rects of the class-0x472 slot
@@ -766,6 +770,7 @@ impl Menu {
 			ram_alpha: None,
 			press_lang: 0,
 			front_rows: Vec::new(),
+			lang_rows: Vec::new(),
 		}
 	}
 
@@ -901,10 +906,12 @@ impl Menu {
 			}
 			Page::LoadGame | Page::LoadSaved => self.slot_rows(text, false),
 			Page::SaveGame => self.slot_rows(text, true),
-			// Retail mode: the rows the game lists (USA: no Video row; the PC Graphics row, retail/pcext.rs).
+			// Retail mode: the rows the game lists (the Language page's five languages in the game's own order, USA: no Video row;
+			// the PC Graphics row, retail/pcext.rs).
 			Page::Options if !self.front_rows.is_empty() => self.front_rows.iter().map(|&id| t(id)).collect(),
 			Page::Options if crate::retail::disc::usa() => vec![t(LANGUAGE), t(SOUND)],
 			Page::Options => vec![t(LANGUAGE), t(VIDEO), t(SOUND)],
+			Page::Language if !self.lang_rows.is_empty() => self.lang_rows.iter().map(|&id| t(id)).collect(),
 			Page::Language => (0..5).map(|i| t(LANGUAGES + i)).collect(),
 			Page::Video => vec![(format!("{}  {}", text.get(VIDEO_MODE), text.get(if s.hz60 { HZ60 } else { HZ50 })), true)],
 			Page::Graphics => crate::retail::pcext::title_rows().into_iter().map(|(label, value)| (format!("{}  {}", text.get(label), text.get(value)), true)).collect(),

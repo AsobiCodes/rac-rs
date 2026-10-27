@@ -34,6 +34,9 @@
 //! hud=sharp         sharp original   (the HUD and menus drawn again at the window's resolution, no new art; original = the 512-wide picture;
 //!                   gscap/draw/gpu.rs, gpu.wgsl k_hd; Pause -> Options -> Graphics -> Picture -> HUD, applied at once; only on windows at least
 //!                   896 px tall (gscap.rs HD_MIN_PX_PER_ROW); RAC_HUD=original forces Original)
+//! glyphs=xbox        playstation xbox switch   (Pause -> Options -> Graphics -> Screen -> Button glyphs: how a gamepad's buttons are named in
+//!                   the prompts, PlayStation being the retail's own glyphs, Xbox the letters A B X Y, and Switch the Xbox's with the four
+//!                   face buttons the other way round; the keyboard names the buttons by key whatever this says)
 //! debug=off        off on           (Pause -> Options -> Controls -> Debug -> Debug mode: On switches the test keys of retail/devtools.rs (F1 planet
 //!                   list / warp, F2 free camera) and retail/debugkeys.rs (F5 immortality, F6 infinite ammo, F8 +10000 bolts, F3 draw distance A/B)
 //!                   on; only `on` is written, the env switches RAC_DEV_TOOLS / RAC_DEBUG_KEYS still force them on)
@@ -42,7 +45,7 @@
 //! A missing file, a missing key or a value that cannot be read gives that key's default (camera modern, strafe on, language
 //! not chosen yet = the console language of the cold boot, lighting classic = the retail picture, ambient occlusion,
 //! dynamic shadows, water, particles and sun rays high (the full Enhanced picture) and vegetation moderate for when the player picks
-//! Lighting Enhanced, global illumination off, display windowed, draw distance medium). The six quality rows hold a level 0..3 (off / classic, low, medium, high). Keys this build does not know are kept when the file is rewritten.
+//! Lighting Enhanced, global illumination off, display windowed, draw distance medium, button glyphs Xbox). The six quality rows hold a level 0..3 (off / classic, low, medium, high). Keys this build does not know are kept when the file is rewritten.
 //! The file is written to a temporary name and renamed, so a crash never leaves half a file.
 use std::path::{Path, PathBuf};
 
@@ -129,6 +132,8 @@ pub struct PcOptions {
 	pub draw: Option<u8>,
 	/// HUD: Some(true) = Sharp (the HUD drawn again at the window's resolution, gscap/draw/gpu.rs), Some(false) = Original; None: Sharp.
 	pub hud: Option<bool>,
+	/// Graphics -> Button glyphs: Some(0 PlayStation, 1 Xbox, 2 Switch); None: never changed (Xbox).
+	pub glyphs: Option<u8>,
 	/// Debug mode (Controls -> Debug): Some(true) = On; None: Off. Only `debug=on` is written.
 	pub debug: Option<bool>,
 	/// Lines this build does not know, kept verbatim on rewrite.
@@ -154,6 +159,14 @@ fn vegetation_value(v: &str) -> Option<u8> {
 		"lush" => Some(2),
 		_ => None,
 	}
+}
+
+/// The button glyphs styles as the file writes them (index = the Graphics page's value byte).
+pub const GLYPHS: [&str; 3] = ["playstation", "xbox", "switch"];
+
+/// A stored button glyphs style: the names above.
+fn glyphs_value(v: &str) -> Option<u8> {
+	GLYPHS.iter().position(|g| *g == v.trim().to_ascii_lowercase()).map(|i| i as u8)
 }
 
 /// The quality level names of the five effect rows (index = the row byte; 0 is Off, or Classic for Water and Particles).
@@ -223,12 +236,17 @@ fn flag(v: &str, yes: &str, no: &str) -> Option<bool> {
 
 impl PcOptions {
 	pub const fn new() -> PcOptions {
-		PcOptions { lang: None, camera: None, camfeel: None, strafe: None, buyall: None, lockon: None, camspeed: None, lighting: None, ao: None, shadows: None, fullscreen: None, water: None, particles: None, sun_rays: None, smoothing: None, vegetation: None, culling: None, gi: None, waves: None, draw: None, hud: None, debug: None, extra: Vec::new() }
+		PcOptions { lang: None, camera: None, camfeel: None, strafe: None, buyall: None, lockon: None, camspeed: None, lighting: None, ao: None, shadows: None, fullscreen: None, water: None, particles: None, sun_rays: None, smoothing: None, vegetation: None, culling: None, gi: None, waves: None, draw: None, hud: None, glyphs: None, debug: None, extra: Vec::new() }
 	}
 
 	/// Lock-on with the default: Auto (0).
 	pub fn lockon_mode(&self) -> u8 {
 		self.lockon.unwrap_or(0).min(2)
+	}
+
+	/// The button glyphs style with the default: Xbox (1).
+	pub fn glyph_style(&self) -> u8 {
+		self.glyphs.unwrap_or(1).min(2)
 	}
 
 	/// Debug mode with the default: Off.
@@ -380,6 +398,7 @@ impl PcOptions {
 				"waves" => o.waves = flag(v, "on", "off"),
 				"draw" => o.draw = draw_value(v),
 				"hud" => o.hud = flag(v, "sharp", "original"),
+				"glyphs" => o.glyphs = glyphs_value(v),
 				"debug" => o.debug = flag(v, "on", "off"),
 				_ if !k.is_empty() && !k.starts_with('#') => {
 					o.extra.retain(|(e, _)| *e != k);
@@ -458,6 +477,9 @@ impl PcOptions {
 		if let Some(t) = self.hud {
 			s += &format!("hud={}\n", if t { "sharp" } else { "original" });
 		}
+		if let Some(g) = self.glyphs {
+			s += &format!("glyphs={}\n", GLYPHS[g.min(2) as usize]);
+		}
 		if self.debug == Some(true) {
 			s += "debug=on\n";
 		}
@@ -510,7 +532,24 @@ mod tests {
 		assert!(o.buyall_on(), "a new player starts with buy all ammo on");
 		assert_eq!(o.lighting_or_default(), 0, "a new player sees the retail picture (Lighting Classic)");
 		assert_eq!((o.ao_level(), o.shadows_level()), (3, 3), "ambient occlusion and dynamic shadows wait at High for Enhanced");
+		assert_eq!(o.glyph_style(), 1, "a new player gets the Xbox letters");
 		assert_eq!(o.to_text(), "version=1\n", "nothing is written until the player chooses something");
+	}
+
+	/// The button glyphs style: the file's three names, and the default when the key is missing or unreadable.
+	#[test]
+	fn the_glyphs_style_is_read_and_written() {
+		for (i, name) in GLYPHS.iter().enumerate() {
+			let o = PcOptions::parse(&format!("version=1\nglyphs={name}\n"));
+			assert_eq!(o.glyphs, Some(i as u8), "glyphs={name}");
+			assert_eq!(o.glyph_style(), i as u8);
+		}
+		let o = PcOptions::parse("version=1\nglyphs=nonsense\n");
+		assert_eq!(o.glyphs, None, "an unreadable value is not kept");
+		assert_eq!(o.glyph_style(), 1, "and the default stands");
+		let mut o = PcOptions::new();
+		o.glyphs = Some(2);
+		assert!(o.to_text().contains("glyphs=switch\n"), "the style is written back");
 	}
 
 	#[test]

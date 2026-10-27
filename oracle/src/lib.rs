@@ -5,6 +5,7 @@
 pub mod isolvl;
 #[allow(dead_code)]
 mod wad;
+pub mod clock;
 pub mod cold;
 pub mod ver;
 pub mod cpu;

@@ -28,7 +28,9 @@
 //! only show text (their byte is reset like a blank row's). Their texts are the ids 0x7fa0..0x7faf in a pool of their own (`DBG_POOL`).
 //!
 //! Graphics (3 sections: Picture, Effects, Screen): the rows are `pcext::ROWS` (bytes and values unchanged) plus the HUD row
-//! (`HUDB`: 0 Sharp, 1 Original) that `pcext::sync` hands to the options file and the renderer (`pcext::hud_sharp_now`).
+//! (`HUDB`: 0 Sharp, 1 Original) and the Button glyphs row (0 PlayStation, 1 Xbox, 2 Switch; its byte is `pcext::GLYPHS`, with the
+//! other Graphics rows' bytes, so the title screen's Graphics page shares it) that `pcext::sync` hands to the options file and the
+//! renderer (`pcext::hud_sharp_now`, `pcext::glyph_style_now`).
 //!
 //! Reserved RAM (`CBASE`, inside pcext's BASE window, above prompts.rs's pool): the row bytes, the Controls page copy, its header
 //! and value items, its row table, the Options pictures and the text pool. All of it is written only after `build_page` /
@@ -87,6 +89,12 @@ const ID_SELG: u32 = 0x7f75;
 const ID_HUD: u32 = 0x7f76;
 const ID_SHARP: u32 = 0x7f77;
 const ID_ORIGINAL: u32 = 0x7f78;
+/// The Button glyphs row: its label and its three values. The title screen's Graphics page uses these too, so the mirror's text
+/// map has them (the pcext's own pool has no room left).
+pub const ID_GLYPHS: u32 = 0x7f79;
+pub const ID_PLAYSTATION: u32 = 0x7f7a;
+pub const ID_XBOX: u32 = 0x7f7b;
+pub const ID_SWITCH: u32 = 0x7f7c;
 /// The Debug section: ids 0x7fa0 (the mode row's label), 0x7fa1..0x7fa5 (the key rows' labels), 0x7fa6..0x7faa (their values F1 .. F8);
 /// 0x7fab..0x7faf are free. Off / On are retail's own 0x4f5b / 0x4f5a.
 pub const ID_DBG0: u32 = 0x7fa0;
@@ -104,11 +112,13 @@ const NDKEYS: usize = 5;
 const NGSEC: usize = 3;
 /// The HUD row in `GSECS` (the 13 rows of `pcext::ROWS` are 0..=12).
 const HUD_ROW: usize = 13;
+/// The Button glyphs row in `GSECS` (after the HUD row).
+const GLYPH_ROW: usize = 14;
 /// The Graphics sections as indices of `pcext::ROWS` (0 Lighting, 1 Ambient occlusion, 2 Dynamic shadows, 3 Display mode, 4 Water,
 /// 5 Particles, 6 Sun rays, 7 Frame smoothing, 8 Vegetation, 9 Culling, 10 Global illumination, 11 Waves, 12 Draw distance).
 /// Picture: Lighting, Ambient occlusion, Dynamic shadows, Global illumination, Sun rays, HUD. Effects: Water, Waves, Particles,
-/// Vegetation. Screen: Display mode, Frame smoothing, Draw distance, Culling.
-const GSECS: [&[usize]; NGSEC] = [&[0, 1, 2, 10, 6, HUD_ROW], &[4, 11, 5, 8], &[3, 7, 12, 9]];
+/// Vegetation. Screen: Display mode, Frame smoothing, Draw distance, Culling, Button glyphs.
+const GSECS: [&[usize]; NGSEC] = [&[0, 1, 2, 10, 6, HUD_ROW], &[4, 11, 5, 8], &[3, 7, 12, 9, GLYPH_ROW]];
 
 /// What a row does in a Controls section.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -194,6 +204,11 @@ static PAGE: T5 = [b"Page", b"Page", b"Seite", b"P\x84gina", b"Pagina"];
 static HUD: T5 = [b"HUD", b"HUD", b"HUD", b"HUD", b"HUD"];
 static SHARP: T5 = [b"Sharp", b"Net", b"Scharf", b"N\x94tido", b"Nitido"];
 static ORIGINAL: T5 = [b"Original", b"Original", b"Original", b"Original", b"Originale"];
+/// The Button glyphs row: its label and its three styles.
+static GLYPHS: T5 = [b"Button glyphs", b"Touches de manette", b"Tastensymbole", b"Botones del mando", b"Tasti del gamepad"];
+static PLAYSTATION: T5 = [b"PlayStation", b"PlayStation", b"PlayStation", b"PlayStation", b"PlayStation"];
+static XBOX: T5 = [b"Xbox", b"Xbox", b"Xbox", b"Xbox", b"Xbox"];
+static SWITCH: T5 = [b"Switch", b"Switch", b"Switch", b"Switch", b"Switch"];
 static DBG_MODE: T5 = [b"Debug mode", b"Mode debug", b"Debug-Modus", b"Modo debug", b"Modo debug"];
 /// The key rows' labels (F1, F2, F5, F6, F8), no '+' or '%' (the font's glyphs are not known for '+').
 static DBG_KEYS: [T5; NDKEYS] = [
@@ -248,6 +263,10 @@ pub fn text(id: u32, lang: usize, csec: usize, gsec: usize, playstation: bool) -
 		ID_HUD => fixed(&HUD),
 		ID_SHARP => fixed(&SHARP),
 		ID_ORIGINAL => fixed(&ORIGINAL),
+		ID_GLYPHS => fixed(&GLYPHS),
+		ID_PLAYSTATION => fixed(&PLAYSTATION),
+		ID_XBOX => fixed(&XBOX),
+		ID_SWITCH => fixed(&SWITCH),
 		ID_DBG0 => fixed(&DBG_MODE),
 		_ if (ID_DBG_KEY..ID_DBG_KEY + NDKEYS as u32).contains(&id) => fixed(&DBG_KEYS[(id - ID_DBG_KEY) as usize]),
 		_ if (ID_DBG_VAL..ID_DBG_VAL + NDKEYS as u32).contains(&id) => DBG_VALS[(id - ID_DBG_VAL) as usize].to_vec(),
@@ -285,6 +304,27 @@ pub fn text_hook(c: &mut Cpu, id: u32, lang: usize) -> bool {
 	c.mem.wr8(at + n as u32, 0);
 	c.s(2, at as u64);
 	true
+}
+
+/// The texts that do not follow a section (the pages' own rows and the fixed ones): the mirror's text map takes them, so the
+/// title screen's Graphics page can show the Button glyphs row.
+pub fn fixed_texts(lang: usize) -> impl Iterator<Item = (u32, String)> {
+	let l = lang.min(4);
+	[
+		(ID_CONTROLS, CONTROLS[l]),
+		(ID_HEADER, HEADER[l]),
+		(ID_DESC, DESC[l]),
+		(ID_PAGE, PAGE[l]),
+		(ID_HUD, HUD[l]),
+		(ID_SHARP, SHARP[l]),
+		(ID_ORIGINAL, ORIGINAL[l]),
+		(ID_GLYPHS, GLYPHS[l]),
+		(ID_PLAYSTATION, PLAYSTATION[l]),
+		(ID_XBOX, XBOX[l]),
+		(ID_SWITCH, SWITCH[l]),
+	]
+	.into_iter()
+	.map(|(id, t)| (id, t.iter().map(|&b| b as char).collect()))
 }
 
 // ---- the tables and the pages --------------------------------------------------------------------------------------------
@@ -327,7 +367,13 @@ fn table(sec: usize) -> Vec<u32> {
 fn gfx_table(rows: &[[u32; 6]], sec: usize) -> Vec<u32> {
 	let mut t = vec![ID_PAGE, G_SEL, ID_SELG, ID_SELG, 0, 0];
 	for &i in GSECS[sec.min(NGSEC - 1)] {
-		t.extend(if i == HUD_ROW { [ID_HUD, HUDB, ID_SHARP, ID_ORIGINAL, 0, 0] } else { rows[i] });
+		t.extend(match i {
+			HUD_ROW => [ID_HUD, HUDB, ID_SHARP, ID_ORIGINAL, 0, 0],
+			// The Button glyphs row: its byte is in pcext's block, with the other Graphics rows' bytes, so the title screen's
+			// Graphics page shares it.
+			GLYPH_ROW => [ID_GLYPHS, super::pcext::GLYPHS, ID_PLAYSTATION, ID_XBOX, ID_SWITCH, 0],
+			_ => rows[i],
+		});
 	}
 	t
 }
@@ -734,12 +780,12 @@ mod tests {
 		assert!((5..8).all(|s| rows(s).iter().all(|t| matches!(t, Target::Func(Cap::Pad(_))))));
 	}
 
-	/// Every Graphics row (the 13 of pcext's `ROWS` and the HUD row) is on exactly one page of at most six rows.
+	/// Every Graphics row (the 13 of pcext's `ROWS`, the HUD row and the Button glyphs row) is on exactly one page of at most six rows.
 	#[test]
 	fn graphics_sections_cover_the_rows() {
 		let mut all: Vec<usize> = GSECS.iter().flat_map(|s| s.iter().copied()).collect();
 		all.sort();
-		assert_eq!(all, (0..=HUD_ROW).collect::<Vec<_>>());
+		assert_eq!(all, (0..=GLYPH_ROW).collect::<Vec<_>>());
 		assert!(GSECS.iter().all(|s| (1..=ROWS - 1).contains(&s.len())));
 		let rows = fake_rows();
 		for sec in 0..NGSEC {
@@ -751,6 +797,8 @@ mod tests {
 		assert_eq!(&t[6..12], &rows[0]);
 		assert_eq!(&t[t.len() - 6..], &[ID_HUD, HUDB, ID_SHARP, ID_ORIGINAL, 0, 0], "HUD closes the Picture page");
 		assert_eq!(&gfx_table(&rows, 1)[6..12], &rows[4], "Effects starts with Water");
+		let s = gfx_table(&rows, 2);
+		assert_eq!(&s[s.len() - 6..], &[ID_GLYPHS, crate::retail::pcext::GLYPHS, ID_PLAYSTATION, ID_XBOX, ID_SWITCH, 0], "Button glyphs closes the Screen page");
 	}
 
 	/// The Graphics table is rewritten for the section; a shorter section leaves no stale record behind its zero record.

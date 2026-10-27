@@ -1784,8 +1784,25 @@ impl ApplicationHandler for App {
 if let (Some(m), Some(a), Some(text)) = (&self.pause, &self.ui_art, &self.ui_text) {
 							// The frozen world shows behind the menu under FUN_001f9fd0(0,0,0,0x30): black at 0x30/0x80
 							// (retail PCSX2 captures; decomp/notes/ingame_pause_menu.md). The HUD is hidden.
-							g.hud.clear();
-							g.hud_split = None;
+					g.hud.clear();
+					g.hud_split = None;
+					// The button glyphs style or the button bindings changed: the Xbox artwork goes into the font sheet's ten
+					// button cells and the sheet goes up again.
+					let style = crate::retail::pcext::glyph_style_now();
+					let map = crate::retail::binds::pad_map();
+					if style != self.glyph_style || map != self.glyph_map {
+						self.glyph_style = style;
+						self.glyph_map = map;
+						if let (Some(slot), Some(orig), Some(tex)) = (
+							self.art.font.as_ref().map(|f| f.0),
+							self.art.font_tex_orig.as_ref(),
+							self.art.font_tex.as_mut(),
+						) {
+							if crate::retail::xglyphs::blit(orig, tex, style, &map) {
+								g.hud_texture(Some(slot), tex);
+							}
+						}
+					}
 							overlay::rect(&mut g.hud, [0.0, 0.0, w, h], [0.0, 0.0, 0.0, 0.375]);
 							m.draw(&mut g.hud, w, h, a, text);
 // Selected item model in panel 3 (frontend.rs preview; turntable camera [P]).

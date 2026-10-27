@@ -19,6 +19,15 @@ wgpu = "30.0.1"
 winit = "0.30.13"
 ee-oracle = { path = "../oracle" }
 
+# Linux: the gamepads (an Xbox controller, a DualSense, ...) as evdev devices, read with gilrs. The Windows build has its own
+# paths (xinput for an Xbox controller, pspad for a PlayStation one) and does not need this.
+# The default features (gilrs' `wgi`) are kept: gilrs-core insists on one of `wgi` / `xinput` being enabled on every platform, and
+# the `windows` crate behind `wgi` is an empty stub outside Windows, so it costs nothing here.
+  [target.'cfg(target_os = "linux")'.dependencies]
+  gilrs = { version = "0.11.2" }
+  # The run log (runlog.rs) sends the game's stderr into the log file through a pipe: pipe, dup2 and read.
+  libc = "0.2.190"
+
 [features]
 # Public build: the exe uses the Windows GUI subsystem (no console window) and logs panics to <player dir>/crash.log. Off for dev builds and test tools.
 windows_gui = []

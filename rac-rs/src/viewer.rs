@@ -1632,6 +1632,10 @@ struct App {
 	/// NOV-13.5b: this tick's gadget cinematic frame (camera, fade, actors).
 	gadget_frame: Option<game::gadget_scene::SceneFrame>,
 	art: HudArt,
+	/// The button glyphs style the font sheet was blitted with (the artwork goes in again when it changes).
+	glyph_style: u8,
+	/// The button bindings the font sheet was blitted with (a rebound function is shown as the button it was bound to).
+	glyph_map: [u8; crate::retail::binds::NP],
 	/// Seconds left on the bolt and nanotech counters (they show on a change, then fade).
 	hud_t: (f32, f32),
 	/// Ammo HUD: the weapon shown, bar/icon fade f1 and text fade f2 (0..1 = bytes +0x70/+0x71 over 8).
@@ -2035,6 +2039,8 @@ fn new_app(iso_path: &str, level: usize, shot: Option<String>, start: Option<[f3
 		ship_voice: None,
 		gadget_frame: None,
 		art: HudArt::default(),
+		glyph_style: u8::MAX,
+		glyph_map: [u8::MAX; crate::retail::binds::NP],
 		hud_t: (0.0, 0.0),
 		ammo_hud: (None, 0.0, 0.0),
 		hud_seen: (u32::MAX, -1),
@@ -2656,6 +2662,11 @@ struct HudArt {
 	/// HUD sprite 0xe935 frame 0: the shop's LED ticker sheet (FUN_002b1168).
 	led: Option<(usize, f32, f32)>,
 	font: Option<(usize, Vec<art::Glyph>)>,
+	/// The font sheet itself, so the button glyphs style can put the Xbox artwork in its cells and send it up again.
+	font_tex: Option<Texture>,
+	/// The font sheet as it was decoded, before the artwork went into it: the PlayStation style takes the retail's own symbols
+	/// out of it, and the sheet is written from it, so the style can be changed back.
+	font_tex_orig: Option<Texture>,
 	/// Level font 3 (the marker prompt's "!", NOV-14.2b).
 	font3: Option<(usize, Vec<art::Glyph>)>,
 	/// Level font 2 (the shop panels' text, table boot 0x1df370).

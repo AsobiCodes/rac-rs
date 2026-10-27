@@ -32,8 +32,10 @@ pub mod aim;
 pub mod pcext;
 pub mod binds;
 pub mod pcctl;
-pub mod prompts;
-pub mod pspad;
+  pub mod prompts;
+  pub mod xglyphs;
+  pub mod pspad;
+pub mod lxpad;
 pub mod vendor;
 pub mod pcopts;
 pub mod strafe;
@@ -3701,8 +3703,10 @@ impl Retail {
 		// A gamepad adds its buttons and sticks and, when it moved, becomes the device of the button prompts (prompts.rs).
 		prompts::poll_pad(&mut b, &mut s);
 		let (mode, front) = (self.snap.mode, self.snap.front);
-		// Esc / Space skip a scene or ship flight through retail's own skip test (`skip_feed`).
-		let skip_key = [winit::keyboard::KeyCode::Escape, winit::keyboard::KeyCode::Space].iter().any(|&k| held(k) || taps.contains_key(&k));
+		// Esc / Space skip a scene or ship flight through retail's own skip test (`skip_feed`); the gamepad's Start does the
+		// same, like Space on the keyboard.
+		let skip_key = [winit::keyboard::KeyCode::Escape, winit::keyboard::KeyCode::Space].iter().any(|&k| held(k) || taps.contains_key(&k))
+			|| (prompts::pad_buttons() & START) != 0;
 		if !front {
 			b |= skip_feed(mode, self.snap.ship, skip_key);
 		}
@@ -4057,7 +4061,7 @@ impl Retail {
 	/// (`movie_poll`). Start is Esc / Enter; the combo's L1 + R1 + L2 + R2 are C, Left Ctrl, V, B (`pad_from_keys`).
 	pub fn movie_pressed(&mut self, held: impl Fn(winit::keyboard::KeyCode) -> bool) -> bool {
 		let taps = &self.taps;
-		let (hit, now) = movie_poll(self.movie_rule, self.movie_prev, |k| held(k) || taps.contains_key(&k));
+		let (hit, now) = movie_poll(self.movie_rule, self.movie_prev, |k| held(k) || taps.contains_key(&k), prompts::pad_buttons());
 		self.movie_prev = now;
 		hit
 	}
@@ -4587,16 +4591,27 @@ fn release(g: &mut Game, free: &mut HashMap<u32, Vec<usize>>, i: usize) {
 	free.entry(g.props[i].class_id).or_default().push(i);
 }
 
+/// The PS2 Start bit (the retail pad bits): the skip press on a gamepad, like Space on the keyboard.
+const START: u16 = 0x800;
+
 /// One poll of the skip test of a playing movie: (the rule ends it now, the pad to remember for the next poll).
-fn movie_poll(rule: fmv_bridge::Skip, prev: u16, held: impl Fn(winit::keyboard::KeyCode) -> bool) -> (bool, u16) {
+/// `pad` is the gamepad's own buttons (`prompts::pad_buttons`): its Start is the skip press, like Space on the keyboard.
+fn movie_poll(rule: fmv_bridge::Skip, prev: u16, held: impl Fn(winit::keyboard::KeyCode) -> bool, pad: u16) -> (bool, u16) {
 	let skip_key = held(winit::keyboard::KeyCode::Escape) || held(winit::keyboard::KeyCode::Space);
-	let mut now = pad_from_keys(held, false, false).0;
-	// Esc and Space are the player's skip keys (user request 2026-10-13): they feed the pad the player's own skip test wants
-	// (`Skip::feed`), so retail's rule decides and a button held from before the movie still counts for nothing.
-	if skip_key {
+	// The gamepad's Start is the skip press on a gamepad, like Space on the keyboard.
+	let pad_start = pad & START != 0;
+	let mut now = pad_from_keys(held, false, false).0 | pad;
+	// Esc and Space are the player's skip keys (user request 2026-10-13), and so is the gamepad's Start: they feed the pad the
+	// player's own skip test wants (`Skip::feed`), so retail's rule decides and a button held from before the movie still
+	// counts for nothing.
+	if skip_key || pad_start {
 		now |= rule.feed();
 	}
-	(rule.pressed(prev, now), now)
+	// The logo movies (the Insomniac intro at the start of a cold boot) have no skip in retail (`Skip::Never`): the port lets
+	// the skip press end them, so the intro is not in the way.
+	let hit = rule.pressed(prev, now)
+		|| (rule == fmv_bridge::Skip::Never && (skip_key || pad_start) && (now & !prev) != 0);
+	(hit, now)
 }
 
 /// The pad bits Esc / Space add while a scene or a ship flight plays, so retail's own skip test sees its press: the
@@ -4634,9 +4649,12 @@ mod tests {
 	fn movie_skip_rule_keyboard() {
 		use fmv_bridge::Skip;
 		use winit::keyboard::KeyCode as K;
-		let poll = |rule: Skip, prev: u16, keys: &[K]| movie_poll(rule, prev, |k| keys.contains(&k));
-		// Boot logos (mode -1): nothing skips.
-		assert!(!poll(Skip::Never, 0, &[K::Escape, K::Enter, K::Space]).0);
+		let poll = |rule: Skip, prev: u16, keys: &[K]| movie_poll(rule, prev, |k| keys.contains(&k), 0);
+		// Boot logos (mode -1): the player's skip keys end them (the port lets them skip).
+		assert!(poll(Skip::Never, 0, &[K::Escape]).0, "Esc skips the logos");
+		assert!(poll(Skip::Never, 0, &[K::Space]).0, "Space skips the logos");
+		assert!(!poll(Skip::Never, 0, &[K::KeyF]).0, "other keys do not skip the logos");
+		assert!(!poll(Skip::Never, 0x800, &[K::Escape]).0, "Start held from before the movie");
 		// Attract movie (mode 2): any new button, but not one already down at the last poll.
 		assert!(poll(Skip::Any, 0, &[K::Space]).0);
 		assert!(poll(Skip::Any, 0, &[K::KeyF]).0);
@@ -4674,6 +4692,28 @@ mod tests {
 			assert!(hit && !poll(Skip::Combo, prev, &[k]).0, "{k:?} skips a combo movie once");
 			assert!(!poll(Skip::Combo, 0x80f, &[k]).0, "{k:?} held from before");
 		}
+	}
+
+	/// The gamepad's Start is the skip press on a gamepad, like Space on the keyboard: it skips the logos, the New Game intro
+	/// and the story movies, and it feeds the whole combo. A Start held from before the movie counts for nothing.
+	#[test]
+	fn movie_skip_rule_gamepad() {
+		use fmv_bridge::Skip;
+		let poll = |rule: Skip, prev: u16, pad: u16| movie_poll(rule, prev, |_| false, pad);
+		// The logos (mode -1): the gamepad's Start ends them, like Space does.
+		assert!(poll(Skip::Never, 0, START).0, "Start skips the logos");
+		assert!(!poll(Skip::Never, 0, 0).0, "no button, no skip");
+		assert!(!poll(Skip::Never, START, START).0, "Start held from before the movie");
+		// The New Game intro (Start rule): the gamepad's Start skips it.
+		assert!(poll(Skip::Start, 0, START).0);
+		assert!(!poll(Skip::Start, 0, 0x40).0, "Cross alone is no skip");
+		assert!(!poll(Skip::Start, START, START).0, "Start held from before the movie");
+		// The story movies (combo rule): the gamepad's Start feeds the whole combo, like Esc / Space.
+		assert!(poll(Skip::Combo, 0, START).0);
+		assert!(!poll(Skip::Combo, 0x80f, START).0, "Start held from before the movie");
+		// A press polled twice skips once: the second poll sees it already down.
+		let (hit, prev) = poll(Skip::Start, 0, START);
+		assert!(hit && !poll(Skip::Start, prev, START).0);
 	}
 
 	/// Esc / Space during a scene (mode 2) press Start with the four shoulder buttons (retail's scene skip test), during a

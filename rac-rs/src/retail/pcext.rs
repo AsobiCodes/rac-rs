@@ -35,11 +35,15 @@
 //! - Paged Graphics / Controls (pcctl.rs): in a level the pause pages show at most 7 rows, row 0 is a "Page" selector (Left / Right
 //!   or Cross steps and wraps): Graphics has 3 sections (Picture: Lighting, Ambient occlusion, Dynamic shadows, Global
 //!   illumination, Sun rays, HUD; Effects: Water, Waves, Particles, Vegetation; Screen: Display mode, Frame smoothing, Draw
-//!   distance, Culling), Controls 9 (pcctl.rs). `HUD: Sharp / Original` is a byte of the pcctl block that `sync` applies to
-//!   `hud_sharp_now()` and `hud=` in the file. The title's Graphics page keeps its 13 rows and has no HUD row.
+//!   distance, Culling, Button glyphs), Controls 9 (pcctl.rs). `HUD: Sharp / Original` is a byte of the pcctl block that `sync` applies to
+//!   `hud_sharp_now()` and `hud=` in the file. `Button glyphs: PlayStation / Xbox / Switch` is a byte of pcext's own block
+//!   (`GLYPHS`) that `sync` applies to `glyph_style_now()` and `glyphs=` in the file: it says how a gamepad's buttons are named in
+//!   the prompts (prompts.rs). The title's Graphics page keeps the 13 retail rows and has no HUD row, but it has the Button
+//!   glyphs row.
 //! - Title screen: Options -> Graphics (`title_options`, a hand on the front end's Options list set-up) shows the same rows on
-//!   a copy of the Video Options page; `front_field` applies and remembers them, the mirror draws them (viewer/front_mirror.rs,
-//!   frontend.rs `Page::Graphics`). The Options rows themselves are retail's of the disc's region (USA: no Video row).
+//!   a copy of the Video Options page, with the Button glyphs row after them; `front_field` applies and remembers them, the mirror
+//!   draws them (viewer/front_mirror.rs, frontend.rs `Page::Graphics`). The Options rows themselves are retail's of the disc's
+//!   region (USA: no Video row).
 //!
 //! - Debug mode (Controls -> Debug, pcctl.rs; `debug=on` in the file, default Off): `sync` hands the row's byte to `devtools::set_menu`, so the
 //!   dev tools (F1 planet list / warp, F2 free camera) and the debug keys (F3 draw distance A/B, F5 immortality, F6 infinite ammo, F8
@@ -53,7 +57,7 @@ use ee_oracle::cpu::Cpu;
 use ee_oracle::mem::Mem;
 use ee_oracle::rec::{register_hand, Hand};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 /// Reserved RAM: all zero in every savestate scanned, below the ELF image (0x100000) and outside the rec/hand range.
@@ -96,6 +100,9 @@ pub const WAVES: u32 = BASE + 19;
 /// Graphics -> Draw distance: 0 Medium, 1 High, 2 Low (`pcopts::draw_level`; viewer/fardraw.rs, with either Lighting). 0 = Medium
 /// so a new player's byte is the zero RAM held there before the row existed (today's Enhanced distances).
 pub const DRAW: u32 = BASE + 20;
+/// Graphics -> Button glyphs: 0 PlayStation (the retail's own glyphs), 1 Xbox, 2 Switch. Its byte is here, with the other Graphics
+/// rows' bytes, so the title screen's Graphics page and the pause menu's share it.
+pub const GLYPHS: u32 = BASE + 21;
 /// The Graphics page's row bytes in row order.
 const GROWS: [u32; 13] = [LIGHT, AO, SHADOWS, DISPLAY, WATER, PARTICLES, SUNRAYS, SMOOTH, VEG, CULL, GI, WAVES, DRAW];
 /// The copy of the row table (5 records + the zero record).
@@ -104,7 +111,7 @@ const TAB: u32 = BASE + 0x40;
 const POOL: u32 = BASE + 0x100;
 const POOL_SLOTS: usize = 28;
 /// The string pool's second part: after the title's Graphics rows (they end at BASE + 0xef8), before prompts.rs (4 slots).
-const POOL2: u32 = BASE + 0xf00;
+const POOL2: u32 = BASE + 0x1800;
 /// Graphics page (`patch_graphics`): the Options list records (8 + the zero record, 12 bytes each), its row descriptions (8 + 0),
 /// its row pictures (8 ToC records {sector, sectors}), the page (a copy of Camera Options; 0x100 bytes, zero after its 0x60:
 /// the menu engine reads item slots past the page's zero item, retail's own pages are followed by zeros there), its header
@@ -124,8 +131,11 @@ const GTAB: u32 = BASE + 0xaa0;
 const TRECS: u32 = BASE + 0xc00;
 pub const TGPAGE: u32 = BASE + 0xc40;
 const TGHDR: u32 = BASE + 0xd40;
-pub const TGVAL: u32 = BASE + 0xda0;
-const TGTAB: u32 = BASE + 0xde0;
+/// The title's row table (15 records of 20 bytes: the 13 Graphics rows, the Button glyphs row and the zero record) and the
+/// value item (64 bytes) share the space the two had before, with the row table first: the Button glyphs row needs one more
+/// record and the value item does not fill its old place.
+const TGTAB: u32 = BASE + 0xdd8;
+pub const TGVAL: u32 = BASE + 0xd98;
 /// The Graphics rows of both pages: label, row byte, the value texts for 0, 1, 2 and 3 (0: no such value; the retail item's
 /// record holds four choices). The pause page's multi-choice item cycles a row through its values; the title's value item only
 /// flips a byte, so `sync` steps the rows with more than two values on.
@@ -351,6 +361,19 @@ pub fn hud_sharp_now() -> bool {
 	HUD_SHARP.load(Ordering::Relaxed)
 }
 
+/// The button glyphs style as last applied (0 PlayStation, 1 Xbox, 2 Switch); the Graphics page's Button glyphs row (pcctl.rs)
+/// writes it.
+static GLYPH_STYLE: AtomicU8 = AtomicU8::new(1);
+
+/// The button glyphs style the Graphics row asks for: 0 PlayStation (the retail's own glyphs), 1 Xbox, 2 Switch. The prompts
+/// (prompts.rs) read it: with the extension off the retail's own glyphs.
+pub fn glyph_style_now() -> u8 {
+	if !enabled() {
+		return super::prompts::STYLE_PS;
+	}
+	GLYPH_STYLE.load(Ordering::Relaxed).min(2)
+}
+
 /// The Graphics rows as last applied (`pack_gfx`; default Classic, the rest On / Enhanced for when the player picks Enhanced).
 static GFX: AtomicU32 = AtomicU32::new(pack_gfx(DEFAULT_ROWS));
 /// The row bytes of a new player (`PcOptions::graphics_rows` of no file): Classic lighting, the effect rows at High, Windowed,
@@ -560,6 +583,9 @@ impl St {
 /// starts the console in the remembered language (the dev override COLD_LANG wins).
 pub fn init(cold: bool) {
 	if !enabled() {
+		// The extension is off: the options file is not read, so the bindings are the defaults (the file was read before the
+		// threads started, for the prompts' sake).
+		super::binds::init(None, None);
 		return;
 	}
 	let path = pcopts::file();
@@ -585,6 +611,7 @@ pub fn init(cold: bool) {
 	STRAFE_ON.store(opts.strafe_on(), Ordering::Relaxed);
 	BUYALL_ON.store(opts.buyall_on(), Ordering::Relaxed);
 	HUD_SHARP.store(opts.hud_sharp(), Ordering::Relaxed);
+	GLYPH_STYLE.store(opts.glyph_style(), Ordering::Relaxed);
 	GFX.store(pack_gfx(swap_rows(opts.graphics_rows())), Ordering::Relaxed);
 	FULLSCREEN.store(opts.fullscreen_on(), Ordering::Relaxed);
 	modcam::set_active(opts.camera_modern());
@@ -647,6 +674,7 @@ fn setup(mem: &mut Mem, s: &mut St) {
 	for (a, v) in GROWS.iter().zip(g) {
 		mem.wr8(*a, v);
 	}
+	mem.wr8(GLYPHS, s.opts.glyph_style());
 	s.glast = Some(g);
 	apply_graphics(s, g, false);
 	camopts_setup(mem, s);
@@ -694,6 +722,18 @@ fn sync(mem: &mut Mem, level: u32, toggle: bool, s: &mut St) -> bool {
 			s.opts.hud = Some(sharp);
 			s.save();
 		}
+	}
+	// The Button glyphs row (Graphics -> Screen, and the title screen's Graphics page): the prompts name a gamepad's buttons the
+	// way the row says. It has three values: the pause page cycles a row (+1 mod values), the title's value item only flips the
+	// byte; any change is one press, so the row steps on from its last value on both pages.
+	let style = mem.rd8(GLYPHS);
+	if style != GLYPH_STYLE.load(Ordering::Relaxed) {
+		let stepped = (GLYPH_STYLE.load(Ordering::Relaxed) + 1) % 3;
+		mem.wr8(GLYPHS, stepped);
+		GLYPH_STYLE.store(stepped, Ordering::Relaxed);
+		eprintln!("retail: PC options: Button glyphs {}", pcopts::GLYPHS[stepped as usize]);
+		s.opts.glyphs = Some(stepped);
+		s.save();
 	}
 	// Debug mode (Controls -> Debug): the row's byte opens / closes the dev tools and debug keys at once and is remembered (`debug=on`).
 	if let Some(on) = super::pcctl::debug_on(mem) {
@@ -1023,7 +1063,13 @@ fn build_title(mem: &mut Mem, pc: u32, item: u32, s: &mut St) -> Option<u64> {
 	mem.wr32(TGVAL + 0x38, 0);
 	mem.wr32(TGVAL + 0x3c, 0);
 	// 5-word rows {label, byte, value 0, value 1, flags 0 (Cross flips the byte; Video's 1 = the keep-mode prompt)}, the zero record.
-	let tab: Vec<u32> = ROWS.iter().flat_map(|r| [r[0], r[1], r[2], r[3], 0]).chain([0; 5]).collect();
+	// The Button glyphs row is ours (three values; the record holds the first two, the mirror draws the third).
+	let tab: Vec<u32> = ROWS
+		.iter()
+		.flat_map(|r| [r[0], r[1], r[2], r[3], 0])
+		.chain([crate::retail::pcctl::ID_GLYPHS, GLYPHS, crate::retail::pcctl::ID_PLAYSTATION, crate::retail::pcctl::ID_XBOX, 0])
+		.chain([0; 5])
+		.collect();
 	for (i, w) in tab.iter().enumerate() {
 		mem.wr32(TGTAB + 4 * i as u32, *w);
 	}
@@ -1036,7 +1082,11 @@ fn build_title(mem: &mut Mem, pc: u32, item: u32, s: &mut St) -> Option<u64> {
 pub fn title_rows() -> Vec<(u32, u32)> {
 	let mut v = unpack_gfx(GFX.load(Ordering::Relaxed));
 	v[3] = FULLSCREEN.load(Ordering::Relaxed) as u8;
-	ROWS.iter().zip(v).map(|(r, v)| (r[0], r[2 + v as usize])).collect()
+	let mut rows: Vec<(u32, u32)> = ROWS.iter().zip(v).map(|(r, v)| (r[0], r[2 + v as usize])).collect();
+	// The Button glyphs row: the style the prompts use.
+	let style = GLYPH_STYLE.load(Ordering::Relaxed).min(2) as usize;
+	rows.push((crate::retail::pcctl::ID_GLYPHS, [crate::retail::pcctl::ID_PLAYSTATION, crate::retail::pcctl::ID_XBOX, crate::retail::pcctl::ID_SWITCH][style]));
+	rows
 }
 
 /// The new texts in `lang` (0 En .. 4 It) as the mirror's strings (font bytes as chars, like the disc's texts).
@@ -1140,7 +1190,7 @@ pub const ID_STATIC: u32 = 0x7f83;
 pub const ID_SMOOTH: u32 = 0x7f84;
 /// This section's string pool: one 0x40-byte slot per id (`ID_LOCKON`..=`ID_SMOOTH`); the range is skipped by prompts.rs' canary.
 const CO_POOL: u32 = BASE + 0x1000;
-pub const CO_POOL_END: u32 = BASE + 0x1800;
+pub const CO_POOL_END: u32 = BASE + 0x1900;
 /// Retail's camera speed byte (save struct): 0 Slow, 1 Medium, 2 Fast.
 const RETAIL_SPEED: u32 = 0x15ede4;
 /// The page-menu mode word (mouse_menu::MODE while a pause page is open) and the row index of the camera speed row.
@@ -1481,7 +1531,7 @@ mod camopts_tests {
 		v.dedup();
 		assert_eq!(v.len(), 5 + GROWS.len(), "row bytes are distinct");
 		assert!((ID_LOCKON..=ID_SMOOTH).all(|id| !NEW_IDS.contains(&id)));
-		assert!(CO_POOL >= POOL2 + 0x100 && CO_POOL + 0x40 * (ID_SMOOTH - ID_LOCKON + 1) <= CO_POOL_END);
+		assert!(CO_POOL + 0x40 * (ID_SMOOTH - ID_LOCKON + 1) <= CO_POOL_END && CO_POOL_END >= POOL2 + 0x100);
 	}
 
 	#[test]
@@ -2165,6 +2215,34 @@ mod tests {
 		FULLSCREEN.store(false, Ordering::Relaxed);
 	}
 
+	/// The Button glyphs row: its byte is the style, a change steps it on (the pause page cycles it, the title's flip only marks
+	/// a change), the file names it and the title screen's row list shows the style.
+	#[test]
+	fn the_glyphs_row_steps_and_is_remembered() {
+		let _turn = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+		let dirp = scratch("glyphs");
+		let mut mem = Mem::new();
+		let mut s = St { opts: PcOptions::default(), path: Some(dirp.join("pc_options.txt")), last: None, glast: None, lang_seen: None, warned: false };
+		// A new player gets the Xbox letters.
+		sync(&mut mem, 4, false, &mut s);
+		assert_eq!(mem.rd8(GLYPHS), 1, "Xbox by default");
+		assert_eq!(title_rows()[13], (crate::retail::pcctl::ID_GLYPHS, crate::retail::pcctl::ID_XBOX));
+		// The row steps on: Xbox -> Switch -> PlayStation -> Xbox.
+		for want in [2u8, 0, 1] {
+			let next = (mem.rd8(GLYPHS) + 1) % 3;
+			mem.wr8(GLYPHS, next);
+			sync(&mut mem, 4, false, &mut s);
+			assert_eq!(mem.rd8(GLYPHS), want, "the row steps on");
+			assert_eq!(title_rows()[13].1, [crate::retail::pcctl::ID_PLAYSTATION, crate::retail::pcctl::ID_XBOX, crate::retail::pcctl::ID_SWITCH][want as usize]);
+		}
+		// The file names the style.
+		assert!(std::fs::read_to_string(dirp.join("pc_options.txt")).unwrap().contains("glyphs=xbox\n"));
+		// A fresh RAM takes the remembered style back.
+		let o = PcOptions::load(&dirp.join("pc_options.txt"));
+		assert_eq!(o.glyphs, Some(1));
+		GLYPH_STYLE.store(1, Ordering::Relaxed);
+	}
+
 	/// The packed Graphics word: every level of every effect row round-trips, a word from before the levels existed (an "on" bit
 	/// and no level) reads as High, and the effect rows have the right number of values.
 	#[test]
@@ -2205,8 +2283,8 @@ mod tests {
 		assert_eq!(slots.len(), NEW_IDS.len(), "no id twice");
 		assert_eq!(NEW_IDS.len(), TEXTS.len());
 		assert!(POOL + 0x40 * POOL_SLOTS as u32 <= OPT_RECS, "the string pool ends before the Graphics page copies");
-		assert!(TGTAB + 20 * (ROWS.len() as u32 + 1) <= POOL2 && GTAB + 24 * (ROWS.len() as u32 + 1) <= TRECS, "the row tables end before the next copies");
-		assert!(pool_slot(NEW_IDS.len() - 1) + 0x40 <= BASE + 0x1000, "the second pool ends before prompts.rs");
+		assert!(TGVAL + 0x40 <= TGTAB && TGTAB + 20 * (ROWS.len() as u32 + 2) <= POOL2 && GTAB + 24 * (ROWS.len() as u32 + 1) <= TRECS, "the row tables end before the next copies");
+		assert!(pool_slot(NEW_IDS.len() - 1) + 0x40 <= crate::retail::prompts::POOL, "the second pool ends before prompts.rs");
 	}
 
 	/// The title's Options list set-up as the PAL boot ELF holds it (0x219ca8, region word 0x15ee90, lists 0x1d4790 / 0x1d47c0) with
@@ -2274,7 +2352,8 @@ mod tests {
 			assert_eq!(row(&mut m, i as u32), [r[0], r[1], r[2], r[3], 0], "the title's value item flips between the first two values");
 		}
 		assert_eq!(row(&mut m, 12), [ID_DRAW, DRAW, ID_MEDIUM, ID_HIGH, 0]);
-		assert_eq!(row(&mut m, 13), [0; 5]);
+		assert_eq!(row(&mut m, 13), [crate::retail::pcctl::ID_GLYPHS, GLYPHS, crate::retail::pcctl::ID_PLAYSTATION, crate::retail::pcctl::ID_XBOX, 0], "the Button glyphs row closes the page");
+		assert_eq!(row(&mut m, 14), [0; 5]);
 		// Re-entry: the list's runtime word stays, the page is rebuilt (the cursor back on the first row).
 		m.wr32(TRECS + 8, 0x77);
 		m.wr32(TGVAL + 0x38, 3);
