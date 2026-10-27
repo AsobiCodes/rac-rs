@@ -35,7 +35,7 @@ use ee_oracle::rec::Hand;
 use ee_oracle::mem::Mem;
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 use winit::keyboard::KeyCode;
@@ -47,6 +47,9 @@ static HOST: AtomicU8 = AtomicU8::new(KB);
 static FIELD: AtomicU8 = AtomicU8::new(KB);
 /// A retail page menu is open (set by the worker after each field): Circle is then the right mouse button (back).
 static MENU: AtomicBool = AtomicBool::new(false);
+/// The gamepad's own button bits (the PS2 bits, after `map_xinput`), for the paths that need the pad alone and not the
+/// keyboard's bits mixed in: the movie and scene skips (retail/input.rs) look for the Start bit here.
+static PAD_BUTTONS: AtomicU16 = AtomicU16::new(0);
 
 /// Reserved RAM for the substituted strings (see decomp/notes/button_prompts.md for the proof that retail never writes it):
 /// `SLOTS` slots of `SLOT` bytes.
@@ -769,6 +772,12 @@ fn pad_state() -> Option<PadState> {
 	pad_read().map(|(p, _)| p)
 }
 
+/// The gamepad's own button bits (the PS2 bits): the paths that need the pad alone, not the keyboard's bits mixed in, ask
+/// for the Start bit here.
+pub fn pad_buttons() -> u16 {
+	PAD_BUTTONS.load(Ordering::Relaxed)
+}
+
 /// The physical buttons of `pad_read` at the last two `poll_pad` calls (one per field).
 static PHYS_NOW: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static PHYS_PREV: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -795,7 +804,11 @@ pub fn poll_pad(buttons: &mut u16, sticks: &mut [u8; 4]) {
 	let pr = pad_read();
 	PHYS_PREV.store(PHYS_NOW.load(Ordering::Relaxed), Ordering::Relaxed);
 	PHYS_NOW.store(pr.map_or(0, |r| r.1), Ordering::Relaxed);
-	let Some((mut p, _)) = pr else { return };
+	let Some((mut p, _)) = pr else {
+		// No pad: the skip paths must not see a Start that is no longer there.
+		PAD_BUTTONS.store(0, Ordering::Relaxed);
+		return;
+	};
 	static PREV: Mutex<PadState> = Mutex::new(PadState::IDLE);
 	if let Ok(mut prev) = PREV.lock() {
 		if pad_activity(&prev, &p) {
@@ -812,6 +825,8 @@ pub fn poll_pad(buttons: &mut u16, sticks: &mut [u8; 4]) {
 	if aim {
 		p.buttons &= !2;
 	}
+	// The gamepad's own buttons, for the skip paths (`pad_buttons`).
+	PAD_BUTTONS.store(p.buttons, Ordering::Relaxed);
 	(*buttons, *sticks) = merge((*buttons, *sticks), &p);
 }
 

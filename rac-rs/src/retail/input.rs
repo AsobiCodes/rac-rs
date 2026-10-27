@@ -95,8 +95,10 @@ impl Retail {
 		self.kb_rs = [s[0], s[1]].map(|v| (v as i16 - 0x80) as i8);
 		prompts::poll_pad(&mut b, &mut s);
 		let (mode, front) = (self.snap.mode, self.snap.front);
-		// Esc / Space skip a scene or ship flight through retail's own skip test (`skip_feed`).
-		let skip_key = [winit::keyboard::KeyCode::Escape, winit::keyboard::KeyCode::Space].iter().any(|&k| held(k) || taps.contains_key(&k));
+		// Esc / Space skip a scene or ship flight through retail's own skip test (`skip_feed`); the gamepad's Start does the
+		// same, like Space on the keyboard.
+		let skip_key = [winit::keyboard::KeyCode::Escape, winit::keyboard::KeyCode::Space].iter().any(|&k| held(k) || taps.contains_key(&k))
+			|| (prompts::pad_buttons() & START) != 0;
 		if !front {
 			b |= skip_feed(mode, self.snap.ship, skip_key);
 		}
@@ -243,13 +245,20 @@ pub(super) fn keytap_script() -> Vec<KeyTap> {
 		.collect()
 }
 
-/// One poll of the skip test of a playing movie: (the rule ends it now, the pad to remember for the next poll).
-pub(super) fn movie_poll(rule: fmv_bridge::Skip, prev: u16, held: impl Fn(winit::keyboard::KeyCode) -> bool) -> (bool, u16) {
+/// The PS2 Start bit (the retail pad bits): the skip press on a gamepad, like Space on the keyboard.
+const START: u16 = 0x800;
+
+/// One poll of the skip test of a playing movie: (the rule ends it now, the pad to remember for the next poll). `pad` is the
+/// gamepad's own buttons (`prompts::pad_buttons`): its Start is the skip press, like Space on the keyboard.
+pub(super) fn movie_poll(rule: fmv_bridge::Skip, prev: u16, held: impl Fn(winit::keyboard::KeyCode) -> bool, pad: u16) -> (bool, u16) {
 	let skip_key = held(winit::keyboard::KeyCode::Escape) || held(winit::keyboard::KeyCode::Space);
-	let mut now = pad_from_keys(held, false, false).0;
-	// Esc and Space are the player's skip keys (user request 2026-10-13): they feed the pad the player's own skip test wants
-	// (`Skip::feed`), so retail's rule decides and a button held from before the movie still counts for nothing.
-	if skip_key {
+	// The gamepad's Start is the skip press on a gamepad, like Space on the keyboard.
+	let pad_start = pad & START != 0;
+	let mut now = pad_from_keys(held, false, false).0 | pad;
+	// Esc and Space are the player's skip keys (user request 2026-10-13), and so is the gamepad's Start: they feed the pad the
+	// player's own skip test wants (`Skip::feed`), so retail's rule decides and a button held from before the movie still
+	// counts for nothing.
+	if skip_key || pad_start {
 		now |= rule.feed();
 	}
 	(rule.pressed(prev, now), now)

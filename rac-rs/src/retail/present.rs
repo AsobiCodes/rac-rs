@@ -59,7 +59,7 @@ impl Retail {
 	/// (`movie_poll`). Start is Esc / Enter; the combo's L1 + R1 + L2 + R2 are C, Left Ctrl, V, B (`pad_from_keys`).
 	pub fn movie_pressed(&mut self, held: impl Fn(winit::keyboard::KeyCode) -> bool) -> bool {
 		let taps = &self.taps;
-		let (hit, now) = movie_poll(self.movie_rule, self.movie_prev, |k| held(k) || taps.contains_key(&k));
+		let (hit, now) = movie_poll(self.movie_rule, self.movie_prev, |k| held(k) || taps.contains_key(&k), prompts::pad_buttons());
 		self.movie_prev = now;
 		hit
 	}
