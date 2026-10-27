@@ -477,10 +477,28 @@ pub fn load_store() -> Option<Store> {
 /// The mods folder, read.
 fn read_store() -> Option<Store> {
 	#[cfg(test)]
-	if let Some(root) = TEST_ROOT.with(|r| r.borrow().clone()) {
-		return Some(Store::load(&root));
+	let root = TEST_ROOT.with(|r| r.borrow().clone());
+	#[cfg(not(test))]
+	let root = crate::texpack::mods::mods_root();
+	let mut store = root.map(|r| Store::load(&r))?;
+	// Without a mod loader a script / native mod cannot run, so the pages do not offer it (texture packs never need one). A
+	// loader appearing next to the exe brings the rows back on the next planet load; nothing is removed from the mods folder.
+	if !loader_ok() {
+		store.mods.retain(|m| Master::of_kind(&m.kind) != Master::Mods);
 	}
-	crate::texpack::mods::mods_root().map(|r| Store::load(&r))
+	Some(store)
+}
+
+/// Whether a mod loader is there: `libomniloader.so` next to the exe (`RAC_OMNI_DLL`), not `RAC_OMNI=0`. Upstream publishes
+/// only the Windows DLL, so on Linux the script / native mods stay in the folder but the pages leave them out.
+#[cfg(not(test))]
+fn loader_ok() -> bool {
+	crate::omni::loader_present()
+}
+
+#[cfg(test)]
+fn loader_ok() -> bool {
+	TEST_LOADER.with(|l| l.get())
 }
 
 fn row_wanted(s: &Store) -> bool {
@@ -489,11 +507,18 @@ fn row_wanted(s: &Store) -> bool {
 
 #[cfg(test)]
 thread_local! { static TEST_ROOT: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) }; }
+thread_local! { static TEST_LOADER: std::cell::Cell<bool> = const { std::cell::Cell::new(true) }; }
 
 /// Test hook: `load_store` / `build_title` of this thread read `root` (None = the real lookup).
 #[cfg(test)]
 pub fn test_root(root: Option<&std::path::Path>) {
 	TEST_ROOT.with(|r| *r.borrow_mut() = root.map(|p| p.to_path_buf()));
+}
+
+/// Test hook: whether this thread's pages see a mod loader (the default is yes, so the other tests keep their script mods).
+#[cfg(test)]
+pub fn test_loader(present: bool) {
+	TEST_LOADER.with(|l| l.set(present));
 }
 
 /// The copy of a retail value page: `page` at `at` (0x100 bytes), its header item `hdr` at `h` and its value item `val` at `v`; `src` =

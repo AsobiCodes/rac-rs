@@ -34,6 +34,15 @@ fn dll_path() -> Option<PathBuf> {
 	Some(exe_dir()?.join(name))
 }
 
+/// Whether a mod loader can run: not switched off (`RAC_OMNI=0`) and its library next to the exe (or `RAC_OMNI_DLL`). The
+/// Mods pages offer script / native mods only then; texture packs never need it.
+pub fn loader_present() -> bool {
+	if std::env::var("RAC_OMNI").is_ok_and(|v| v == "0") {
+		return false;
+	}
+	dll_path().is_some_and(|p| p.is_file())
+}
+
 fn binding_text() -> String {
 	exe_dir().map(|d| d.join("omni").join("rac1.json")).and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_else(|| BUILTIN_BINDING.to_string())
 }
