@@ -107,8 +107,11 @@ pub const WAVES: u32 = BASE + 19;
 /// Graphics -> Draw distance: 0 Medium, 1 High, 2 Low (`pcopts::draw_level`; viewer/fardraw.rs, with either Lighting). 0 = Medium
 /// so a new player's byte is the zero RAM held there before the row existed (today's Enhanced distances).
 pub const DRAW: u32 = BASE + 20;
+/// Graphics -> System -> Button glyphs: 0 PlayStation (the retail's own glyphs), 1 Xbox, 2 Switch. Its byte, with the other
+/// Graphics rows' bytes: 21 and 22 are Volumetric fog and Volumetric clouds (fogopt.rs / cloudopt.rs), so it sits after them.
+pub const GLYPHS: u32 = BASE + 23;
 /// The Graphics page's row bytes in row order.
-const GROWS: [u32; 15] = [LIGHT, AO, SHADOWS, DISPLAY, WATER, PARTICLES, SUNRAYS, SMOOTH, VEG, CULL, GI, WAVES, DRAW, fogopt::FOG, cloudopt::CLOUDS];
+pub(super) const GROWS: [u32; 15] = [LIGHT, AO, SHADOWS, DISPLAY, WATER, PARTICLES, SUNRAYS, SMOOTH, VEG, CULL, GI, WAVES, DRAW, fogopt::FOG, cloudopt::CLOUDS];
 /// The copy of the Camera Options row table (8 rows + the zero record = 9 records of 24 bytes, ending at BASE + 0x12d8): in the
 /// camopts section's block after its text slots (BASE + 0x1000..0x1800); BASE + 0x40..0x100, where the 7-row copy was, is unused now.
 const TAB: u32 = BASE + 0x1200;
@@ -530,6 +533,7 @@ pub fn init(cold: bool) {
 	STRAFE_ON.store(opts.strafe_on(), Ordering::Relaxed);
 	BUYALL_ON.store(opts.buyall_on(), Ordering::Relaxed);
 	HUD_SHARP.store(opts.hud_sharp(), Ordering::Relaxed);
+	super::xglyphs::set_style(opts.glyph_style());
 	super::pcrender::init(&opts); super::pcintro::init(&opts);
 	GFX.store(pack_gfx(swap_rows(opts.graphics_rows())), Ordering::Relaxed);
 	fogopt::set(opts.graphics_rows()[13]);
@@ -597,6 +601,7 @@ fn setup(mem: &mut Mem, s: &mut St) {
 	for (a, v) in GROWS.iter().zip(g) {
 		mem.wr8(*a, v);
 	}
+	mem.wr8(GLYPHS, s.opts.glyph_style());
 	s.glast = Some(g);
 	apply_graphics(s, g, false);
 	camopts_setup(mem, s);
@@ -647,6 +652,15 @@ fn sync(mem: &mut Mem, level: u32, toggle: bool, s: &mut St) -> bool {
 		s.save();
 	}
 	if super::pcrender::sync(mem, &mut s.opts) | super::pcintro::sync(mem, &mut s.opts) { s.save(); } // Renderer row (pcrender.rs), Skip intro row (pcintro.rs); no short circuit
+	// The Button glyphs row (Graphics -> System, pcctl.rs): the pictures in the font sheet follow the style on the next upload
+	// (a level load) and the HUD's own copy when the viewer notices the change (viewer/handler.rs).
+	let style = mem.rd8(GLYPHS).min(2);
+	if style != super::xglyphs::style() {
+		super::xglyphs::set_style(style);
+		eprintln!("retail: PC options: Button glyphs {}", pcopts::GLYPHS[style as usize]);
+		s.opts.glyphs = Some(style);
+		s.save();
+	}
 	// Debug mode (Controls -> Debug): the row's byte opens / closes the dev tools and debug keys at once and is remembered (`debug=on`).
 	if let Some(on) = super::pcctl::debug_on(mem) {
 		if super::devtools::set_menu(on, true) {

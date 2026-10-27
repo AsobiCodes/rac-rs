@@ -34,6 +34,12 @@ pub fn style() -> u8 {
 	STYLE.load(Ordering::Relaxed).min(2)
 }
 
+/// The Graphics page's Button glyphs row sets the style at once; the font sheet is re-blitted from it
+/// (viewer/handler.rs) and the next upload carries it (gscap.rs).
+pub fn set_style(s: u8) {
+	STYLE.store(s.min(2), Ordering::Relaxed);
+}
+
 /// The cell size: the retail's button cells are 24 wide and 16 tall. The art sits in a 16-wide
 /// window at x 2, the text after a button glyph starts 18 columns in, and the rest of the cell is
 /// overdrawn by it.

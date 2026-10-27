@@ -118,6 +118,8 @@ pub(crate) fn bound_function(code: u8) -> Option<usize> {
 		R1 => b::R1,
 		L2 => b::L2,
 		R2 => b::R2,
+		LSTICK => b::L3,
+		RSTICK => b::R3,
 		_ => return None,
 	})
 }
