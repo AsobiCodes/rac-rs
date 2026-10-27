@@ -82,6 +82,8 @@ pub mod binds;
 pub mod pcctl;
 pub mod pcmods;
 pub mod prompts;
+pub mod lxpad;
+pub mod xglyphs;
 pub mod vendor;
 pub mod pcopts;
 pub mod pcintro;

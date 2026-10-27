@@ -161,7 +161,7 @@ pub(super) fn hud_art(l: &Level, disc: &mut iso::Disc) -> (Vec<Texture>, HudArt)
 			// is kept, so the style can be changed back (the PlayStation style takes the retail's own symbols out of it).
 			a.font_tex_orig = Some(f.tex.clone());
 			let map = crate::retail::binds::pad_map();
-			crate::retail::xglyphs::blit(a.font_tex_orig.as_ref().unwrap(), &mut f.tex, crate::retail::pcext::glyph_style_now(), &map);
+			crate::retail::xglyphs::blit(a.font_tex_orig.as_ref().unwrap(), &mut f.tex, crate::retail::xglyphs::style(), &map);
 			a.font = Some((1 + tex.len(), f.glyphs));
 			a.font_tex = Some(f.tex.clone());
 			tex.push(f.tex);

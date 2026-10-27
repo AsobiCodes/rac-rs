@@ -16,10 +16,23 @@
 //! the button it was bound to (the map of `binds.rs`): the Cross cell holds the A picture until the Cross is
 //! bound to another button.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::binds::{DEFAULT_PAD, NP};
+
+/// The button glyphs style as last applied (0 PlayStation, 1 Xbox, 2 Switch); the Graphics page's Button glyphs row
+/// (pcctl.rs) writes it.
+static STYLE: AtomicU8 = AtomicU8::new(1);
+
+/// The button glyphs style the prompts and the font sheet use: 0 PlayStation (the retail's own glyphs), 1 Xbox, 2 Switch.
+/// With the PC options off, the retail's own.
+pub fn style() -> u8 {
+	if !super::pcext::enabled() {
+		return 0;
+	}
+	STYLE.load(Ordering::Relaxed).min(2)
+}
 
 /// The cell size: the retail's button cells are 24 wide and 16 tall. The art sits in a 16-wide
 /// window at x 2, the text after a button glyph starts 18 columns in, and the rest of the cell is

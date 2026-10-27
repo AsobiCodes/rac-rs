@@ -104,7 +104,7 @@ pub struct Ctx {
 }
 
 /// The binding function (`binds::CROSS` ..) of a button glyph code (Cross .. R2); None for the sticks and other bytes.
-fn bound_function(code: u8) -> Option<usize> {
+pub(crate) fn bound_function(code: u8) -> Option<usize> {
 	use super::binds as b;
 	Some(match code {
 		CROSS => b::CROSS,

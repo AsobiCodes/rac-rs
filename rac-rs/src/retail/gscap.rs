@@ -1397,7 +1397,7 @@ impl Gs {
           // The sheet is in the graphics memory now: remember where, so a change of style can put the other
           // artwork in it.
           self.font_at = Some((dbp, dbw, dx, dy, which));
-          let style = crate::retail::pcext::glyph_style_now().min(2) as usize;
+          let style = crate::retail::xglyphs::style().min(2) as usize;
           let map = crate::retail::binds::pad_map();
           self.font_style = style as u8;
           self.font_map = map;
@@ -1441,7 +1441,7 @@ impl Gs {
       /// known from its upload (`font_at`).
       pub fn repatch_font(&mut self) {
           let Some((dbp, dbw, dx, dy, which)) = self.font_at else { return };
-          let style = crate::retail::pcext::glyph_style_now().min(2) as usize;
+          let style = crate::retail::xglyphs::style().min(2) as usize;
           let map = crate::retail::binds::pad_map();
           if style as u8 == self.font_style && map == self.font_map {
               return;

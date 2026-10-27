@@ -255,10 +255,6 @@ impl App {
 			for (id, s) in crate::retail::pcext::texts(lang) {
 				fe.text.insert(id, s);
 			}
-			// The Controls page's own texts, and the Button glyphs row the title screen's Graphics page shows.
-			for (id, s) in crate::retail::pcctl::fixed_texts(lang) {
-				fe.text.insert(id, s);
-			}
 		}
 		// The title's Mods page (retail/pcmods.rs): its texts follow the mods and settings, so they are refreshed while it is open.
 		if crate::retail::pcmods::title_open() || fe.text.get(crate::retail::pcmods::ID_MODS).is_empty() {

@@ -117,6 +117,10 @@ pub(super) struct HudArt {
 	/// HUD sprite 0xe935 frame 0: the shop's LED ticker sheet (FUN_002b1168).
 	pub(super) led: Option<(usize, f32, f32)>,
 	pub(super) font: Option<(usize, Vec<art::Glyph>)>,
+	/// The font sheet as uploaded: the button glyphs style puts the Xbox artwork in its cells and sends it up again.
+	pub(super) font_tex: Option<Texture>,
+	/// The font sheet as decoded, before any artwork went into it (the PlayStation style writes the sheet from it again).
+	pub(super) font_tex_orig: Option<Texture>,
 	/// Level font 3 (the marker prompt's "!", NOV-14.2b).
 	pub(super) font3: Option<(usize, Vec<art::Glyph>)>,
 	/// Level font 2 (the shop panels' text, table boot 0x1df370).
