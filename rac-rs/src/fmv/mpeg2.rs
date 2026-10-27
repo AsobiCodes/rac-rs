@@ -1334,6 +1334,7 @@ mod tests {
 		println!("{} frames in {dt:.2}s = {:.1} fps, errors {}", frames.len(), frames.len() as f64 / dt, dec.errors);
 		assert!(frames.len() >= 100);
 		let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/target/test_out");
+		std::fs::create_dir_all(dir).unwrap();
 		for n in [0, 12, 50, 99] {
 			let f = &frames[n];
 			println!("frame {n}: {}x{} type {} struct {} tff {} prog {} pts {:?}", f.width, f.height, f.coding_type, f.picture_structure, f.top_field_first, f.progressive, f.pts);

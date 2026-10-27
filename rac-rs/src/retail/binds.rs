@@ -38,6 +38,9 @@ pub const R2: usize = 7;
 pub const DPAD: usize = 12;
 pub const LSTICK: usize = 16;
 pub const RSTICK: usize = 20;
+/// The stick buttons (the L3 and R3 presses; the sticks' directions are `LSTICK` and `RSTICK`).
+pub const L3: usize = 8;
+pub const R3: usize = 9;
 
 /// The PS2 pad bit of each button function (the d-pad in the order up, down, left, right); the stick functions have none.
 pub const BIT: [u16; NP] = [0x40, 0x80, 0x10, 0x20, 4, 8, 1, 2, 0x200, 0x400, 0x800, 0x100, 0x1000, 0x4000, 0x8000, 0x2000];
@@ -361,6 +364,12 @@ pub fn kb() -> KbBinds {
 
 pub fn pad_map() -> [u8; NP] {
 	live(|l| l.pad)
+}
+
+/// The physical button the function `f` is played by now: the live map (the options file, the Controls page). The prompts name
+/// and draw this button, so a rebound function is shown as the button it is really played with.
+pub fn pad_physical(f: usize) -> u8 {
+	pad_map()[f % NP]
 }
 
 /// pcext::init: the options file's `keys` / `pad` values.

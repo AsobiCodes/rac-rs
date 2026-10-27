@@ -337,8 +337,9 @@ pub enum TextureGroup {
 	Shrub = 0x48,
 }
 
-/// An 8-bit indexed texture expanded to RGBA8 (PSMT8 with a CSM1 RGBA32 palette).
-pub struct Texture {
+	/// An 8-bit indexed texture expanded to RGBA8 (PSMT8 with a CSM1 RGBA32 palette).
+	#[derive(Clone)]
+	pub struct Texture {
 	pub w: usize,
 	pub h: usize,
 	pub rgba: Vec<[u8; 4]>,

@@ -300,6 +300,19 @@ impl Cpu {
             self.mem.wr32(recv, 0);
             return;
         }
+        // The CDVD S-command client's clock read (boot 0x121780 sceCdReadClock): the IOP answers status 0 and the
+        // 8-byte BCD time at recv + 4 (sceCdCLOCK: sec, min, hour, pad, day, month, year), which the wrapper copies
+        // into the caller's sceCdCLOCK.
+        if client == 0x132d08 && fno == 1 && recv != 0 {
+            self.mem.wr32(recv, 0);
+            if rsize >= 0xc {
+                for (k, b) in crate::clock::local_rtc().iter().enumerate() {
+                    self.mem.wr8(recv + 4 + k as u32, *b);
+                }
+                self.mem.wr32(recv + 0xc, 0);
+            }
+            return;
+        }
         // 989snd direct calls on the command client: the sync wrapper (boot ~0x12dfd0, used by FUN_0012da28) and
         // FUN_0012e6e0 for a command without arguments while nothing is batched send ONE command with fno = its cid and
         // the send buffer = its argument words (none: send 0); the caller reads the result at recv + 4 (DAT_00133104).
