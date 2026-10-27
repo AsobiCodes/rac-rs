@@ -130,12 +130,12 @@ const SEC_DEBUG: usize = 9;
 const NDKEYS: usize = 5;
 const NGSEC: usize = 4;
 /// The HUD row, the Renderer row and the Preset row in `GSECS` (the 15 rows of `pcext::ROWS` are 0..=14).
-const HUD_ROW: usize = 15;
-const RENDER_ROW: usize = 16;
-const PRESET_ROW: usize = 17;
+pub(super) const HUD_ROW: usize = 15;
+pub(super) const RENDER_ROW: usize = 16;
+pub(super) const PRESET_ROW: usize = 17;
 /// The Skip intro row and the Button glyphs row in the System section (the other three sections are full at six rows).
-const INTRO_ROW: usize = 18;
-const GLYPH_ROW: usize = 19;
+pub(super) const INTRO_ROW: usize = 18;
+pub(super) const GLYPH_ROW: usize = 19;
 /// The Graphics sections as indices of `pcext::ROWS` (0 Lighting, 1 Ambient occlusion, 2 Dynamic shadows, 3 Display mode, 4 Water,
 /// 5 Particles, 6 Sun rays, 7 Frame smoothing, 8 Vegetation, 9 Culling, 10 Global illumination, 11 Waves, 12 Draw distance, 13 Volumetric fog, 14 Volumetric clouds).
 /// Picture: Preset, Lighting, Ambient occlusion, Dynamic shadows, Global illumination, Sun rays. Effects: Water, Waves, Particles,
@@ -330,6 +330,22 @@ pub fn text(id: u32, lang: usize, csec: usize, gsec: usize, playstation: bool) -
 	}
 }
 
+/// The fixed texts the title Graphics page shows (its mirror draws the page itself; the pause page's lookup goes through the
+/// game's text hook instead): the stepper's label and the rows and values that are not `pcext`'s own ids.
+pub fn fixed_texts(lang: usize) -> impl Iterator<Item = (u32, String)> {
+	let l = lang.min(4);
+	[ID_PAGE, ID_HUD, ID_SHARP, ID_ORIGINAL, ID_PRESET, ID_CUSTOM, ID_INTRO, ID_GLYPHS, ID_PLAYSTATION, ID_XBOX, ID_SWITCH]
+		.into_iter()
+		.map(move |id| (id, text(id, l, 0, 0, false).iter().map(|&b| b as char).collect()))
+}
+
+/// The same, into the front end's text map (one call from the mirror's frame).
+pub fn put_fixed_texts(text: &mut crate::frontend::Text, lang: usize) {
+	for (id, s) in fixed_texts(lang) {
+		text.insert(id, s);
+	}
+}
+
 /// The text lookup hand for the pages' ids (`pcext::text_hook`, 0x7f40..0x7f7f): the string goes into the id's pool slot and its
 /// address into v0, in the game's language `lang`.
 pub fn text_hook(c: &mut Cpu, id: u32, lang: usize) -> bool {
@@ -381,19 +397,46 @@ fn table(sec: usize) -> Vec<u32> {
 	t
 }
 
-/// The Graphics row table of section `sec`: the stepper, then the section's rows of `rows` (`pcext::ROWS`), the HUD, Renderer and
-/// Preset rows. `custom`: the Preset row has its 4th choice "Custom" (the state is Custom).
+/// One of the extra Graphics rows (not in `pcext::ROWS`): label id, byte, up to four value texts (0 = no such value). The pause
+/// page and the title's copy both come from here, so the two cannot drift apart. `custom`: the Preset row's 4th choice.
+fn gfx_row_def(i: usize, custom: bool) -> [u32; 6] {
+	match i {
+		HUD_ROW => [ID_HUD, HUDB, ID_SHARP, ID_ORIGINAL, 0, 0],
+		RENDER_ROW => [ID_RENDERER, RENDB, ID_VULKAN, ID_DX12, 0, 0],
+		INTRO_ROW => [ID_INTRO, INTROB, ID_OFF, ID_ON, 0, 0],
+		PRESET_ROW => [ID_PRESET, PRESETB, ID_LOW, ID_MEDIUM, ID_HIGH, if custom { ID_CUSTOM } else { 0 }],
+		GLYPH_ROW => [ID_GLYPHS, super::pcext::GLYPHS, ID_PLAYSTATION, ID_XBOX, ID_SWITCH, 0],
+		_ => [0; 6],
+	}
+}
+
+/// A Graphics row by its index in `GSECS`: label id, byte, up to four value texts. The title's copy uses this too.
+pub(super) fn gfx_row(i: usize, custom: bool) -> [u32; 6] {
+	if i < super::pcext::ROWS.len() {
+		super::pcext::ROWS[i]
+	} else {
+		gfx_row_def(i, custom)
+	}
+}
+
+/// The Graphics page's sections (the pause page and the title's copy): how many, and the rows of one.
+pub(super) fn gfx_sections() -> usize {
+	NGSEC
+}
+pub(super) fn gfx_section(sec: usize) -> &'static [usize] {
+	GSECS[sec.min(NGSEC - 1)]
+}
+/// The section's name in `lang` (the stepper's own text).
+pub(super) fn gfx_section_name(lang: usize, sec: usize) -> &'static [u8] {
+	GSECTIONS[sec.min(NGSEC - 1)][lang.min(4)]
+}
+
+/// The Graphics row table of section `sec`: the stepper, then the section's rows of `rows` (`pcext::ROWS`) and the HUD, Renderer,
+/// Preset, Skip intro and Button glyphs rows. `custom`: the Preset row has its 4th choice "Custom" (the state is Custom).
 fn gfx_table(rows: &[[u32; 6]], sec: usize, custom: bool) -> Vec<u32> {
 	let mut t = vec![ID_PAGE, G_SEL, ID_SELG, ID_SELG, 0, 0];
 	for &i in GSECS[sec.min(NGSEC - 1)] {
-		t.extend(match i {
-			HUD_ROW => [ID_HUD, HUDB, ID_SHARP, ID_ORIGINAL, 0, 0],
-			RENDER_ROW => [ID_RENDERER, RENDB, ID_VULKAN, ID_DX12, 0, 0],
-			INTRO_ROW => [ID_INTRO, INTROB, ID_OFF, ID_ON, 0, 0],
-			GLYPH_ROW => [ID_GLYPHS, super::pcext::GLYPHS, ID_PLAYSTATION, ID_XBOX, ID_SWITCH, 0],
-			PRESET_ROW => [ID_PRESET, PRESETB, ID_LOW, ID_MEDIUM, ID_HIGH, if custom { ID_CUSTOM } else { 0 }],
-			_ => rows[i],
-		});
+		t.extend(if i < rows.len() { rows[i] } else { gfx_row_def(i, custom) });
 	}
 	t
 }
@@ -907,6 +950,21 @@ mod tests {
 			&[ID_INTRO, INTROB, ID_OFF, ID_ON, 0, 0, ID_GLYPHS, super::super::pcext::GLYPHS, ID_PLAYSTATION, ID_XBOX, ID_SWITCH, 0],
 			"System holds the Skip intro row and the Button glyphs row"
 		);
+	}
+
+	/// The title's Graphics page shows the same words as the pause page: its texts come from this map (the pause page's from the
+	/// game's text hook), so a missing row would draw blank there.
+	#[test]
+	fn the_fixed_texts_name_the_graphics_rows() {
+		let t: std::collections::HashMap<u32, String> = fixed_texts(0).collect();
+		assert_eq!(t.get(&ID_PAGE).map(String::as_str), Some("Page"));
+		assert_eq!(t.get(&ID_PRESET).map(String::as_str), Some("Preset"));
+		assert_eq!(t.get(&ID_CUSTOM).map(String::as_str), Some("Custom"));
+		assert_eq!(t.get(&ID_INTRO).map(String::as_str), Some("Skip intro"));
+		assert_eq!(t.get(&ID_GLYPHS).map(String::as_str), Some("Button glyphs"));
+		assert_eq!(t.get(&ID_XBOX).map(String::as_str), Some("Xbox"));
+		assert_eq!(t.get(&ID_SHARP).map(String::as_str), Some("Sharp"));
+		assert_eq!(t.get(&ID_ORIGINAL).map(String::as_str), Some("Original"));
 	}
 
 	/// The Graphics table is rewritten for the section; a shorter section leaves no stale record behind its zero record.
