@@ -16,7 +16,7 @@
 # Everything it writes stays inside this folder: oracle/rec, oracle/game, the generated .rs
 # files named by .gitignore, generated/, build/, and player/ once you play. It writes nothing
 # outside this folder at all. The application menu entry is a separate script,
-# ./install-desktop-launcher.sh, so that it stays that way.
+# ./install-desktop-entry.sh, so that it stays that way.
 #
 # This is plain POSIX shell, so it runs under whatever /bin/sh happens to be: bash on Arch
 # and Fedora, dash on Debian and Ubuntu. Nothing else is needed.
@@ -472,7 +472,8 @@ printf '  wrote generated/play.cfg\n'
 
 Step 'done'
 printf 'To play:  ./play.sh\n'
-printf 'For a menu entry:  ./install-desktop-launcher.sh\n'
+printf 'For a menu entry:  ./install-desktop-entry.sh\n'
+printf 'For the optional launcher:  ./launcher.sh\n'
 
 # ---------------------------------------------------------------- pause
 # Started from a file manager, the window would close at once and the log would be gone

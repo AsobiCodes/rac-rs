@@ -63,6 +63,10 @@ what that brought is in [What's new from upstream
   can be turned on in the game's Mods page. Script and native mods need an
   OmniLoader library built for Linux, which upstream does not publish yet, so
   the Mods page leaves those rows out.
+- **An optional launcher (work in progress).** A small desktop app with a
+  library of installs, Play, the game's options and profiles, texture-pack
+  import and application-menu entries. `./launcher.sh` builds it the first
+  time and starts it; the game works the same without it.
 
 ## What's new from upstream 0.4.0
 
@@ -87,16 +91,9 @@ on Linux is here:
   the graphics card.
 
 The Windows-only parts of v0.4.0 are not in this fork: the DirectX 12 renderer,
-ReShade, the RAC-RS Launcher and the Steam integration. What is and is not here
-is listed in [`docs/linux-parity.md`](docs/linux-parity.md).
-
-## Not coming back
-
-One thing the 0.2.2 release had is not coming back to the 0.3.0 branch:
-
-- **A third camera style, "Enhanced"** (L2 aims, R2 fires). Every button can
-  be rebound in the game's own Options menu now, which does the same thing
-  without a camera mode of its own.
+ReShade, the Windows launcher and the Steam integration. This fork has its own
+launcher instead (below). What is and is not here is listed in
+[`docs/linux-parity.md`](docs/linux-parity.md).
 
 ## Status
 
@@ -116,6 +113,8 @@ One thing the 0.2.2 release had is not coming back to the 0.3.0 branch:
   sections and rows (including Preset, HUD, Skip intro and Button glyphs).
 - PCSX2 texture packs work (title Options > Mods). Script mods need a Linux
   OmniLoader build, see [Known issues](#known-issues).
+- An optional launcher (work in progress) manages installs, options, profiles
+  and texture packs; see [Launcher](#launcher-optional-work-in-progress).
 - Every button can be rebound, for the keyboard and for controllers, on the
   Controls page (Pause > Options > Controls).
 - Plays from the PAL / Europe disc and, since v0.2, from the USA disc.
@@ -253,8 +252,12 @@ The build does the rest by itself:
 - **Build:** it generates the game code from your disc and builds the game.
 
 To add a "Ratchet & Clank (rac-rs)" entry to your application menu, run
-**`./install-desktop-launcher.sh`**. It writes one small file to your home
-folder and nothing else, and it works whichever way you built the game.
+**`./install-desktop-entry.sh`**. It writes one small file to your home folder
+and nothing else, and it works whichever way you built the game.
+
+If you want the optional launcher, run **`./launcher.sh`**: it builds the
+launcher the first time and starts it. See
+[Launcher](#launcher-optional-work-in-progress) below.
 
 **Do not share or upload the generated files or the built game.** They contain
 code generated from the game disc. Everything the setup creates stays inside
@@ -376,6 +379,38 @@ and writes `gscap_gpu=off` into `player/pc_options.txt`, then draws the layer on
 the processor instead. Write `gscap_gpu=auto` there to have the graphics card
 try again.
 
+## Launcher (optional, work in progress)
+
+The fork includes its own launcher: a small desktop app that keeps a list of
+installs, starts the game, edits its options, switches profiles and installs
+texture packs. It is optional; everything it does can also be done in the
+game's own menus (packs included), and `play.sh` keeps starting the game
+directly.
+
+```sh
+./launcher.sh
+```
+
+The first start builds it (Rust and a C compiler are needed), then opens the
+window:
+
+- **Library:** "Add existing install..." and pick this folder, or another
+  built copy. Several installs can live side by side; removing one from the
+  list never deletes files.
+- **Play** starts the game with the selected profile's options and mods.
+- **Settings** edits the game's own options. **Mods** installs a texture pack
+  from a `.zip` or folder, or imports one from PCSX2 itself. The game reads the
+  same `mods/` folder, so the in-game Mods page and the launcher agree.
+- The game page has "Open saves folder" and "Open log folder".
+
+Application-menu entries: `./install-desktop-entry.sh` adds the game;
+`./launcher/install-desktop-entry.sh` adds the launcher (build it first).
+
+Not in it yet: installing or repairing the game from a disc, updates and
+backups, and script mods (they need a Linux OmniLoader). Build instructions,
+the data folders and the code map are in
+[`launcher/README.md`](launcher/README.md).
+
 ## Updating
 
 This fork does not have an automatic updater. Pull the changes instead:
@@ -457,8 +492,11 @@ menu's Graphics page also takes Left / Right on its Page row and on the rows.
 - The title screen's Graphics page steps a value with Cross / A; the D-pad's
   Left / Right does not step values there (that page is the game's own Video
   Options page). In game, the Graphics page takes Left / Right as well.
-- DirectX 12, ReShade and the RAC-RS Launcher are Windows-only and are not part
-  of this fork. See [`docs/linux-parity.md`](docs/linux-parity.md).
+- DirectX 12 and ReShade are Windows-only and are not part of this fork. See
+  [`docs/linux-parity.md`](docs/linux-parity.md).
+- The launcher cannot install, repair or update the game yet, and it hides
+  script mods until a Linux OmniLoader exists. Installs made with `setup.sh`
+  and texture packs work today.
 
 ## Reporting a problem
 
@@ -487,6 +525,10 @@ data, which is not part of a public checkout, so they fail here:
 Everything else passes. The file and function size caps are enforced by the
 same suite; `RAC_SIZE_CAPS_WRITE=1` lowers `rac-rs/SIZE_CAPS.txt` after a split.
 
+The launcher is a separate crate with its own lockfile:
+`cd launcher && cargo test`. Its build and code map are in
+[`launcher/README.md`](launcher/README.md).
+
 ## Credits
 **[rac-rs](https://github.com/AsobiCodes/rac-rs)** by
 [AsobiCodes](https://github.com/AsobiCodes) is the original project, and
@@ -495,6 +537,10 @@ glyphs and the cutscene skip are the work of
 **[DeSynkro](https://github.com/DeSynkro)**, who did it for Linux users and
 for anyone who would rather just play the game than fight a Windows
 installer.
+
+The optional launcher started as
+[AsobiCodes' rac-rs-launcher](https://github.com/AsobiCodes/rac-rs-launcher);
+the Linux version is part of this fork (see [`launcher/`](launcher/)).
 
 [OpenCode](https://opencode.ai) was used for a portion of the work.
 

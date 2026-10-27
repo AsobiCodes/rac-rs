@@ -19,3 +19,6 @@
 /rac-rs/src/particles/orb_tables.rs
 __pycache__/
 *.pyc
+/mods/
+/profiles/
+/shots/

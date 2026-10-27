@@ -49,6 +49,15 @@ The sound (SPU2), graphics (GS/VU) and CPU behaviour in this project was written
 
 psx-spx (Martin Korth / nocash) documents the SPU ADPCM and Gaussian interpolation tables. These are properties of the PlayStation hardware.
 
+## RAC-RS Launcher (launcher/)
+
+The optional launcher in `launcher/` started as **RAC-RS Launcher** by
+[AsobiCodes](https://github.com/AsobiCodes/rac-rs-launcher), licensed
+GPL-3.0-or-later. The Linux version in this fork keeps the same licence and
+contains no game data. The libraries it builds into the launcher (egui/eframe,
+image, rfd, serde, sha1, sha2, trash, zip, ureq, libc and egui_kittest for the
+tests) and their licence texts are listed in `launcher/THIRD_PARTY.md`.
+
 ## Rust libraries
 
 rac-rs uses crates from crates.io, including wgpu, winit, cpal, rayon, bytemuck, pollster and xxhash-rust, under the MIT, Apache-2.0, Zlib, BSD, ISC and BSL-1.0 licences. Cargo downloads them at build time. Their licence texts ship with each crate.

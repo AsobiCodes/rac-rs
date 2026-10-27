@@ -11,7 +11,7 @@ had, and the parts of v0.4.0 that needed a Linux version.
 
 - **A native Linux build.** `setup.sh` and `play.sh` replace the Windows
   `Setup.cmd` and `setup.ps1`; your system Rust and Python are used as they are.
-  The Docker build, `install-desktop-launcher.sh` and `clean.sh` are here too.
+  The Docker build, `install-desktop-entry.sh` and `clean.sh` are here too.
 - **Gamepad support.** Xbox-style and PlayStation controllers are read as evdev
   devices, with full analog sticks and triggers, and a controller connected
   while the game runs is picked up without a restart.
@@ -33,6 +33,13 @@ had, and the parts of v0.4.0 that needed a Linux version.
   Preset row, HUD, Skip intro and Button glyphs included, and a change made in
   one place shows in the other.
 - **Texture packs.** PCSX2 texture packs can be switched on in the Mods page.
+- **An optional launcher (work in progress).** `launcher/` is a Linux version of
+  AsobiCodes' RAC-RS Launcher: a library of existing installs, Play, the game's
+  options and profiles, texture-pack import from a `.zip`, a folder or PCSX2,
+  the saves and log folders, and application-menu entries. Start it with
+  `./launcher.sh` (it builds the first time) or `launcher/build.sh`. It cannot
+  install, repair or update the game yet, and it hides script mods until a
+  Linux OmniLoader exists.
 - **A crash log** in `player/crash.log`, with the run log in `player/log.txt`.
 
 ### Changed
@@ -51,6 +58,8 @@ had, and the parts of v0.4.0 that needed a Linux version.
   packs work. Arsenal Mastery stays in the mods folder, switched off.
 - **The Windows-only v0.4.0 files are kept under `windows/`** for reference;
   nothing there is built or run here.
+- **`install-desktop-launcher.sh` is now `install-desktop-entry.sh`** (the game's
+  menu entry); the launcher has its own `launcher/install-desktop-entry.sh`.
 
 ### Fixed
 

@@ -12,7 +12,7 @@ than showing a row that does nothing.
 | DirectX 12 renderer | wgpu's DX12 backend and its shader compiler (DXC) are Windows-only | Vulkan only; the Renderer row is not shown (`pcctl` hides it, `wgpu` backend list is clamped to Vulkan) |
 | ReShade | A Windows DLL injected into the swapchain | Not built; the ReShade startup branch in `main.rs` is `cfg(windows)` |
 | RTSS overlay | Windows shared memory between RTSS and the game | Not built; `rtss_*` modules stay `cfg(windows)` |
-| RAC-RS Launcher, Steam shortcut | Windows apps | Not part of this fork; every option is in the in-game menus |
+| Upstream RAC-RS Launcher, Steam shortcut | Windows apps | This fork has its own Linux launcher (`launcher/`, work in progress): library, Play, options, profiles and texture packs work; disc install, update, backup and script mods are not wired yet. Desktop entries replace Steam shortcuts. |
 | OmniLoader script and native mods | Upstream ships `omniloader.dll` (Windows) and does not publish the loader's source or a Linux `.so` | Texture packs work. The Mods page hides script and native rows while `omni::load::loader_present()` is false. Dropping a compatible `libomniloader.so` next to the exe turns them back on |
 | `Setup.cmd`, `setup.ps1`, `release_files.txt`, `pgo/`, `tools/mingw_as.py`, `tools/rust_unpack.py` | Windows installer and Windows toolchain helpers | Archived under `windows/`; `setup.sh` and the Linux build ignore them |
 | Windows PGO profiles | Recorded with the Windows toolchain | The Linux setup builds its own profile (`generated/build_profile.toml`) |

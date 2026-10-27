@@ -1,5 +1,5 @@
 #!/bin/sh
-# install-desktop-launcher.sh - adds "Ratchet & Clank (rac-rs)" to your
+# install-desktop-entry.sh - adds "Ratchet & Clank (rac-rs)" to your
 # application menu.
 #
 # It writes one small file into your home folder and touches nothing else.
