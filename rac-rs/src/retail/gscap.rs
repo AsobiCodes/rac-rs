@@ -1453,6 +1453,12 @@ impl Gs {
           self.font_style = style as u8;
           self.font_map = map;
           let cells = font.cells_for(which, style, &map);
+          // [PC] The GPU capture builds its transfer stream per job (0.4.0's lazy readback): a transfer written from inside a
+          // job breaks it and the overlay stops updating (the pause menu stays on the screen). The artwork the sheet was
+          // uploaded with stays; the viewer's own copy of the font sheet is re-blitted instead (viewer/handler.rs).
+          if self.gpu.is_some() {
+              return;
+          }
           // The sheet's texels, read back, with the cells of the style in it (the PlayStation style's cells are the sheet's own).
           let mut sheet = vec![0u8; 256 * 128];
           for y in 0..128u32 {
