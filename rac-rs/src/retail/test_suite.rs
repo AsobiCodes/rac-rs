@@ -13,9 +13,13 @@ mod tests {
 	fn movie_skip_rule_keyboard() {
 		use fmv_bridge::Skip;
 		use winit::keyboard::KeyCode as K;
-		let poll = |rule: Skip, prev: u16, keys: &[K]| movie_poll(rule, prev, |k| keys.contains(&k));
-		// Boot logos (mode -1): nothing skips.
-		assert!(!poll(Skip::Never, 0, &[K::Escape, K::Enter, K::Space]).0);
+		let poll = |rule: Skip, prev: u16, keys: &[K]| movie_poll(rule, prev, |k| keys.contains(&k), 0);
+		// Boot logos (mode -1): retail skips nothing, the port's skip press ends them (the Skip intro row cuts them too).
+		assert!(poll(Skip::Never, 0, &[K::Enter]).0);
+		assert!(poll(Skip::Never, 0, &[K::Escape]).0);
+		assert!(poll(Skip::Never, 0, &[K::Space]).0);
+		assert!(!poll(Skip::Never, 0, &[K::KeyF]).0, "other keys are no skip");
+		assert!(!poll(Skip::Never, 0x800, &[K::Enter]).0, "Start held from before the logo");
 		// Attract movie (mode 2): any new button, but not one already down at the last poll.
 		assert!(poll(Skip::Any, 0, &[K::Space]).0);
 		assert!(poll(Skip::Any, 0, &[K::KeyF]).0);
@@ -53,6 +57,20 @@ mod tests {
 			assert!(hit && !poll(Skip::Combo, prev, &[k]).0, "{k:?} skips a combo movie once");
 			assert!(!poll(Skip::Combo, 0x80f, &[k]).0, "{k:?} held from before");
 		}
+	}
+
+	/// The gamepad's Start is the player's skip press too, and any pad button ends the attract movie, on the same rules as the
+	/// keyboard (`movie_poll`): a Start held from before the movie counts for nothing, and the boot logos never skip.
+	#[test]
+	fn movie_skip_rule_gamepad() {
+		use fmv_bridge::Skip;
+		let poll = |rule: Skip, prev: u16, pad: u16| movie_poll(rule, prev, |_| false, pad);
+		assert!(poll(Skip::Start, 0, 0x800).0, "the pad's Start skips a movie");
+		assert_eq!(poll(Skip::Start, 0, 0x800).1, 0x800);
+		assert!(!poll(Skip::Start, 0x800, 0x800).0, "Start held from before the movie");
+		assert!(poll(Skip::Any, 0, 0x40).0, "any pad button skips the attract movie");
+		assert!(poll(Skip::Never, 0, 0x800).0, "the pad's Start ends a boot logo too");
+		assert!(poll(Skip::Combo, 0, 0x800).0, "the pad's Start feeds the whole combo, like Esc / Space");
 	}
 
 	/// Esc / Space during a scene (mode 2) press Start with the four shoulder buttons (retail's scene skip test), during a

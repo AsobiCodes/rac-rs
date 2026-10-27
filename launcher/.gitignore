@@ -1,0 +1,11 @@
+target/
+dist/
+shots/
+nettest/
+flow_base/
+test_install/
+test_install_old/
+linux_tools/
+*.log
+*.part
+*.old

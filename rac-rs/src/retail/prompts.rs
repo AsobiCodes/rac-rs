@@ -21,8 +21,8 @@
 //! "Space" plus the label would be wider than retail's legend box (see `substitute`).
 //!
 //! The gamepad (XInput): A = Cross, B = Circle, X = Square, Y = Triangle, LB = L1, RB = R1, LT = L2, RT = R2, Back = Select,
-//! Start = Start, d-pad, both sticks analog with radial deadzones and a DualShock 2's square range (`stick`), L3 / R3. A PlayStation controller (pspad.rs: DualShock 4,
-//! DualSense, read over HID) arrives as an XInput report with its buttons in their PS2 places and goes the same way. The pads
+//! Start = Start, d-pad, both sticks analog with radial deadzones and a DualShock 2's square range (`stick`), L3 / R3. A PlayStation controller (lxpad.rs on Linux: DualShock 4,
+//! DualSense, read over evdev) arrives as an XInput report with its buttons in their PS2 places and goes the same way. The pads
 //! are merged with the keyboard (OR of buttons, the larger deflection of each stick axis) and work without any switch; only
 //! the keyboard prompts follow `RAC_PC_EXT`.
 //!
@@ -35,7 +35,7 @@ use ee_oracle::rec::Hand;
 use ee_oracle::mem::Mem;
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 use winit::keyboard::KeyCode;
@@ -47,6 +47,9 @@ static HOST: AtomicU8 = AtomicU8::new(KB);
 static FIELD: AtomicU8 = AtomicU8::new(KB);
 /// A retail page menu is open (set by the worker after each field): Circle is then the right mouse button (back).
 static MENU: AtomicBool = AtomicBool::new(false);
+/// The gamepad's own button bits (the PS2 bits, after `map_xinput`), for the paths that need the pad alone and not the
+/// keyboard's bits mixed in: the movie and scene skips (retail/input.rs) look for the Start bit here.
+static PAD_BUTTONS: AtomicU16 = AtomicU16::new(0);
 
 /// Reserved RAM for the substituted strings (see decomp/notes/button_prompts.md for the proof that retail never writes it):
 /// `SLOTS` slots of `SLOT` bytes.
@@ -104,7 +107,7 @@ pub struct Ctx {
 }
 
 /// The binding function (`binds::CROSS` ..) of a button glyph code (Cross .. R2); None for the sticks and other bytes.
-fn bound_function(code: u8) -> Option<usize> {
+pub(crate) fn bound_function(code: u8) -> Option<usize> {
 	use super::binds as b;
 	Some(match code {
 		CROSS => b::CROSS,
@@ -115,6 +118,8 @@ fn bound_function(code: u8) -> Option<usize> {
 		R1 => b::R1,
 		L2 => b::L2,
 		R2 => b::R2,
+		LSTICK => b::L3,
+		RSTICK => b::R3,
 		_ => return None,
 	})
 }
@@ -452,7 +457,7 @@ pub(crate) fn real_pads_off() -> bool {
 
 /// Start of the run (Retail::load): says which pad is there (the device stays the keyboard until the pad is used).
 pub fn init() {
-	if super::pcext::enabled() && !real_pads_off() && (xinput::connected() | super::pspad::connected()) {
+	if super::pcext::enabled() && !real_pads_off() && (xinput::connected() | super::lxpad::connected()) {
 		eprintln!("retail: prompts: gamepad found, keyboard prompts until it is used");
 	}
 }
@@ -743,13 +748,13 @@ pub fn pad_activity(prev: &PadState, now: &PadState) -> bool {
 	now.buttons & !prev.buttons != 0 || (0..4).any(|i| now.sticks[i] != 0x80 && (prev.sticks[i] == 0x80 || (now.sticks[i] as i32 - prev.sticks[i] as i32).abs() > 24))
 }
 
-/// Every connected pad as one: the XInput controller and the PlayStation controller (pspad.rs), merged as `merge` does; also
+/// Every connected pad as one: the XInput controller and the PlayStation controller (lxpad.rs), merged as `merge` does; also
 /// the physical buttons pressed on either (`binds::PHYS` masks, for the Controls page's "press a button").
 fn pad_read() -> Option<(PadState, u32)> {
 	if real_pads_off() {
 		return None;
 	}
-	let (xr, pr) = (xinput::raw(), super::pspad::state());
+	let (xr, pr) = (xinput::raw(), super::lxpad::state());
 	if xr.is_none() && pr.is_none() {
 		return None;
 	}
@@ -767,6 +772,12 @@ fn pad_read() -> Option<(PadState, u32)> {
 
 fn pad_state() -> Option<PadState> {
 	pad_read().map(|(p, _)| p)
+}
+
+/// The gamepad's own button bits (the PS2 bits): the paths that need the pad alone, not the keyboard's bits mixed in, ask
+/// for the Start bit here.
+pub fn pad_buttons() -> u16 {
+	PAD_BUTTONS.load(Ordering::Relaxed)
 }
 
 /// The physical buttons of `pad_read` at the last two `poll_pad` calls (one per field).
@@ -795,7 +806,11 @@ pub fn poll_pad(buttons: &mut u16, sticks: &mut [u8; 4]) {
 	let pr = pad_read();
 	PHYS_PREV.store(PHYS_NOW.load(Ordering::Relaxed), Ordering::Relaxed);
 	PHYS_NOW.store(pr.map_or(0, |r| r.1), Ordering::Relaxed);
-	let Some((mut p, _)) = pr else { return };
+	let Some((mut p, _)) = pr else {
+		// No pad: the skip paths must not see a Start that is no longer there.
+		PAD_BUTTONS.store(0, Ordering::Relaxed);
+		return;
+	};
 	static PREV: Mutex<PadState> = Mutex::new(PadState::IDLE);
 	if let Ok(mut prev) = PREV.lock() {
 		if pad_activity(&prev, &p) {
@@ -812,6 +827,8 @@ pub fn poll_pad(buttons: &mut u16, sticks: &mut [u8; 4]) {
 	if aim {
 		p.buttons &= !2;
 	}
+	// The gamepad's own buttons, for the skip paths (`pad_buttons`).
+	PAD_BUTTONS.store(p.buttons, Ordering::Relaxed);
 	(*buttons, *sticks) = merge((*buttons, *sticks), &p);
 }
 

@@ -50,6 +50,8 @@ mod tests {
 		let t = &tex[keys.iter().next().unwrap()];
 		let rgb: Vec<u8> = t.rgba.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
 		let png = crate::render::png(&crate::render::Image { w: t.w, h: t.h, rgb });
-		std::fs::write(concat!(env!("CARGO_MANIFEST_DIR"), "/target/test_out/wrench_tex.png"), png).unwrap();
+		let out = concat!(env!("CARGO_MANIFEST_DIR"), "/target/test_out");
+		std::fs::create_dir_all(out).unwrap();
+		std::fs::write(format!("{out}/wrench_tex.png"), png).unwrap();
 	}
 }

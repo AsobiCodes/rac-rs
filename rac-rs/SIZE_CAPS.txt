@@ -6,10 +6,10 @@
 # Paths are relative to the project folder (rac-rs's parent).
 file oracle/src/snd989/handler.rs 1679
 file rac-rs/src/anim.rs 2384
-file rac-rs/src/frontend.rs 2139
+file rac-rs/src/frontend.rs 2089
 file rac-rs/src/retail/gscap/draw/gpu.rs 1636
 file rac-rs/src/retail/modcam.rs 1800
-file rac-rs/src/retail/pcext.rs 1679
+file rac-rs/src/retail/pcext.rs 1619
 file rac-rs/src/sound.rs 1668
 file rac-rs/src/viewer.rs 1875
 file rac-rs/src/viewer/app.rs 1703
@@ -18,7 +18,7 @@ file rac-rs/src/viewer/waterfx/shader.rs 1780
 fn oracle/src/cpu.rs exec_body 156
 fn oracle/src/gate.rs run 205
 fn oracle/src/gs/draw.rs pixel 151
-fn oracle/src/hle.rs rpc_reply 176
+fn oracle/src/hle.rs rpc_reply 175
 fn oracle/src/mc.rs mc_rpc 177
 fn oracle/src/snd989/handler.rs exec 219
 fn oracle/src/vu.rs vu0_exec_interp 155
@@ -54,13 +54,13 @@ fn rac-rs/src/viewer/handler/frame_audio.rs frame_audio_anim 171
 fn rac-rs/src/viewer/handler/frame_audio.rs frame_audio_music 153
 fn rac-rs/src/viewer/handler/frame_hero.rs frame_hero 390
 fn rac-rs/src/viewer/handler/frame_hero.rs frame_hero_scene 185
-fn rac-rs/src/viewer/handler/frame_hud.rs frame_hud_draw 293
+fn rac-rs/src/viewer/handler/frame_hud.rs frame_hud_draw 292
 fn rac-rs/src/viewer/handler/frame_post.rs frame_sound_events 187
 fn rac-rs/src/viewer/handler/frame_render.rs frame_render 236
 fn rac-rs/src/viewer/handler/frame_ticks.rs frame_ticks 154
 fn rac-rs/src/viewer/handler/frame_upload.rs frame_upload 232
 fn rac-rs/src/viewer/hud.rs hud 201
-fn rac-rs/src/viewer/hudart.rs hud_art 170
+fn rac-rs/src/viewer/hudart.rs hud_art 153
 fn rac-rs/src/viewer/startup.rs new_app 213
 fn rac-rs/src/viewer/vegfx.rs plan_cpu 318
 fn rac-rs/src/viewer/waterfx/passes.rs positions 191

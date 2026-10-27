@@ -60,13 +60,13 @@ const ROWS: usize = 7;
 pub(super) const TABLE_RECS: usize = ROWS + 1;
 /// The Graphics page's selector byte and its HUD row's byte (0 Sharp, 1 Original).
 const G_SEL: u32 = CBASE + 0x10;
-const HUDB: u32 = CBASE + 0x11;
+pub(super) const HUDB: u32 = CBASE + 0x11;
 /// The Graphics page's Preset row byte: 0 Low, 1 Medium, 2 High, 3 Custom (`pcext/presets.rs` chooses and detects).
 pub(super) const PRESETB: u32 = CBASE + 0x14;
 /// The Graphics page's Renderer row byte (0 Vulkan, 1 DirectX 12; pcrender.rs).
-const RENDB: u32 = CBASE + 0x13;
+pub(super) const RENDB: u32 = CBASE + 0x13;
 /// The Graphics page's Skip intro row byte (0 Off, 1 On; pcintro.rs). Stays 0 with the default `intro=play`.
-const INTROB: u32 = CBASE + 0x15;
+pub(super) const INTROB: u32 = CBASE + 0x15;
 /// The Debug section's row byte (0 Off, 1 On); set from `devtools::menu` when the page is built.
 pub const DBGB: u32 = CBASE + 0x12;
 /// Set by `build_gfx` / `build_page`: that page is in RAM, so `field` / `sync` may read and write its bytes.
@@ -99,6 +99,11 @@ const ID_SELG: u32 = 0x7f75;
 const ID_HUD: u32 = 0x7f76;
 const ID_SHARP: u32 = 0x7f77;
 const ID_ORIGINAL: u32 = 0x7f78;
+/// The Button glyphs row: its label and its three values. Ids 0x7f68..0x7f6b are free in the pool range.
+const ID_GLYPHS: u32 = 0x7f68;
+const ID_PLAYSTATION: u32 = 0x7f69;
+const ID_XBOX: u32 = 0x7f6a;
+const ID_SWITCH: u32 = 0x7f6b;
 /// The Renderer row: its label and its two values (pcrender.rs words them: a value that differs from the running API says restart).
 const ID_RENDERER: u32 = 0x7f79;
 const ID_VULKAN: u32 = 0x7f7a;
@@ -125,17 +130,24 @@ const SEC_DEBUG: usize = 9;
 const NDKEYS: usize = 5;
 const NGSEC: usize = 4;
 /// The HUD row, the Renderer row and the Preset row in `GSECS` (the 15 rows of `pcext::ROWS` are 0..=14).
-const HUD_ROW: usize = 15;
-const RENDER_ROW: usize = 16;
-const PRESET_ROW: usize = 17;
-/// The Skip intro row, alone in the System section (the other three are full at six rows).
-const INTRO_ROW: usize = 18;
+pub(super) const HUD_ROW: usize = 15;
+pub(super) const RENDER_ROW: usize = 16;
+pub(super) const PRESET_ROW: usize = 17;
+/// The Skip intro row and the Button glyphs row in the System section (the other three sections are full at six rows).
+pub(super) const INTRO_ROW: usize = 18;
+pub(super) const GLYPH_ROW: usize = 19;
 /// The Graphics sections as indices of `pcext::ROWS` (0 Lighting, 1 Ambient occlusion, 2 Dynamic shadows, 3 Display mode, 4 Water,
 /// 5 Particles, 6 Sun rays, 7 Frame smoothing, 8 Vegetation, 9 Culling, 10 Global illumination, 11 Waves, 12 Draw distance, 13 Volumetric fog, 14 Volumetric clouds).
 /// Picture: Preset, Lighting, Ambient occlusion, Dynamic shadows, Global illumination, Sun rays. Effects: Water, Waves, Particles,
 /// Vegetation, Volumetric fog, Volumetric clouds. Screen: Display mode, Frame smoothing, Draw distance, Culling, Renderer, HUD. Each section is at most six rows (the
 /// panel holds the stepper and six).
-const GSECS: [&[usize]; NGSEC] = [&[PRESET_ROW, 0, 1, 2, 10, 6], &[4, 11, 5, 8, 13, 14], &[3, 7, 12, 9, RENDER_ROW, HUD_ROW], &[INTRO_ROW]];
+/// The Screen section. The Renderer row (Vulkan / DirectX 12) is Windows only: a Linux build has no DirectX 12 backend, so the
+/// row is not offered there (a `renderer=dx12` line left in a shared options file is ignored, viewer/gpu/renderer.rs).
+#[cfg(windows)]
+const GSCREEN: &[usize] = &[3, 7, 12, 9, RENDER_ROW, HUD_ROW];
+#[cfg(not(windows))]
+const GSCREEN: &[usize] = &[3, 7, 12, 9, HUD_ROW];
+const GSECS: [&[usize]; NGSEC] = [&[PRESET_ROW, 0, 1, 2, 10, 6], &[4, 11, 5, 8, 13, 14], GSCREEN, &[INTRO_ROW, GLYPH_ROW]];
 
 /// What a row does in a Controls section.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -222,6 +234,11 @@ static HUD: T5 = [b"HUD", b"HUD", b"HUD", b"HUD", b"HUD"];
 static SHARP: T5 = [b"Sharp", b"Net", b"Scharf", b"N\x94tido", b"Nitido"];
 static RENDERER: T5 = [b"Renderer", b"Rendu", b"Renderer", b"Motor gr\x84fico", b"Renderer"];
 static INTRO: T5 = [b"Skip intro", b"Passer intro", b"Intro \xa7berspringen", b"Saltar intro", b"Salta intro"];
+/// The Button glyphs row: its label and its three styles.
+static GLYPHS: T5 = [b"Button glyphs", b"Touches de manette", b"Tastensymbole", b"Botones del mando", b"Tasti del gamepad"];
+static PLAYSTATION: T5 = [b"PlayStation", b"PlayStation", b"PlayStation", b"PlayStation", b"PlayStation"];
+static XBOX: T5 = [b"Xbox", b"Xbox", b"Xbox", b"Xbox", b"Xbox"];
+static SWITCH: T5 = [b"Switch", b"Switch", b"Switch", b"Switch", b"Switch"];
 static PRESET: T5 = [b"Preset", b"Pr\x8cr\x8cglage", b"Voreinst.", b"Preajuste", b"Preset"];
 static CUSTOM: T5 = [b"Custom", b"Perso.", b"Eigene", b"Personal", b"Person."];
 static ORIGINAL: T5 = [b"Original", b"Original", b"Original", b"Original", b"Originale"];
@@ -280,6 +297,10 @@ pub fn text(id: u32, lang: usize, csec: usize, gsec: usize, playstation: bool) -
 		ID_HUD => fixed(&HUD),
 		ID_SHARP => fixed(&SHARP),
 		ID_ORIGINAL => fixed(&ORIGINAL),
+		ID_GLYPHS => fixed(&GLYPHS),
+		ID_PLAYSTATION => fixed(&PLAYSTATION),
+		ID_XBOX => fixed(&XBOX),
+		ID_SWITCH => fixed(&SWITCH),
 		ID_PRESET => fixed(&PRESET),
 		ID_CUSTOM => fixed(&CUSTOM),
 		ID_RENDERER => fixed(&RENDERER),
@@ -309,11 +330,27 @@ pub fn text(id: u32, lang: usize, csec: usize, gsec: usize, playstation: bool) -
 	}
 }
 
+/// The fixed texts the title Graphics page shows (its mirror draws the page itself; the pause page's lookup goes through the
+/// game's text hook instead): the stepper's label and the rows and values that are not `pcext`'s own ids.
+pub fn fixed_texts(lang: usize) -> impl Iterator<Item = (u32, String)> {
+	let l = lang.min(4);
+	[ID_PAGE, ID_HUD, ID_SHARP, ID_ORIGINAL, ID_PRESET, ID_CUSTOM, ID_INTRO, ID_GLYPHS, ID_PLAYSTATION, ID_XBOX, ID_SWITCH]
+		.into_iter()
+		.map(move |id| (id, text(id, l, 0, 0, false).iter().map(|&b| b as char).collect()))
+}
+
+/// The same, into the front end's text map (one call from the mirror's frame).
+pub fn put_fixed_texts(text: &mut crate::frontend::Text, lang: usize) {
+	for (id, s) in fixed_texts(lang) {
+		text.insert(id, s);
+	}
+}
+
 /// The text lookup hand for the pages' ids (`pcext::text_hook`, 0x7f40..0x7f7f): the string goes into the id's pool slot and its
 /// address into v0, in the game's language `lang`.
 pub fn text_hook(c: &mut Cpu, id: u32, lang: usize) -> bool {
 	let (csec, gsec) = state(|st| (st.ctl.sec, st.gfx.sec));
-	let s = text(id, lang, csec, gsec, !super::prompts::real_pads_off() && super::pspad::connected());
+	let s = text(id, lang, csec, gsec, !super::prompts::real_pads_off() && super::lxpad::connected());
 	let at = if (ID_DBG0..ID_DBG_END).contains(&id) { DBG_POOL + SLOT * (id - ID_DBG0) } else { POOL + SLOT * (id - ID0) };
 	let n = s.len().min(SLOT as usize - 1);
 	for (i, b) in s[..n].iter().enumerate() {
@@ -360,18 +397,46 @@ fn table(sec: usize) -> Vec<u32> {
 	t
 }
 
-/// The Graphics row table of section `sec`: the stepper, then the section's rows of `rows` (`pcext::ROWS`), the HUD, Renderer and
-/// Preset rows. `custom`: the Preset row has its 4th choice "Custom" (the state is Custom).
+/// One of the extra Graphics rows (not in `pcext::ROWS`): label id, byte, up to four value texts (0 = no such value). The pause
+/// page and the title's copy both come from here, so the two cannot drift apart. `custom`: the Preset row's 4th choice.
+fn gfx_row_def(i: usize, custom: bool) -> [u32; 6] {
+	match i {
+		HUD_ROW => [ID_HUD, HUDB, ID_SHARP, ID_ORIGINAL, 0, 0],
+		RENDER_ROW => [ID_RENDERER, RENDB, ID_VULKAN, ID_DX12, 0, 0],
+		INTRO_ROW => [ID_INTRO, INTROB, ID_OFF, ID_ON, 0, 0],
+		PRESET_ROW => [ID_PRESET, PRESETB, ID_LOW, ID_MEDIUM, ID_HIGH, if custom { ID_CUSTOM } else { 0 }],
+		GLYPH_ROW => [ID_GLYPHS, super::pcext::GLYPHS, ID_PLAYSTATION, ID_XBOX, ID_SWITCH, 0],
+		_ => [0; 6],
+	}
+}
+
+/// A Graphics row by its index in `GSECS`: label id, byte, up to four value texts. The title's copy uses this too.
+pub(super) fn gfx_row(i: usize, custom: bool) -> [u32; 6] {
+	if i < super::pcext::ROWS.len() {
+		super::pcext::ROWS[i]
+	} else {
+		gfx_row_def(i, custom)
+	}
+}
+
+/// The Graphics page's sections (the pause page and the title's copy): how many, and the rows of one.
+pub(super) fn gfx_sections() -> usize {
+	NGSEC
+}
+pub(super) fn gfx_section(sec: usize) -> &'static [usize] {
+	GSECS[sec.min(NGSEC - 1)]
+}
+/// The section's name in `lang` (the stepper's own text).
+pub(super) fn gfx_section_name(lang: usize, sec: usize) -> &'static [u8] {
+	GSECTIONS[sec.min(NGSEC - 1)][lang.min(4)]
+}
+
+/// The Graphics row table of section `sec`: the stepper, then the section's rows of `rows` (`pcext::ROWS`) and the HUD, Renderer,
+/// Preset, Skip intro and Button glyphs rows. `custom`: the Preset row has its 4th choice "Custom" (the state is Custom).
 fn gfx_table(rows: &[[u32; 6]], sec: usize, custom: bool) -> Vec<u32> {
 	let mut t = vec![ID_PAGE, G_SEL, ID_SELG, ID_SELG, 0, 0];
 	for &i in GSECS[sec.min(NGSEC - 1)] {
-		t.extend(match i {
-			HUD_ROW => [ID_HUD, HUDB, ID_SHARP, ID_ORIGINAL, 0, 0],
-			RENDER_ROW => [ID_RENDERER, RENDB, ID_VULKAN, ID_DX12, 0, 0],
-			INTRO_ROW => [ID_INTRO, INTROB, ID_OFF, ID_ON, 0, 0],
-			PRESET_ROW => [ID_PRESET, PRESETB, ID_LOW, ID_MEDIUM, ID_HIGH, if custom { ID_CUSTOM } else { 0 }],
-			_ => rows[i],
-		});
+		t.extend(if i < rows.len() { rows[i] } else { gfx_row_def(i, custom) });
 	}
 	t
 }
@@ -841,12 +906,27 @@ mod tests {
 		assert!((5..8).all(|s| rows(s).iter().all(|t| matches!(t, Target::Func(Cap::Pad(_))))));
 	}
 
-	/// Every Graphics row (the 13 of pcext's `ROWS`, the HUD, Renderer and Preset rows) is on exactly one page of at most six rows.
+	/// Every Graphics row's byte is its own: two rows that share one turn a change on one row into a change on the other (the
+	/// Button glyphs row once sat on Volumetric fog's byte, so moving one moved the other and the fog's 4th value showed as
+	/// a Button glyphs choice).
+	#[test]
+	fn the_graphics_rows_have_distinct_bytes() {
+		let mut v: Vec<u32> = super::super::pcext::GROWS.to_vec();
+		v.extend([HUDB, RENDB, PRESETB, INTROB, super::super::pcext::GLYPHS]);
+		let n = v.len();
+		v.sort_unstable();
+		v.dedup();
+		assert_eq!(v.len(), n, "two Graphics rows share a byte ({v:?})");
+	}
+
+	/// Every Graphics row (the 15 of pcext's `ROWS`, the HUD, Renderer, Preset, Skip intro and Button glyphs rows) is on exactly
+	/// one page of at most six rows.
 	#[test]
 	fn graphics_sections_cover_the_rows() {
 		let mut all: Vec<usize> = GSECS.iter().flat_map(|s| s.iter().copied()).collect();
 		all.sort();
-		assert_eq!(all, (0..=INTRO_ROW).collect::<Vec<_>>());
+		let want: Vec<usize> = (0..=GLYPH_ROW).filter(|&r| cfg!(windows) || r != RENDER_ROW).collect();
+		assert_eq!(all, want);
 		assert!(GSECS.iter().all(|s| (1..=ROWS - 1).contains(&s.len())));
 		let rows = fake_rows();
 		for sec in 0..NGSEC {
@@ -862,9 +942,29 @@ mod tests {
 		assert_eq!(&gfx_table(&rows, 1, false)[6..12], &rows[4], "Effects starts with Water");
 		let s = gfx_table(&rows, 2, false);
 		assert_eq!(&s[s.len() - 6..], &[ID_HUD, HUDB, ID_SHARP, ID_ORIGINAL, 0, 0], "HUD closes the Screen page");
-		assert_eq!(&s[s.len() - 12..s.len() - 6], &[ID_RENDERER, RENDB, ID_VULKAN, ID_DX12, 0, 0]);
+		#[cfg(windows)]
+		assert_eq!(&s[s.len() - 12..s.len() - 6], &[ID_RENDERER, RENDB, ID_VULKAN, ID_DX12, 0, 0], "the Renderer row sits before the HUD");
 		let sys = gfx_table(&rows, 3, false);
-		assert_eq!(&sys[6..], &[ID_INTRO, INTROB, ID_OFF, ID_ON, 0, 0], "System holds the Skip intro row, Off / On");
+		assert_eq!(
+			&sys[6..],
+			&[ID_INTRO, INTROB, ID_OFF, ID_ON, 0, 0, ID_GLYPHS, super::super::pcext::GLYPHS, ID_PLAYSTATION, ID_XBOX, ID_SWITCH, 0],
+			"System holds the Skip intro row and the Button glyphs row"
+		);
+	}
+
+	/// The title's Graphics page shows the same words as the pause page: its texts come from this map (the pause page's from the
+	/// game's text hook), so a missing row would draw blank there.
+	#[test]
+	fn the_fixed_texts_name_the_graphics_rows() {
+		let t: std::collections::HashMap<u32, String> = fixed_texts(0).collect();
+		assert_eq!(t.get(&ID_PAGE).map(String::as_str), Some("Page"));
+		assert_eq!(t.get(&ID_PRESET).map(String::as_str), Some("Preset"));
+		assert_eq!(t.get(&ID_CUSTOM).map(String::as_str), Some("Custom"));
+		assert_eq!(t.get(&ID_INTRO).map(String::as_str), Some("Skip intro"));
+		assert_eq!(t.get(&ID_GLYPHS).map(String::as_str), Some("Button glyphs"));
+		assert_eq!(t.get(&ID_XBOX).map(String::as_str), Some("Xbox"));
+		assert_eq!(t.get(&ID_SHARP).map(String::as_str), Some("Sharp"));
+		assert_eq!(t.get(&ID_ORIGINAL).map(String::as_str), Some("Original"));
 	}
 
 	/// The Graphics table is rewritten for the section; a shorter section leaves no stale record behind its zero record.

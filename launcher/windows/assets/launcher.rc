@@ -1,0 +1,17 @@
+#include <winuser.h>
+1 ICON "rac-rs.ico"
+1 RT_MANIFEST "launcher.manifest"
+1 VERSIONINFO
+FILEVERSION 0,1,0,0
+PRODUCTVERSION 0,1,0,0
+{
+  BLOCK "StringFileInfo" { BLOCK "040904b0" {
+    VALUE "FileDescription", "RAC-RS Launcher"
+    VALUE "ProductName", "RAC-RS"
+    VALUE "CompanyName", "AsobiCodes"
+    VALUE "FileVersion", "0.1.0"
+    VALUE "OriginalFilename", "RAC-RS Launcher.exe"
+    VALUE "LegalCopyright", "GPL-3.0-or-later"
+  } }
+  BLOCK "VarFileInfo" { VALUE "Translation", 0x409, 1200 }
+}

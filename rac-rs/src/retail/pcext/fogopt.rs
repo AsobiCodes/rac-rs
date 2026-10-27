@@ -10,8 +10,6 @@ use std::sync::atomic::AtomicU8;
 
 /// Graphics -> Fog (the row byte, see above). A new player has High (like the other effect rows), which shows with Lighting Enhanced.
 pub const FOG: u32 = BASE + 21;
-/// The rows of the title's Graphics page (`ROWS` has one more: Fog, pause page only).
-pub(super) const TITLE_ROWS: usize = 13;
 
 /// The level the Fog row asks for (0 Classic .. 3 High), as last applied.
 static FOG_Q: AtomicU8 = AtomicU8::new(3);
@@ -56,7 +54,7 @@ mod tests {
 	fn the_fog_row_is_the_last_one() {
 		assert_eq!(GROWS[13], FOG);
 		assert_eq!(ROWS[13], [ID_FOG, FOG, ID_CLASSIC, ID_HIGH, ID_MEDIUM, ID_LOW]);
-		assert_eq!((row_values(13), ROWS.len(), TITLE_ROWS), (4, 15, 13));
+		assert_eq!((row_values(13), ROWS.len()), (4, 15));
 		assert_eq!(DEFAULT_ROWS[13], 1, "a new player: High");
 		assert_eq!([0u8, 1, 2, 3].map(|b| name(swap_level(b))), ["classic", "high", "medium", "low"]);
 		// The word does not hold Fog: the other 13 rows are what they were.

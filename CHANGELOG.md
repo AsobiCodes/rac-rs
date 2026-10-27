@@ -1,5 +1,81 @@
 # Changelog
 
+## Linux fork v0.4.0
+
+This fork carries rac-rs v0.4.0 over to Linux. The game itself is unchanged: it
+is still the original PS2 code, recompiled from your own disc and run on a PS2
+CPU core written in Rust. What is new here is the platform, the extras this fork
+had, and the parts of v0.4.0 that needed a Linux version.
+
+### Added
+
+- **A native Linux build.** `setup.sh` and `play.sh` replace the Windows
+  `Setup.cmd` and `setup.ps1`; your system Rust and Python are used as they are.
+  The Docker build, `install-desktop-entry.sh` and `clean.sh` are here too.
+- **Gamepad support.** Xbox-style and PlayStation controllers are read as evdev
+  devices, with full analog sticks and triggers, and a controller connected
+  while the game runs is picked up without a restart.
+- **Xbox and Switch button glyphs.** The prompts can show the buttons as
+  pictures instead of the retail's PlayStation shapes. The style is a row on
+  both Graphics pages (pause: System; title: the same page), and Xbox is the
+  default. The PlayStation style puts the retail's own shapes back.
+- **The prompts follow your rebindings and your hands.** A rebound button is
+  shown as the button it is really played with, and the prompts switch between
+  key names and pad buttons by themselves as you use each.
+- **Skip intro.** A row on Options > Graphics > System, on the title screen or
+  in the game. Start, Escape and Space also end the logo movies.
+- **Save dates.** The emulated console now has a clock: saves take your PC's
+  local time, on the memory card too, and the Load Game screen shows it as
+  day/month/year.
+- **The remembered language.** The game starts in the language you picked, and
+  the Language page lists German and Spanish in the game's own order.
+- **The title's Graphics page has the in-game page's sections and rows**, the
+  Preset row, HUD, Skip intro and Button glyphs included, and a change made in
+  one place shows in the other.
+- **Texture packs.** PCSX2 texture packs can be switched on in the Mods page.
+- **An optional launcher (work in progress).** `launcher/` is a Linux version of
+  AsobiCodes' RAC-RS Launcher: install and Repair from a source folder and your
+  disc, with the setup progress in the window; Play; the game's options and
+  profiles; texture-pack import from a `.zip`, a folder or PCSX2; manual
+  backups; the saves and log folders; and application-menu entries. Start it
+  with `./launcher.sh` (it builds the first time) or `launcher/build.sh`. It
+  never downloads updates; new versions are a new download or `git pull`, then
+  Repair / rebuild. Script mods wait for a Linux OmniLoader.
+- **A crash log** in `player/crash.log`, with the run log in `player/log.txt`.
+
+### Changed
+
+- **The game is now upstream's v0.4.0.** Graphics gained volumetric fog, 3D
+  clouds, shining stars, tides, Enhanced water on Kalebo III, smoother texture
+  detail and more vegetation, plus a Graphics Preset row. Culling Off draws
+  past the draw distance; debug mode has F10's split view and F11's HUD toggle.
+  Strafe-aiming feels like Ratchet & Clank 2, there is a Mouse speed row, and
+  the Modern camera turns with the stick. Upstream's own changelog is below.
+- **Vulkan is the only renderer.** DirectX 12 is a Windows thing, so the
+  Renderer row is not shown here.
+- **Script and native mods need an OmniLoader library built for Linux.** The
+  upstream loader is a Windows DLL and its source is not published, so the
+  Mods page hides those rows and the game plays exactly as before. Texture
+  packs work. Arsenal Mastery stays in the mods folder, switched off.
+- **The Windows-only v0.4.0 files are kept under `windows/`** for reference;
+  nothing there is built or run here.
+- **`install-desktop-launcher.sh` is now `install-desktop-entry.sh`** (the game's
+  menu entry); the launcher has its own `launcher/install-desktop-entry.sh`.
+
+### Fixed
+
+- **A controller rebind no longer freezes the pause menu.** The font strip is
+  repatched without the GPU capture that v0.4.0 builds inside a GS job.
+- **Returning from a level no longer resets the title Graphics rows to Low.**
+  The pause magic survived the level change, and the pause page's own sync ran
+  over the title page's rows.
+- **The title Graphics page shows the real fog and cloud levels.** It read the
+  shared block without them, so a preset looked like Classic or Custom.
+- **The Button glyphs value no longer shares its byte with fog.** It changed
+  the fog too, and a fourth value showed up that read a text id.
+- **The intro skip keys work again**, and the title page's Preset row applies
+  when you press it, not when you move onto it.
+
 ## v0.4.0
 
 - Updating from v0.3.1 takes about 2 to 10 minutes (only the parts that changed are rebuilt). Your saves and settings are kept.

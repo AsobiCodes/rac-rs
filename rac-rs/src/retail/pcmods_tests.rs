@@ -547,3 +547,22 @@ fn the_pause_note_is_blank_without_packs_and_names_the_planet_with_them() {
 	test_open(&mut mem, &root);
 	assert_eq!(state(|st| text(ID_NOTE_L, 0, st)), NOTE[0].to_vec());
 }
+
+	/// Without a mod loader the script / native mods are left out (they cannot run); texture packs stay. With a loader both are
+	/// there, and the mods folder keeps everything either way.
+	#[test]
+	fn the_script_mods_wait_for_the_loader() {
+		let d = dir("loader");
+		add_script(&d, "am", "arsenal_mastery", "Arsenal Mastery", AM_SETTINGS);
+		add_mod(&d, "pack", "A Pack", "textures");
+		test_root(Some(&d));
+		test_loader(false);
+		let s = read_store().expect("the store");
+		assert!(scripts(&s).is_empty(), "no script mods without a loader");
+		assert_eq!(packs(&s).len(), 1, "the texture pack stays");
+		test_loader(true);
+		let s = read_store().expect("the store");
+		assert_eq!((scripts(&s).len(), packs(&s).len()), (1, 1), "with a loader both are offered");
+		test_loader(true);
+		test_root(None);
+	}

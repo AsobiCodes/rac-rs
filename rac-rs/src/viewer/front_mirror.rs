@@ -41,6 +41,18 @@ fn page_of(m: Option<&MenuSnap>) -> Option<frontend::Page> {
 	})
 }
 
+/// The PC pages' texts (the Graphics row and page, the title Graphics page's rows/values and its stepper): they join the
+/// language's strings (the front end's text map) when the page first shows and are refreshed while it is drawn.
+fn pc_page_texts(text: &mut frontend::Text, lang: usize) {
+	if text.get(crate::retail::pcext::ID_GRAPHICS).is_empty() {
+		for (id, s) in crate::retail::pcext::texts(lang) {
+			text.insert(id, s);
+		}
+	}
+	crate::retail::pcctl::put_fixed_texts(text, lang);
+	crate::retail::pcext::put_title_gfx_texts(text, lang);
+}
+
 /// The selected row of the page from retail's current item and that item's own cursor.
 fn sel_of(m: &MenuSnap, page: frontend::Page, slot_cur: [u32; 2]) -> usize {
 	let cur = m.items.iter().find(|i| i.addr == m.cur);
@@ -65,6 +77,20 @@ fn sel_of(m: &MenuSnap, page: frontend::Page, slot_cur: [u32; 2]) -> usize {
 		frontend::Page::Overwrite => (slot_cur[1] as usize).min(crate::save::SLOTS - 1),
 		_ => cur.map_or(0, cursor),
 	}
+}
+
+/// The Language page's five languages, in the order the game lists them: the page's list item holds the text id of each
+/// language, and the game's cursor counts the rows in that order. The disc's ids (`LANGUAGES + 0..4`) are in the game's own
+/// order, which puts German and Spanish the other way round than the console's list the game follows, so the rows the player
+/// sees have to be the game's own. Empty when the page has no such item.
+fn language_rows(items: &[crate::retail::mouse_menu::Item]) -> Vec<u32> {
+	const FIRST: u16 = 0x4f2c;
+	const LAST: u16 = 0x4f30;
+	items
+		.iter()
+		.find(|i| !i.texts.is_empty() && i.texts.iter().all(|&t| (FIRST..=LAST).contains(&t)))
+		.map(|i| i.texts.iter().map(|&t| t as u32).collect())
+		.unwrap_or_default()
 }
 
 /// Wall time of one redraw the front end may spend on back-to-back load-loop fields.
@@ -236,17 +262,10 @@ impl App {
 			}
 			fe.menu.lang = lang;
 		}
-		// The PC options' texts (the Graphics row and page) join the language's strings.
-		if fe.text.get(crate::retail::pcext::ID_GRAPHICS).is_empty() {
-			for (id, s) in crate::retail::pcext::texts(lang) {
-				fe.text.insert(id, s);
-			}
-		}
+		pc_page_texts(&mut fe.text, lang);
 		// The title's Mods page (retail/pcmods.rs): its texts follow the mods and settings, so they are refreshed while it is open.
 		if crate::retail::pcmods::title_open() || fe.text.get(crate::retail::pcmods::ID_MODS).is_empty() {
-			for (id, s) in crate::retail::pcmods::texts(lang) {
-				fe.text.insert(id, s);
-			}
+			for (id, s) in crate::retail::pcmods::texts(lang) { fe.text.insert(id, s); }
 		}
 		let slots: [Option<save::Summary>; save::SLOTS] = std::array::from_fn(|i| fr.slots.get(i).copied().flatten().map(|(level, bolts, play_frames, date)| save::Summary { level: level as usize, bolts, play_frames, date }));
 		match snap.as_ref().map(|m| (page_of(Some(m)), m)) {
@@ -256,6 +275,14 @@ impl App {
 				if page == frontend::Page::Options {
 					if let Some(it) = m.items.iter().find(|i| i.slot == 3 && !i.texts.is_empty()) {
 						fe.menu.front_rows = it.texts.iter().map(|&t| t as u32).collect();
+					}
+				}
+				// The Language page's five languages as the game lists them (its list item): the rows the player sees have to be in
+				// the order the game's cursor counts, or the name under the cursor is the wrong language.
+				if page == frontend::Page::Language {
+					let rows = language_rows(&m.items);
+					if !rows.is_empty() {
+						fe.menu.lang_rows = rows;
 					}
 				}
 				fe.menu.follow(page, sel_of(m, page, fr.slot_cur), slots)
@@ -353,5 +380,30 @@ impl App {
 			g.set_props(Some(&[]), &HashMap::new(), &HashMap::new(), &actors, &[], &[], &[], &[]);
 			g.set_particles(&[], &[], &[], &[], &self.cam, None);
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::retail::mouse_menu::Item;
+
+	fn item(texts: Vec<u16>) -> Item {
+		Item { addr: 1, slot: 3, rect: [0; 4], kind: Kind::Label { rows: Vec::new(), rowh: 0.0, cursor: 0 }, texts }
+	}
+
+	/// The Language page's rows are the game's own: the game lists the languages in the console's order (English, French,
+	/// Spanish, German, Italian) and the disc's ids are in the game's (English, French, German, Spanish, Italian), so the two
+	/// put German and Spanish the other way round. The rows follow the game, or the name under the cursor is the wrong
+	/// language.
+	#[test]
+	fn the_language_page_follows_the_games_own_order() {
+		// The game's list item: the five language ids in its own order.
+		let rows = language_rows(&[item(vec![0x4f2c, 0x4f2d, 0x4f30, 0x4f2e, 0x4f2f])]);
+		assert_eq!(rows, vec![0x4f2c, 0x4f2d, 0x4f30, 0x4f2e, 0x4f2f]);
+		// The page has no such item: the rows keep the disc's own order.
+		assert!(language_rows(&[]).is_empty());
+		assert!(language_rows(&[item(vec![])]).is_empty(), "an item without texts");
+		assert!(language_rows(&[item(vec![0x4f2b, 0x4f2c])]).is_empty(), "the Options row is not a language list");
 	}
 }

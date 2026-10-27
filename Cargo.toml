@@ -4,6 +4,8 @@
 # the developers) fits your build. setup.ps1 builds with this file; rac-rs\Cargo.toml is the game itself.
 [workspace]
 members = ["rac-rs", "rac-rs/exe"]
+# The launcher is its own cargo project (its own lockfile and dependency versions).
+exclude = ["launcher"]
 default-members = ["rac-rs", "rac-rs/exe"]
 resolver = "3"
 

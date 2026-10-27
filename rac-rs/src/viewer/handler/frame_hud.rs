@@ -96,6 +96,7 @@ impl App {
 		let Some(st) = f.st.take() else { return };
 		if let (Some(game), Some(w)) = (&mut self.game, &self.world) {
 			if let Some(g) = &mut self.gpu {
+				glyph_font_refresh(&mut self.art, g);
 				let p = &game.player;
 				hud(&mut g.hud, g.config.width as f32, g.config.height as f32, Some(st), &self.messages, self.flow.as_ref(), &self.art, self.settings.subtitles);
 				// NOV-28 (water.md): last frame's fog swap goes live, the camera zone fog updates, then the
@@ -134,9 +135,7 @@ impl App {
 						wheel(&mut g.hud, w, h, &self.art, font, &game.inv, &names, sel, self.wheel_fade.0, self.clock);
 					}
 				}
-				if self.save_icon > 0.0 {
-					save_icon(&mut g.hud, w, h, &self.art, self.clock);
-				}
+				if self.save_icon > 0.0 { save_icon(&mut g.hud, w, h, &self.art, self.clock); }
 				g.preview = None;
 				g.preview2 = None;
 				g.preview_pair = None;
@@ -381,6 +380,24 @@ g.preview_worn = None;
 				}
 				profile::lap(profile::Phase::Hud);
 			}
+		}
+	}
+}
+
+/// The button glyphs style or the bindings changed (the Graphics page's Button glyphs row, the Controls page): the pictures in
+/// the font sheet's ten button cells are the ones of the buttons the functions are played by now, so the sheet is written from
+/// the one decoded off the disc and goes up again (xglyphs.rs). Free on purpose: the frame already borrows the game, the world
+/// and the GPU separately.
+fn glyph_font_refresh(art: &mut crate::viewer::app_state::HudArt, g: &mut super::super::Gpu) {
+	let (style, map) = (crate::retail::xglyphs::style(), crate::retail::binds::pad_map());
+	if (style, map) == (art.glyph_style, art.glyph_map) {
+		return;
+	}
+	art.glyph_style = style;
+	art.glyph_map = map;
+	if let (Some(slot), Some(orig), Some(tex)) = (art.font.as_ref().map(|f| f.0), art.font_tex_orig.as_ref(), art.font_tex.as_mut()) {
+		if crate::retail::xglyphs::blit(orig, tex, style, &map) {
+			g.hud_texture(Some(slot), tex);
 		}
 	}
 }

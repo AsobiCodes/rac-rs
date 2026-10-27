@@ -57,6 +57,7 @@ mod layer;
 mod layout;
 pub(crate) mod live_settings;
 mod load;
+pub(crate) use load::loader_present;
 mod lock;
 mod mobys;
 pub(crate) mod modset;

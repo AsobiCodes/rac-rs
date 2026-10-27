@@ -42,7 +42,7 @@
 //! - `disc`, `disc_hands`, `disc_map`: which retail disc runs (PAL or USA) and what differs; the hand and address maps are generated
 //! - `hot`: [PC] the busy threads at above-normal priority, out of Windows power throttling
 //! - PC options and controls: `pcext` (options in the pause menu), `pcopts` (the options file), `pcctl` (Controls page), `binds` (button
-//!   remap), `prompts` (button prompts, gamepad), `pspad` (DualShock / DualSense over HID), `mouse_menu` and `menu_keys` (mouse and keys
+//!   remap), `prompts` (button prompts, gamepad), `lxpad` (gamepads over evdev, gilrs), `mouse_menu` and `menu_keys` (mouse and keys
 //!   in the menus), `vendor` ("buy all ammo")
 //! - PC extras: `modcam` (modern camera, RMB aim), `aim` (crosshair and aimed shots), `strafe` ("Controls: Modern" movement),
 //!   `shipmouse` (mouse steering in ship fights)
@@ -82,7 +82,8 @@ pub mod binds;
 pub mod pcctl;
 pub mod pcmods;
 pub mod prompts;
-pub mod pspad;
+pub mod lxpad;
+pub mod xglyphs;
 pub mod vendor;
 pub mod pcopts;
 pub mod pcintro;

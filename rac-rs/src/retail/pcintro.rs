@@ -43,5 +43,17 @@ mod tests {
 		let mut mem = ee_oracle::mem::Mem::new();
 		let mut o = PcOptions::default();
 		assert!(!sync(&mut mem, &mut o), "page not built yet");
+		// The page built (its fresh row byte comes from the file) and the player flips Skip intro to On: the change goes into
+		// the options file and the next boot cuts the logo movie.
+		super::super::pcctl::build_gfx(&mut mem, 0x1_0000, &[[0u32; 6]; 15], false, false);
+		mem.wr8(super::super::pcctl::INTROB, 1);
+		assert!(sync(&mut mem, &mut o), "the row changed");
+		assert_eq!(o.intro, Some(true));
+		assert!(skip());
+		// Flipping it back is saved too.
+		mem.wr8(super::super::pcctl::INTROB, 0);
+		assert!(sync(&mut mem, &mut o));
+		assert_eq!(o.intro, Some(false));
+		assert!(!skip());
 	}
 }

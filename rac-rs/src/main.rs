@@ -111,11 +111,11 @@ fn message_box(text: &str) {
 
 /// The install root: the first folder from the exe's folder upwards that holds `generated/play.cfg`. Err is the text for a message box.
 fn install_root() -> Result<std::path::PathBuf, String> {
-	let exe = std::env::current_exe().map_err(|e| format!("Cannot find the game folder ({e}). Run Setup.cmd first."))?;
+	let exe = std::env::current_exe().map_err(|e| format!("Cannot find the game folder ({e}). Run setup.sh first."))?;
 	exe.parent()
 		.and_then(|d| d.ancestors().find(|d| d.join("generated").join("play.cfg").is_file()))
 		.map(|d| d.to_path_buf())
-		.ok_or_else(|| "Run Setup.cmd first: the game has not been set up yet (generated/play.cfg not found).".to_string())
+		.ok_or_else(|| "Run setup.sh first: the game has not been set up yet (generated/play.cfg not found).".to_string())
 }
 
 /// [PC] The window title: "rac-rs v0.2.1" from the install root's `generated/built_version.txt` (setup.ps1 writes it after building
@@ -188,13 +188,19 @@ fn update_check() -> bool {
 	}
 }
 
-/// The no-argument start (what Play.cmd did): find the install root (the first folder from the exe's folder upwards that holds
-/// `generated/play.cfg`), read `iso=<path>` and optional `lang=en|fr|de|es|it` from it, set the environment Play.cmd set, rotate the
+/// The value for COLD_LANG: the play config's `lang=` when it names one the game knows, else None. None leaves the choice to
+/// the language remembered in the options file (the game's own menu saves it there) and to the default, English.
+fn cold_lang(play_cfg: Option<&str>) -> Option<String> {
+	play_cfg.filter(|l| ["en", "fr", "de", "es", "it"].contains(l)).map(str::to_string)
+}
+
+/// The no-argument start (what play.sh does): find the install root (the first folder from the exe's folder upwards that holds
+/// `generated/play.cfg`), read `iso=<path>` and optional `lang=en|fr|de|es|it` from it, set the environment, rotate the
 /// card safety copies and return the arguments of `view <iso> 0 --retail-cold --modern-cam`. Err is the text for a message box.
 /// Runs first thing in `main`, before any thread starts (`set_var` is only sound then).
 fn launch_args() -> Result<Vec<String>, String> {
 	let root = install_root()?;
-	let cfg = std::fs::read(root.join("generated").join("play.cfg")).map_err(|e| format!("Cannot read generated/play.cfg ({e}). Run Setup.cmd again."))?;
+	let cfg = std::fs::read(root.join("generated").join("play.cfg")).map_err(|e| format!("Cannot read generated/play.cfg ({e}). Run setup.sh again."))?;
 	let cfg = String::from_utf8_lossy(&cfg);
 	let (mut iso, mut lang) = (None, None);
 	for line in cfg.trim_start_matches('\u{feff}').lines() {
@@ -206,9 +212,9 @@ fn launch_args() -> Result<Vec<String>, String> {
 			}
 		}
 	}
-	let iso = iso.filter(|i| !i.is_empty()).ok_or("Run Setup.cmd again: generated/play.cfg has no disc image path.")?;
+	let iso = iso.filter(|i| !i.is_empty()).ok_or("Run setup.sh again: generated/play.cfg has no disc image path.")?;
 	if !std::path::Path::new(&iso).is_file() {
-		return Err(format!("Your disc image moved or is gone:\n{iso}\n\nRun Setup.cmd again."));
+		return Err(format!("Your disc image moved or is gone:\n{iso}\n\nRun setup.sh again."));
 	}
 	let player = root.join("player");
 	let _ = std::fs::create_dir_all(&player);
@@ -218,8 +224,12 @@ fn launch_args() -> Result<Vec<String>, String> {
 		std::env::set_var("ORACLE_STUBS", root.join("oracle").join("stubs.txt"));
 		std::env::set_var("RAC_PLAYER_DIR", &player);
 		if std::env::var_os("COLD_LANG").is_none() {
-			let lang = lang.filter(|l| ["en", "fr", "de", "es", "it"].contains(&l.as_str())).unwrap_or_else(|| "en".to_string());
-			std::env::set_var("COLD_LANG", lang);
+			// The play config's language, when it names one. Otherwise the game boots in the language it remembered in the
+			// options file (its own menu saves it there), and in English when it has none: setting it here as "en" would
+			// override the remembered language (upstream issue #11).
+			if let Some(l) = cold_lang(lang.as_deref()) {
+				std::env::set_var("COLD_LANG", l);
+			}
 		}
 	}
 	// Safety copies of the save card before each start (the newest two starts).
@@ -257,7 +267,7 @@ pub fn main() -> ExitCode {
 	if (args.is_empty() || args.iter().any(|a| a == "--retail-cold")) && update_check() {
 		return ExitCode::SUCCESS;
 	}
-	// Double-clicked (no arguments): start the game the way Play.cmd does, from generated/play.cfg written by setup.
+	// Double-clicked (no arguments): start the game the way play.sh does, from generated/play.cfg written by setup.
 	if args.is_empty() {
 		match launch_args() {
 			Ok(a) => args = a,
@@ -616,4 +626,19 @@ fn elf_section<'a>(elf: &'a [u8], name: &str) -> Option<&'a [u8]> {
 		}
 	}
 	None
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// The play config's language is used when it names one the game knows, and nothing is set when it does not: the game
+	/// then boots in the language it remembered in the options file, and in English when it has none (upstream issue #11).
+	#[test]
+	fn the_play_configs_language_is_only_used_when_it_names_one() {
+		assert_eq!(cold_lang(Some("de")), Some("de".to_string()));
+		assert_eq!(cold_lang(Some("en")), Some("en".to_string()));
+		assert_eq!(cold_lang(Some("xx")), None, "a language the game does not know");
+		assert_eq!(cold_lang(None), None, "the play config names no language");
+	}
 }

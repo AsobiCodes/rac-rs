@@ -154,10 +154,24 @@ pub(super) fn hud_art(l: &Level, disc: &mut iso::Disc) -> (Vec<Texture>, HudArt)
 	if let Some(&g) = a.glove.first() {
 		a.items.insert(crate::inventory::BOMB_GLOVE, g);
 	}
+	font_art(l, disc, &mut tex, &mut a);
+	(tex, a)
+}
+
+
+/// The level fonts (the HUD's own sheet and the shop's) and the retail's own prompts' sheet patch: the button glyphs style goes
+/// into the main sheet's ten button cells (xglyphs.rs), and the capture patch for the prompts is set.
+fn font_art(l: &Level, disc: &mut iso::Disc, tex: &mut Vec<Texture>, a: &mut HudArt) {
 	match art::font_glyph_tables(disc).and_then(|g| art::level_fonts(l, &g)) {
 		Ok(mut fonts) if !fonts.is_empty() => {
-			let f = fonts.remove(0);
+			let mut f = fonts.remove(0);
+			// The button glyphs style: the Xbox artwork goes into the sheet's ten button cells. The sheet as it was decoded
+			// is kept, so the style can be changed back (the PlayStation style takes the retail's own symbols out of it).
+			a.font_tex_orig = Some(f.tex.clone());
+			let map = crate::retail::binds::pad_map();
+			crate::retail::xglyphs::blit(a.font_tex_orig.as_ref().unwrap(), &mut f.tex, crate::retail::xglyphs::style(), &map);
 			a.font = Some((1 + tex.len(), f.glyphs));
+			a.font_tex = Some(f.tex.clone());
 			tex.push(f.tex);
 			// NOV-14.2b: font 3 (the last of the three level fonts).
 			if let Some(f3) = fonts.pop() {
@@ -172,7 +186,14 @@ pub(super) fn hud_art(l: &Level, disc: &mut iso::Disc) -> (Vec<Texture>, HudArt)
 		}
 		r => eprintln!("hud font: {:?}", r.err()),
 	}
-	(tex, a)
+	// The retail's own prompts (the in-game tutorial text, the Quick Select ring, the paged menus) are drawn out
+	// of the graphics memory, where the sheet is 8-bit indexed: the artwork goes into the sheet's ten button cells
+	// there too (the capture recognises the sheet's upload by its content).
+	if let Ok(g) = art::font_glyph_tables(disc) {
+		if let Some(p) = crate::retail::xglyphs::patch_for(l, &g) {
+			crate::retail::xglyphs::set_patch(p);
+		}
+	}
 }
 
 /// Hands the mods' draw pass (omni/draw_art.rs) this level's default font and icon slots; called right after `set_hud_art` uploads the slots.

@@ -49,15 +49,24 @@ The sound (SPU2), graphics (GS/VU) and CPU behaviour in this project was written
 
 psx-spx (Martin Korth / nocash) documents the SPU ADPCM and Gaussian interpolation tables. These are properties of the PlayStation hardware.
 
+## RAC-RS Launcher (launcher/)
+
+The optional launcher in `launcher/` started as **RAC-RS Launcher** by
+[AsobiCodes](https://github.com/AsobiCodes/rac-rs-launcher), licensed
+GPL-3.0-or-later. The Linux version in this fork keeps the same licence and
+contains no game data. The libraries it builds into the launcher (egui/eframe,
+image, rfd, serde, sha1, sha2, trash, zip, ureq, libc and egui_kittest for the
+tests) and their licence texts are listed in `launcher/THIRD_PARTY.md`.
+
 ## Rust libraries
 
 rac-rs uses crates from crates.io, including wgpu, winit, cpal, rayon, bytemuck, pollster and xxhash-rust, under the MIT, Apache-2.0, Zlib, BSD, ISC and BSL-1.0 licences. Cargo downloads them at build time. Their licence texts ship with each crate.
 
-## OmniLoader mod loader (bundled/omniloader.dll) and Arsenal Mastery
+## OmniLoader mod loader (windows/bundled/omniloader.dll) and Arsenal Mastery
 
-bundled/omniloader.dll is OmniLoader, this project's own mod loader (MIT OR Apache-2.0), written from the MIT-licensed OpenRAC SDK documentation. Built into it: the Luau script engine (MIT; Roblox Corporation and Lua.org, PUC-Rio) through the mlua crate (MIT), and serde / serde_json (MIT OR Apache-2.0). bundled/mods/arsenal-mastery is a mod of this project with its own LICENSE file.
+windows/bundled/omniloader.dll is OmniLoader, this project's own mod loader (MIT OR Apache-2.0), written from the MIT-licensed OpenRAC SDK documentation. Built into it: the Luau script engine (MIT; Roblox Corporation and Lua.org, PUC-Rio) through the mlua crate (MIT), and serde / serde_json (MIT OR Apache-2.0). windows/bundled/mods/arsenal-mastery is a mod of this project with its own LICENSE file.
 
-OmniLoader's mod format (the `omni-mod.json` manifest, which also accepts OpenRAC's `openrac-mod.json`), its Luau API and its sandbox rules follow the OpenRAC SDK 1.3 (https://github.com/OpenRAC/OpenRAC), written from its public documentation and data. No code of OpenRAC's GPL-3.0 game port was read or copied. The OpenRAC SDK licence, copied unchanged:
+The DLL is kept in `windows/` for reference; a Linux build of the loader is not available yet, so this fork plays without script mods. OmniLoader's mod format (the `omni-mod.json` manifest, which also accepts OpenRAC's `openrac-mod.json`), its Luau API and its sandbox rules follow the OpenRAC SDK 1.3 (https://github.com/OpenRAC/OpenRAC), written from its public documentation and data. No code of OpenRAC's GPL-3.0 game port was read or copied. The OpenRAC SDK licence, copied unchanged:
 
 ```
 MIT License
