@@ -261,7 +261,13 @@ pub(super) fn movie_poll(rule: fmv_bridge::Skip, prev: u16, held: impl Fn(winit:
 	if skip_key || pad_start {
 		now |= rule.feed();
 	}
-	(rule.pressed(prev, now), now)
+	// The boot logo movies have no skip in retail (`Skip::Never`): the port lets the player's skip press end them, so the
+	// intro is not in the way (the Skip intro row cuts them before they play, when the player asked for that).
+	if rule == fmv_bridge::Skip::Never && (skip_key || pad_start) {
+		now |= START;
+	}
+	let hit = rule.pressed(prev, now) || (rule == fmv_bridge::Skip::Never && (now & !prev & START) != 0);
+	(hit, now)
 }
 
 /// The pad bits Esc / Space add while a scene or a ship flight plays, so retail's own skip test sees its press: the

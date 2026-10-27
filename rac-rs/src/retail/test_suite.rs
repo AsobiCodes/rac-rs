@@ -14,8 +14,12 @@ mod tests {
 		use fmv_bridge::Skip;
 		use winit::keyboard::KeyCode as K;
 		let poll = |rule: Skip, prev: u16, keys: &[K]| movie_poll(rule, prev, |k| keys.contains(&k), 0);
-		// Boot logos (mode -1): nothing skips.
-		assert!(!poll(Skip::Never, 0, &[K::Escape, K::Enter, K::Space]).0);
+		// Boot logos (mode -1): retail skips nothing, the port's skip press ends them (the Skip intro row cuts them too).
+		assert!(poll(Skip::Never, 0, &[K::Enter]).0);
+		assert!(poll(Skip::Never, 0, &[K::Escape]).0);
+		assert!(poll(Skip::Never, 0, &[K::Space]).0);
+		assert!(!poll(Skip::Never, 0, &[K::KeyF]).0, "other keys are no skip");
+		assert!(!poll(Skip::Never, 0x800, &[K::Enter]).0, "Start held from before the logo");
 		// Attract movie (mode 2): any new button, but not one already down at the last poll.
 		assert!(poll(Skip::Any, 0, &[K::Space]).0);
 		assert!(poll(Skip::Any, 0, &[K::KeyF]).0);
@@ -65,7 +69,7 @@ mod tests {
 		assert_eq!(poll(Skip::Start, 0, 0x800).1, 0x800);
 		assert!(!poll(Skip::Start, 0x800, 0x800).0, "Start held from before the movie");
 		assert!(poll(Skip::Any, 0, 0x40).0, "any pad button skips the attract movie");
-		assert!(!poll(Skip::Never, 0, 0x800).0, "the boot logos never skip");
+		assert!(poll(Skip::Never, 0, 0x800).0, "the pad's Start ends a boot logo too");
 		assert!(poll(Skip::Combo, 0, 0x800).0, "the pad's Start feeds the whole combo, like Esc / Space");
 	}
 

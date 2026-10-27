@@ -66,7 +66,7 @@ pub(super) const PRESETB: u32 = CBASE + 0x14;
 /// The Graphics page's Renderer row byte (0 Vulkan, 1 DirectX 12; pcrender.rs).
 const RENDB: u32 = CBASE + 0x13;
 /// The Graphics page's Skip intro row byte (0 Off, 1 On; pcintro.rs). Stays 0 with the default `intro=play`.
-const INTROB: u32 = CBASE + 0x15;
+pub(super) const INTROB: u32 = CBASE + 0x15;
 /// The Debug section's row byte (0 Off, 1 On); set from `devtools::menu` when the page is built.
 pub const DBGB: u32 = CBASE + 0x12;
 /// Set by `build_gfx` / `build_page`: that page is in RAM, so `field` / `sync` may read and write its bytes.
