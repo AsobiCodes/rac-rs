@@ -141,7 +141,13 @@ const GLYPH_ROW: usize = 19;
 /// Picture: Preset, Lighting, Ambient occlusion, Dynamic shadows, Global illumination, Sun rays. Effects: Water, Waves, Particles,
 /// Vegetation, Volumetric fog, Volumetric clouds. Screen: Display mode, Frame smoothing, Draw distance, Culling, Renderer, HUD. Each section is at most six rows (the
 /// panel holds the stepper and six).
-const GSECS: [&[usize]; NGSEC] = [&[PRESET_ROW, 0, 1, 2, 10, 6], &[4, 11, 5, 8, 13, 14], &[3, 7, 12, 9, RENDER_ROW, HUD_ROW], &[INTRO_ROW, GLYPH_ROW]];
+/// The Screen section. The Renderer row (Vulkan / DirectX 12) is Windows only: a Linux build has no DirectX 12 backend, so the
+/// row is not offered there (a `renderer=dx12` line left in a shared options file is ignored, viewer/gpu/renderer.rs).
+#[cfg(windows)]
+const GSCREEN: &[usize] = &[3, 7, 12, 9, RENDER_ROW, HUD_ROW];
+#[cfg(not(windows))]
+const GSCREEN: &[usize] = &[3, 7, 12, 9, HUD_ROW];
+const GSECS: [&[usize]; NGSEC] = [&[PRESET_ROW, 0, 1, 2, 10, 6], &[4, 11, 5, 8, 13, 14], GSCREEN, &[INTRO_ROW, GLYPH_ROW]];
 
 /// What a row does in a Controls section.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -876,7 +882,8 @@ mod tests {
 	fn graphics_sections_cover_the_rows() {
 		let mut all: Vec<usize> = GSECS.iter().flat_map(|s| s.iter().copied()).collect();
 		all.sort();
-		assert_eq!(all, (0..=GLYPH_ROW).collect::<Vec<_>>());
+		let want: Vec<usize> = (0..=GLYPH_ROW).filter(|&r| cfg!(windows) || r != RENDER_ROW).collect();
+		assert_eq!(all, want);
 		assert!(GSECS.iter().all(|s| (1..=ROWS - 1).contains(&s.len())));
 		let rows = fake_rows();
 		for sec in 0..NGSEC {
@@ -892,7 +899,8 @@ mod tests {
 		assert_eq!(&gfx_table(&rows, 1, false)[6..12], &rows[4], "Effects starts with Water");
 		let s = gfx_table(&rows, 2, false);
 		assert_eq!(&s[s.len() - 6..], &[ID_HUD, HUDB, ID_SHARP, ID_ORIGINAL, 0, 0], "HUD closes the Screen page");
-		assert_eq!(&s[s.len() - 12..s.len() - 6], &[ID_RENDERER, RENDB, ID_VULKAN, ID_DX12, 0, 0]);
+		#[cfg(windows)]
+		assert_eq!(&s[s.len() - 12..s.len() - 6], &[ID_RENDERER, RENDB, ID_VULKAN, ID_DX12, 0, 0], "the Renderer row sits before the HUD");
 		let sys = gfx_table(&rows, 3, false);
 		assert_eq!(
 			&sys[6..],

@@ -33,6 +33,7 @@ fn dx12_compiler(dll: Option<String>) -> wgpu::Dx12Compiler {
 
 /// The backends for the file's choice: exactly that one, or wgpu's default set when nothing is chosen or `default_set` (the
 /// fallback after the chosen one found no adapter).
+#[cfg(windows)]
 fn backends_for(choice: Option<bool>, default_set: bool) -> wgpu::Backends {
 	match choice {
 		Some(true) if !default_set => wgpu::Backends::DX12,
@@ -40,6 +41,18 @@ fn backends_for(choice: Option<bool>, default_set: bool) -> wgpu::Backends {
 		// IDXGIFactoryMedia, and ReShade 6.8.0's CreateDXGIFactory1 hook crashes on that (also when ReShade is only the Vulkan layer).
 		Some(false) | None if !default_set => wgpu::Backends::VULKAN,
 		_ => wgpu::Backends::default(),
+	}
+}
+
+/// Linux: Vulkan is the only backend this fork offers (the Renderer row is not shown either). A `renderer=dx12` line left in a
+/// shared options file is ignored; the second try after no Vulkan adapter is wgpu's own set (never DirectX 12).
+#[cfg(not(windows))]
+fn backends_for(choice: Option<bool>, default_set: bool) -> wgpu::Backends {
+	let _ = choice;
+	if default_set {
+		wgpu::Backends::default()
+	} else {
+		wgpu::Backends::VULKAN
 	}
 }
 
@@ -111,10 +124,18 @@ mod tests {
 
 	#[test]
 	fn the_files_choice_picks_the_backends() {
-		assert_eq!(backends_for(Some(true), false), wgpu::Backends::DX12);
 		assert_eq!(backends_for(Some(false), false), wgpu::Backends::VULKAN);
 		assert_eq!(backends_for(None, false), wgpu::Backends::VULKAN, "not chosen: Vulkan first, never the DX12 start-up (ReShade crash)");
-		assert_eq!(backends_for(Some(true), true), wgpu::Backends::default(), "the fallback is wgpu's own order");
+		#[cfg(windows)]
+		{
+			assert_eq!(backends_for(Some(true), false), wgpu::Backends::DX12);
+			assert_eq!(backends_for(Some(true), true), wgpu::Backends::default(), "the fallback is wgpu's own order");
+		}
+		#[cfg(not(windows))]
+		{
+			assert_eq!(backends_for(Some(true), false), wgpu::Backends::VULKAN, "Linux has no DirectX 12 backend");
+			assert_eq!(backends_for(Some(true), true), wgpu::Backends::default(), "the fallback is wgpu's own order");
+		}
 		assert!(wgpu::Backends::default().contains(wgpu::Backends::VULKAN), "Vulkan stays in today's default set");
 	}
 
