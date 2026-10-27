@@ -1,8 +1,7 @@
-//! The game page: header with the tabs, and the Play tab (set up the game from a disc, or Play with the update banner).
+//! The game page: header with the tabs, and the Play tab (set up the game from a disc, play, back it up).
 use super::state::{App, DiscState, Purpose, RunKind, Tab, View};
 use super::theme;
 use crate::games::GameDef;
-use crate::update::UpdateState;
 use egui::{RichText, ScrollArea, Ui, Vec2};
 
 impl App {
@@ -72,7 +71,11 @@ impl App {
         ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             self.hero(ui, g, |this, ui| {
                 this.play_status_chips(ui);
-                this.update_banner(ui);
+                if this.is_backup() {
+                    this.backup_note(ui);
+                }
+                this.finish_note(ui);
+                this.backup_card(ui);
                 let running = this.game_running();
                 let label = if running { "Playing..." } else { "Play" };
                 ui.horizontal(|ui| {
@@ -95,7 +98,6 @@ impl App {
                     });
                 }
                 this.iso_missing_note(ui);
-                this.play_footer(ui);
                 this.play_summary(ui);
                 this.saves_row(ui);
             });
@@ -112,7 +114,7 @@ impl App {
                 theme::chip(ui, d.region, theme::MUTED);
             }
             if self.info.finish_pending() {
-                theme::chip(ui, "Update unfinished", theme::ORANGE);
+                theme::chip(ui, "Rebuild needed", theme::ORANGE);
             }
         });
     }
@@ -177,83 +179,44 @@ impl App {
         ui.label(theme::muted(crate::play::LOG_HINT));
     }
 
-    fn play_footer(&mut self, ui: &mut Ui) {
-        if self.is_backup() {
+    /// The source files in this folder are newer than the built game (the user replaced a source copy).
+    fn finish_note(&mut self, ui: &mut Ui) {
+        if self.is_backup() || !self.info.finish_pending() {
             return;
         }
-        let st = self.update_state();
-        ui.horizontal(|ui| {
-            match &st {
-                UpdateState::Checking => ui.label(theme::muted("Checking for updates...")),
-                UpdateState::UpToDate(v) => ui.label(theme::muted(format!("You have the latest version (v{v})."))),
-                UpdateState::Offline => ui.label(theme::muted("Could not check for updates. Are you online?")),
-                UpdateState::Available(_) => ui.label(theme::muted("")),
-            };
-            if !matches!(st, UpdateState::Checking) && theme::link(ui, "Check again") {
-                self.check_updates();
+        theme::card_colored(ui, theme::ORANGE, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                theme::chip(ui, "Rebuild", theme::ORANGE);
+                ui.label(theme::bold("The source files are newer than the game", 16.0));
+            });
+            ui.label(theme::muted(format!(
+                "This folder holds version {} and the game was built from {}. Repair / rebuild makes the game again from the files here; your saves and settings are kept.",
+                self.info.local_version, self.info.built_version
+            )));
+            if theme::button(ui, "Repair / rebuild...") {
+                self.goto_repair();
             }
         });
     }
 
-    fn update_banner(&mut self, ui: &mut Ui) {
-        if self.is_backup() {
-            self.backup_note(ui);
+    /// A manual copy of the install (the built game, saves, settings and texture packs) for when you replace or rebuild it.
+    fn backup_card(&mut self, ui: &mut Ui) {
+        if self.is_backup() || !self.info.installed {
             return;
         }
-        let UpdateState::Available(offer) = self.update_state() else { return };
         let running = self.game_running();
-        if self.is_pinned() {
-            // an install the user put on an older version: no banner, only a plain button
-            // the sentence wraps inside the page and the button sits under it (a one-line row ran off the page in a narrow window)
-            ui.label(theme::muted(format!("This install stays on version {} (you chose it). Version {} is out.", offer.from, offer.to)));
-            let ready = self.backup_choice(ui, offer.finish);
-            self.backup_error_note(ui);
-            if theme::button_enabled(ui, &format!("Update to {}", offer.to), !running && !offer.finish && ready) {
-                if let Some(id) = self.cur_id.clone() {
-                    self.library.set_pinned(&id, false);
-                    self.save_library();
-                }
-                self.begin_update(&offer.to, false);
-            }
-            return;
-        }
-        let mut go = false;
-        theme::card_colored(ui, theme::ORANGE, |ui| {
+        theme::card(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                theme::chip(ui, if offer.finish { "Finish update" } else { "Update" }, theme::ORANGE);
-                let title = if offer.finish { format!("Finish the update to v{}", offer.to) } else { format!("Version {} is available (you have {})", offer.to, offer.from) };
-                ui.label(theme::bold(title, 16.0));
-            });
-            ui.label(theme::muted(if offer.finish {
-                "An earlier update was not finished. It takes about 2 to 10 minutes. Your saves and settings are kept."
-            } else {
-                "This takes about 2 to 10 minutes. Your saves and settings are kept."
-            }));
-            if !offer.changes.is_empty() {
-                let open = self.update_changes_open;
-                if theme::link(ui, if open { "Hide what is new" } else { "What is new" }) {
-                    self.update_changes_open = !open;
-                }
-                if self.update_changes_open {
-                    egui::Frame::new().fill(theme::BG).corner_radius(egui::CornerRadius::same(8)).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ScrollArea::vertical().max_height(130.0).id_salt("changes").show(ui, |ui| {
-                            ui.label(RichText::new(offer.changes.clone()).size(13.5));
-                        });
-                    });
-                }
+            ui.label(theme::bold("Backups", 15.5));
+            ui.label(theme::muted("A playable copy of this install next to it. Keeps its own saves, plays at once and is never changed by a rebuild."));
+            if theme::button_enabled(ui, "Back up this install", !running && !self.busy()) {
+                self.begin_backup();
             }
-            let ready = self.backup_choice(ui, offer.finish);
-            self.backup_error_note(ui);
-            go = theme::button_enabled(ui, if offer.finish { "Finish update" } else { "Update now" }, !running && ready);
             if running {
                 ui.label(theme::muted("Close the game first."));
             }
         });
-        if go {
-            self.begin_update(&offer.to, offer.finish);
-        }
     }
 
     // ------------------------------------------------------------------ pick the disc (first install, repair)
@@ -274,7 +237,7 @@ impl App {
                     ui.add_space(2.0);
                     ui.checkbox(&mut this.shortcut_wanted, "Create a desktop shortcut");
                 }
-                ui.label(theme::muted("Needs about 5 GB of free disk space and an internet connection (once)."));
+                ui.label(theme::muted("Needs about 5 GB of free disk space. The first build downloads the Rust crates."));
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     let ok = matches!(this.disc_state, DiscState::Ok(_)) && this.disc_path.is_some();
@@ -323,13 +286,6 @@ impl App {
         match &self.run_kind {
             RunKind::Install => "Installing Ratchet & Clank".to_string(),
             RunKind::Repair => "Repairing Ratchet & Clank".to_string(),
-            RunKind::Update { to, finish } => {
-                if *finish {
-                    format!("Finishing the update to v{to}")
-                } else {
-                    format!("Updating to v{to}")
-                }
-            }
         }
     }
 }

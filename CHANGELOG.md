@@ -34,12 +34,13 @@ had, and the parts of v0.4.0 that needed a Linux version.
   one place shows in the other.
 - **Texture packs.** PCSX2 texture packs can be switched on in the Mods page.
 - **An optional launcher (work in progress).** `launcher/` is a Linux version of
-  AsobiCodes' RAC-RS Launcher: a library of existing installs, Play, the game's
-  options and profiles, texture-pack import from a `.zip`, a folder or PCSX2,
-  the saves and log folders, and application-menu entries. Start it with
-  `./launcher.sh` (it builds the first time) or `launcher/build.sh`. It cannot
-  install, repair or update the game yet, and it hides script mods until a
-  Linux OmniLoader exists.
+  AsobiCodes' RAC-RS Launcher: install and Repair from a source folder and your
+  disc, with the setup progress in the window; Play; the game's options and
+  profiles; texture-pack import from a `.zip`, a folder or PCSX2; manual
+  backups; the saves and log folders; and application-menu entries. Start it
+  with `./launcher.sh` (it builds the first time) or `launcher/build.sh`. It
+  never downloads updates; new versions are a new download or `git pull`, then
+  Repair / rebuild. Script mods wait for a Linux OmniLoader.
 - **A crash log** in `player/crash.log`, with the run log in `player/log.txt`.
 
 ### Changed

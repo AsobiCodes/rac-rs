@@ -1,4 +1,4 @@
-//! "Back up your current version first": a playable copy of an install, made before an update touches anything.
+//! "Back up this install": a playable copy of an install, made before you replace or rebuild it.
 //!
 //! What a backup holds (found from what the game reads at run time, see `run_set`):
 //! - the game binary and the shared libraries next to it (`build/release/rac-rs`, `*.so*`; no build caches, no `deps`,
@@ -338,7 +338,7 @@ fn copy_file(src: &Path, dst: &Path, st: &State) -> Result<(), String> {
 
 fn marker_text(plan: &Plan) -> String {
     format!(
-        "This folder is a backup of RAC-RS {} made by the RAC-RS Launcher before an update ({}).\nIt was made from {}.\nThe launcher never updates it. To go back, open it in the Library and press Play.\nTo remove it, use Delete backup in the launcher's Library.\n",
+        "This folder is a backup of RAC-RS {} made by the RAC-RS Launcher ({}).\nIt was made from {}.\nThe launcher never changes it. To go back, open it in the Library and press Play.\nTo remove it, use Delete backup in the launcher's Library.\n",
         plan.version,
         crate::library::today(),
         plan.root.display()

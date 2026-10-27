@@ -19,10 +19,10 @@ pub struct LibEntry {
     pub folder: String,
     /// `YYYY-MM-DD`.
     pub added: String,
-    /// The user put this install on an older game version: no update nag (a plain "Update to <newest>" button stays).
+    /// Kept as it is (backups are pinned; the launcher never changes them).
     #[serde(default)]
     pub pinned: bool,
-    /// A backup made before an update (`backup.rs`): always pinned, never updated, can be deleted from the Library.
+    /// A backup made by hand (`backup.rs`): always pinned, never rebuilt, can be deleted from the Library.
     #[serde(default)]
     pub backup: bool,
     /// The name shown for a backup ("Ratchet & Clank v0.3.1 (backup)"); empty = the game's title.
@@ -236,17 +236,6 @@ impl Library {
         let e = LibEntry { id: self.new_id(game.id), game: game.id.to_string(), folder: folder.to_string_lossy().to_string(), added: today(), pinned: true, backup: true, name: name.to_string() };
         self.entries.push(e.clone());
         e
-    }
-
-    /// Marks an install as pinned to its (older) version, or clears it. True when the entry exists.
-    pub fn set_pinned(&mut self, id: &str, pinned: bool) -> bool {
-        match self.entries.iter_mut().find(|e| e.id == id) {
-            Some(e) => {
-                e.pinned = pinned;
-                true
-            }
-            None => false,
-        }
     }
 
     /// "Add existing install": the folder must be a built game install. Adding the same folder twice is refused.

@@ -63,10 +63,11 @@ what that brought is in [What's new from upstream
   can be turned on in the game's Mods page. Script and native mods need an
   OmniLoader library built for Linux, which upstream does not publish yet, so
   the Mods page leaves those rows out.
-- **An optional launcher (work in progress).** A small desktop app with a
-  library of installs, Play, the game's options and profiles, texture-pack
-  import and application-menu entries. `./launcher.sh` builds it the first
-  time and starts it; the game works the same without it.
+- **An optional launcher (work in progress).** A small desktop app that installs
+  and repairs the game from your disc, keeps a library of installs, starts the
+  game, edits its options and profiles, imports texture packs, makes manual
+  backups, and adds application-menu entries. `./launcher.sh` builds it the
+  first time and starts it; the game works the same without it.
 
 ## What's new from upstream 0.4.0
 
@@ -113,8 +114,9 @@ launcher instead (below). What is and is not here is listed in
   sections and rows (including Preset, HUD, Skip intro and Button glyphs).
 - PCSX2 texture packs work (title Options > Mods). Script mods need a Linux
   OmniLoader build, see [Known issues](#known-issues).
-- An optional launcher (work in progress) manages installs, options, profiles
-  and texture packs; see [Launcher](#launcher-optional-work-in-progress).
+- An optional launcher (work in progress) installs and repairs the game,
+  manages installs, options, profiles, texture packs and backups; see
+  [Launcher](#launcher-optional-work-in-progress).
 - Every button can be rebound, for the keyboard and for controllers, on the
   Controls page (Pause > Options > Controls).
 - Plays from the PAL / Europe disc and, since v0.2, from the USA disc.
@@ -397,17 +399,25 @@ window:
 - **Library:** "Add existing install..." and pick this folder, or another
   built copy. Several installs can live side by side; removing one from the
   list never deletes files.
+- **New install** takes a downloaded or cloned copy of the game's source
+  (it must hold `VERSION` and `setup.sh`), asks for your disc and builds the
+  game, showing the same progress as `setup.sh`. **Repair / rebuild** does the
+  same for an existing install.
 - **Play** starts the game with the selected profile's options and mods.
 - **Settings** edits the game's own options. **Mods** installs a texture pack
   from a `.zip` or folder, or imports one from PCSX2 itself. The game reads the
   same `mods/` folder, so the in-game Mods page and the launcher agree.
+- **Back up this install** makes a playable copy next to it; the copy is in the
+  Library and can be deleted from there.
 - The game page has "Open saves folder" and "Open log folder".
 
 Application-menu entries: `./install-desktop-entry.sh` adds the game;
 `./launcher/install-desktop-entry.sh` adds the launcher (build it first).
 
-Not in it yet: installing or repairing the game from a disc, updates and
-backups, and script mods (they need a Linux OmniLoader). Build instructions,
+The launcher does not check for or install updates: this is a fork, so a new
+version is a new download or `git pull`. Put the newer source in the install
+folder and use Repair / rebuild; the launcher notices that the source is newer
+than the build. Script mods still need a Linux OmniLoader. Build instructions,
 the data folders and the code map are in
 [`launcher/README.md`](launcher/README.md).
 
@@ -494,9 +504,8 @@ menu's Graphics page also takes Left / Right on its Page row and on the rows.
   Options page). In game, the Graphics page takes Left / Right as well.
 - DirectX 12 and ReShade are Windows-only and are not part of this fork. See
   [`docs/linux-parity.md`](docs/linux-parity.md).
-- The launcher cannot install, repair or update the game yet, and it hides
-  script mods until a Linux OmniLoader exists. Installs made with `setup.sh`
-  and texture packs work today.
+- The launcher hides script mods until a Linux OmniLoader exists. Updates are
+  manual: download the newer fork and use Repair / rebuild.
 
 ## Reporting a problem
 

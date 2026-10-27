@@ -14,13 +14,11 @@ pub struct LauncherCfg {
     pub minimize_while_playing: bool,
     /// Where the disc picker started last time.
     pub last_iso_dir: String,
-    /// The "Back up your current version first" tick of an update (default on).
-    pub backup_before_update: bool,
 }
 
 impl Default for LauncherCfg {
     fn default() -> Self {
-        LauncherCfg { width: 1000.0, height: 640.0, game: "rac1".into(), install: String::new(), tab: "play".into(), minimize_while_playing: false, last_iso_dir: String::new(), backup_before_update: true }
+        LauncherCfg { width: 1000.0, height: 640.0, game: "rac1".into(), install: String::new(), tab: "play".into(), minimize_while_playing: false, last_iso_dir: String::new() }
     }
 }
 
@@ -42,7 +40,6 @@ impl LauncherCfg {
                 "tab" if matches!(v, "play" | "settings" | "mods") => c.tab = v.to_string(),
                 "minimize_while_playing" => c.minimize_while_playing = matches!(v, "1" | "on" | "true" | "yes"),
                 "last_iso_dir" => c.last_iso_dir = v.to_string(),
-                "backup_before_update" => c.backup_before_update = !matches!(v, "0" | "off" | "false" | "no"),
                 _ => {}
             }
         }
@@ -51,7 +48,7 @@ impl LauncherCfg {
 
     pub fn to_text(&self) -> String {
         format!(
-            "width={}\nheight={}\ngame={}\ninstall={}\ntab={}\nminimize_while_playing={}\nlast_iso_dir={}\nbackup_before_update={}\n",
+            "width={}\nheight={}\ngame={}\ninstall={}\ntab={}\nminimize_while_playing={}\nlast_iso_dir={}\n",
             self.width.round(),
             self.height.round(),
             self.game,
@@ -59,7 +56,6 @@ impl LauncherCfg {
             self.tab,
             if self.minimize_while_playing { "on" } else { "off" },
             self.last_iso_dir,
-            if self.backup_before_update { "on" } else { "off" }
         )
     }
 
@@ -78,18 +74,13 @@ mod tests {
 
     #[test]
     fn round_trip_and_defaults() {
-        let c = LauncherCfg { width: 1111.0, height: 700.0, game: "rac2".into(), install: "rac1-2".into(), tab: "mods".into(), minimize_while_playing: true, last_iso_dir: "D:\\isos".into(), backup_before_update: false };
+        let c = LauncherCfg { width: 1111.0, height: 700.0, game: "rac1".into(), install: "rac1-2".into(), tab: "mods".into(), minimize_while_playing: true, last_iso_dir: "/isos".into() };
         assert_eq!(LauncherCfg::parse(&c.to_text()), c);
         assert_eq!(LauncherCfg::parse(""), LauncherCfg::default());
     }
 
     #[test]
     fn the_backup_tick_defaults_on_and_is_remembered() {
-        assert!(LauncherCfg::default().backup_before_update);
-        assert!(LauncherCfg::parse("width=900\n").backup_before_update, "an old launcher.cfg keeps the default");
-        let off = LauncherCfg { backup_before_update: false, ..LauncherCfg::default() };
-        assert!(off.to_text().contains("backup_before_update=off"));
-        assert!(!LauncherCfg::parse(&off.to_text()).backup_before_update);
     }
 
     #[test]

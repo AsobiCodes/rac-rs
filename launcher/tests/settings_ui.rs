@@ -34,7 +34,7 @@ fn installed(name: &str) -> PathBuf {
 }
 
 fn harness(root: &PathBuf, tab: Tab) -> Harness<'static, LauncherApp> {
-    let mut app = App::new(root.clone(), Some(root.join("_no_remote").to_string_lossy().to_string()));
+    let mut app = App::new(root.clone());
     app.covers.dir = Some(root.join("_no_covers"));
     app.sel = Sel::Game("rac1");
     app.tab = tab;

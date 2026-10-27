@@ -1,9 +1,9 @@
 # RAC-RS Launcher for Linux
 
-An optional desktop app (Rust, egui) that keeps a list of Ratchet & Clank
-installs, starts the game, edits its options, switches profiles and installs
-texture packs. It is the launcher for this Linux fork; the game works the same
-without it.
+An optional desktop app (Rust, egui) that installs the game from your own disc,
+keeps a list of installs, starts the game, edits its options, switches profiles,
+installs texture packs and makes backups. It is the launcher for this Linux
+fork; the game works the same without it.
 
 It started as [AsobiCodes' RAC-RS Launcher](https://github.com/AsobiCodes/rac-rs-launcher),
 the Windows launcher for the upstream port, and lives in this repository so
@@ -32,11 +32,21 @@ Working now:
   selected.
 - **Desktop entry:** `./install-desktop-entry.sh` adds "RAC-RS Launcher" to the
   application menu.
+- **Install and repair:** "New install" takes a downloaded or cloned copy of the
+  game's source (`VERSION` and `setup.sh`), asks for your disc and runs the same
+  build as `./setup.sh`, with its progress in the window. Repair / rebuild runs
+  it again with `--regenerate`.
+- **Backups:** "Back up this install" makes a playable copy next to the install
+  (the built game, saves, settings and packs; big packs are hard-linked), and it
+  shows up in the Library.
 
-Not yet (next phases):
+There is no update check and no self-update: this is a fork, so a new version
+is a new download or `git pull` from this repository. Put the newer files in
+the install folder and use Repair / rebuild (the launcher notices that the
+source is newer than the build).
 
-- Installing the game from a disc (the `setup.sh` engine), Repair / rebuild.
-- Updates, the backup-before-update step and the launcher's self-update.
+Not yet:
+
 - Script and native mods: they need an OmniLoader library built for Linux, and
   upstream only publishes the Windows DLL. The Mods page hides them until one
   exists; texture packs never need it.
@@ -67,9 +77,7 @@ The launcher reports the fork's version from `../VERSION`.
 - Each install keeps its own saves (`player/`), options, profiles and mods; the
   launcher only stores paths. Removing an install from the list never deletes
   files.
-- `--root DIR` opens one install directly (handy for a desktop entry);
-  `RAC_GAME_RELEASES` / `RAC_LAUNCHER_RELEASES` point the release checks at a
-  test folder.
+- `--root DIR` opens one install directly (handy for a desktop entry).
 
 ## How it reads a game folder
 
@@ -99,11 +107,10 @@ what the game's own Mods page reads. PCSX2 packs are found under
 | `src/pcopts.rs` | `player/pc_options.txt` parser/writer (mirrors the game) |
 | `src/mods/` | mod store, `active.txt`, zip/folder/PCSX2 import, settings, script manifests |
 | `src/gating.rs` | which game version knows which option |
-| `src/engine.rs` | the process reader the Linux `setup.sh` engine will use; `start` says "later version" for now |
-| `src/installer.rs` | Linux install backend (disabled until the engine lands) |
-| `src/backup.rs` | playable copy for updates (compiled, not offered yet) |
-| `src/releases.rs`, `src/game_dl.rs`, `src/update.rs`, `src/selfupdate.rs` | releases and update plumbing (the Windows releases are not used; the fork's own channel comes with Phase 2) |
-| `src/ui/` | egui pages: library, game (play/settings/mods), profiles, network/update screens |
+| `src/engine.rs` | runs `setup.sh` and reads its progress markers |
+| `src/installer.rs` | the install backend (setup.sh) |
+| `src/backup.rs` | the playable copy behind the Back up button |
+| `src/ui/` | egui pages: library, game (play/settings/mods), profiles, backup progress |
 
 ## Updating from upstream
 
@@ -115,12 +122,9 @@ so the existing progress screen works unchanged.
 
 ## Planned
 
-1. `setup.sh --progress=launcher` and the Linux install engine: New install
-   and Repair from a disc.
-2. Update + backup (binary, `player/`, `mods/` with hard-linked packs) and
-   launcher self-update from the same release tag.
-3. Packaging (tarball or AppImage) built against Debian 12 so it runs on older
-   systems too.
+1. Packaging (tarball or AppImage) built against Debian 12 so it runs on
+   older systems too.
+2. Script mods when a Linux OmniLoader exists.
 
 ## Licence and credits
 

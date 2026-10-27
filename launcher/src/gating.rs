@@ -1,7 +1,20 @@
 //! Version gating: which game version first knows an option or a feature. The launcher greys out what the install's version does not know.
 //! One small table: add a line when a game version brings a new option.
-use crate::update::compare_version;
 use std::cmp::Ordering;
+
+/// Numeric compare of `x.y.z` versions ("0.10.0" > "0.9.9").
+pub fn compare_version(a: &str, b: &str) -> Ordering {
+    let parse = |v: &str| -> Vec<u32> { v.split('.').map(|p| p.parse().unwrap_or(0)).collect() };
+    let (a, b) = (parse(a), parse(b));
+    for i in 0..a.len().max(b.len()) {
+        let (x, y) = (a.get(i).copied().unwrap_or(0), b.get(i).copied().unwrap_or(0));
+        match x.cmp(&y) {
+            Ordering::Equal => {}
+            o => return o,
+        }
+    }
+    Ordering::Equal
+}
 
 /// Feature name of the texture packs in `mods\` (the game side ships in a later game version).
 pub const TEXTURE_PACKS: &str = "texture-packs";
@@ -111,6 +124,13 @@ pub fn needs_text(version: &str, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn versions_compare_numerically() {
+        assert_eq!(compare_version("0.3.10", "0.3.9"), Ordering::Greater);
+        assert_eq!(compare_version("0.3.1", "0.3.1"), Ordering::Equal);
+        assert_eq!(compare_version("0.2.9", "0.3.0"), Ordering::Less);
+    }
 
     #[test]
     fn renderer_needs_040() {

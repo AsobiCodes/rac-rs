@@ -3,7 +3,6 @@ use super::state::{App, Sel};
 use super::theme;
 use crate::games::{self, GameDef};
 use crate::library::LibEntry;
-use crate::update::UpdateState;
 use egui::{Align2, Color32, CornerRadius, FontId, Rect, Sense, Ui, Vec2};
 
 /// Version of the launcher program itself.
@@ -106,9 +105,8 @@ impl App {
         if self.game_running() {
             return ("Running".into(), Some(theme::GREEN));
         }
-        let upd = matches!(self.update_state(), UpdateState::Available(_)) && !self.is_pinned() && !self.is_backup();
         let v = if self.info.local_version.is_empty() { "Installed".to_string() } else { format!("Version {}", self.info.local_version) };
-        (v, Some(if upd { theme::ORANGE } else { theme::GREEN }))
+        (v, Some(theme::GREEN))
     }
 
     pub fn show_sidebar(&mut self, ui: &mut Ui) {

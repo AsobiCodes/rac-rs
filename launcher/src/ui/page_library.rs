@@ -26,7 +26,6 @@ impl App {
         ui.label(theme::muted("Your Ratchet & Clank installs. You can keep several, for example the Europe and the USA version. Removing one from the list never deletes its files."));
         ui.add_space(10.0);
         ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            self.download_card(ui);
             let entries = self.library.entries.clone();
             if entries.is_empty() {
                 theme::card_colored(ui, theme::BLUE, |ui| {
@@ -157,7 +156,7 @@ impl App {
                 Some(AddDialog::Existing { text }) => self.add_existing_form(ui, text),
                 Some(AddDialog::New { text }) => self.new_install_form(ui, text),
                 None => {
-                    ui.label(theme::muted("Existing: a folder with a game you set up before. New: choose where the game should live."));
+                    ui.label(theme::muted("Existing: a game that is already built. New: a downloaded or cloned copy of the game's source, which the launcher builds from your disc."));
                 }
             }
             if let Some((m, err)) = self.lib_ui.message.clone() {
@@ -228,24 +227,23 @@ impl App {
         ui.add_space(6.0);
         ui.separator();
         ui.label(theme::bold("New install", 15.5));
-        ui.label(theme::muted("Where should the game live? It needs about 5 GB. You can change the folder."));
-        if let Some(t) = self.folder_field(ui, &text, "Folder for the game", Purpose::NewInstall) {
+        ui.label(theme::muted("Point at a downloaded or cloned copy of the game's source. It must hold VERSION and setup.sh. The game is then built from your own disc; about 5 GB are needed."));
+        if let Some(t) = self.folder_field(ui, &text, "Folder of the game's source", Purpose::NewInstall) {
             self.lib_ui.dialog = Some(AddDialog::New { text: t });
             self.lib_ui.message = None;
         }
-        self.load_versions(false);
-        self.version_picker(ui);
         let path = std::path::PathBuf::from(text.trim().trim_matches('"'));
         if !text.trim().is_empty() {
             self.free_space_line(ui, &path);
         }
-        if library::is_release_tree(&path) {
-            ui.label(theme::muted("This folder already holds a RAC-RS release. It will be used."));
-        } else {
-            ui.label(theme::muted("The chosen version is downloaded from GitHub into this folder (a few MB), then you pick your disc to set the game up."));
+        let source = library::is_release_tree(&path);
+        if source {
+            ui.label(RichText::new(format!("Game source found: version {}.", games::local_version(&path))).color(theme::GREEN).size(14.5));
+        } else if !text.trim().is_empty() {
+            ui.label(RichText::new("This is not a game source folder: it must hold VERSION and setup.sh. Download or clone the Linux fork first.").color(theme::RED).size(14.0));
         }
         ui.horizontal(|ui| {
-            if theme::button_enabled(ui, if library::is_release_tree(&path) { "Use this folder" } else { "Download the game" }, !text.trim().is_empty() && !self.downloading()) {
+            if theme::button_enabled(ui, "Use this folder", source) {
                 self.lib_ui.message = Some(match self.new_install(&text) {
                     Ok(m) => {
                         self.lib_ui.dialog = None;

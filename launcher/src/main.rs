@@ -1,7 +1,6 @@
 use rac_rs_launcher::cfg::LauncherCfg;
 use rac_rs_launcher::platform;
 use rac_rs_launcher::ui::{theme, LauncherApp};
-use std::time::{Duration, Instant};
 
 const ICON_PNG: &[u8] = include_bytes!("../assets/rac-rs-256.png");
 
@@ -13,18 +12,8 @@ fn icon() -> Option<egui::IconData> {
 
 fn main() {
     let info = LauncherApp::open_args();
-    let restarted = info.restarted;
-    // One launcher per window; after a self-update the old process may still be closing, so retry for a while.
-    let until = Instant::now() + Duration::from_secs(if restarted { 10 } else { 0 });
-    let guard = loop {
-        if let Some(g) = platform::single_instance("rac-rs-launcher") {
-            break Some(g);
-        }
-        if Instant::now() >= until {
-            break None;
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    };
+    // One launcher per window.
+    let guard = platform::single_instance("rac-rs-launcher");
     if guard.is_none() {
         rfd::MessageDialog::new()
             .set_title("RAC-RS Launcher")
@@ -47,9 +36,7 @@ fn main() {
         opts,
         Box::new(move |cc| {
             theme::apply(&cc.egui_ctx);
-            let mut app = LauncherApp::build_app(&info);
-            app.restarted = restarted;
-            Ok(Box::new(LauncherApp::new(app)))
+            Ok(Box::new(LauncherApp::new(LauncherApp::build_app(&info))))
         }),
     );
     if let Err(e) = result {

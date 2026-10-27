@@ -33,6 +33,7 @@ pub fn hidden(cmd: &mut Command) -> &mut Command {
 
 /// Kills the child and everything it started (the process group when the caller made one).
 pub fn kill_tree(pid: u32) {
+    let _ = Command::new("kill").args(["-9", &format!("-{pid}")]).status();
     let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
 }
 

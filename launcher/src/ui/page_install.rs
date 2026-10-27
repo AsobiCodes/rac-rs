@@ -88,10 +88,7 @@ impl App {
     pub fn show_run_with(&mut self, ui: &mut Ui, pr: &Progress, started: std::time::Instant) {
         let names = pr.step_names();
         let pct = pr.progress.floor().min(100.0) as u32;
-        let note = match self.run_kind {
-            RunKind::Update { .. } => "This takes about 2 to 10 minutes. You can keep using your PC.",
-            _ => "This takes about 15 minutes. You can keep using your PC.",
-        };
+        let note = "This takes about 15 minutes. You can keep using your PC.";
         let mut cancel_ask = false;
         let mut cancel_yes = false;
         let mut cancel_no = false;
@@ -168,9 +165,8 @@ impl App {
 
     pub fn show_failed(&mut self, ui: &mut Ui) {
         let Some(f) = self.failure.as_ref() else { return };
-        let (msg, details, log, is_update) = (f.message.clone(), f.details.clone(), f.log.clone(), f.update);
-        let (mut retry, mut close, mut copy, mut play_backup) = (false, false, false, false);
-        let backup = if is_update { self.backup_for_failure() } else { None };
+        let (msg, details, log) = (f.message.clone(), f.details.clone(), f.log.clone());
+        let (mut retry, mut close, mut copy) = (false, false, false);
         ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             narrow(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -192,10 +188,7 @@ impl App {
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         retry = theme::primary_button(ui, "Try again", Vec2::new(140.0, 40.0), true);
-                        if let Some((_, v)) = &backup {
-                            play_backup = theme::button_enabled(ui, &format!("Play the backup (v{v})"), !self.game_running());
-                        }
-                        close = theme::button(ui, if is_update { "Play old version" } else { "Back" });
+                        close = theme::button(ui, "Back");
                     });
                 });
             });
@@ -207,36 +200,20 @@ impl App {
         if retry {
             self.retry_after_failure();
         }
-        if play_backup {
-            let ctx = ui.ctx().clone();
-            self.play_the_backup(&ctx);
-        }
         if close {
             self.failure = None;
             self.view = View::Home;
             self.refresh_info();
-            if is_update {
-                let ctx = ui.ctx().clone();
-                self.play(&ctx);
-            }
         }
     }
 
     fn retry_after_failure(&mut self) {
-        let update = self.failure.as_ref().map(|f| f.update).unwrap_or(false);
         self.failure = None;
-        if update {
-            if let Some((to, finish)) = self.last_update.clone() {
-                self.start_update(&to, finish);
-                return;
-            }
-        }
         self.view = if self.run_kind == RunKind::Repair { View::Repair } else { View::Home };
     }
 
     pub fn show_done(&mut self, ui: &mut Ui) {
         let title = match &self.run_kind {
-            RunKind::Update { to, .. } => format!("Updated to v{to}"),
             RunKind::Repair => "Repair finished".to_string(),
             RunKind::Install => "Ready to play".to_string(),
         };

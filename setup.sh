@@ -232,6 +232,9 @@ done
 command -v cargo >/dev/null 2>&1 || Fail 'cargo not found (install the rust toolchain: https://rustup.rs)'
 command -v python3 >/dev/null 2>&1 || Fail 'python3 not found (the generators need it)'
 
+Step '(a) checking the tools'
+printf '  cargo and python3 found\n'
+
 # The generator flags, as in setup.ps1. --shared-slow writes the memory-access slow paths
 # as shared helpers instead of inlining them.
 gen_flags='--no-comments --compact --shared-slow --outline-mem --direct-mem --skin-ff --vu-guard'
@@ -431,6 +434,10 @@ fi
 
 # ---------------------------------------------------------------- (d) build
 Step '(d) building the game (release)'
+# The launcher's progress bar follows cargo's "Compiling" lines. Generated crates plus the
+# downloaded libraries are what a first build compiles; a rebuild needs fewer.
+n_gen=$(find "$orc/rec" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
+printf 'expect-compiles: %d\n' $((n_gen + 150))
 # This takes a while: the 427 generated crates are 97% of the compile work. Cargo prints
 # every crate as it goes, so the output below is the progress. Set CARGO_BUILD_JOBS to
 # use fewer cores than the machine has (cargo takes them all otherwise).

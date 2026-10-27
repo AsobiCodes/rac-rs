@@ -4,7 +4,7 @@
 //! step markers `== (a)` ... `== (e)` and `== done`, `level N done`, cargo's `Compiling` lines, `expect-compiles: N`, `ERROR:` lines.
 use std::time::{Duration, Instant};
 
-pub const STEP_NAMES_INSTALL: [&str; 5] = ["Download tools", "Check disc", "Prepare game code", "Build game", "Finish"];
+pub const STEP_NAMES_INSTALL: [&str; 5] = ["Check the tools", "Check disc", "Prepare game code", "Build game", "Finish"];
 pub const STEP_NAMES_UPDATE: [&str; 5] = ["Download update", "Check tools", "Prepare game code", "Build game", "Finish"];
 /// "Compiling" lines of a complete first build (measured); the bar never goes above 98% for the build.
 pub const EXPECTED_COMPILES: u32 = 563;

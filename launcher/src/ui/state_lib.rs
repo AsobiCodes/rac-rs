@@ -93,7 +93,6 @@ impl App {
         self.reload_profiles();
         self.reload_game_data();
         if self.info.installed {
-            self.check_updates();
             if let Some(iso) = self.info.iso.clone().filter(|_| self.info.iso_exists) {
                 self.disc_text = iso.to_string_lossy().to_string();
             }
@@ -135,12 +134,12 @@ impl App {
         Ok(format!("Added Ratchet & Clank {version} from {}", e.folder))
     }
 
-    /// "New install" with the typed or picked folder. A folder that already holds an unpacked RAC-RS release is listed as it is;
-    /// otherwise the latest release is downloaded into it (`state_net.rs`); when that is done the entry is added and the disc setup is next.
+    /// "New install": a downloaded or cloned copy of the game's source (VERSION + setup.sh). The launcher
+    /// builds it from the player's disc; it never downloads anything.
     pub fn new_install(&mut self, text: &str) -> Result<String, String> {
         let dir = clean_path(text);
         if dir.as_os_str().is_empty() {
-            return Err("Choose a folder for the game.".to_string());
+            return Err("Choose a folder for the game's source.".to_string());
         }
         if dir.is_file() {
             return Err("That is a file, not a folder.".to_string());
@@ -150,11 +149,7 @@ impl App {
             return Ok("This folder was already in your list. It is open now.".to_string());
         }
         if !library::is_release_tree(&dir) {
-            if let Some(p) = space_problem(library::free_space(&dir)) {
-                return Err(p);
-            }
-            let want = self.picked_version();
-            return self.start_game_download(dir, want);
+            return Err("This is not a game source folder: it must hold VERSION and setup.sh. Download or clone the Linux fork first.".to_string());
         }
         let installed = library::check_folder(&dir).is_ok();
         if !installed {
@@ -166,7 +161,7 @@ impl App {
         let e = self.library.add(game, &dir);
         self.save_library();
         self.select_install(&e.id);
-        Ok(if installed { "This folder already holds a set-up game. It is in your list now.".to_string() } else { "The folder is in your list. Pick your disc to set the game up.".to_string() })
+        Ok(if installed { "This folder already holds a set-up game. It is in your list now.".to_string() } else { "The source is in your list. Pick your disc to build the game.".to_string() })
     }
 
     /// "Remove from list": the entry goes, no file is touched.

@@ -7,7 +7,6 @@ use rac_rs_launcher::setup_parse::Progress;
 use rac_rs_launcher::ui::page_mods::AddState;
 use rac_rs_launcher::ui::state::{App, DiscState, Failure, RunKind, Sel, Tab, View};
 use rac_rs_launcher::ui::{theme, LauncherApp};
-use rac_rs_launcher::update::UpdateState;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -31,10 +30,8 @@ fn write(p: &Path, text: &str) {
     std::fs::write(p, text).unwrap();
 }
 
-const CHANGELOG: &str = "# Changelog\n\n## v0.4.0\n- Faster start on slow PCs.\n- New launcher: install, play and mods in one window.\n- Fixed the water flicker in Pokitaru.\n\n## v0.3.1\n- Fixed a freeze at start-up on some AMD cards.\n";
-
-/// A finished install in a scratch folder; `remote` = the version the fake update server offers.
-fn installed_root(name: &str, local: &str, remote: &str) -> (PathBuf, String) {
+/// A finished install in a scratch folder.
+fn installed_root(name: &str, local: &str, _remote: &str) -> (PathBuf, String) {
     let root = scratch(name);
     write(&root.join("build/release/rac-rs"), "x");
     write(&root.join("play.sh"), "x");
@@ -43,21 +40,12 @@ fn installed_root(name: &str, local: &str, remote: &str) -> (PathBuf, String) {
     write(&root.join("generated/built_version.txt"), &format!("{local}\n"));
     write(&root.join("VERSION"), &format!("{local}\n"));
     write(&root.join("player/pc_options.txt"), "version=1\n");
-    let base = root.join("_remote");
-    write(&base.join("VERSION"), &format!("{remote}\n"));
-    write(&base.join("CHANGELOG.md"), CHANGELOG);
-    let b = base.to_string_lossy().to_string();
-    (root, b)
+    (root, String::new())
 }
 
-fn make_app(root: PathBuf, base: Option<String>) -> App {
-    let mut app = App::new(root.clone(), base);
+fn make_app(root: PathBuf, _base: Option<String>) -> App {
+    let mut app = App::new(root.clone());
     app.covers.dir = Some(root.join("_no_covers"));
-    // wait for the (local) update check to finish so the screen is the same every run
-    let t = Instant::now();
-    while matches!(app.update_state(), UpdateState::Checking) && app.info.installed && t.elapsed() < Duration::from_secs(5) {
-        std::thread::sleep(Duration::from_millis(30));
-    }
     app.info.disc = Some(&RAC1_DISCS[0]);
     app
 }
@@ -66,8 +54,8 @@ fn empty_app(name: &str) -> App {
     make_app(scratch(name), Some(scratch(&format!("{name}_remote")).to_string_lossy().to_string()))
 }
 
-fn demo_progress(update: bool, step: usize, pct: f64) -> Progress {
-    let mut p = Progress::new(update);
+fn demo_progress(step: usize, pct: f64) -> Progress {
+    let mut p = Progress::new(false);
     p.step = step;
     p.progress = pct;
     p.status = "Compiling level 7 of 19 (rec_l6)".into();
@@ -141,7 +129,7 @@ fn s05_installing() {
     let mut a = empty_app("s05");
     a.view = View::Run;
     a.run_kind = RunKind::Install;
-    a.demo_run = Some((demo_progress(false, 2, 47.0), Instant::now() - Duration::from_secs(412)));
+    a.demo_run = Some((demo_progress(2, 47.0), Instant::now() - Duration::from_secs(412)));
     shot("05_installing", a);
 }
 
@@ -151,7 +139,7 @@ fn s06_installing_details() {
     a.view = View::Run;
     a.run_kind = RunKind::Install;
     a.show_details = true;
-    a.demo_run = Some((demo_progress(false, 2, 47.0), Instant::now() - Duration::from_secs(412)));
+    a.demo_run = Some((demo_progress(2, 47.0), Instant::now() - Duration::from_secs(412)));
     shot("06_installing_details", a);
 }
 
@@ -163,7 +151,6 @@ fn s07_install_failed() {
         message: "The build stopped: there is not enough free disk space on drive D:. About 6 GB are needed.".into(),
         details: "error: no space left on device".into(),
         log: "   Compiling rec_sh_12 v0.1.0\nerror: no space left on device (os error 112)\nerror: could not compile `rec_sh_12`".into(),
-        update: false,
     });
     shot("07_install_failed", a);
 }
@@ -183,14 +170,6 @@ fn s09_installed() {
     let (root, base) = installed_root("s09", "0.3.1", "0.3.1");
     add_mods(&root);
     shot("09_installed", make_app(root, Some(base)));
-}
-
-#[test]
-fn s10_update_banner() {
-    let (root, base) = installed_root("s10", "0.3.1", "0.4.0");
-    let mut a = make_app(root, Some(base));
-    a.update_changes_open = true;
-    shot("10_update_banner", a);
 }
 
 #[test]
@@ -337,14 +316,14 @@ fn s19_launcher_page() {
 fn s20_scaled_and_small() {
     let (root, base) = installed_root("s20", "0.3.1", "0.4.0");
     let a = make_app(root, Some(base));
-    render("20_installed_update_1p5x", (1100.0, 700.0), 1.5, a);
+    render("20_installed_1p5x", (1100.0, 700.0), 1.5, a);
     let (root, base) = installed_root("s20b", "0.3.1", "0.4.0");
     let mut b = make_app(root, Some(base));
     select_tab(&mut b, Tab::Settings);
     render("21_settings_small_860x580", (860.0, 580.0), 1.0, b);
     let mut c = empty_app("s20c");
     c.view = View::Run;
-    c.demo_run = Some((demo_progress(false, 2, 47.0), Instant::now() - Duration::from_secs(412)));
+    c.demo_run = Some((demo_progress(2, 47.0), Instant::now() - Duration::from_secs(412)));
     c.show_details = true;
     render("22_installing_small_860x580_1p5x", (860.0, 580.0), 1.5, c);
 }

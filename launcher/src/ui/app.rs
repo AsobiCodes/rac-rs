@@ -22,7 +22,6 @@ impl LauncherApp {
         egui::Panel::left("side").exact_size(236.0).resizable(false).frame(side).show(ui, |ui| self.app.show_sidebar(ui));
         let main = egui::Frame::new().fill(theme::BG).inner_margin(Margin::symmetric(30, 24));
         egui::CentralPanel::default().frame(main).show(ui, |ui| {
-            self.app.launcher_banner(ui);
             match self.app.sel {
             Sel::Launcher => self.app.show_launcher_page(ui),
             Sel::Library => self.app.show_library(ui),
@@ -120,26 +119,23 @@ impl LauncherApp {
             Some(r) => r.clone(),
             None => crate::library::data_dir(&exe_dir, appdata.as_deref()).0,
         };
-        let base = a.update_base.or_else(|| std::env::var("RAC_LAUNCHER_UPDATE_BASE").ok().filter(|s| !s.is_empty()));
-        StartInfo { data_dir, exe_dir, root: a.root, base, restarted: a.restarted }
+        StartInfo { data_dir, exe_dir, root: a.root }
     }
 
     /// The app for the command line: the library of `data_dir` (the launcher's own folder is added when it sits in a game folder).
     pub fn build_app(info: &StartInfo) -> App {
-        let mut app = Self::build_app_inner(info);
-        app.start_self_check();
-        app
+        Self::build_app_inner(info)
     }
 
     fn build_app_inner(info: &StartInfo) -> App {
         match &info.root {
-            Some(r) => App::new(r.clone(), info.base.clone()),
+            Some(r) => App::new(r.clone()),
             None => {
                 let mut lib = crate::library::Library::load(&info.data_dir);
                 if lib.auto_add(&info.exe_dir).is_some() {
                     let _ = lib.save();
                 }
-                App::with_library(info.data_dir.clone(), lib, None, info.base.clone())
+                App::with_library(info.data_dir.clone(), lib, None)
             }
         }
     }
@@ -151,8 +147,6 @@ pub struct StartInfo {
     pub exe_dir: std::path::PathBuf,
     /// `--root`.
     pub root: Option<std::path::PathBuf>,
-    pub base: Option<String>,
-    pub restarted: bool,
 }
 
 impl eframe::App for LauncherApp {

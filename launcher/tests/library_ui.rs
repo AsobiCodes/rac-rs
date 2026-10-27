@@ -6,7 +6,6 @@ use egui_kittest::kittest::{NodeT, Queryable};
 use egui_kittest::Harness;
 use rac_rs_launcher::games::game_by_id;
 use rac_rs_launcher::library::Library;
-use rac_rs_launcher::releases::{self, ReleaseSource};
 use rac_rs_launcher::ui::state::{App, Sel, Tab};
 use rac_rs_launcher::ui::{theme, LauncherApp};
 use std::path::{Path, PathBuf};
@@ -55,7 +54,7 @@ fn lib_app(name: &str, versions: &[&str]) -> (App, Env) {
         roots.push(root);
     }
     lib.save().unwrap();
-    let mut app = App::with_library(data.clone(), lib, ids.first().cloned(), Some(data.join("_no_remote").to_string_lossy().to_string()));
+    let mut app = App::with_library(data.clone(), lib, ids.first().cloned());
     app.covers.dir = Some(data.join("_no_covers"));
     (app, Env { data, roots, ids })
 }
@@ -178,13 +177,11 @@ fn new_install_input_checks() {
     let file = e.data.join("a_file.txt");
     write(&file, "x");
     assert!(a.new_install(&file.to_string_lossy()).unwrap_err().contains("file, not a folder"));
-    // a folder with something in it that is not a game: refused before anything is downloaded
+    // a folder that is not a game source: refused, nothing is touched
     let busy = e.data.join("my_documents");
     write(&busy.join("notes.txt"), "mine");
-    a.net.game_src = ReleaseSource::Folder(e.data.join("_no_releases"));
     let r = a.new_install(&busy.to_string_lossy());
-    assert!(r.unwrap_err().contains("not empty"));
-    assert!(!a.downloading(), "nothing was started");
+    assert!(r.unwrap_err().contains("not a game source folder"));
     assert_eq!(std::fs::read_to_string(busy.join("notes.txt")).unwrap(), "mine");
     assert_eq!(a.library.entries.len(), 1);
     cleanup(&e);
@@ -213,47 +210,12 @@ fn new_install_in_an_unpacked_release_tree_is_listed_and_waits_for_the_disc() {
     assert_eq!(a.root, tree, "the new install is open");
     assert!(!a.info.installed, "not set up yet: the disc comes next");
     assert_eq!(saved_ids(&e.data).len(), 2);
-    assert!(!a.downloading(), "an unpacked tree is not downloaded again");
     // a tree that is built already says so
     let built = e.data.join("built");
     install(&built, "0.3.1");
     let r = a.new_install(&built.to_string_lossy()).unwrap();
     assert!(r.contains("already holds a set-up game"), "{r}");
     assert_eq!(a.library.entries.len(), 3);
-    cleanup(&e);
-}
-
-#[test]
-fn new_install_downloads_into_an_empty_folder_from_a_test_source() {
-    let (mut a, e) = lib_app("new_dl", &["0.4.0"]);
-    let rel = e.data.join("rel");
-    let mut zip = std::io::Cursor::new(Vec::new());
-    {
-        use std::io::Write;
-        let mut w = zip::ZipWriter::new(&mut zip);
-        let o = zip::write::SimpleFileOptions::default();
-        for (n, b) in [("rac-rs-9.9.9/VERSION", &b"9.9.9\n"[..]), ("rac-rs-9.9.9/setup.sh", b"# s"), ("rac-rs-9.9.9/play.sh", b"x")] {
-            w.start_file(n, o).unwrap();
-            w.write_all(b).unwrap();
-        }
-        w.finish().unwrap();
-    }
-    releases::write_test_release(&rel, "v9.9.9", "", &[("rac-rs-9.9.9.zip", zip.get_ref())], &|_, hex| Some(format!("sha256:{hex}")));
-    a.net.game_src = ReleaseSource::Folder(rel);
-    let dest = e.data.join("games").join("rac");
-    assert!(a.new_install(&dest.to_string_lossy()).is_ok());
-    assert!(a.downloading());
-    for _ in 0..300 {
-        a.poll_net();
-        if !a.downloading() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    assert!(!a.downloading() && a.net.dl_error.is_none(), "{:?}", a.net.dl_error);
-    assert_eq!(a.info.local_version, "9.9.9");
-    assert!(a.library.find_folder(&dest).is_some());
-    assert!(!a.library.entries.iter().find(|x| x.path() == dest).unwrap().pinned, "the newest version is not pinned");
     cleanup(&e);
 }
 
@@ -276,7 +238,7 @@ fn a_crash_marker_is_recovered_at_the_next_start() {
     drop(a);
     // next start: the exe is not running, so the live file is copied back into the profile and the marker is gone
     let lib = Library::load(&e.data);
-    let b = App::with_library(e.data.clone(), lib, None, Some(e.data.join("_no_remote").to_string_lossy().to_string()));
+    let b = App::with_library(e.data.clone(), lib, None);
     assert!(!b.game_external);
     assert!(b.profiles.pending_marker().is_none(), "marker removed");
     let t = profile_options(&e.roots[0], "default");
@@ -297,7 +259,7 @@ fn a_marker_stays_while_the_game_is_still_running() {
     // a handle that denies sharing = what a running exe looks like to platform::exe_in_use
     let _lock = std::fs::OpenOptions::new().read(true).share_mode(0).open(e.roots[0].join("build/release/rac-rs")).unwrap();
     let lib = Library::load(&e.data);
-    let b = App::with_library(e.data.clone(), lib, None, None);
+    let b = App::with_library(e.data.clone(), lib, None);
     assert!(b.game_external, "a game started by another launcher is noticed");
     assert!(b.profiles.pending_marker().is_some(), "not copied back while it runs");
     assert!(!profile_options(&e.roots[0], "default").contains("water=medium"));

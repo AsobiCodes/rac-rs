@@ -37,6 +37,16 @@ that follows this import.
 - This crate is its own Cargo workspace, and the game's root `Cargo.toml`
   excludes `launcher`, so the two builds cannot see each other's dependencies.
 
+## What the Linux port removed
+
+The update, self-update and release-download modules (`releases.rs`,
+`game_dl.rs`, `update.rs`, `selfupdate.rs`, `ui/page_net.rs`,
+`ui/state_net.rs`) were removed from the Linux crate: this is a fork, so a new
+version is a new download or `git pull`, and the launcher only builds and
+repairs the local source. Their upstream versions are in the git history and in
+`windows/` where they describe Windows flows. The launcher's own version is the
+fork's `VERSION`, used for display only.
+
 ## Re-syncing with upstream
 
 1. Fetch the new upstream commit: `git clone https://github.com/AsobiCodes/rac-rs-launcher`.

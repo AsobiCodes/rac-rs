@@ -1,28 +1,21 @@
-//! The setup process behind the install / repair / update screens.
-//!
-//! The Windows launcher ran `setup.ps1` (archived in `windows/engine_windows.rs`).
-//! The Linux engine, which will run `setup.sh --iso <iso>` and read the same
-//! progress markers, comes in a later version; until then `start` says so and
-//! the screens stay closed. The process reader below is what that engine will
-//! use, so it is kept here rather than duplicated later.
+//! The setup process: `setup.sh --iso <iso> --no-pause --skip-hash`, with its output read by
+//! `setup_parse::Progress`. The launcher already checked the disc (size and SHA-1), so the setup
+//! only checks the size again (`--skip-hash`). Repair passes `--regenerate`.
 use crate::platform;
 use crate::setup_parse::Progress;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
-use std::process::Child;
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::time::Instant;
 
 #[derive(Clone, Debug, Default)]
 pub struct EngineOpts {
     pub root: PathBuf,
     pub iso: PathBuf,
-    /// Some((version, finish_only)): an update.
-    pub update: Option<(String, bool)>,
-    /// Repair / rebuild: regenerate the game code too.
+    /// Repair / rebuild: make the game code again (`--regenerate`).
     pub regenerate: bool,
-    pub test_update_base: Option<String>,
-    /// More switches for flow tests; also from the environment variable RAC_LAUNCHER_SETUP_ARGS.
+    /// More arguments for `setup.sh` (tests).
     pub extra: Vec<String>,
 }
 
@@ -30,10 +23,23 @@ pub fn env_extra_args() -> Vec<String> {
     std::env::var("RAC_LAUNCHER_SETUP_ARGS").map(|s| s.split_whitespace().map(String::from).collect()).unwrap_or_default()
 }
 
+/// The arguments after `sh`.
+pub fn build_args(o: &EngineOpts, script: &std::path::Path) -> Vec<String> {
+    let mut a = vec![
+        script.to_string_lossy().to_string(),
+        "--iso".to_string(),
+        o.iso.to_string_lossy().to_string(),
+        "--no-pause".to_string(),
+        "--skip-hash".to_string(),
+    ];
+    if o.regenerate {
+        a.push("--regenerate".to_string());
+    }
+    a.extend(o.extra.iter().cloned());
+    a
+}
+
 /// A running (or finished) setup worker.
-///
-/// Built by the Linux engine in a later version; the reader is kept ready for it.
-#[allow(dead_code)]
 pub struct Engine {
     child: Child,
     pid: u32,
@@ -45,7 +51,6 @@ pub struct Engine {
     pub cancelled: bool,
 }
 
-#[allow(dead_code)]
 fn pump<R: std::io::Read + Send + 'static>(r: R, tx: std::sync::mpsc::Sender<String>) {
     std::thread::spawn(move || {
         let mut br = BufReader::new(r);
@@ -67,11 +72,41 @@ fn pump<R: std::io::Read + Send + 'static>(r: R, tx: std::sync::mpsc::Sender<Str
     });
 }
 
-pub const UNSUPPORTED_TEXT: &str = "Installing or repairing from a disc comes in a later version of the Linux launcher. Run setup.sh in the game folder, then use \"Add existing install...\".";
-
 impl Engine {
-    pub fn start(_opts: &EngineOpts) -> std::io::Result<Engine> {
-        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, UNSUPPORTED_TEXT))
+    pub fn start(opts: &EngineOpts) -> std::io::Result<Engine> {
+        let script = opts.root.join("setup.sh");
+        if !script.is_file() {
+            return Err(std::io::Error::new(std::io::ErrorKind::NotFound, format!("setup.sh was not found in {}", opts.root.display())));
+        }
+        let mut cmd = Command::new("sh");
+        cmd.args(build_args(opts, &script))
+            .current_dir(&opts.root)
+            .env("RAC_NO_PAUSE", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // Own process group: Cancel kills the generators and cargo with setup.sh.
+            unsafe {
+                cmd.pre_exec(|| {
+                    libc::setpgid(0, 0);
+                    Ok(())
+                });
+            }
+        }
+        platform::hidden(&mut cmd);
+        let mut child = cmd.spawn()?;
+        let (tx, rx) = channel();
+        if let Some(o) = child.stdout.take() {
+            pump(o, tx.clone());
+        }
+        if let Some(e) = child.stderr.take() {
+            pump(e, tx);
+        }
+        let pid = child.id();
+        Ok(Engine { child, pid, rx, progress: Progress::new(false), started: Instant::now(), done: None, cancelled: false })
     }
 
     /// Reads what the worker printed since the last call and checks whether it ended. Returns true when something changed.
@@ -120,7 +155,7 @@ impl Engine {
         changed
     }
 
-    /// Cancel: the child and its descendants only.
+    /// Cancel: the child and everything it started (its process group).
     pub fn cancel(&mut self) {
         self.cancelled = true;
         if self.done.is_none() {
@@ -145,12 +180,36 @@ impl Drop for Engine {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::time::Duration;
 
     #[test]
-    fn starting_says_linux_installs_come_later() {
-        let o = EngineOpts { root: PathBuf::from("/tmp/none"), iso: PathBuf::new(), ..Default::default() };
-        let e = Engine::start(&o).err().unwrap();
-        assert_eq!(e.kind(), std::io::ErrorKind::Unsupported);
-        assert!(e.to_string().contains("setup.sh"));
+    fn missing_script_is_an_error_not_a_panic() {
+        let o = EngineOpts { root: std::env::temp_dir().join("racl_no_such_root"), iso: PathBuf::new(), ..Default::default() };
+        assert!(Engine::start(&o).is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_progress_markers_are_read() {
+        let d = std::env::temp_dir().join(format!("racl_engine_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("setup.sh"), "#!/bin/sh\nprintf '== (a) tools\\n== (b) disc\\n  level 0 done: x\\nexpect-compiles: 10\\n== (d) build\\n   Compiling foo\\nERROR: nope\\n== done\\n'\n").unwrap();
+        let o = EngineOpts { root: d.clone(), iso: PathBuf::from("/x.iso"), ..Default::default() };
+        let mut e = Engine::start(&o).unwrap();
+        for _ in 0..300 {
+            e.poll();
+            if e.done.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(e.progress.levels, 1);
+        assert_eq!(e.progress.expect, 10);
+        assert_eq!(e.progress.compiled, 1);
+        assert_eq!(e.progress.last_error, "nope");
+        assert_eq!(e.done, Some(0), "the last word is the exit code");
+        assert!(e.progress.finished);
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

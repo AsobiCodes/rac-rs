@@ -1,4 +1,4 @@
-//! The launcher's state and the flows behind the buttons (install, repair, update, play, disc check, shortcuts, restart after a launcher update).
+//! The launcher's state and the flows behind the buttons (install, repair, play, disc check, backups, shortcuts).
 //! The pages (`page_*.rs`) only draw and call these methods.
 use crate::cfg::LauncherCfg;
 use crate::discs::{self, DiscCheck, DiscResult};
@@ -9,16 +9,14 @@ use crate::profiles::{Profile, Profiles};
 use crate::pcopts::Options;
 use crate::platform;
 use crate::play;
-use crate::selfupdate;
 use crate::setup_parse::Progress;
 use crate::ui::cover::Covers;
 use crate::ui::page_mods::ModsUi;
 use crate::ui::state_lib::{AddDialog, LibUi, ProfileUi};
-use crate::update::{self, UpdateState};
 use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::mpsc::{channel, Receiver};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub const LAUNCHER_EXE: &str = "rac-rs-launcher";
@@ -66,7 +64,7 @@ pub enum View {
     Repair,
     /// The worker runs.
     Run,
-    /// The backup before an update is being copied.
+    /// A backup is being copied.
     Backup,
     Failed,
     Done,
@@ -76,7 +74,6 @@ pub enum View {
 pub enum RunKind {
     Install,
     Repair,
-    Update { to: String, finish: bool },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -91,7 +88,6 @@ pub struct Failure {
     pub message: String,
     pub details: String,
     pub log: String,
-    pub update: bool,
 }
 
 /// What a file dialog on its own thread was asked for.
@@ -114,27 +110,14 @@ pub struct Toast {
 
 pub struct Args {
     pub root: Option<PathBuf>,
-    pub update_base: Option<String>,
-    pub restarted: bool,
-}
-
-fn set_env_arg(key: &str, v: Option<String>) {
-    if let Some(v) = v {
-        std::env::set_var(key, v);
-    }
 }
 
 pub fn parse_args(args: impl IntoIterator<Item = String>) -> Args {
-    let mut a = Args { root: None, update_base: std::env::var("RAC_LAUNCHER_UPDATE_BASE").ok().filter(|s| !s.is_empty()), restarted: false };
+    let mut a = Args { root: None };
     let mut it = args.into_iter();
     while let Some(x) = it.next() {
         match x.as_str() {
             "--root" => a.root = it.next().map(PathBuf::from),
-            "--update-base" => a.update_base = it.next(),
-            "--restarted" => a.restarted = true,
-            // the two release sources for tests (folders with latest.json); the environment is inherited by a restarted launcher
-            "--launcher-releases" => set_env_arg("RAC_LAUNCHER_RELEASES", it.next()),
-            "--game-releases" => set_env_arg("RAC_GAME_RELEASES", it.next()),
             _ => {}
         }
     }
@@ -155,7 +138,7 @@ pub struct App {
     pub profile_list: Vec<Profile>,
     pub profile_ui: ProfileUi,
     pub lib_ui: LibUi,
-    /// "Back up your current version first" (see state_backup.rs).
+    /// Manual backups of the open install (see state_backup.rs).
     pub backup: crate::ui::state_backup::BackupUi,
     pub cfg: LauncherCfg,
     pub sel: Sel,
@@ -177,11 +160,6 @@ pub struct App {
     pub confirm_cancel: bool,
     pub failure: Option<Failure>,
     pub done_note: String,
-    pub last_update: Option<(String, bool)>,
-    // updates
-    pub update: Arc<Mutex<UpdateState>>,
-    pub update_base: Option<String>,
-    pub update_changes_open: bool,
     // the game
     pub game_child: Option<Child>,
     pub game_external: bool,
@@ -199,11 +177,7 @@ pub struct App {
     pub confirm_quit: bool,
     pub quit_now: bool,
     pub shortcut_dir: Option<PathBuf>,
-    pub restart_exe: Option<PathBuf>,
-    pub restarted: bool,
-    /// Downloads and the launcher's own update (see state_net.rs).
-    pub net: crate::ui::state_net::Net,
-    /// Started with `--root`: a restart passes it on.
+    /// Started with `--root`: keep using it for this window.
     pub forced_root: bool,
     /// Snapshot tests only: a made-up worker progress to draw when no engine runs.
     pub demo_run: Option<(Progress, Instant)>,
@@ -212,17 +186,17 @@ pub struct App {
 impl App {
     /// "Use this install": `root` is the one install, and the launcher's own files (launcher.cfg, library.json) live there too.
     /// Used by `--root` and by the tests; the folder is put in the library whatever it holds.
-    pub fn new(root: PathBuf, update_base: Option<String>) -> App {
+    pub fn new(root: PathBuf) -> App {
         let mut library = Library::load(&root);
         let entry = library.add(games::game_by_id("rac1").unwrap_or(&games::GAMES[0]), &root);
         let _ = library.save();
-        let mut app = Self::with_library(root, library, Some(entry.id), update_base);
+        let mut app = Self::with_library(root, library, Some(entry.id));
         app.forced_root = true;
         app
     }
 
     /// The normal start: the library of `data_dir`, with `select` (or the last used, or the first install) opened.
-    pub fn with_library(data_dir: PathBuf, library: Library, select: Option<String>, update_base: Option<String>) -> App {
+    pub fn with_library(data_dir: PathBuf, library: Library, select: Option<String>) -> App {
         let cfg = LauncherCfg::load(&data_dir);
         let want = select.or_else(|| Some(cfg.install.clone()).filter(|s| !s.is_empty())).filter(|id| library.get(id).is_some()).or_else(|| library.entries.first().map(|e| e.id.clone()));
         let game = games::game_by_id(&cfg.game).filter(|g| g.visible).unwrap_or(&games::GAMES[0]);
@@ -243,10 +217,6 @@ impl App {
             confirm_cancel: false,
             failure: None,
             done_note: String::new(),
-            last_update: None,
-            update: Arc::new(Mutex::new(UpdateState::Checking)),
-            update_base,
-            update_changes_open: false,
             game_child: None,
             game_external: false,
             last_ext_check: Instant::now() - Duration::from_secs(10),
@@ -260,9 +230,6 @@ impl App {
             confirm_quit: false,
             quit_now: false,
             shortcut_dir: std::env::var_os("RAC_LAUNCHER_SHORTCUT_DIR").map(PathBuf::from),
-            restart_exe: None,
-            restarted: false,
-            net: crate::ui::state_net::Net::from_env(),
             forced_root: false,
             demo_run: None,
             info: InstallInfo::default(),
@@ -278,7 +245,6 @@ impl App {
             library,
             cfg,
         };
-        app.cleanup_old_exe();
         if let Some(id) = want {
             app.enter_install(&id);
         }
@@ -333,44 +299,6 @@ impl App {
 
     pub fn busy(&self) -> bool {
         self.engine.as_ref().map(|e| e.running()).unwrap_or(false) || self.backup.job.is_some()
-    }
-
-    // ------------------------------------------------------------------ the old exe left by a launcher update
-
-    /// At start: remove `rac-rs-launcher.old` NEXT TO THE RUNNING EXE (not in the data folder), retrying for ~15 s on a thread.
-    fn cleanup_old_exe(&self) {
-        selfupdate::cleanup_old(self.net.self_exe.clone());
-    }
-
-    // ------------------------------------------------------------------ updates
-
-    pub fn check_updates(&mut self) {
-        if !self.info.installed {
-            return;
-        }
-        if !crate::installer::supported() {
-            // The Linux update flow comes with the setup.sh engine; no Windows release is offered here.
-            if let Ok(mut g) = self.update.lock() {
-                *g = UpdateState::UpToDate(self.info.local_version.clone());
-            }
-            return;
-        }
-        self.backup_forget_plan();
-        if self.is_backup() {
-            // a backup stays on its version for good: no check, no banner
-            if let Ok(mut g) = self.update.lock() {
-                *g = UpdateState::UpToDate(self.info.local_version.clone());
-            }
-            return;
-        }
-        if let Ok(mut g) = self.update.lock() {
-            *g = UpdateState::Checking;
-        }
-        update::check_async(self.info.local_version.clone(), self.info.built_version.clone(), self.update_base.clone(), self.root.clone(), self.update.clone());
-    }
-
-    pub fn update_state(&self) -> UpdateState {
-        self.update.lock().map(|g| g.clone()).unwrap_or(UpdateState::Offline)
     }
 
     // ------------------------------------------------------------------ the disc
@@ -473,7 +401,7 @@ impl App {
         }
     }
 
-    // ------------------------------------------------------------------ the worker (install / repair / update)
+    // ------------------------------------------------------------------ the worker (install / repair)
 
     pub fn goto_repair(&mut self) {
         self.view = View::Repair;
@@ -488,45 +416,7 @@ impl App {
         let Some(iso) = self.disc_path.clone() else { return };
         let repair = self.view == View::Repair;
         self.run_kind = if repair { RunKind::Repair } else { RunKind::Install };
-        let opts = EngineOpts { root: self.root.clone(), iso, update: None, regenerate: repair, test_update_base: None, extra: engine::env_extra_args() };
-        self.start_engine(opts);
-    }
-
-    /// Why an update cannot start now (None = it can): the game runs, or the disc image is gone. Reads the install again.
-    pub fn update_blocker(&mut self) -> Option<String> {
-        self.refresh_info();
-        if self.game_running() {
-            return Some("The game is still running.\n\nClose it, then click Try again.".to_string());
-        }
-        match self.info.iso.clone().filter(|_| self.info.iso_exists) {
-            Some(_) => None,
-            None => {
-                let p = self.info.iso.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
-                Some(format!("Your disc image was not found at:\n{p}\n\nPut it back where it was, or use Repair / rebuild (Settings, Advanced) to pick it again."))
-            }
-        }
-    }
-
-    pub fn start_update(&mut self, to: &str, finish: bool) {
-        self.last_update = Some((to.to_string(), finish));
-        self.run_kind = RunKind::Update { to: to.to_string(), finish };
-        // a backup is a finished copy of an old version: nothing ever updates it
-        let msg = if self.is_backup() { Some("A backup is never updated. Open your main install to update.".to_string()) } else { self.update_blocker() };
-        if let Some(m) = msg {
-            self.failure = Some(Failure { message: m, details: String::new(), log: String::new(), update: true });
-            self.engine = None;
-            self.view = View::Failed;
-            return;
-        }
-        let iso = self.info.iso.clone().unwrap_or_default();
-        let opts = EngineOpts {
-            root: self.root.clone(),
-            iso,
-            update: Some((to.to_string(), finish)),
-            regenerate: false,
-            test_update_base: self.update_base.clone(),
-            extra: engine::env_extra_args(),
-        };
+        let opts = EngineOpts { root: self.root.clone(), iso, regenerate: repair, extra: engine::env_extra_args() };
         self.start_engine(opts);
     }
 
@@ -541,7 +431,7 @@ impl App {
             }
             Err(e) => {
                 self.engine = None;
-                self.failure = Some(Failure { message: format!("The setup could not be started.\n\n{e}"), details: String::new(), log: String::new(), update: opts.update.is_some() });
+                self.failure = Some(Failure { message: format!("The setup could not be started.\n\n{e}"), details: String::new(), log: String::new() });
                 self.view = View::Failed;
             }
         }
@@ -570,7 +460,7 @@ impl App {
         if code == 0 {
             self.finish_ok(&progress);
         } else {
-            self.failure = Some(Failure { message: progress.error_text(), details: progress.details_text(&platform::os_text()), log: progress.log.join("\n"), update: progress.update });
+            self.failure = Some(Failure { message: progress.error_text(), details: progress.details_text(&platform::os_text()), log: progress.log.join("\n") });
             self.view = View::Failed;
         }
     }
@@ -579,22 +469,13 @@ impl App {
         self.refresh_info();
         self.reload_game_data();
         self.done_note = String::new();
-        if let RunKind::Update { to, .. } = self.run_kind.clone() {
-            self.done_note = format!("Updated to v{to}. Your saves and settings were kept.");
-            if let Some(e) = self.backup.made.as_deref().and_then(|id| self.library.get(id)) {
-                self.done_note.push_str(&format!(" Your old version is kept as \"{}\" in the Library.", e.name));
-            }
-            if !self.backup.left_out.is_empty() {
-                self.done_note.push_str(&format!(" The backup does not hold the texture pack(s) {} (this drive cannot share files).", self.backup.left_out.join(", ")));
-            }
-        } else if self.shortcut_wanted && self.run_kind == RunKind::Install {
+        if self.shortcut_wanted && self.run_kind == RunKind::Install {
             self.done_note = self.make_shortcut_note();
         } else if self.run_kind == RunKind::Repair {
             self.done_note = "The game was rebuilt from your disc. Your saves and settings were kept.".to_string();
         }
         let _ = progress;
         self.view = View::Done;
-        self.check_updates();
     }
 
     fn make_shortcut_note(&mut self) -> String {
@@ -702,7 +583,6 @@ impl App {
         self.poll_engine();
         self.poll_game(ctx);
         self.mods_poll();
-        let net_busy = self.poll_net();
         if let Some(t) = &self.toast {
             if Instant::now() > t.until {
                 self.toast = None;
@@ -716,12 +596,7 @@ impl App {
             || self.game_child.is_some()
             || self.toast.is_some()
             || self.mods_ui.busy()
-            || net_busy
-            || matches!(self.update_state(), UpdateState::Checking)
             || self.info.installed;
-        if let Some(exe) = self.restart_exe.take() {
-            self.do_restart(&exe);
-        }
         active
     }
 
@@ -751,10 +626,9 @@ mod tests {
 
     #[test]
     fn args_are_read() {
-        let a = parse_args(["--root".to_string(), "D:\\x".to_string(), "--restarted".to_string(), "--update-base".to_string(), "E:\\b".to_string()]);
-        assert_eq!(a.root.as_deref(), Some(Path::new("D:\\x")));
-        assert!(a.restarted);
-        assert_eq!(a.update_base.as_deref(), Some("E:\\b"));
+        let a = parse_args(["--root".to_string(), "/games/rac".to_string()]);
+        assert_eq!(a.root.as_deref(), Some(Path::new("/games/rac")));
+        assert!(parse_args(["--something".to_string()]).root.is_none());
     }
 
     #[test]

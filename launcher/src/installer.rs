@@ -1,9 +1,4 @@
-//! The install backend of the Linux launcher.
-//!
-//! The Windows launcher ran the PowerShell worker (`setup.ps1`, archived in
-//! `windows/engine_windows.rs`). The Linux engine (`setup.sh --iso <iso>`) comes
-//! in a later version; until then the launcher manages installs that are
-//! already set up with `setup.sh`.
+//! The install backend of the Linux launcher: `setup.sh` in the game's source folder.
 use crate::engine::{Engine, EngineOpts};
 
 pub trait InstallBackend: Send + Sync {
@@ -13,16 +8,14 @@ pub trait InstallBackend: Send + Sync {
     fn start(&self, opts: &EngineOpts) -> std::io::Result<Engine>;
 }
 
-pub const UNSUPPORTED_TEXT: &str = crate::engine::UNSUPPORTED_TEXT;
-
 pub struct LinuxBackend;
 
 impl InstallBackend for LinuxBackend {
     fn name(&self) -> &'static str {
-        "setup.sh (later version)"
+        "setup.sh"
     }
     fn supported(&self) -> bool {
-        false
+        true
     }
     fn start(&self, opts: &EngineOpts) -> std::io::Result<Engine> {
         Engine::start(opts)
@@ -43,11 +36,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn linux_backend_says_install_comes_later() {
+    fn the_backend_is_the_linux_setup() {
+        assert!(supported());
+        assert_eq!(backend().name(), "setup.sh");
         let o = EngineOpts::default();
-        let e = backend().start(&o).err().unwrap();
-        assert_eq!(e.kind(), std::io::ErrorKind::Unsupported);
-        assert!(e.to_string().contains("setup.sh"));
-        assert!(!supported());
+        assert!(backend().start(&o).is_err(), "no setup.sh in an empty folder");
     }
 }
