@@ -188,6 +188,12 @@ fn update_check() -> bool {
 	}
 }
 
+/// The value for COLD_LANG: the play config's `lang=` when it names one the game knows, else None. None leaves the choice to
+/// the language remembered in the options file (the game's own menu saves it there) and to the default, English.
+fn cold_lang(play_cfg: Option<&str>) -> Option<String> {
+	play_cfg.filter(|l| ["en", "fr", "de", "es", "it"].contains(l)).map(str::to_string)
+}
+
 /// The no-argument start (what Play.cmd did): find the install root (the first folder from the exe's folder upwards that holds
 /// `generated/play.cfg`), read `iso=<path>` and optional `lang=en|fr|de|es|it` from it, set the environment Play.cmd set, rotate the
 /// card safety copies and return the arguments of `view <iso> 0 --retail-cold --modern-cam`. Err is the text for a message box.
@@ -218,8 +224,12 @@ fn launch_args() -> Result<Vec<String>, String> {
 		std::env::set_var("ORACLE_STUBS", root.join("oracle").join("stubs.txt"));
 		std::env::set_var("RAC_PLAYER_DIR", &player);
 		if std::env::var_os("COLD_LANG").is_none() {
-			let lang = lang.filter(|l| ["en", "fr", "de", "es", "it"].contains(&l.as_str())).unwrap_or_else(|| "en".to_string());
-			std::env::set_var("COLD_LANG", lang);
+			// The play config's language, when it names one. Otherwise the game boots in the language it remembered in the
+			// options file (its own menu saves it there), and in English when it has none: setting it here as "en" would
+			// override the remembered language (upstream issue #11).
+			if let Some(l) = cold_lang(lang.as_deref()) {
+				std::env::set_var("COLD_LANG", l);
+			}
 		}
 	}
 	// Safety copies of the save card before each start (the newest two starts).
@@ -616,4 +626,19 @@ fn elf_section<'a>(elf: &'a [u8], name: &str) -> Option<&'a [u8]> {
 		}
 	}
 	None
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// The play config's language is used when it names one the game knows, and nothing is set when it does not: the game
+	/// then boots in the language it remembered in the options file, and in English when it has none (upstream issue #11).
+	#[test]
+	fn the_play_configs_language_is_only_used_when_it_names_one() {
+		assert_eq!(cold_lang(Some("de")), Some("de".to_string()));
+		assert_eq!(cold_lang(Some("en")), Some("en".to_string()));
+		assert_eq!(cold_lang(Some("xx")), None, "a language the game does not know");
+		assert_eq!(cold_lang(None), None, "the play config names no language");
+	}
 }
