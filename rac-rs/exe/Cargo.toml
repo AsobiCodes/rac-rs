@@ -24,10 +24,6 @@ ee-game = { path = "../../oracle/game" }
 rac-rs-order-a = { path = "order_a" }
 rac-rs-order-b = { path = "order_b" }
 
-[build-dependencies]
-# Embeds rac-rs.manifest (the Windows segment heap, build.rs) with no external tools, for the MSVC and the GNU toolchain alike.
-embed-manifest = "1"
-
 [features]
 # Public build (set by setup.ps1): see the feature of the same name in ../Cargo.toml.
 windows_gui = ["rac-rs/windows_gui"]

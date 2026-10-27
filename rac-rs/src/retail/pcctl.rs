@@ -313,7 +313,7 @@ pub fn text(id: u32, lang: usize, csec: usize, gsec: usize, playstation: bool) -
 /// address into v0, in the game's language `lang`.
 pub fn text_hook(c: &mut Cpu, id: u32, lang: usize) -> bool {
 	let (csec, gsec) = state(|st| (st.ctl.sec, st.gfx.sec));
-	let s = text(id, lang, csec, gsec, !super::prompts::real_pads_off() && super::pspad::connected());
+	let s = text(id, lang, csec, gsec, !super::prompts::real_pads_off() && super::lxpad::connected());
 	let at = if (ID_DBG0..ID_DBG_END).contains(&id) { DBG_POOL + SLOT * (id - ID_DBG0) } else { POOL + SLOT * (id - ID0) };
 	let n = s.len().min(SLOT as usize - 1);
 	for (i, b) in s[..n].iter().enumerate() {
