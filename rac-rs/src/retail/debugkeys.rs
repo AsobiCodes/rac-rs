@@ -1,6 +1,6 @@
 //! Debug keys for the user's own playtests (2026-10-13), keyboard only. Inert unless the environment variable RAC_DEBUG_KEYS=1 is
 //! set (the dev launcher sets it) or the player switched Debug mode on (Pause -> Options -> Controls -> Debug, `devtools::set_menu`,
-//! default Off; the release Play.cmd sets neither). Off, nothing is registered,
+//! default Off; the release play.sh sets neither). Off, nothing is registered,
 //! nothing is written and the window title is unchanged, so retail stays bit-exact (the savestate smoke hashes do not move).
 //!
 //! Keys (in game, retail mode; F7 is the modern camera):

@@ -121,6 +121,10 @@ pub(super) struct HudArt {
 	pub(super) font_tex: Option<Texture>,
 	/// The font sheet as decoded, before any artwork went into it (the PlayStation style writes the sheet from it again).
 	pub(super) font_tex_orig: Option<Texture>,
+	/// The button glyphs style and the bindings the font sheet's button cells were blitted with: a change puts the other
+	/// artwork in and sends the sheet up again (xglyphs.rs, viewer/handler/frame_hud.rs).
+	pub(super) glyph_style: u8,
+	pub(super) glyph_map: [u8; crate::retail::binds::NP],
 	/// Level font 3 (the marker prompt's "!", NOV-14.2b).
 	pub(super) font3: Option<(usize, Vec<art::Glyph>)>,
 	/// Level font 2 (the shop panels' text, table boot 0x1df370).

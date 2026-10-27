@@ -113,8 +113,6 @@ fn new_app(iso_path: &str, level: usize, shot: Option<String>, start: Option<[f3
 		ship_voice: None,
 		gadget_frame: None,
 		art: HudArt::default(),
-		glyph_style: u8::MAX,
-		glyph_map: [u8::MAX; crate::retail::binds::NP],
 		hud_t: (0.0, 0.0),
 		ammo_hud: (None, 0.0, 0.0),
 		hud_seen: (u32::MAX, -1),

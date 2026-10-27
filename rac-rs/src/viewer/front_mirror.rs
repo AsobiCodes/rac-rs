@@ -41,6 +41,18 @@ fn page_of(m: Option<&MenuSnap>) -> Option<frontend::Page> {
 	})
 }
 
+/// The PC pages' texts (the Graphics row and page, the title Graphics page's rows/values and its stepper): they join the
+/// language's strings (the front end's text map) when the page first shows and are refreshed while it is drawn.
+fn pc_page_texts(text: &mut frontend::Text, lang: usize) {
+	if text.get(crate::retail::pcext::ID_GRAPHICS).is_empty() {
+		for (id, s) in crate::retail::pcext::texts(lang) {
+			text.insert(id, s);
+		}
+	}
+	crate::retail::pcctl::put_fixed_texts(text, lang);
+	crate::retail::pcext::put_title_gfx_texts(text, lang);
+}
+
 /// The selected row of the page from retail's current item and that item's own cursor.
 fn sel_of(m: &MenuSnap, page: frontend::Page, slot_cur: [u32; 2]) -> usize {
 	let cur = m.items.iter().find(|i| i.addr == m.cur);
@@ -250,19 +262,10 @@ impl App {
 			}
 			fe.menu.lang = lang;
 		}
-		// The PC options' texts (the Graphics row and page) join the language's strings.
-		if fe.text.get(crate::retail::pcext::ID_GRAPHICS).is_empty() {
-			for (id, s) in crate::retail::pcext::texts(lang) {
-				fe.text.insert(id, s);
-			}
-		}
-		crate::retail::pcctl::put_fixed_texts(&mut fe.text, lang); // the title Graphics page's rows and values
-		crate::retail::pcext::put_title_gfx_texts(&mut fe.text, lang); // the title Graphics stepper's section name
+		pc_page_texts(&mut fe.text, lang);
 		// The title's Mods page (retail/pcmods.rs): its texts follow the mods and settings, so they are refreshed while it is open.
 		if crate::retail::pcmods::title_open() || fe.text.get(crate::retail::pcmods::ID_MODS).is_empty() {
-			for (id, s) in crate::retail::pcmods::texts(lang) {
-				fe.text.insert(id, s);
-			}
+			for (id, s) in crate::retail::pcmods::texts(lang) { fe.text.insert(id, s); }
 		}
 		let slots: [Option<save::Summary>; save::SLOTS] = std::array::from_fn(|i| fr.slots.get(i).copied().flatten().map(|(level, bolts, play_frames, date)| save::Summary { level: level as usize, bolts, play_frames, date }));
 		match snap.as_ref().map(|m| (page_of(Some(m)), m)) {

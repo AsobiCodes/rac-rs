@@ -262,3 +262,120 @@ mod tests {
 		deactivate();
 	}
 }
+
+// ---- the title's Options list hook (moved out of pcext.rs for the size caps) ----
+
+pub(super) const TITLE_CODE: [(u32, u32); 11] = [
+	(0x3c02_0000, 0xffff_0000), // lui v0, hi(region)
+	(0x8c42_0000, 0xffff_0000), // lw v0, lo(region)(v0)
+	(0x5040_0004, !0),          // beql v0, zero, +4
+	(0x3c02_0000, 0xffff_0000), // lui v0, hi(lists)
+	(0x3c02_0000, 0xffff_0000), // lui v0, hi(lists)
+	(0x1000_0002, !0),          // b +2
+	(0x2442_0000, 0xffff_0000), // addiu v0, v0, lo(PAL list)
+	(0x2442_0000, 0xffff_0000), // addiu v0, v0, lo(NTSC list)
+	(0xac82_0034, !0),          // sw v0, 0x34(a0)
+	(0x03e0_0008, !0),          // jr ra
+	(0x0000_102d, !0),          // move v0, zero
+];
+
+/// The front end runs interpreted (no recompiled code: title_boot.rs `hook_front_movies`), so the Options hook is an oracle host
+/// stub on every copy of `TITLE_CODE` in the code range, applied only while RAM still holds that function. Called when the
+/// front end starts (cold boot title in the boot ELF, frontbin after Quit Game).
+pub fn hook_front(m: &mut ee_oracle::Machine) {
+	if !enabled() {
+		return;
+	}
+	let ram = &m.cpu.mem.ram;
+	let rd = |a: usize| u32::from_le_bytes(ram[a..a + 4].try_into().unwrap());
+	let found: Vec<u32> = (0x10_0000..0x40_0000 - 4 * TITLE_CODE.len()).step_by(4).filter(|&a| TITLE_CODE.iter().enumerate().all(|(k, &(v, mask))| rd(a + 4 * k) & mask == v)).map(|a| a as u32).collect();
+	for a in found {
+		let sig = [0, 1, 2, 3].map(|k| m.rd32(a + 4 * k));
+		m.cpu.add_host_stub(a, "title Options list (pcext)", sig, title_options);
+		eprintln!("retail: PC options: title Options hook at {a:#x}");
+	}
+}
+
+/// The title's Options page (host stub on its list set-up, `hook_front`): the retail rows of the disc's region and a Graphics row
+/// that opens a copy of the Video Options page reading the Graphics rows (`ROWS`: the bytes of the pause menu's Graphics
+/// page), all in reserved RAM. The region is set up first (`setup`), so the rows show the remembered values. The instruction
+/// count advances as retail's would (9 instructions with the PAL rows, 8 with the NTSC ones).
+fn title_options(c: &mut Cpu) -> bool {
+	let item = c.g(4) as u32;
+	let Ok(mut s) = ST.lock() else { return false };
+	let Some(n) = build_title(&mut c.mem, c.pc, item, &mut s) else { return false };
+	c.s(2, 0);
+	c.icount += n;
+	c.mem.now = c.icount;
+	true
+}
+
+/// `title_options` on the memory; Some(the instructions retail runs). Every address comes from the function's own code at `pc`
+/// (the region word, both row lists) and the Video page the PAL list names, checked against the retail texts, so the same body
+/// runs on both discs. None when a check fails: the retail function then runs (no Graphics row). The page's slots, items and
+/// row table are rebuilt on every entry to Options, the list records only when the rows changed (their third word is the
+/// menu's own).
+pub(super) fn build_title(mem: &mut Mem, pc: u32, item: u32, s: &mut St) -> Option<u64> {
+	let ok = |a: u32| (0x10_0000..0x200_0000).contains(&a);
+	let imm = |w: u32| w as u16 as i16 as i32 as u32;
+	// lui v0,hi; lw v0,lo(v0) (the region word); ...; lui v0,hi; ...; addiu v0,v0,pal; addiu v0,v0,ntsc.
+	let (w0, w1, w3, w6, w7) = (mem.rd32(pc), mem.rd32(pc + 4), mem.rd32(pc + 0xc), mem.rd32(pc + 0x18), mem.rd32(pc + 0x1c));
+	let region = ((w0 & 0xffff) << 16).wrapping_add(imm(w1));
+	let (pal, ntsc) = (((w3 & 0xffff) << 16).wrapping_add(imm(w6)), ((w3 & 0xffff) << 16).wrapping_add(imm(w7)));
+	if !ok(item) || !ok(region) || !ok(pal) || !ok(ntsc) {
+		return None;
+	}
+	let rows = |mem: &mut Mem, a: u32| -> Vec<[u32; 3]> { (0..5).map(|i| [mem.rd32(a + 12 * i), mem.rd32(a + 12 * i + 4), mem.rd32(a + 12 * i + 8)]).take_while(|r| r[0] != 0).collect() };
+	let page = |rs: &[[u32; 3]], id: u32| rs.iter().find(|r| r[0] == id | 3 << 16).map(|r| r[1]).filter(|&p| ok(p));
+	let is_pal = mem.rd32(region) != 0;
+	let shown = if is_pal { pal } else { ntsc };
+	let mut recs = rows(mem, shown);
+	let (Some(video), Some(sound)) = (page(&rows(mem, pal), FRONT_VIDEO), page(&recs, FRONT_SOUND)) else { return None };
+	if recs.len() > 3 || recs.iter().any(|r| r[0] >> 16 != 3) || mem.rd32(video + 0x38) != mem.rd32(sound + 0x38) {
+		return None;
+	}
+	let items: Vec<u32> = (0..14).map(|k| mem.rd32(video + 0x44 + 4 * k)).filter(|&a| ok(a)).collect();
+	let hdr = items.iter().copied().find(|&it| mem.rd32(it + 0x34) == FRONT_VIDEO_HDR);
+	let val = items.iter().copied().find(|&it| {
+		let t = mem.rd32(it + 0x34);
+		ok(t) && mem.rd32(t) == FRONT_VIDEO_ROW
+	});
+	let (Some(hdr), Some(val)) = (hdr, val) else { return None };
+	setup(mem, s);
+	recs.push([ID_GRAPHICS | 3 << 16, TGPAGE, 0]);
+	let seq = mem.rd32(sound + 0xc);
+	let trecs = crate::retail::pcmods::title_extend(mem, [video, hdr, val], seq, &mut recs, super::TRECS);
+	let same = recs.iter().enumerate().all(|(i, r)| mem.rd32(trecs + 12 * i as u32) == r[0] && mem.rd32(trecs + 12 * i as u32 + 4) == r[1]) && mem.rd32(trecs + 12 * recs.len() as u32) == 0;
+	if !same {
+		for (i, r) in recs.iter().chain([&[0u32; 3]]).enumerate() {
+			for (k, w) in r.iter().enumerate() {
+				mem.wr32(trecs + 12 * i as u32 + 4 * k as u32, *w);
+			}
+		}
+	}
+	// The page: Video Options' own (slot sequences, parent = Options, id, items) with our header and value items. The value
+	// panel (slot 3) plays the Sound page's slot-3 sequence: its rect (47,125,419,164) holds the 13 rows, Video's holds one.
+	copy_words(mem, video, TGPAGE, 0x88);
+	for o in (0x88..0x100).step_by(4) {
+		mem.wr32(TGPAGE + o, 0);
+	}
+	mem.wr32(TGPAGE + 0xc, seq);
+	for o in (0x40..0x80).step_by(4) {
+		match mem.rd32(TGPAGE + o) {
+			a if a == hdr => mem.wr32(TGPAGE + o, TGHDR),
+			a if a == val => mem.wr32(TGPAGE + o, TGVAL),
+			_ => {}
+		}
+	}
+	copy_words(mem, hdr, TGHDR, 0x58);
+	mem.wr32(TGHDR + 0x34, ID_GRAPHICS_HDR);
+	copy_words(mem, val, TGVAL, 0x40);
+	mem.wr32(TGVAL + 0x34, TGTAB);
+	mem.wr32(TGVAL + 0x38, 0);
+	mem.wr32(TGVAL + 0x3c, 0);
+	// The page's rows: the stepper and the section's rows, the same definitions the pause page uses (titlegfx.rs).
+	titlegfx::build(mem);
+	mem.wr32(item + 0x34, trecs);
+	Some(if is_pal { 9 } else { 8 })
+}
+

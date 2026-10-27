@@ -111,11 +111,11 @@ fn message_box(text: &str) {
 
 /// The install root: the first folder from the exe's folder upwards that holds `generated/play.cfg`. Err is the text for a message box.
 fn install_root() -> Result<std::path::PathBuf, String> {
-	let exe = std::env::current_exe().map_err(|e| format!("Cannot find the game folder ({e}). Run Setup.cmd first."))?;
+	let exe = std::env::current_exe().map_err(|e| format!("Cannot find the game folder ({e}). Run setup.sh first."))?;
 	exe.parent()
 		.and_then(|d| d.ancestors().find(|d| d.join("generated").join("play.cfg").is_file()))
 		.map(|d| d.to_path_buf())
-		.ok_or_else(|| "Run Setup.cmd first: the game has not been set up yet (generated/play.cfg not found).".to_string())
+		.ok_or_else(|| "Run setup.sh first: the game has not been set up yet (generated/play.cfg not found).".to_string())
 }
 
 /// [PC] The window title: "rac-rs v0.2.1" from the install root's `generated/built_version.txt` (setup.ps1 writes it after building
@@ -194,13 +194,13 @@ fn cold_lang(play_cfg: Option<&str>) -> Option<String> {
 	play_cfg.filter(|l| ["en", "fr", "de", "es", "it"].contains(l)).map(str::to_string)
 }
 
-/// The no-argument start (what Play.cmd did): find the install root (the first folder from the exe's folder upwards that holds
-/// `generated/play.cfg`), read `iso=<path>` and optional `lang=en|fr|de|es|it` from it, set the environment Play.cmd set, rotate the
+/// The no-argument start (what play.sh does): find the install root (the first folder from the exe's folder upwards that holds
+/// `generated/play.cfg`), read `iso=<path>` and optional `lang=en|fr|de|es|it` from it, set the environment, rotate the
 /// card safety copies and return the arguments of `view <iso> 0 --retail-cold --modern-cam`. Err is the text for a message box.
 /// Runs first thing in `main`, before any thread starts (`set_var` is only sound then).
 fn launch_args() -> Result<Vec<String>, String> {
 	let root = install_root()?;
-	let cfg = std::fs::read(root.join("generated").join("play.cfg")).map_err(|e| format!("Cannot read generated/play.cfg ({e}). Run Setup.cmd again."))?;
+	let cfg = std::fs::read(root.join("generated").join("play.cfg")).map_err(|e| format!("Cannot read generated/play.cfg ({e}). Run setup.sh again."))?;
 	let cfg = String::from_utf8_lossy(&cfg);
 	let (mut iso, mut lang) = (None, None);
 	for line in cfg.trim_start_matches('\u{feff}').lines() {
@@ -212,9 +212,9 @@ fn launch_args() -> Result<Vec<String>, String> {
 			}
 		}
 	}
-	let iso = iso.filter(|i| !i.is_empty()).ok_or("Run Setup.cmd again: generated/play.cfg has no disc image path.")?;
+	let iso = iso.filter(|i| !i.is_empty()).ok_or("Run setup.sh again: generated/play.cfg has no disc image path.")?;
 	if !std::path::Path::new(&iso).is_file() {
-		return Err(format!("Your disc image moved or is gone:\n{iso}\n\nRun Setup.cmd again."));
+		return Err(format!("Your disc image moved or is gone:\n{iso}\n\nRun setup.sh again."));
 	}
 	let player = root.join("player");
 	let _ = std::fs::create_dir_all(&player);
@@ -267,7 +267,7 @@ pub fn main() -> ExitCode {
 	if (args.is_empty() || args.iter().any(|a| a == "--retail-cold")) && update_check() {
 		return ExitCode::SUCCESS;
 	}
-	// Double-clicked (no arguments): start the game the way Play.cmd does, from generated/play.cfg written by setup.
+	// Double-clicked (no arguments): start the game the way play.sh does, from generated/play.cfg written by setup.
 	if args.is_empty() {
 		match launch_args() {
 			Ok(a) => args = a,

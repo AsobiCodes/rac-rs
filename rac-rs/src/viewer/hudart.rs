@@ -154,6 +154,14 @@ pub(super) fn hud_art(l: &Level, disc: &mut iso::Disc) -> (Vec<Texture>, HudArt)
 	if let Some(&g) = a.glove.first() {
 		a.items.insert(crate::inventory::BOMB_GLOVE, g);
 	}
+	font_art(l, disc, &mut tex, &mut a);
+	(tex, a)
+}
+
+
+/// The level fonts (the HUD's own sheet and the shop's) and the retail's own prompts' sheet patch: the button glyphs style goes
+/// into the main sheet's ten button cells (xglyphs.rs), and the capture patch for the prompts is set.
+fn font_art(l: &Level, disc: &mut iso::Disc, tex: &mut Vec<Texture>, a: &mut HudArt) {
 	match art::font_glyph_tables(disc).and_then(|g| art::level_fonts(l, &g)) {
 		Ok(mut fonts) if !fonts.is_empty() => {
 			let mut f = fonts.remove(0);
@@ -186,7 +194,6 @@ pub(super) fn hud_art(l: &Level, disc: &mut iso::Disc) -> (Vec<Texture>, HudArt)
 			crate::retail::xglyphs::set_patch(p);
 		}
 	}
-	(tex, a)
 }
 
 /// Hands the mods' draw pass (omni/draw_art.rs) this level's default font and icon slots; called right after `set_hud_art` uploads the slots.

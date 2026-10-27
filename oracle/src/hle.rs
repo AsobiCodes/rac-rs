@@ -232,6 +232,26 @@ impl Cpu {
     /// The reply the IOP side gives sceSifCallRpc(client, fno, mode, send, ssize, recv, rsize, end, end_param), written
     /// at once (`end` / `end_param`: the call's end function and its argument; only the memory card server uses them).
     #[allow(clippy::too_many_arguments)]
+    /// The CDVD S-command client's commands (boot 0x121780): the clock read (`fno` 1, sceCdReadClock: status 0 and the 8-byte
+    /// BCD time at recv + 4, sceCdCLOCK sec, min, hour, pad, day, month, year, which the wrapper copies into the caller's
+    /// struct) and the table/config reply (`fno` 4: 0). True when it answered.
+    fn cdvd_scmd(&mut self, fno: u32, recv: u32, rsize: u32) -> bool {
+        match fno {
+            1 if recv != 0 => {
+                self.mem.wr32(recv, 0);
+                if rsize >= 0xc {
+                    for (k, b) in crate::clock::local_rtc().iter().enumerate() {
+                        self.mem.wr8(recv + 4 + k as u32, *b);
+                    }
+                    self.mem.wr32(recv + 0xc, 0);
+                }
+            }
+            4 => self.mem.wr32(recv, 0),
+            _ => return false,
+        }
+        true
+    }
+
     fn rpc_reply(&mut self, client: u32, fno: u32, send: u32, ssize: u32, recv: u32, rsize: u32, end: u32, end_param: u32) {
         if std::env::var("ORACLE_RPC").is_ok() {
             eprintln!("rpc client {client:x} fno {fno} send {send:x} ssize {ssize:x} recv {recv:x} rsize {rsize:x} w0 {:08x}", self.mem.rd32(send));
@@ -296,21 +316,7 @@ impl Cpu {
             self.mem.wr32(recv, h);
             return;
         }
-        if client == 0x132d08 && fno == 4 {
-            self.mem.wr32(recv, 0);
-            return;
-        }
-        // The CDVD S-command client's clock read (boot 0x121780 sceCdReadClock): the IOP answers status 0 and the
-        // 8-byte BCD time at recv + 4 (sceCdCLOCK: sec, min, hour, pad, day, month, year), which the wrapper copies
-        // into the caller's sceCdCLOCK.
-        if client == 0x132d08 && fno == 1 && recv != 0 {
-            self.mem.wr32(recv, 0);
-            if rsize >= 0xc {
-                for (k, b) in crate::clock::local_rtc().iter().enumerate() {
-                    self.mem.wr8(recv + 4 + k as u32, *b);
-                }
-                self.mem.wr32(recv + 0xc, 0);
-            }
+        if client == 0x132d08 && self.cdvd_scmd(fno, recv, rsize) {
             return;
         }
         // 989snd direct calls on the command client: the sync wrapper (boot ~0x12dfd0, used by FUN_0012da28) and
