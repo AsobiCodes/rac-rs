@@ -64,6 +64,8 @@ Your saves are kept in the `player` folder.
 
 Since v0.4.1, rac-rs also runs on Linux (x86-64). It is the same game code as on Windows, built from your own disc, and a recorded fight gives identical game memory on both. **Linux support is new**: it has been tested on Ubuntu 24.04 and Arch Linux (under WSL, with software Vulkan). Real graphics drivers and other distributions are not tested yet, so please report what you find.
 
+The Linux port was set up by **[DeSynkro](https://github.com/DeSynkro)** ([pull request #38](https://github.com/AsobiCodes/rac-rs/pull/38)): building and running the game on Linux, Linux gamepads, the Linux run and crash logs and the exact maths that give Linux the same game memory as Windows. Thank you!
+
 Like on Windows, you do not install any programming tools. `setup.sh` downloads its own private copy of Rust 1.99, Python 3.14 and a C linker (zig) into the game folder (`toolchain`, about 250 MB to download and 1 GB on disk), plus the Rust libraries that `cargo` fetches from crates.io (about 200 MB). There is no compiler, `pkg-config`, development package or `sudo` involved. You need:
 
 - A 64-bit Intel/AMD Linux with glibc 2.28 or newer (every mainstream distribution since 2019, SteamOS 3 included), about 7 GB of free space on a Linux drive (ext4, btrfs, ...; not an SD card formatted as FAT or exFAT, which cannot run programs or make links; `setup.sh` checks this) and an internet connection for the first setup.
@@ -141,6 +143,10 @@ The game's own button prompts show the keyboard and mouse keys. You can change t
 ## Reporting a problem
 
 If the game freezes, crashes or looks wrong, please [open an issue](https://github.com/AsobiCodes/rac-rs/issues) and attach the file `player\log.txt` from your rac-rs folder. The game writes it every time it runs. It lists your Windows version, processor and graphics card, and what the game did up to the problem. If the game froze, wait about 15 seconds before you close it: the log then also says where it got stuck. The previous run is kept as `player\log.prev.txt`, so if you already restarted the game, attach that file instead. If you use mods or a texture pack, say which ones, and try once with them switched off. The log stays on your PC; the game sends it nowhere.
+
+## Contributors
+
+- **[DeSynkro](https://github.com/DeSynkro)**: the Linux port ([pull request #38](https://github.com/AsobiCodes/rac-rs/pull/38), v0.4.1).
 
 ## Legal
 

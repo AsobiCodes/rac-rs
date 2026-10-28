@@ -2,6 +2,10 @@
 
 rac-rs is licensed under GPL-3.0-or-later (see LICENSE). It builds on the published knowledge and work listed below.
 
+## Contributors
+
+- **DeSynkro** (https://github.com/DeSynkro): the Linux port (pull request #38, v0.4.1): building and running the game on Linux, Linux gamepads, the Linux run and crash logs and the exact maths that give Linux the same game memory as Windows. Contributed under GPL-3.0-or-later like the rest of rac-rs.
+
 ## rac1-decomp
 
 Several level-file readers began as Rust ports of the Python extraction tools in rac1-decomp: terrain, ties, shrubs, sky, level, table-of-contents and collision. The rac1-decomp tools are released under this licence (its LICENSE file, quoted in full; `src/libgcc/` refers to that repository):
