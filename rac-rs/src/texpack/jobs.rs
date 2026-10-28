@@ -33,9 +33,10 @@ pub fn make_jobs(srcs: &[TexSource], hits: &LevelHits, textures: &HashMap<u32, T
 	jobs
 }
 
-/// Loader threads: `RAC_TEXPACK_THREADS`, else a third of the logical CPUs (1 to 3).
+/// Loader threads: `RAC_TEXPACK_THREADS`, else a third of the logical CPUs (1 to 3); read once.
 pub fn loader_threads() -> usize {
-	std::env::var("RAC_TEXPACK_THREADS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|&n| n > 0).unwrap_or_else(|| (std::thread::available_parallelism().map_or(2, |n| n.get()) / 3).clamp(1, 3))
+	static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+	*N.get_or_init(|| std::env::var("RAC_TEXPACK_THREADS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|&n| n > 0).unwrap_or_else(|| (std::thread::available_parallelism().map_or(2, |n| n.get()) / 3).clamp(1, 3)))
 }
 
 #[cfg(test)]

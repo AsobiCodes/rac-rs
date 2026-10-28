@@ -6,7 +6,7 @@
 --      (the levels' effects); with it off nothing is read or written.
 --   2. Survival (setting `ammo_mode` = "survival"):
 --      - ammo crates give half of their ammo (at least 1),
---      - every kill gives 1 shot back to the weapon that made it (the game caps it at the weapon's capacity),
+--      - every kill gives 1 shot back to the weapon that made it (the game caps it at the weapon's capacity; not the Glove of Doom, whose agents kill on their own),
 --      - vendors are not touched: ammo bought there is the full amount.
 --      With ammo_mode "normal" the crate hooks only pass through.
 
@@ -19,6 +19,9 @@ local DATA = {
 	pickup_ratio = 0.5, -- share of a crate's ammo that is kept
 	pickup_min = 1, -- a crate always gives at least this much
 	kill_refund = 1, -- shots given back per kill
+	-- Weapons whose kills come from a swarm released by one shot (Glove of Doom: the agents, twins included, kill on their own and
+	-- would pay a shot each, refilling the glove): no refund.
+	no_refund = { glove_of_doom = true },
 	-- weapons with a capacity field -> item id (Suck Cannon, Taunter, Walloper and Morph-o-Ray have no ammo)
 	items = {
 		bomb_glove = 10, devastator = 11, visibomb = 13, blaster = 15, pyrocitor = 16, mine_glove = 17,
@@ -181,7 +184,7 @@ end
 
 local function refund(weapon)
 	local item = DATA.items[weapon]
-	if item == nil or DATA.kill_refund <= 0 then
+	if item == nil or DATA.kill_refund <= 0 or DATA.no_refund[weapon] then
 		return
 	end
 	if add_ammo == nil then

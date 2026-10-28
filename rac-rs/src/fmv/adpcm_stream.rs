@@ -58,6 +58,11 @@ impl AdpcmDecoder {
 		AdpcmDecoder { channels, interleave, hist: vec![(0, 0); channels], pending: Vec::new(), ended: vec![false; channels] }
 	}
 
+	/// Every channel has decoded its END-flagged frame: the track is over (what follows is silence).
+	pub fn all_ended(&self) -> bool {
+		!self.ended.is_empty() && self.ended.iter().all(|&e| e)
+	}
+
 	pub fn push(&mut self, data: &[u8], out: &mut Vec<i16>) {
 		self.pending.extend_from_slice(data);
 		let block = self.channels * self.interleave;

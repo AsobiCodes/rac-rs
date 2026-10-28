@@ -1,9 +1,10 @@
 //! The native view handles ReShade takes (`resource_view` = one u64): on D3D12 views made by ReShade's own device (see `dx12`),
 //! on Vulkan the VkImageView handles of the wgpu views (which must stay alive as long as the handles are used).
 
-use super::abi::{self, Device, ViewDesc};
+use super::abi::{self, Device, Runtime, ViewDesc};
 use super::targets::Targets;
 use std::any::Any;
+use std::ffi::c_void;
 use std::sync::atomic::Ordering::Acquire;
 
 /// The three handles of the add-on (render target plain / sRGB view of `rt`, shader resource view of the depth texture) and
@@ -17,12 +18,11 @@ pub(super) struct Native {
 	_keep: Box<dyn Any + Send + Sync>,
 }
 
-/// ReShade's device and the runtime (and epoch) it was taken from: the views are destroyed only while that runtime lives,
-/// because the device and its heaps may be gone after it.
+/// ReShade's device the views were made with: they are destroyed only while a live runtime reports this same device, because the
+/// device and its heaps may be gone otherwise. The device outlives a runtime reset (a swapchain resize destroys and re-creates the
+/// runtime), so the views of an earlier runtime are still destroyed through the same device.
 pub(super) struct Under {
 	pub(super) device: Device,
-	pub(super) runtime: usize,
-	pub(super) epoch: u64,
 }
 
 struct Owned {
@@ -37,7 +37,8 @@ unsafe impl Sync for Owned {}
 impl Drop for Native {
 	fn drop(&mut self) {
 		let Some(o) = &self.owned else { return };
-		if super::LINK.runtime.load(Acquire) == o.under.runtime && super::LINK.epoch.load(Acquire) == o.under.epoch {
+		let live = super::LINK.runtime.load(Acquire);
+		if live != 0 && unsafe { Runtime(live as *mut c_void).device() }.0 == o.under.device.0 {
 			for v in o.views {
 				unsafe { o.under.device.destroy_view(v) };
 			}
@@ -111,29 +112,47 @@ mod tests {
 	use super::*;
 	use std::ffi::c_void;
 
-	/// The values the add-on works with are the ones create_view returned, and they are destroyed only under the same runtime.
+	/// The views are destroyed through the device they were made with while a live runtime reports that device, also after a runtime
+	/// reset (swapchain resize: new runtime and epoch, same device); never for another device or with no runtime.
 	#[test]
-	fn only_views_of_a_live_runtime_are_destroyed() {
+	fn views_are_destroyed_while_a_live_runtime_reports_their_device() {
 		static DESTROYED: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
 		unsafe extern "system" fn destroy(_: *mut c_void, view: u64) {
 			DESTROYED.lock().unwrap().push(view);
 		}
 		let table = [0usize, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, destroy as *const () as usize];
-		let obj = Box::new([table.as_ptr() as usize]);
-		let mk = |runtime: usize, epoch: u64| Native {
+		let dev = Box::new([table.as_ptr() as usize]);
+		let dev_ptr = dev.as_ptr() as usize;
+		let other = Box::new([table.as_ptr() as usize]);
+		// A fake effect_runtime whose get_device (slot RT_GET_DEVICE) returns the first word after its vtable pointer.
+		unsafe extern "system" fn get_device(this: *mut c_void) -> *mut c_void {
+			unsafe { *(this as *const usize).add(1) as *mut c_void }
+		}
+		let rt_table = [0usize, 0, 0, get_device as *const () as usize];
+		let runtime_on = |device: usize| Box::new([rt_table.as_ptr() as usize, device]);
+		let mk = || Native {
 			rtv: 1,
 			rtv_srgb: 2,
 			depth_srv: 3,
-			owned: Some(Owned { under: Under { device: Device(obj.as_ptr() as *mut c_void), runtime, epoch }, views: [1, 2, 3] }),
+			owned: Some(Owned { under: Under { device: Device(dev_ptr as *mut c_void) }, views: [1, 2, 3] }),
 			_keep: Box::new(()),
 		};
-		super::super::LINK.runtime.store(0x1000, std::sync::atomic::Ordering::Release);
-		let epoch = super::super::LINK.epoch.load(Acquire);
-		drop(mk(0x1000, epoch));
+		let link = &super::super::LINK;
+		let first = runtime_on(dev_ptr);
+		link.runtime.store(first.as_ptr() as usize, std::sync::atomic::Ordering::Release);
+		drop(mk());
 		assert_eq!(*DESTROYED.lock().unwrap(), [1, 2, 3]);
-		drop(mk(0x2000, epoch));
-		drop(mk(0x1000, epoch + 1));
-		assert_eq!(DESTROYED.lock().unwrap().len(), 3, "a view of another runtime or epoch is left alone");
-		super::super::LINK.runtime.store(0, std::sync::atomic::Ordering::Release);
+		// A runtime reset: another runtime object and epoch on the same device still destroys the old views (no leak per resize).
+		let second = runtime_on(dev_ptr);
+		link.runtime.store(second.as_ptr() as usize, std::sync::atomic::Ordering::Release);
+		link.epoch.fetch_add(2, std::sync::atomic::Ordering::Release);
+		drop(mk());
+		assert_eq!(DESTROYED.lock().unwrap().len(), 6);
+		let foreign = runtime_on(other.as_ptr() as usize);
+		link.runtime.store(foreign.as_ptr() as usize, std::sync::atomic::Ordering::Release);
+		drop(mk());
+		link.runtime.store(0, std::sync::atomic::Ordering::Release);
+		drop(mk());
+		assert_eq!(DESTROYED.lock().unwrap().len(), 6, "a view of another device, or with no runtime, is left alone");
 	}
 }

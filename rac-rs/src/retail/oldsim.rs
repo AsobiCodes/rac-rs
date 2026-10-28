@@ -209,7 +209,8 @@ fn sphere_vis(m: &Machine, a: u32, far: f32) -> i32 {
 	let v4 = [v1[0] - v23[0], v1[1] - v23[1]];
 	let v7b = [v5[0] - v6[0], v5[1] - v6[1]];
 	let v8c = [v9[0] - v8b[0], v9[1] - v8b[1]];
-	if v7b[0].is_sign_negative() || v7b[1].is_sign_negative() {
+	// [PC] A side reject the wider window still shows is kept (`wide_side::keep`; never in a 4:3 window).
+	if (v7b[0].is_sign_negative() || v7b[1].is_sign_negative()) && !super::wide_side::keep(c, r, v20[0]) {
 		return -1;
 	}
 	// a0 = vf4 with the sign of x flipped: x counts as "outside" when cz + r has not stayed below vf23.x.

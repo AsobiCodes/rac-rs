@@ -16,9 +16,13 @@
 //! that touch nothing the open batch reads or writes run before it.
 
 use super::super::{hd_dims, hd_note_rows, hd_target, luts, zlut, Gs, Hd, Overlay, Vtx, BT32, CT32, SKY_PROGRAMS};
+use super::gpu_cache::PipeCache;
+use super::gpu_repl::{self, ReplGpu};
+use super::gpu_span::sampled_span;
 use super::{disp_rows, St};
 
 mod kernels;
+mod repl_glue;
 
 const STRIDE: usize = 80;
 const PLANE: u64 = 512 * 512 * 16;
@@ -163,6 +167,8 @@ pub(crate) struct Gpu {
     /// params, vram, ovl, clut, lut, prims, tiles, dat.
     bufs: Vec<wgpu::Buffer>,
     bg: wgpu::BindGroup,
+    /// The texture-pack replacement atlas and table (bindings 9, 10); idle until `repl_id`.
+    repl: ReplGpu,
     rb: wgpu::Buffer,
     /// RAC_GSGPU_TIME=1 (debug): a timestamp pair per step (query set, resolve buffer, readable copy), and the step cap.
     ts: Option<(wgpu::QuerySet, wgpu::Buffer, wgpu::Buffer)>,
@@ -224,6 +230,7 @@ struct RbPend {
     done: std::sync::Arc<std::sync::atomic::AtomicU32>,
     want: u32,
     hd: Option<(u32, u32)>,
+    sub: wgpu::SubmissionIndex, // the submission with the copy: a blocking wait waits for it, not for later work (`wait_maps`)
 }
 
 /// The device being opened since `prestart`, and the capture of a dropped `Gs` (`recycle`): opening one takes most of a
@@ -253,52 +260,6 @@ pub(crate) fn set_default(on: bool) {
 
 fn want() -> Option<String> {
     super::gpu_shared::resolve(std::env::var("RAC_GSCAP_GPU").ok(), CPU_BY_DEFAULT.load(std::sync::atomic::Ordering::Relaxed))
-}
-
-/// The Vulkan pipeline cache of the kernels, kept in the player folder (`gpu_kernels_<adapter, driver and shader hash>.bin`; a file
-/// that fails its check or that the driver refuses is ignored, the kernels are then built and the file is written again).
-pub(crate) struct PipeCache {
-    cache: wgpu::PipelineCache,
-    path: std::path::PathBuf,
-    loaded: usize,
-}
-
-impl PipeCache {
-    fn open(dev: &wgpu::Device, info: &wgpu::AdapterInfo, shader: &str) -> PipeCache {
-        let fnv = |h: u64, b: &[u8]| b.iter().fold(h, |h, &x| (h ^ x as u64).wrapping_mul(0x0100_0000_01b3));
-        let mut key = fnv(0xcbf2_9ce4_8422_2325, info.name.as_bytes());
-        key = fnv(key, info.driver.as_bytes());
-        key = fnv(key, info.driver_info.as_bytes());
-        key = fnv(key, &info.vendor.to_le_bytes());
-        key = fnv(key, &info.device.to_le_bytes());
-        key = fnv(key, shader.as_bytes());
-        let dir = std::env::var_os("RAC_GSGPU_CACHEDIR").map(std::path::PathBuf::from).unwrap_or_else(crate::retail::memcard::player_dir);
-        let path = dir.join(format!("gpu_kernels_{key:016x}.bin"));
-        // File: 8 bytes check (FNV of the rest), then the driver's data.
-        let data = std::fs::read(&path).ok().filter(|d| d.len() > 8 && fnv(0xcbf2_9ce4_8422_2325, &d[8..]).to_le_bytes() == d[..8]);
-        let loaded = data.as_ref().map_or(0, |d| d.len() - 8);
-        // SAFETY: the data is either None or what `PipelineCache::get_data` returned for this adapter and shader (checked above; the
-        // key names the adapter, driver and shader); `fallback` lets wgpu start an empty cache when the driver refuses it anyway.
-        let cache = unsafe { dev.create_pipeline_cache(&wgpu::PipelineCacheDescriptor { label: Some("gs kernels"), data: data.as_deref().map(|d| &d[8..]), fallback: true }) };
-        PipeCache { cache, path, loaded }
-    }
-
-    fn save(&self) {
-        let Some(d) = self.cache.get_data() else { return };
-        if d.len() == self.loaded {
-            return;
-        }
-        let fnv = d.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &x| (h ^ x as u64).wrapping_mul(0x0100_0000_01b3));
-        let mut f = fnv.to_le_bytes().to_vec();
-        f.extend_from_slice(&d);
-        if let Some(p) = self.path.parent() {
-            let _ = std::fs::create_dir_all(p);
-        }
-        let tmp = self.path.with_extension("tmp");
-        if std::fs::write(&tmp, &f).is_ok() && std::fs::rename(&tmp, &self.path).is_err() {
-            let _ = std::fs::remove_file(&tmp);
-        }
-    }
 }
 
 impl Gpu {
@@ -400,18 +361,7 @@ impl Gpu {
             Err(_) => include_str!("gpu.wgsl").into(),
         }) });
         eprintln!("gscap gpu: {} ({:?}, {})", info.name, info.backend, if shared { "the window's device" } else { "own device" });
-        let ent = |binding: u32, ty: wgpu::BufferBindingType, dynamic: bool| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Buffer { ty, has_dynamic_offset: dynamic, min_binding_size: if dynamic { wgpu::BufferSize::new(256) } else { None } },
-            count: None,
-        };
-        let rw = wgpu::BufferBindingType::Storage { read_only: false };
-        let ro = wgpu::BufferBindingType::Storage { read_only: true };
-        let bgl = dev.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("gs capture"),
-            entries: &[ent(0, wgpu::BufferBindingType::Uniform, true), ent(1, rw, false), ent(2, rw, false), ent(3, rw, false), ent(4, ro, false), ent(5, ro, false), ent(6, ro, false), ent(7, ro, false), ent(8, rw, false)],
-        });
+        let bgl = dev.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("gs capture"), entries: &gpu_repl::layout_entries() });
         let pl = dev.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("gs capture"), bind_group_layouts: &[Some(&bgl)], immediate_size: 0 });
         let tk = std::time::Instant::now();
         let shader_text: std::borrow::Cow<str> = match std::env::var("RAC_GSGPU_WGSL") {
@@ -456,7 +406,8 @@ impl Gpu {
         lut.extend(inv);
         assert_eq!(lut.len(), 34816);
         q.write_buffer(&bufs[4], 0, bytemuck::cast_slice(&lut));
-        let bg = Self::bind(&dev, &bgl, &bufs);
+        let repl = ReplGpu::new(&dev);
+        let bg = Self::bind(&dev, &bgl, &bufs, &repl);
         let ts = timing.then(|| {
             (
                 dev.create_query_set(&wgpu::QuerySetDescriptor { label: Some("gs steps"), ty: wgpu::QueryType::Timestamp, count: 4096 }),
@@ -472,6 +423,7 @@ impl Gpu {
             bgl,
             bufs,
             bg,
+            repl,
             rb,
             ts,
             cap: if timing { 2040 } else { STEP_CAP },
@@ -529,21 +481,16 @@ impl Gpu {
         Some(g)
     }
 
-    fn bind(dev: &wgpu::Device, bgl: &wgpu::BindGroupLayout, b: &[wgpu::Buffer]) -> wgpu::BindGroup {
+    fn bind(dev: &wgpu::Device, bgl: &wgpu::BindGroupLayout, b: &[wgpu::Buffer], r: &ReplGpu) -> wgpu::BindGroup {
         let e = |i: usize| wgpu::BindGroupEntry { binding: i as u32, resource: b[i].as_entire_binding() };
         dev.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("gs capture"),
             layout: bgl,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &b[0], offset: 0, size: wgpu::BufferSize::new(256) }) },
-                e(1),
-                e(2),
-                e(3),
-                e(4),
-                e(5),
-                e(6),
-                e(7),
-                e(8),
+                e(1), e(2), e(3), e(4), e(5), e(6), e(7), e(8),
+                wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(r.views().0) },
+                wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(r.views().1) },
             ],
         })
     }
@@ -912,7 +859,7 @@ impl Gpu {
         let st = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
         self.bufs[8] = self.dev.create_buffer(&wgpu::BufferDescriptor { label: Some("gs hd planes"), size: HPS * 32, usage: st, mapped_at_creation: false });
         self.hd_rb = Some(self.dev.create_buffer(&wgpu::BufferDescriptor { label: Some("gs hd readback"), size: HPS * 4, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }));
-        self.bg = Self::bind(&self.dev, &self.bgl, &self.bufs);
+        self.bg = Self::bind(&self.dev, &self.bgl, &self.bufs, &self.repl);
     }
 
     /// The sharp prims of the batch just recorded (or the serial prim), binned into 16 x 16 tiles of the sharp pixels: one step
@@ -975,7 +922,7 @@ impl Gpu {
             let size = (bytes.next_power_of_two() as u64).max(self.bufs[i].size() * 2);
             let usage = self.bufs[i].usage();
             self.bufs[i] = self.dev.create_buffer(&wgpu::BufferDescriptor { label: Some("gs capture"), size, usage, mapped_at_creation: false });
-            self.bg = Self::bind(&self.dev, &self.bgl, &self.bufs);
+            self.bg = Self::bind(&self.dev, &self.bgl, &self.bufs, &self.repl);
         }
     }
 
@@ -1035,7 +982,7 @@ impl Gpu {
         for s in &steps {
             *self.st.entry(KERNELS[s.k as usize]).or_default() += 1;
         }
-        super::gpu_shared::submit(&self.q, [enc.finish()]); // not while the window reconfigures its surface
+        let sub = super::gpu_shared::submit(&self.q, [enc.finish()]); // not while the window reconfigures its surface
         *self.st.entry("submit prep us").or_default() += t_prep.elapsed().as_micros() as u64;
         if let (false, Some((_, _, qm))) = (steps.is_empty(), &self.ts) {
             qm.slice(..).map_async(wgpu::MapMode::Read, |_| {});
@@ -1067,7 +1014,7 @@ impl Gpu {
                 });
                 (w, rows)
             });
-            self.rb_pend = Some(RbPend { done: n, want: 1 + hd.is_some() as u32, hd });
+            self.rb_pend = Some(RbPend { done: n, want: 1 + hd.is_some() as u32, hd, sub });
             return None;
         }
         let t = std::time::Instant::now();
@@ -1094,10 +1041,9 @@ impl Gpu {
     /// [PC] (speed) The lazy readback's picture (stage plane; the sharp picture goes to `hd_out`): `block` waits for the GPU,
     /// else None while it is still copying.
     fn rb_finish(&mut self, block: bool) -> Option<Vec<u32>> {
-        let p = self.rb_pend.as_ref()?;
-        let (done, want, hd) = (p.done.clone(), p.want, p.hd);
+        let (done, want, hd, sub) = self.rb_pend.as_ref().map(|p| (p.done.clone(), p.want, p.hd, p.sub.clone()))?;
         let w = block.then(|| crate::runlog::waiting("the GS capture GPU's picture (lazy readback)"));
-        super::gpu_shared::wait_maps(&self.dev, &done, want, block);
+        super::gpu_shared::wait_maps(&self.dev, &done, want, block, sub);
         drop(w);
         if done.load(std::sync::atomic::Ordering::SeqCst) < want {
             return None;
@@ -1493,6 +1439,7 @@ impl Gs {
         r[24] = self.r[0x49] as u32;
         r[25] = self.clut_off as u32;
         r[26] = st.ov as u32;
+        r[1] = self.repl_word(st.ov, st.at, st.tex0, st.clamp);
         if let Some(z) = &st.zb {
             r[27..33].copy_from_slice(&[z.bp, z.bw, z.z24 as u32, z.msk as u32, z.tst, 1]);
         }
@@ -1559,30 +1506,7 @@ impl Gs {
         }
         // What the prim samples and writes, for the batch rules.
         let gp = self.gpu.as_mut().unwrap();
-        let sp_r = &mut self.sp_r;
-        let ts = (st.at & 0x10 != 0).then(|| {
-            let tex0 = st.tex0;
-            if let Some((k, v)) = *sp_r {
-                if k == (tex0, st.clamp) {
-                    return v;
-                }
-            }
-            let (tw, th) = (1u32 << ((tex0 >> 26) & 0xf).min(10), 1u32 << ((tex0 >> 30) & 0xf).min(10));
-            let cl = st.clamp;
-            // The texel coordinates `wrapc` (gpu.wgsl) can give, first and last: region clamp keeps them in
-            // [min(MIN, MAX), MAX], region repeat in [MAX, MIN | MAX] (a 1024-wide guess ran past the end of local memory
-            // and claimed all of it, so the map's icons near the top of memory went serial).
-            let reach = |m: u64, size: u32, lo: u32, hi: u32| match m & 3 {
-                2 => (lo.min(hi), hi),
-                3 => (hi, lo | hi),
-                _ => (0, size - 1),
-            };
-            let (x0, x1) = reach(cl, tw, ((cl >> 4) & 0x3ff) as u32, ((cl >> 14) & 0x3ff) as u32);
-            let (y0, y1) = reach(cl >> 2, th, ((cl >> 24) & 0x3ff) as u32, ((cl >> 34) & 0x3ff) as u32);
-            let v = gp.span((((tex0 >> 20) & 0x3f) as u32, (tex0 & 0x3fff) as u32, ((tex0 >> 14) & 0x3f) as u32, x0, y0, x1 - x0 + 1, y1 - y0 + 1));
-            *sp_r = Some(((tex0, st.clamp), v));
-            v
-        });
+        let ts = sampled_span(&mut self.sp_r, st);
         // [PC] (speed) at most two written ranges (the frame's, the Z buffer's): on the stack, not a Vec per prim.
         let mut wa = [(0u32, 0u32, 0u64); 2];
         let mut nw = 0;
@@ -1627,10 +1551,11 @@ impl Gs {
             why(gp, if kind == 1 { "serial: line" } else if ts.is_some_and(|t| ws.iter().any(|&(l, h, _)| hit((l, h), t))) { "serial: samples its target" } else { "serial: other" });
             *gp.st.entry("serial pixels").or_default() += ((bb[1] - bb[0]) as u64) * ((bb[3] - bb[2]) as u64);        }
         gp.prim(&r, bb, ts, ws, serial, hd);
+        self.repl_drawn(ws);
     }
 }
 
 /// Overlay metadata of a publish (`Gs::publish` / `field_end` fill it in; the pixels come from the GPU).
-pub(crate) fn meta(w: u32, h: u32, rows: u32, frozen: bool, disp: bool) -> Overlay {
-    Overlay { w, h, rows: rows.min(disp_rows()), frozen, disp, px: Vec::new(), rgba: Vec::new(), hd: None }
+pub(crate) fn meta(w: u32, h: u32, rows: u32, frozen: bool, disp: bool, guard: super::super::edge_cut::Guard) -> Overlay {
+    Overlay { w, h, rows: rows.min(disp_rows()), frozen, disp, px: Vec::new(), rgba: Vec::new(), hd: None, guard }
 }

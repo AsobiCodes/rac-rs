@@ -19,11 +19,11 @@
 //! (a few cm to about 12 cm at arm length) against the exact reflection across the chest joint's own plane.
 
 use super::binding::SkeletonDef;
+use super::pose::MASK;
 use super::{events, pose, pose_capture};
 use ee_oracle::cpu::Cpu;
 use std::sync::Mutex;
 
-const MASK: u32 = 0x01ff_ffff;
 /// The hero attach matrices (`HeroComputeAttachMatrices` -> `MobyEvalAttachLists`, out buffer): nine 4x4 float matrices, stride `0x40`.
 pub const ATTACH_MATRICES: usize = 0x13_fe10;
 const MATRIX_STRIDE: usize = 0x40;

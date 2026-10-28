@@ -255,6 +255,10 @@ const FADE_OUT: f32 = 0.3;
 
 impl Under {
 	pub(super) fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Under {
+		super::pipe_guard::build(device, super::pipe_guard::Effect::Underwater, || Self::make(device, format))
+	}
+
+	fn make(device: &wgpu::Device, format: wgpu::TextureFormat) -> Under {
 		let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("underwater"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("underwater", (SHADER.to_string() + &waterfx::sky_wgsl(4, 5)).into())) });
 		let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
 			label: Some("underwater"),
@@ -303,6 +307,9 @@ impl Under {
 
 	/// The pass: the picture in `scene` below the retail HUD, with `depth` (the level's MSAA depth, sample 0).
 	pub(super) fn run(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, enc: &mut wgpu::CommandEncoder, scene: &wgpu::TextureView, depth: &wgpu::TextureView, f: &UnderFrame, sky: &waterfx::SkyMap) {
+		if super::pipe_guard::off(super::pipe_guard::Effect::Underwater) {
+			return; // [PC] pipe_guard.rs: the driver refused the underwater shader
+		}
 		self.ramp(f.flag);
 		if self.k <= 0.0 {
 			return;

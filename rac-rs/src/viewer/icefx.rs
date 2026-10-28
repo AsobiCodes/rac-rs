@@ -88,9 +88,10 @@ pub(super) fn flag(level: usize) -> f32 {
 		return 1.0;
 	}
 	let g = crate::retail::pcext::graphics();
+	let post = g.enhanced() && !crate::viewer::pipe_guard::off(crate::viewer::pipe_guard::Effect::Post); // [PC] a refused Post (pipe_guard.rs) = the Classic picture
 	let on = match ICE_GATE {
-		Gate::Lighting => g.enhanced(),
-		Gate::Water => g.enhanced() && g.water,
+		Gate::Lighting => post,
+		Gate::Water => post && g.water,
 	};
 	if crate::retail::splitview::fx(on) { 1.0 + ICE_LOOK } else { 1.0 }
 }

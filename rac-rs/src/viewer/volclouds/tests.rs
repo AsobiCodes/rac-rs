@@ -40,7 +40,7 @@ fn uniform_size_matches_block() {
 fn quality_levels() {
 	assert_eq!(params::quality(0), None);
 	let (l, m, h) = (params::quality(1).unwrap(), params::quality(2).unwrap(), params::quality(3).unwrap());
-	assert!(l.steps < m.steps && m.steps < h.steps && l.light <= m.light && m.light <= h.light && l.div > m.div && m.div > h.div);
+	assert!(l.steps < m.steps && m.steps < h.steps && l.light <= m.light && m.light <= h.light && l.div > m.div && m.div >= h.div);
 	assert!([l, m, h].iter().all(|q| q.div % 2 == 0), "the grid divides the half-size depth grid evenly");
 }
 

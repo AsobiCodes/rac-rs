@@ -15,6 +15,7 @@
 //! - hero_rows.rs: hero rows (tilt), joint override records
 //! - play_input.rs: mouse button / key state changes
 //! - ship_shadows.rs: ship pad / flight shadow quads
+//! - sun_gate.rs: which camera-culled mobys the sun shadow pass can take (props phase)
 //! - sound_loops.rs: sound stage, enemy cues, loop voices
 use super::*;
 
@@ -34,15 +35,19 @@ mod frame_switch;
 mod frame_ticks;
 mod frame_upload;
 mod hero_rows;
+pub(in crate::viewer) mod hud_hold;
+pub(in crate::viewer) mod hud_place;
 mod play_input;
 mod pose_service;
 mod ship_shadows;
+mod sun_gate;
 mod sound_loops;
 use self::display::*;
 use self::frame_ticks::*;
 use self::frame_upload::*;
 use self::hero_rows::*;
 use self::ship_shadows::*;
+use self::sun_gate::{SunGate, HISTORY_MARGIN};
 use self::sound_loops::*;
 use self::frame_start::*;
 
@@ -80,9 +85,12 @@ impl ApplicationHandler for App {
 		}
 		let window = Arc::new(el.create_window(attrs).expect("window"));
 		crate::runlog::set_window(&window);
+		crate::awake::focus(window.has_focus());
+		crate::awake::minimise(window.inner_size().width == 0 || window.inner_size().height == 0);
 		crate::loadlog::say(|| "host: window created".into());
 		crate::retail::gpu_capture_expect_window(); // the GS capture waits for this window's device (it shares it)
 		self.gpu = Some(Gpu::new(window));
+		super::gpu::renderer::start_done(); // [PC] the DX12 FXC start-up wait is over (renderer.rs)
 		self.audio = if self.headless { None } else { audio::Audio::new() };
 		if self.audio.is_none() {
 			eprintln!("no audio output; running silent");
@@ -129,7 +137,7 @@ impl ApplicationHandler for App {
 		// The OS cursor shows only while the mouse is the device in use (cursor_vis.rs).
 		cursor_vis::window_event(&event, self.grabbed);
 		// OmniLoader mods (omni/input.rs): keys, buttons, wheel, cursor and focus; the game does not see the mouse presses of a mod that owns the mouse.
-		crate::omni::input::note_window_event(&event, self.gpu.as_ref().map_or((1, 1), |g| (g.config.width, g.config.height)));
+		crate::omni::input::note_window_event(&event, self.gpu.as_ref().map_or((1, 1), |g| g.win_size()));
 		if self.retail.is_some() && crate::omni::input::swallows(&event) {
 			return;
 		}
@@ -142,9 +150,12 @@ impl ApplicationHandler for App {
 				if let Some(g) = &mut self.gpu {
 					g.resize(s.width, s.height);
 				}
+				crate::awake::minimise(s.width == 0 || s.height == 0);
 			}
 			WindowEvent::Focused(f) => {
 				self.focused = f;
+				// Gamepad input does not count as activity for Windows: the display stays awake while this window has the focus (awake.rs).
+				crate::awake::focus(f);
 				// Retail play: a key released while another window had the focus never reports its release here, so it
 				// would stay held in every recorded field. Losing the focus lets go of every key and mouse button.
 				if !f && crate::retail::active() {
@@ -158,8 +169,10 @@ impl ApplicationHandler for App {
 			WindowEvent::CursorMoved { position, .. } => {
 				self.cursor = Some((position.x as f32, position.y as f32));
 				// Retail page menus (retail/mouse_menu.rs): the cursor as fractions of the client area.
+				// Aims only while the mouse is in use (cursor shown); a hidden-cursor desk bump just keeps the place for a click.
 				if let (Some(r), Some(g)) = (self.retail.as_mut(), self.gpu.as_ref()) {
-					r.mouse_cursor(position.x as f32 / g.config.width.max(1) as f32, position.y as f32 / g.config.height.max(1) as f32);
+					let (fx, fy) = (position.x as f32 / g.win_size().0.max(1) as f32, position.y as f32 / g.win_size().1.max(1) as f32); // window pixels (render scale: config is the render size)
+					if cursor_vis::mouse_in_use() { r.mouse_cursor(fx, fy) } else { r.mouse_track(fx, fy) }
 				}
 			}
 			// Retail page menus: the wheel steps the list (retail/mouse_menu.rs).
@@ -240,6 +253,9 @@ impl ApplicationHandler for App {
 				}
 			}
 			WindowEvent::RedrawRequested => {
+				if let Some(g) = &mut self.gpu {
+					g.rscale_sync(); // [PC] a changed render scale (menu / env) applies before anything reads the frame size
+				}
 				let mut f = self.frame_begin();
 				self.frame_input(&mut f);
 				self.frame_ticks(&mut f);

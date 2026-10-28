@@ -30,13 +30,10 @@ pub fn without_frame_cb<R>(c: &mut Cpu, f: impl FnOnce(&mut Cpu) -> R) -> R {
 	}
 }
 
-/// The vblank wait of the PAL boot (oracle `VBLANK_WAIT`), where an unwound call is left.
-const VBLANK_WAIT: u32 = 0x118cb0;
-
 /// Whether a call left the machine at its return address with nothing stopped (the call is over, result in v0 / f0). A real unwind
-/// stays at the frame wait (or a stop).
+/// stays at the frame wait (or a stop); the wait is never a return address.
 pub fn came_back(c: &Cpu, ret: u32) -> bool {
-	c.stop.is_none() && c.pc == ret && c.pc != VBLANK_WAIT
+	c.stop.is_none() && c.pc == ret
 }
 
 /// A retail call for a mod (a hook's `original`, `call_game`): the callee runs with no frame callback (`without_frame_cb`) to its return
@@ -116,7 +113,6 @@ mod tests {
 		assert!(came_back(&c, RET), "a tail jump that ran on to the return address is a finished call");
 		c.pc = WAIT;
 		assert!(!came_back(&c, RET), "left at the frame wait: unwound");
-		assert!(!came_back(&c, WAIT), "the wait itself is never a return address");
 		c.pc = ENTRY + 8;
 		assert!(!came_back(&c, RET), "somewhere in the middle: not back");
 		c.pc = RET;

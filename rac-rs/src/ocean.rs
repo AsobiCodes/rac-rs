@@ -216,6 +216,12 @@ impl Ocean {
 		out
 	}
 
+	/// The heights of the whole ocean: (height, patches the mask draws) per descriptor, whatever the camera's distance or region.
+	pub fn heights(&self, out: &mut Vec<(f32, usize)>) {
+		out.clear();
+		out.extend(self.groups.iter().flatten().map(|d| (d.origin[2], d.mask.iter().filter(|&&m| m != 0).count())).filter(|h| h.1 > 0));
+	}
+
 	fn desc_patches(&self, d: &Desc, eye: [f32; 3], out: &mut Vec<WorldStrip>) {
 		let (cols, rows) = d.grid();
 		let [ox, oy, oz] = d.origin;

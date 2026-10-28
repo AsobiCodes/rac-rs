@@ -59,13 +59,18 @@ impl Gpu {
 	pub(in crate::viewer) fn star_frame(&self, scene: &Scene, gfx: &crate::retail::pcext::Graphics) {
 		let sf = &self.volclouds.sky.star;
 		let q = crate::devtune::f32("star_q", 1.0);
-		let slot = (gfx.enhanced() && self.modern_ok && self.level == LEVEL && !scene.warp_shown && !self.ship_fight && q > 0.0)
+		let slot = (gfx.enhanced() && self.modern_ok && !crate::viewer::pipe_guard::off(crate::viewer::pipe_guard::Effect::Post) && self.level == LEVEL && !scene.warp_shown && !self.ship_fight && q > 0.0)
 			.then(|| scene.tex_slots.get(&KEY).copied())
 			.flatten()
 			.filter(|_| scene.sky.is_some());
 		sf.slot.set(slot);
 		if slot.is_some() {
-			let r = sf.res.get_or_init(|| self.star_res());
+			// [PC] pipe_guard.rs: a driver that refuses the star shader (DX12 FXC) keeps the plain sky texture, it does not crash the game.
+			let built = || crate::viewer::pipe_guard::guard(&self.device, crate::viewer::pipe_guard::Effect::Star, || self.star_res()).map(|r| sf.res.get_or_init(|| r));
+			let Some(r) = sf.res.get().or_else(built) else {
+				sf.slot.set(None);
+				return;
+			};
 			let v = [seconds(), q, 0.0, 0.0];
 			self.queue.write_buffer(&r.params, 0, bytemuck::cast_slice(&v));
 		}

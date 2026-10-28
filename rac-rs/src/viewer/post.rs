@@ -767,6 +767,9 @@ pub(super) struct Post {
 	gi: Option<GiTargets>,
 	/// This frame's water pass ran: the composite reads its targets (`bind_water`).
 	gi_water: bool,
+	/// The fog cover: the fog pass asked for it this frame (`fog_cover`) / its last clear is older than a frame the fog drew in.
+	fogc_wanted: std::cell::Cell<bool>,
+	fogc_dirty: std::cell::Cell<bool>,
 	/// [PC] Volumetric clouds on (volclouds.rs): the sun rays gather from a tighter circle round the sun, so a sunlit cloud body
 	/// away from it streams no shaft.
 	pub(super) rays_tight: bool,
@@ -866,6 +869,8 @@ impl Post {
 			t: None,
 			gi: None,
 			gi_water: false,
+			fogc_wanted: Default::default(),
+			fogc_dirty: Default::default(),
 			rays_tight: false,
 		}
 	}
@@ -977,6 +982,8 @@ impl Post {
 
 	/// [PC] The volumetric fog's cover target (after `prepare`; volfog.rs draws `1 - transmittance` into it).
 	pub(super) fn fog_cover(&self) -> Option<&wgpu::TextureView> {
+		// (Asked for only when the fog pass draws this frame: `encode` clears the cover then, and once more after the last such frame.)
+		self.fogc_wanted.set(true);
 		self.t.as_ref().map(|t| &t.fogc)
 	}
 
@@ -1118,8 +1125,13 @@ impl Post {
 			run(enc, "post ao across", &t.ao[1], &self.p_blur, &t.g_blur[0], clear);
 			run(enc, "post ao down", &t.ao[0], &self.p_blur, &t.g_blur[1], clear);
 		}
-		// No fog cover unless the volumetric fog draws one in `mid`.
-		drop(enc.begin_render_pass(&wgpu::RenderPassDescriptor { label: Some("post fog cover clear"), color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &t.fogc, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: clear, store: wgpu::StoreOp::Store } })], depth_stencil_attachment: None, timestamp_writes: crate::viewer::passtime::rw("post fog cover clear"), occlusion_query_set: None, multiview_mask: None }));
+		// No fog cover unless the volumetric fog draws one in `mid`: cleared only for a frame where it draws, and once after the last
+		// such frame (so the composite reads zero); a fresh target is zero already.
+		let fog_frame = self.fogc_wanted.replace(false);
+		if fog_frame || self.fogc_dirty.replace(false) {
+			self.fogc_dirty.set(fog_frame);
+			drop(enc.begin_render_pass(&wgpu::RenderPassDescriptor { label: Some("post fog cover clear"), color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &t.fogc, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: clear, store: wgpu::StoreOp::Store } })], depth_stencil_attachment: None, timestamp_writes: crate::viewer::passtime::rw("post fog cover clear"), occlusion_query_set: None, multiview_mask: None }));
+		}
 		mid(enc, &t.scene, ao.then_some(&t.ao[0]));
 		if let Some(g) = gi {
 			// The grid's cells (colour and normal at once), the gather, its blur across and down.

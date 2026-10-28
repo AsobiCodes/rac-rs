@@ -59,7 +59,7 @@ impl Gpu {
 			// BRIDGE-64a: with volumes this frame the deferred-list slots leave the opaque props draws for the redraw after them.
 			// M3a shadows: in retail mode a frame whose only deferred caster is the hero still draws its volumes.
 			// [PC] Dynamic shadows replace the retail shadow volumes (no double shadows).
-			let volumes = self.volume_buf.as_ref().filter(|_| sun.is_none() && self.volume_counts != (0, 0) && (props.is_some() && !scene.props_late.is_empty() || self.shadow.marker_late && marker.is_some()));
+			let volumes = self.volume_buf.as_ref().filter(|_| !super::super::pipe_guard::off(super::super::pipe_guard::Effect::ShadowVol) && sun.is_none() && self.volume_counts != (0, 0) && (props.is_some() && !scene.props_late.is_empty() || self.shadow.marker_late && marker.is_some()));
 			let marker_late = marker.filter(|_| volumes.is_some() && self.shadow.marker_late);
 			let (props_main, props_late) = match volumes {
 				Some(_) => super::shadowvol::split_late(&scene.props.draws, &scene.slot_runs, &scene.props_late),
@@ -234,7 +234,7 @@ impl Gpu {
 				let (l, c) = (MENU_LIGHT_DIR, MENU_LIGHT_COLOUR);
 				let to_light = [0, 1, 2].map(|k| -(m[4 * k] * l[0] + m[4 * k + 1] * l[1] + m[4 * k + 2] * l[2]));
 				pu.lights[MENU_LIGHT_SLOT] = [[c[0], c[1], c[2], -0.25], [to_light[0], to_light[1], to_light[2], 0.0], [0.0; 4], [0.0; 4]];
-				self.queue.write_buffer(&self.pbuf[slot], 0, bytemuck::bytes_of(&pu));
+				self.queue.write_buffer(&self.pbuf[slot], 0, bytemuck::bytes_of(&super::super::volfog::fade_retail_fog(pu))); // [PC] the frame's decided fog scale, like the world
 				pass.set_pipeline(&self.pipeline);
 				pass.set_bind_group(0, &self.pbind[slot], &[]);
 				pass.set_vertex_buffer(0, batch.vbuf.slice(..));

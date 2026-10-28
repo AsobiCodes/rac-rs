@@ -133,47 +133,7 @@ impl WaterFx {
 			})
 		};
 		let (p_shore, p_shore_keep, p_shore_h, p_shore_v) = (shore_pipe("cs_shore"), shore_pipe("cs_shore_keep"), shore_pipe("cs_shore_h"), shore_pipe("cs_shore_v"));
-		// The waterfalls also see retail's waterfall texture (group 1, a level texture's bind group).
-		let pl_fall = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("water falls"), bind_group_layouts: &[Some(&layout), Some(tex_layout)], immediate_size: 0 });
-		let p_fall = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-			label: Some("water falls"),
-			layout: Some(&pl_fall),
-			vertex: wgpu::VertexState {
-				module: &shader,
-				entry_point: Some("vs_fall"),
-				compilation_options: Default::default(),
-				buffers: &[Some(wgpu::VertexBufferLayout {
-					array_stride: std::mem::size_of::<Vertex>() as u64,
-					step_mode: wgpu::VertexStepMode::Vertex,
-					attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2, 2 => Float32x3, 3 => Float32x4, 4 => Float32x4],
-				})],
-			},
-			fragment: Some(wgpu::FragmentState {
-				module: &shader,
-				entry_point: Some("fs_fall"),
-				compilation_options: Default::default(),
-				targets: &[Some(wgpu::ColorTargetState {
-					format,
-					blend: Some(wgpu::BlendState {
-						color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add },
-						alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Zero, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add },
-					}),
-					write_mask: wgpu::ColorWrites::ALL,
-				})],
-			}),
-			primitive: Default::default(),
-			depth_stencil: None,
-			multisample: Default::default(),
-			multiview_mask: None,
-			cache: None,
-		});
-		let fall_dummy = {
-			let view = device
-				.create_texture(&wgpu::TextureDescriptor { label: Some("water falls dummy"), size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 }, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba8Unorm, usage: wgpu::TextureUsages::TEXTURE_BINDING, view_formats: &[] })
-				.create_view(&Default::default());
-			let sampler = device.create_sampler(&Default::default());
-			device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("water falls dummy"), layout: tex_layout, entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) }, wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) }] })
-		};
+		let (p_fall, fall_dummy) = Self::fall_parts(device, &shader, &layout, tex_layout, format);
 		let small = |format| {
 			device
 				.create_texture(&wgpu::TextureDescriptor { label: Some("water fx dummy"), size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 }, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format, usage: wgpu::TextureUsages::TEXTURE_BINDING, view_formats: &[] })
@@ -210,6 +170,7 @@ impl WaterFx {
 			fall: None,
 			sheet_mem: SheetMem::default(),
 			sheet_level: usize::MAX,
+			shore_game: usize::MAX,
 			p_mask,
 			p_grid, dry,
 			p_shore, p_shore_keep,
@@ -225,11 +186,57 @@ impl WaterFx {
 		}
 	}
 
+	/// The waterfall pipeline and its dummy retail-texture bind group (split out of `new`).
+	fn fall_parts(device: &wgpu::Device, shader: &wgpu::ShaderModule, layout: &wgpu::BindGroupLayout, tex_layout: &wgpu::BindGroupLayout, format: wgpu::TextureFormat) -> (wgpu::RenderPipeline, wgpu::BindGroup) {
+		// The waterfalls also see retail's waterfall texture (group 1, a level texture's bind group).
+		let pl_fall = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("water falls"), bind_group_layouts: &[Some(layout), Some(tex_layout)], immediate_size: 0 });
+		let p_fall = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+			label: Some("water falls"),
+			layout: Some(&pl_fall),
+			vertex: wgpu::VertexState {
+				module: shader,
+				entry_point: Some("vs_fall"),
+				compilation_options: Default::default(),
+				buffers: &[Some(wgpu::VertexBufferLayout {
+					array_stride: std::mem::size_of::<Vertex>() as u64,
+					step_mode: wgpu::VertexStepMode::Vertex,
+					attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2, 2 => Float32x3, 3 => Float32x4, 4 => Float32x4],
+				})],
+			},
+			fragment: Some(wgpu::FragmentState {
+				module: shader,
+				entry_point: Some("fs_fall"),
+				compilation_options: Default::default(),
+				targets: &[Some(wgpu::ColorTargetState {
+					format,
+					blend: Some(wgpu::BlendState {
+						color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add },
+						alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Zero, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add },
+					}),
+					write_mask: wgpu::ColorWrites::ALL,
+				})],
+			}),
+			primitive: Default::default(),
+			depth_stencil: None,
+			multisample: Default::default(),
+			multiview_mask: None,
+			cache: None,
+		});
+		let fall_dummy = {
+			let view = device
+				.create_texture(&wgpu::TextureDescriptor { label: Some("water falls dummy"), size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 }, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba8Unorm, usage: wgpu::TextureUsages::TEXTURE_BINDING, view_formats: &[] })
+				.create_view(&Default::default());
+			let sampler = device.create_sampler(&Default::default());
+			device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("water falls dummy"), layout: tex_layout, entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) }, wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) }] })
+		};
+		(p_fall, fall_dummy)
+	}
+
 	/// The targets for the post's current ones (`post::Post::water_inputs`): (re)made when the window or the post targets change.
 	pub(super) fn prepare(&mut self, device: &wgpu::Device, depth: &wgpu::TextureView, scene: &wgpu::TextureView, lin: &wgpu::TextureView, glow: &wgpu::TextureView, generation: u64) {
 		let tex = scene.texture();
 		let (w, h) = (tex.width(), tex.height());
-		if self.t.as_ref().is_some_and(|t| t.key == (w, h, generation)) {
+		if self.t.as_ref().is_some_and(|t| t.key == (w, h, generation, self.sky.made())) {
 			return;
 		}
 		let make = |label, format, usage| {
@@ -298,6 +305,6 @@ impl WaterFx {
 				wgpu::BindGroupEntry { binding: 2, resource: self.shore.as_entire_binding() },
 			],
 		});
-		self.t = Some(Targets { key: (w, h, generation), wpos, wdepth, copy, g_pos, g_shade, mirror_ms, mirror_layers, mirror_depth, bed_ms, bed, bed_depth, seamask, g_grid, g_shore, dry });
+		self.t = Some(Targets { key: (w, h, generation, self.sky.made()), wpos, wdepth, copy, g_pos, g_shade, mirror_ms, mirror_layers, mirror_depth, bed_ms, bed, bed_depth, seamask, g_grid, g_shore, dry });
 	}
 }

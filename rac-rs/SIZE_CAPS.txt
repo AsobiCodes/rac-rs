@@ -7,13 +7,13 @@
 file oracle/src/snd989/handler.rs 1679
 file rac-rs/src/anim.rs 2384
 file rac-rs/src/frontend.rs 2139
-file rac-rs/src/retail/gscap/draw/gpu.rs 1636
+file rac-rs/src/retail/gscap/draw/gpu.rs 1561
 file rac-rs/src/retail/modcam.rs 1800
-file rac-rs/src/retail/pcext.rs 1679
+file rac-rs/src/retail/pcext.rs 1652
 file rac-rs/src/sound.rs 1668
 file rac-rs/src/viewer.rs 1875
 file rac-rs/src/viewer/app.rs 1703
-file rac-rs/src/viewer/vegfx.rs 2417
+file rac-rs/src/viewer/vegfx.rs 2269
 file rac-rs/src/viewer/waterfx/shader.rs 1780
 fn oracle/src/cpu.rs exec_body 156
 fn oracle/src/gate.rs run 205
@@ -23,7 +23,6 @@ fn oracle/src/mc.rs mc_rpc 177
 fn oracle/src/snd989/handler.rs exec 219
 fn oracle/src/vu.rs vu0_exec_interp 155
 fn oracle/src/vu.rs vu_lower 217
-fn rac-rs/src/audio.rs mixer 156
 fn rac-rs/src/frontend.rs draw 381
 fn rac-rs/src/game/setup.rs with_story 162
 fn rac-rs/src/gsfull/gs_raster.rs shade 163
@@ -32,10 +31,10 @@ fn rac-rs/src/mobies.rs decode_class 194
 fn rac-rs/src/particles.rs sprites_keyed 171
 fn rac-rs/src/retail/efx_draw.rs build_in 242
 fn rac-rs/src/retail/gscap/draw.rs draw_in 227
-fn rac-rs/src/retail/gscap/draw/gpu.rs gpu_raster 227
+fn rac-rs/src/retail/gscap/draw/gpu.rs gpu_raster 206
 fn rac-rs/src/retail/modcam.rs step 248
 fn rac-rs/src/retail/pcext.rs eudora_graphics_page 230
-fn rac-rs/src/retail/snapshot.rs snap 217
+fn rac-rs/src/retail/snapshot.rs snap 206
 fn rac-rs/src/retail/test_suite.rs retail_mouse_menus 163
 fn rac-rs/src/shop.rs draw 197
 fn rac-rs/src/sound.rs tone_pitch_matches_the_retail_driver 192
@@ -58,10 +57,10 @@ fn rac-rs/src/viewer/handler/frame_hud.rs frame_hud_draw 293
 fn rac-rs/src/viewer/handler/frame_post.rs frame_sound_events 187
 fn rac-rs/src/viewer/handler/frame_render.rs frame_render 236
 fn rac-rs/src/viewer/handler/frame_ticks.rs frame_ticks 154
-fn rac-rs/src/viewer/handler/frame_upload.rs frame_upload 232
+fn rac-rs/src/viewer/handler/frame_upload.rs frame_upload 231
 fn rac-rs/src/viewer/hud.rs hud 201
-fn rac-rs/src/viewer/hudart.rs hud_art 170
+fn rac-rs/src/viewer/hudart.rs hud_art 157
 fn rac-rs/src/viewer/startup.rs new_app 213
-fn rac-rs/src/viewer/vegfx.rs plan_cpu 318
+fn rac-rs/src/viewer/vegfx.rs plan_cpu 311
 fn rac-rs/src/viewer/waterfx/passes.rs positions 191
-fn rac-rs/src/viewer/waterfx/setup.rs new 220
+fn rac-rs/src/viewer/waterfx/setup.rs new 181

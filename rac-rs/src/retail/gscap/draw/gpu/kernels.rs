@@ -1,7 +1,7 @@
 //! The GS capture's compute kernels: building the 13 pipelines (`Gpu::pipes`) and what happens when a driver or shader compiler refuses
-//! one. A refused kernel (DX12 with FXC: "unable to unroll loop"; a driver bug on any API) is caught in a per-thread error scope, so it
-//! never reaches wgpu's default handler (a panic); `Gpu::open` then gives the capture up with a log line and the game draws the HUD
-//! on the CPU, as it does without a GPU capture.
+//! one. A refused kernel (DX12 with FXC: "unable to unroll loop"; a driver bug on any API; the driver running out of memory while it
+//! compiles) is caught in a per-thread error scope, so it never reaches wgpu's default handler (a panic); `Gpu::open` then gives the
+//! capture up with a log line and the game draws the HUD on the CPU, as it does without a GPU capture.
 use super::{Gpu, PipeCache, IDLE, KERNELS, K_HDF};
 
 impl Gpu {
@@ -37,7 +37,7 @@ impl Gpu {
                         let _one = (!dx12 && matches!(k, "k_redo" | "k_serial")).then(|| big.lock());
                         let t = std::time::Instant::now();
                         // Error scopes are per thread: a refusal here is this kernel's, and the window's own errors stay with its handler.
-                        let (sv, si) = (dev.push_error_scope(wgpu::ErrorFilter::Validation), dev.push_error_scope(wgpu::ErrorFilter::Internal));
+                        let (sv, si, so) = (dev.push_error_scope(wgpu::ErrorFilter::Validation), dev.push_error_scope(wgpu::ErrorFilter::Internal), dev.push_error_scope(wgpu::ErrorFilter::OutOfMemory));
                         let p = dev.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                             label: Some(k),
                             layout: Some(pl),
@@ -46,7 +46,9 @@ impl Gpu {
                             compilation_options: wgpu::PipelineCompilationOptions { constants: &c, ..Default::default() },
                             cache: cache.map(|c| &c.cache),
                         });
-                        let err = pollster::block_on(si.pop()).or_else(|| pollster::block_on(sv.pop()));
+                        // Popped last in, first out; all three, so a refusal never leaves a scope on this thread's stack.
+                        let (eo, ei, ev) = (pollster::block_on(so.pop()), pollster::block_on(si.pop()), pollster::block_on(sv.pop()));
+                        let err = eo.or(ei).or(ev);
                         if log || t.elapsed().as_millis() > 1000 {
                             eprintln!("gscap: kernel {k} took {} ms to build", t.elapsed().as_millis());
                         }

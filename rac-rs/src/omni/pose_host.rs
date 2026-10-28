@@ -8,14 +8,9 @@
 use super::binding::{Binding, SkeletonDef};
 use super::cabi::{Host, OmniPoseOp};
 use super::host::{cpu, state, HostState};
+use super::pose::{u32_at, MASK};
 use super::{events, pose, pose_capture};
 use std::ffi::c_void;
-
-const MASK: u32 = 0x01ff_ffff;
-
-fn u32_at(ram: &[u8], a: usize) -> u32 {
-	ram.get(a..a + 4).map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-}
 
 /// `parent` and `partner` of every joint (0xffff = none), from the class record's bone table and the binding's pairs.
 pub fn tables(ram: &[u8], moby: u32, joints: u32, sk: &SkeletonDef) -> (Vec<u16>, Vec<u16>) {

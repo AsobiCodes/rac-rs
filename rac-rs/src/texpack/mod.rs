@@ -6,12 +6,19 @@
 //! - `name`: `TexName` and the PCSX2 file-name parser (six formats, bit 14 masked, `-mipN` files refused).
 //! - `gsname`: the PCSX2 texture name of any draw (GS local memory + TEX0/CLAMP/TEXA/TEXCLUT), for HUD/menu/font/effect classes; `discover`: the
 //!   RAC_TEXNAMES collector (stage A measurement, zero cost when unset).
+//! - `layout`: where a hand-copied pack's images are (documented `textures` folder, or PCSX2 `replacements` shapes).
 //! - `json`, `mods`: the mods contract (`mods/active.txt`, `mods/<id>/mod.json`, images in `mods/<id>/textures`).
 //! - `active`: `mods/active.txt` in the launcher's exact format (master ticks, held ids, foreign comment lines, BOM / CRLF in, LF out);
 //!   `store`: the installed mods plus that file as one value, what the in-game Mods page (retail/pcmods.rs) lists and saves.
 //! - `index`: `PackIndex`, name -> file over the enabled mods' folders.
-//! - `inflate`, `png`, `dds`, `bc`: dependency-free decoders (zlib, PNG, DDS headers, BC1/2/3); `chain`: mip chain assembly; `repl`: the per-level
+//! - `bcenc`: RGBA8 -> BC3 for a chain that would not fit the memory budget (PNG packs).
+//! - `inflate`, `png`, `dds`, `bc`, `bc7dec`: dependency-free decoders (zlib, PNG, DDS headers, BC1/2/3, BC7); `bc7alpha`: the BC7 file alpha rule; `chain`: mip chain assembly; `repl`: the per-level
 //!   replacement registry (`LevelRepl`, async decode).
+//! - `hudrepl`: replacement images for the GPU capture's HUD / menu / text textures, looked up by their run-time name (async decode,
+//!   memory budget); nothing runs without a pack.
+//! - `front_hd`: the same for the pictures the mirror draws itself (title logo, Press Start, the menu panel frame): named from the disc data, replaced
+//!   in the decoded `Texture`; `hud::Sprite::name` names the HUD sprites.
+//! - `hudprefetch`: starts the decoding of a level's HUD pictures at level load (no pop-in on the first frames).
 //! - `source`: the raw PSMT8 tables of a level; `names`: their PCSX2 names and the lookup in the index; `xmap`: the PAL <-> USA twin names
 //!   (`assets/texmap.tsv`) tried for a name the pack lacks; `levelrule`: which files a texture's replacement is built from.
 //! - `extra`, `extra_hd`, `extra_grass`: the textures outside the four world tables (fx / particles / chrome / glass / sky / ship / warp
@@ -19,18 +26,26 @@
 
 pub mod active;
 pub mod bc;
+pub mod bc7alpha;
+pub mod bc7dec;
+pub mod bcenc;
 pub mod chain;
 pub mod dds;
 pub mod discover;
 pub mod extra;
 pub mod extra_grass;
 pub mod extra_hd;
+pub mod front_hd;
 pub mod gsname;
+pub mod guard;
 pub mod hash;
+pub mod hudprefetch;
+pub mod hudrepl;
 pub mod inflate;
 pub mod index;
 pub mod jobs;
 pub mod json;
+pub mod layout;
 pub mod levelrule;
 pub mod mods;
 pub mod name;
@@ -153,13 +168,44 @@ pub fn level_loaded(l: &Level, textures: &std::collections::HashMap<u32, crate::
 	Some(hits)
 }
 
-/// The BC texture formats are requested from the GPU only with a textures mod active, so without one the device is exactly as before.
+/// The BC texture formats are requested from the GPU whenever the adapter has them: the pack folder is not scanned while the device is
+/// made, and a textures mod switched on later (Mods page) still gets BC textures. Without a pack nothing uses the feature.
+///
+/// This is also where the loaders learn whether they may hand BC chains to the GPU as they are (`repl::set_bc_native`): `Gpu::new` makes
+/// the device with exactly the features returned here (no fallback descriptor), so the device has BC iff this returns it. Do not move
+/// that into a call after the device is made (the `gpu_features_is_called_for_real` test reads `gpu/setup.rs`).
 pub fn gpu_features(adapter: &wgpu::Adapter) -> wgpu::Features {
-	if packs().is_some() {
-		adapter.features() & wgpu::Features::TEXTURE_COMPRESSION_BC
-	} else {
-		wgpu::Features::empty()
+	bc_features(adapter.features())
+}
+
+/// `gpu_features` for the feature set `have` of an adapter.
+fn bc_features(have: wgpu::Features) -> wgpu::Features {
+	let f = have & wgpu::Features::TEXTURE_COMPRESSION_BC;
+	repl::set_bc_native(!f.is_empty());
+	f
+}
+
+#[cfg(test)]
+mod bc_flag_tests {
+	use super::*;
+
+	/// The flag the loaders read follows the adapter's features (the unit test of `repl` used to set it by hand, which hid a call that
+	/// sat inside a comment).
+	#[test]
+	fn the_loaders_flag_follows_the_adapter_features() {
+		assert!(bc_features(wgpu::Features::TEXTURE_COMPRESSION_BC | wgpu::Features::DEPTH32FLOAT_STENCIL8) == wgpu::Features::TEXTURE_COMPRESSION_BC);
+		assert!(repl::bc_native());
+		assert!(bc_features(wgpu::Features::DEPTH32FLOAT_STENCIL8).is_empty());
+		assert!(!repl::bc_native());
+		bc_features(wgpu::Features::TEXTURE_COMPRESSION_BC);
 	}
+
+	/// `Gpu::new` must really call `gpu_features` outside of any `//` comment (no GPU needed: the source is read).
+	#[test]
+	fn gpu_features_is_called_for_real() {
+		let src = include_str!("../viewer/gpu/setup.rs");
+		let live = src.lines().map(|l| l.split("//").next().unwrap_or("")).collect::<Vec<_>>().join("\n");
+		assert!(live.contains("crate::texpack::gpu_features(&adapter)"), "Gpu::new does not call texpack::gpu_features outside a comment");	}
 }
 
 #[cfg(test)]

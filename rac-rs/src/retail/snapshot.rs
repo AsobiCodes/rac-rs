@@ -32,6 +32,8 @@ pub struct Snap {
 	/// `mode` is the front end's mode word 0x15f5e4 and the picture is the GS's own (title_boot.rs).
 	/// A ship fight is on (retail/shipmouse.rs): the left mouse button fires with Cross there.
 	pub ship_fight: bool,
+	/// The hero's body form byte 0x1413f4: 0 Ratchet, 1 Clank, 2 Giant Clank, 3 Hologuise (`live_pad`, R2 for the pad).
+	pub form: u8,
 	/// Retail's own occlusion mask of this field (128 bytes at 0x174100 + the level shift; None while loading / outside a level).
 	pub occ_mask: Option<[u8; 128]>,
 	pub front: bool,
@@ -81,7 +83,7 @@ pub struct Snap {
 	pub(super) sound: SndBatch,
 	/// The retail GS overlay finished since the last field (oracle gs.rs): (width, rows, RGBA8 with rgb = the
 	/// premultiplied colour and a = how much of rac-rs's scene shows through).
-	pub(super) ov: Option<(u32, u32, Vec<[u8; 4]>)>,
+	pub(super) ov: Option<(u32, u32, Vec<[u8; 4]>, HudGuard)>,
 	/// `ov` was drawn into the display buffer on a no-present field (gscap `Overlay::disp`): it covers what the
 	/// display showed, a held movie picture too.
 	pub(super) ov_disp: bool,
@@ -141,13 +143,18 @@ pub struct Snap {
 /// RAC_RETAIL_NATIVE_DELAY=d forces a fixed d (0 = the old undelayed draw).
 pub(super) fn native_delay(s: Snap) -> Snap {
 	static FORCED: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
-	let forced = *FORCED.get_or_init(|| std::env::var("RAC_RETAIL_NATIVE_DELAY").ok().and_then(|v| v.parse().ok()));
+	native_delay_with(s, *FORCED.get_or_init(|| std::env::var("RAC_RETAIL_NATIVE_DELAY").ok().and_then(|v| v.parse().ok())))
+}
+
+/// `native_delay` with the forced delay given (None = the rules above); the tests pass None so the environment cannot change them.
+fn native_delay_with(s: Snap, forced: Option<usize>) -> Snap {
 	NATIVE_Q.with(|q| {
 		let mut nd = q.borrow_mut();
 		if s.mode != nd.mode {
 			eprintln!("retail: mode {} -> {} at field {}", nd.mode, s.mode, s.field);
 			nd.mode = s.mode;
 		}
+		nd.form = s.form;
 		if forced == Some(0) {
 			return s;
 		}
@@ -212,6 +219,17 @@ pub(super) fn native_delay(s: Snap) -> Snap {
 	})
 }
 
+/// The game mode and the hero's body form of the newest snapshot taken (before the delay): what the next field's pad is decided in
+/// (`Retail::tick_inner`). It reads `native_delay`'s thread-local state, so it MUST run on the thread that calls `native_delay`
+/// (the main thread, `Retail::tick_inner`; STATE.md NATIVE_Q): on another thread it would return (0, 0) forever, R2 would always
+/// be the aim (STATE.md says so; the state is per thread so tests with several `Retail`s do not cross-talk).
+pub(super) fn live_pad() -> (u32, u8) {
+	NATIVE_Q.with(|q| {
+		let nd = q.borrow();
+		(nd.mode, nd.form)
+	})
+}
+
 /// `native_delay`'s state (main thread): the queued newer snaps, the wanted delay, the newest fade word, the view flags
 /// of the last shown snap (a growing hold keeps them), the delay last logged and the fields gameplay waited to shrink.
 #[derive(Default)]
@@ -224,6 +242,8 @@ struct NativeDelay {
 	pub(super) late: u32,
 	/// The newest snap's game mode (the `mode a -> b` log line).
 	pub(super) mode: u32,
+	/// The newest snap's hero body form.
+	pub(super) form: u8,
 }
 
 /// The scene sequence moby `a` plays, copied out of RAM: scene_chunk_parse appends each actor's sequence to its class
@@ -286,10 +306,9 @@ pub(super) fn arrived(s: &Snap, m: &ee_oracle::Machine) -> bool {
 	matches!(s.mode, 0 | 2) || (s.mode == 6 && s.ship == 8 && m.rd32(0x15f3f4) != 0)
 }
 
-pub fn snap(m: &ee_oracle::Machine) -> Snap {
-	let level = m.level();
-	let mode = m.rd32(va(0x15f5a4));
-	let mut out = Snap {
+/// The plain RAM words of a snapshot: HUD numbers, inventory, the body form and the pad words.
+fn read_words(m: &ee_oracle::Machine, mode: u32, level: u32) -> Snap {
+	Snap {
 		health: m.rd32(0x1415f8) as i32,
 		bolts: m.rd32(0x15ed98),
 		mode,
@@ -297,10 +316,17 @@ pub fn snap(m: &ee_oracle::Machine) -> Snap {
 		have: (0..crate::inventory::GADGETS as u32).map(|i| m.rd8(0x13d4c0 + i) != 0).collect(),
 		ammo: (0..crate::inventory::GADGETS as u32).map(|i| m.rd32(0x13d428 + 4 * i).min(0xffff) as u16).collect(),
 		equipped: m.rd32(0x140408) as u8,
+		form: m.rd8(0x1413f4),
 		last: m.rd32(0x141660) as u8,
 		pad: [m.rd32(0x13cae0), m.rd32(0x13cae4), m.rd32(0x13cb00), m.rd32(0x13cb04)],
 		..Snap::default()
-	};
+	}
+}
+
+pub fn snap(m: &ee_oracle::Machine) -> Snap {
+	let level = m.level();
+	let mode = m.rd32(va(0x15f5a4));
+	let mut out = read_words(m, mode, level);
 	let ship = if mode == 6 { m.rd32(SHIP_STATE) } else { 0 };
 	out.ship_fight = shipmouse::in_ship_fight(m);
 	(out.frozen, out.scene, out.ship) = (frozen_view(mode, ship), scene_view(mode, ship), ship);
@@ -345,7 +371,7 @@ pub fn snap(m: &ee_oracle::Machine) -> Snap {
 	if out.hold {
 		return out;
 	}
-	out.cam = read_cam(m, level);
+	out.cam = super::wide_side::field(read_cam(m, level));
 	out.cam_up = read_cam_up(m, level);
 	out.orbs = Some(orb_draws(m, level));
 	out.fx = Some(queue_fx(m, level));
@@ -509,4 +535,28 @@ pub fn snap(m: &ee_oracle::Machine) -> Snap {
 fn mod_poses(m: &ee_oracle::Machine, a: u32, scene: bool) -> (strafe::Draw, Vec<crate::anim::JointFx>, Vec<crate::omni::FollowRec>) {
 	let posable = m.rd16(a + 0xa6) == 0 && m.rd8((m.rd32(a + 0x24) & 0x01ff_ffff) + 8) == 111;
 	(strafe::current(), crate::omni::pose_ops_for(a, posable, scene), crate::omni::follow_for(posable, scene))
+}
+
+#[cfg(test)]
+mod live_mode_tests {
+	use super::*;
+
+	/// Leaving the pause: the pad of the next field sees the game's NEWEST mode (0), not the delayed shown snapshot's (3), so R2 is
+	/// the aim from the first gameplay field and retail gets no crouch from it (`Retail::pad_gameplay`, `prompts::route_r2`).
+	#[test]
+	fn the_pad_sees_the_newest_mode_not_the_delayed_one() {
+		let snap = |mode| Snap { mode, form: 1, ..Default::default() };
+		assert_eq!(live_pad(), (0, 0));
+		// In the pause menu (mode 3): `native_delay` queues 2 fields, the shown snapshot lags, the live mode is 3 at once.
+		for _ in 0..4 {
+			let shown = native_delay_with(snap(3), None);
+			assert_eq!(live_pad(), (3, 1), "the newest field's mode and body form at once");
+			assert!(shown.mode == 3 || shown.hold, "shown: the held picture or the pause menu");
+		}
+		// The game left the pause at this field: the shown snapshot may still be the pause menu's (2 fields queued), the live mode
+		// is 0 already.
+		let shown = native_delay_with(snap(0), None);
+		assert_eq!(live_pad().0, 0);
+		assert_eq!(shown.mode, 3, "the delayed picture still shows the pause menu: the old gameplay() would still have said no");
+	}
 }

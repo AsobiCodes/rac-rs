@@ -3,14 +3,40 @@
 use super::*;
 
 impl App {
+	/// Which props are posed this frame, and which of those are blended: a shown prop always; a camera-culled moby (`Prop::cast`) is
+	/// used only by the sun shadow pass (Enhanced lighting, Dynamic shadows on: its pose is the shadow's shape) and, with Culling Off,
+	/// drawn by the main pass, so it is posed in exactly those cases (Classic and the default Culling pose nothing more). The shadow
+	/// pass only takes the ones in a cascade box (`SunGate`); the ones within `HISTORY_MARGIN` of a box are posed for their pose
+	/// history, the ones in a box are blended too.
+	fn posing(&self, game: &Game, g: crate::retail::pcext::Graphics) -> (Vec<bool>, Vec<bool>) {
+		let sun = SunGate::of(self, g);
+		game.props.iter().map(|p| {
+			if p.shown || (p.cast && !g.culling) {
+				return (true, true);
+			}
+			let sphere = || self.prop_anims.get(&p.class_id).map(|c| c.0.bsphere);
+			match &sun {
+				Some(s) if p.cast => (s.takes(p, sphere(), HISTORY_MARGIN), s.takes(p, sphere(), 0.0)),
+				_ => (false, false),
+			}
+		}).unzip()
+	}
+
 	pub(super) fn frame_props(&mut self, f: &mut Frame) {
 		let flight_pose = f.flight_pose;
+		let g = crate::retail::pcext::graphics();
+		let (pose, blend) = match &self.game {
+			Some(game) => self.posing(game, g),
+			None => (Vec::new(), Vec::new()),
+		};
 		if let (Some(game), Some(w)) = (&mut self.game, &self.world) {
 			let p = &game.player;
 			let mut posed: HashMap<PoseKey, Posed> = HashMap::new();
 			// Vendor and orb: blend / joint-spin poses (vendor.rs vendor_fx), one skinning per prop.
 			let mut fx_posed: HashMap<usize, Posed> = HashMap::new();
-			for (pi, pr) in game.props.iter().enumerate().filter(|(_, p)| p.shown) {
+			// The skinning of the props with joint records is done on the worker pool below (`fx_jobs`).
+			let mut fx_jobs: Vec<(usize, &mobies::MobyClass, Vec<[f32; 12]>)> = Vec::new();
+			for (pi, pr) in game.props.iter().enumerate().filter(|(pi, _)| pose[*pi]) {
 				// SCN-4.3c: the flying ship blends sequence 1 frame 0 into sequence 2 by the flight's +0x54.
 				if let (Some(fp), Some((class, a))) = (flight_pose.filter(|fp| fp.prop == pi), self.prop_anims.get(&pr.class_id)) {
 					if a.sequences.len() > 2 && !a.sequences[1].frames.is_empty() && !a.sequences[2].frames.is_empty() {
@@ -32,9 +58,16 @@ impl App {
 						fx.extend(r.prop_fx(pi).iter().cloned());
 					}
 					if spins.is_some() || pr.anim.fading() || !fx.is_empty() {
-						fx_posed.insert(pi, anim::skin_all(class, &pr.anim.pose_fx_full(a, spins.unwrap_or(&[]), &fx)));
+						fx_jobs.push((pi, class, pr.anim.pose_fx_full(a, spins.unwrap_or(&[]), &fx)));
 					}
 				}
+			}
+			{
+				use rayon::prelude::*;
+				let _s = profile::span("prop_skin_fx");
+				let skin = |(pi, class, mats): &(usize, &mobies::MobyClass, Vec<[f32; 12]>)| (*pi, anim::skin_all(class, mats));
+				let done: Vec<(usize, Posed)> = if fx_jobs.len() < 3 { fx_jobs.iter().map(skin).collect() } else { fx_jobs.par_iter().map(skin).collect() };
+				fx_posed.extend(done);
 			}
 			// PC perf: no game tick since the last frame's poses (same stamp): the anim states are unchanged, so each
 			// pose key's skinning is moved over from that frame instead of recomputed.
@@ -44,7 +77,7 @@ impl App {
 			// [PC] perf: the joint matrices per new key here, the skinning on the frame worker pool; the keys go into
 			// `posed` in first-seen order as before.
 			let mut todo: Vec<(PoseKey, Result<Posed, (&mobies::MobyClass, Vec<[f32; 12]>)>)> = Vec::new();
-			for pr in game.props.iter().filter(|p| p.shown) {
+			for pr in game.props.iter().enumerate().filter(|(pi, _)| pose[*pi]).map(|(_, p)| p) {
 				if let Some((class, a)) = self.prop_anims.get(&pr.class_id) {
 					let key = pose_key(pr);
 					if !posed.contains_key(&key) {
@@ -66,7 +99,7 @@ impl App {
 				}
 			}
 			// PC-FPS-1: blended poses join `fx_posed`, blended placements go to `smooth::PROP_XF`.
-			{ let _s = profile::span("sm_props"); self.smooth.props(&game.props, posed, &mut fx_posed); }
+			{ let _s = profile::span("sm_props"); self.smooth.props(&game.props, posed, &mut fx_posed, &blend); }
 			profile::lap(profile::Phase::Props);
 			f.fx_posed = fx_posed;
 		}

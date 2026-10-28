@@ -164,6 +164,9 @@ impl Store {
 				OP_HOLD => {
 					if o.source != 0 {
 						pose_capture::covers(o.source, o.joint)?;
+						// Pinned now, not when the op is applied: a `hold(0)` earlier in this batch takes a new snapshot, which evicts the
+						// oldest unpinned one, possibly this one.
+						pose_capture::pin(o.source);
 					}
 					(Kind::Hold(o.source), IDENTITY)
 				}
@@ -183,9 +186,13 @@ impl Store {
 					if op.kind == Kind::Hold(0) {
 						// A hold with no snapshot freezes the pose of now; renewed over a hold it keeps that capture.
 						op.kind = match self.ops.get(&(moby, *joint)).map(|o| o.kind) {
-							Some(Kind::Hold(id)) if id != 0 => Kind::Hold(id),
+							// ... unless that capture is gone (then the hold takes a new one instead of staying dead).
+							Some(Kind::Hold(id)) if id != 0 && pose_capture::covers(id, *joint).is_ok() => Kind::Hold(id),
 							_ => Kind::Hold(pose_capture::request(*joint, *joint + 1)),
 						};
+					}
+					if let Kind::Hold(id) = op.kind {
+						pose_capture::pin(id);
 					}
 					if let Some(old) = self.ops.get(&(moby, *joint)) {
 						// Replacing keeps the weight (and the rotation of a rotation op) where it is: no pop, a renewed op is smooth.
@@ -221,6 +228,8 @@ impl Store {
 			op.advance();
 		}
 		self.ops.retain(|_, op| !(op.fading && op.w <= 0.0));
+		// The captures live holds use stay however many newer snapshots the mod takes.
+		pose_capture::set_pinned(self.ops.values().filter_map(|op| if let Kind::Hold(id) = op.kind { Some(id).filter(|&i| i != 0) } else { None }));
 	}
 
 	pub fn len(&self) -> usize {
@@ -272,7 +281,8 @@ impl Store {
 
 const HERO_CELL: usize = 0x14_13d0;
 const HERO_STATE: usize = 0x14_13d4;
-const MASK: u32 = 0x01ff_ffff;
+/// Masks a game address to the 32 MB RAM (the pose files share this and `u32_at`).
+pub(super) const MASK: u32 = 0x01ff_ffff;
 /// Hero death states (death_respawn.md section 2; the same list as modcam.rs GATE_STATES' death part).
 const DEATH_STATES: [u32; 10] = [0x3d, 0x47, 0x77, 0x7a, 0x7b, 0x7c, 0x7d, 0x7f, 0x80, 0x82];
 /// Game modes (events.rs): movie, in-engine cutscene, vendor.
@@ -280,7 +290,7 @@ const SCENE_MODES: [u32; 3] = [1, 2, 5];
 /// The hero's class id and joint count: the only body that can be posed.
 const HERO_CLASS: u16 = 0;
 
-fn u32_at(ram: &[u8], a: usize) -> u32 {
+pub(super) fn u32_at(ram: &[u8], a: usize) -> u32 {
 	ram.get(a..a + 4).map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
 }
 
@@ -321,7 +331,12 @@ pub fn tick(ram: &[u8], level: i32, exit: bool, mode: u32) {
 	pose_read::new_tick();
 	if changed || SCENE_MODES.contains(&mode) {
 		s.clear_all();
-		pose_capture::clear();
+		// A level change drops the debug state too; a cutscene or vendor tick only the snapshots the cleared holds used.
+		if changed {
+			pose_capture::clear();
+		} else {
+			pose_capture::forget_snapshots();
+		}
 	}
 	let hero = u32_at(ram, HERO_CELL) & MASK;
 	s.hero = hero;

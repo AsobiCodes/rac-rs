@@ -4,7 +4,7 @@ use super::*;
 
 impl Gpu {
 	pub(in crate::viewer) fn ctx(&self) -> SceneCtx {
-		SceneCtx { device: self.device.clone(), queue: self.queue.clone(), sampler: self.sampler.clone(), wrap_samplers: self.wrap_samplers.clone(), tex_layout: self.tex_layout.clone(), tex_log: std::cell::RefCell::new(None), repl: Default::default(), repl_pending: Default::default(), repl_origs: Default::default(), orig_on: Default::default(), extra_origs: Default::default(), bindless_layout: self.bindless.as_ref().map(|b| b.layout.clone()), paced: false }
+		SceneCtx { device: self.device.clone(), queue: self.queue.clone(), sampler: self.sampler.clone(), wrap_samplers: self.wrap_samplers.clone(), tex_layout: self.tex_layout.clone(), tex_log: std::cell::RefCell::new(None), repl: Default::default(), repl_pending: Default::default(), repl_cap: Default::default(), repl_origs: Default::default(), orig_on: Default::default(), extra_origs: Default::default(), bindless_layout: self.bindless.as_ref().map(|b| b.layout.clone()), paced: false }
 	}
 
 	pub(in crate::viewer) fn upload(&self, t: Option<&Texture>, sampler: &wgpu::Sampler) -> wgpu::BindGroup {
@@ -125,6 +125,8 @@ pub(in crate::viewer) struct SceneCtx {
 	/// [PC] texture packs (repl_upload.rs): the level's replacements while `build_scene` runs, and the slots still waiting for theirs.
 	pub(in crate::viewer) repl: std::cell::RefCell<Option<std::sync::Arc<crate::texpack::repl::LevelRepl>>>,
 	pub(in crate::viewer) repl_pending: std::cell::RefCell<Vec<super::repl_upload::PendRaw>>,
+	/// What this scene build may still bind of the Ready replacements (`repl_upload::BuildCap`, set by `repl_begin`).
+	pub(in crate::viewer) repl_cap: std::cell::Cell<super::repl_upload::BuildCap>,
 	/// [PC] split view with a pack (split_orig.rs): (replacement bind group, the original's) of every slot uploaded with its replacement, and whether this build keeps them.
 	pub(in crate::viewer) repl_origs: std::cell::RefCell<Vec<(wgpu::BindGroup, wgpu::BindGroup)>>,
 	pub(in crate::viewer) orig_on: std::cell::Cell<bool>,

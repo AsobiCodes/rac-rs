@@ -1,12 +1,14 @@
 //! Which GPU device the GS capture (`gpu.rs`) draws on. By default the WINDOW'S OWN device, Vulkan or DirectX 12: the window publishes
 //! it (`window_ready`, viewer/gpu/setup.rs, right after its `request_device`) and `acquire` hands out clones of it, so the capture never
-//! opens a second instance and device. That second Vulkan device, opened on a thread while the window's device started presenting,
+//! opens a second Vulkan INSTANCE (on an NVIDIA Vulkan window it gets a second DEVICE, see below). That second instance and device, opened on a thread while the window's device started presenting,
 //! froze the window white before its first frame on an RX 9070 XT (GitHub #12; v0.2.2, which had no GPU capture, ran), which is why
 //! v0.3.1 limited the GPU capture to NVIDIA (v0.3.5: graphics cards of every vendor, not built-in graphics, `default_on`).
 //! On DirectX 12 the kernels need Microsoft's DXC compiler (`dxcompiler.dll` next to the exe, `dx12_dxc`): the old FXC rejects five of
 //! them ("unable to unroll loop") and needs minutes for k_hd. A DX12 window without DXC keeps the CPU capture (`default_on`), and a
 //! DX12 window NEVER opens a Vulkan instance (DX12 is the backup when a Vulkan driver or layer misbehaves): there is no second device
-//! on DX12 at all. `RAC_GSCAP_GPU=own` opens the old own Vulkan device for A/B on a Vulkan window. Without a window (`rac-rs warm-gpu`,
+//! on DX12 at all. v0.4.1: on a Vulkan window of an NVIDIA card the capture gets a second DEVICE (own queue) on the window's adapter,
+//! same `wgpu::Instance` (`second_device_wanted`; RAC_GSCAP_DEV=window keeps the shared one): on the shared queue the capture waited
+//! behind the window's frames. `RAC_GSCAP_GPU=own` opens the old own Vulkan INSTANCE and device for A/B on a Vulkan window. Without a window (`rac-rs warm-gpu`,
 //! unit tests) nothing is ever published and `acquire` opens its own device, of the API the player chose (`own`).
 //!
 //! Order at a start: `expect_window` (handler.rs `resumed`), `Gpu::new` calls `window_ready` (publishes the device, or declines when the
@@ -22,6 +24,8 @@ pub(crate) struct Shared {
     pub dev: wgpu::Device,
     pub q: wgpu::Queue,
     pub info: wgpu::AdapterInfo,
+    /// The window's adapter (same instance): a second DEVICE of the capture's own is opened on it (`pick`, `second_device`).
+    pub adapter: wgpu::Adapter,
 }
 
 /// What `acquire` returns: a device with what `Gpu::open` needs to know about it.
@@ -111,10 +115,30 @@ pub(crate) fn submit_lock() -> std::sync::MutexGuard<'static, ()> {
     SUBMIT.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// `Queue::submit` under `submit_lock` (the capture's only way to submit).
-pub(super) fn submit(q: &wgpu::Queue, cmds: impl IntoIterator<Item = wgpu::CommandBuffer>) {
-    let _lock = submit_lock();
-    q.submit(cmds);
+/// `Queue::submit` under `submit_lock` (the capture's only way to submit); returns the submission's index.
+pub(super) fn submit(q: &wgpu::Queue, cmds: impl IntoIterator<Item = wgpu::CommandBuffer>) -> wgpu::SubmissionIndex {
+    let t = crate::viewer::framecsv::on().then(Instant::now);
+    let idx = {
+        let _lock = submit_lock();
+        q.submit(cmds)
+    };
+    if let Some(t) = t {
+        crate::viewer::framecsv::wait('S', t); // the CSV row (and its file write) is outside the lock
+    }
+    idx
+}
+
+/// Whether the capture's device is the window's own (`Dev::shared` of the last `acquire`). Wgpu's `Device` equality only compares ids
+/// numbered per `wgpu::Instance`, so a device of a second instance (`own`) can look equal to the window's; this flag is exact.
+static ON_WINDOW_DEVICE: AtomicBool = AtomicBool::new(false);
+
+/// Whether the capture draws on the window's device (the lazy readback must then not block, `wait_maps`).
+pub(super) fn on_window_device() -> bool {
+    ON_WINDOW_DEVICE.load(Ordering::SeqCst)
+}
+
+pub(super) fn note_device(shared: bool) {
+    ON_WINDOW_DEVICE.store(shared, Ordering::SeqCst);
 }
 
 /// handler.rs `resumed`, before the window's `Gpu::new`.
@@ -157,11 +181,11 @@ pub(crate) fn default_on(backend: wgpu::Backend, ty: wgpu::DeviceType, dxc: bool
 
 /// The window's `Gpu::new`, after `request_device`: publishes the device when the window is Vulkan or DX12, else declines, and sets the
 /// capture's default (`gpu::set_default`).
-pub(crate) fn window_ready(dev: &wgpu::Device, q: &wgpu::Queue, info: &wgpu::AdapterInfo) {
+pub(crate) fn window_ready(dev: &wgpu::Device, q: &wgpu::Queue, info: &wgpu::AdapterInfo, adapter: &wgpu::Adapter) {
     crate::gscap_guard::note_window(info);
     DX12_WINDOW.store(info.backend == wgpu::Backend::Dx12, Ordering::SeqCst);
     if matches!(info.backend, wgpu::Backend::Vulkan | wgpu::Backend::Dx12) {
-        BOARD.publish(Shared { dev: dev.clone(), q: q.clone(), info: info.clone() });
+        BOARD.publish(Shared { dev: dev.clone(), q: q.clone(), info: info.clone(), adapter: adapter.clone() });
     } else {
         BOARD.decline();
     }
@@ -212,7 +236,10 @@ pub(super) fn acquire(want: &str) -> Option<Dev> {
     crate::gscap_guard::begin();
     let dev = pick(want);
     match &dev {
-        Some(d) => crate::gscap_guard::note_adapter(&d.info),
+        Some(d) => {
+            crate::gscap_guard::note_adapter(&d.info);
+            note_device(d.shared);
+        }
         None => crate::gscap_guard::cancel(),
     }
     dev
@@ -224,6 +251,14 @@ fn pick(want: &str) -> Option<Dev> {
     let w = if dx12 && matches!(want, "own" | "low") { "1" } else { want };
     if w != "own" {
         if let Some(s) = BOARD.wait(WAIT).filter(|s| uses_window(w, &s.info.name)) {
+            if second_device_wanted(w, std::env::var("RAC_GSCAP_GPU").ok().as_deref(), std::env::var("RAC_GSCAP_DEV").ok().as_deref(), s.info.backend, s.info.vendor) {
+                // Same VkInstance and adapter as the window, a device (and queue) of the capture's own: its GPU work no longer waits
+                // behind the window's frames. NOT a second `wgpu::Instance` (that froze RTSS / AMD, GitHub #12).
+                if let Some(d) = second_device(&s.adapter) {
+                    return Some(d);
+                }
+                eprintln!("gscap gpu: no second device on the window's adapter, the capture takes the window's device");
+            }
             let f = s.dev.features();
             let timing = std::env::var_os("RAC_GSGPU_TIME").is_some() && f.contains(wgpu::Features::TIMESTAMP_QUERY);
             return Some(Dev { has_cache: f.contains(wgpu::Features::PIPELINE_CACHE), dev: s.dev, q: s.q, info: s.info, timing, shared: true });
@@ -267,6 +302,11 @@ fn own(want: &str) -> Option<Dev> {
         let w = want.to_lowercase();
         pollster::block_on(inst.enumerate_adapters(backends)).into_iter().find(|a| a.get_info().name.to_lowercase().contains(&w))?
     };
+    device_on(&adapter)
+}
+
+/// A device and queue of the capture's own on `adapter` (the instance's, whoever made it), with the capture's features.
+fn device_on(adapter: &wgpu::Adapter) -> Option<Dev> {
     let info = adapter.get_info();
     let timing = std::env::var_os("RAC_GSGPU_TIME").is_some() && adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY);
     let mut features = if timing { wgpu::Features::TIMESTAMP_QUERY } else { wgpu::Features::empty() };
@@ -285,14 +325,62 @@ fn own(want: &str) -> Option<Dev> {
     Some(Dev { dev, q, info, timing, has_cache, shared: false })
 }
 
+/// NVIDIA's PCI vendor id.
+const NVIDIA: u32 = 0x10de;
+
+/// Whether the capture gets a second DEVICE on the window's adapter instead of the window's own device (the window and the capture then
+/// have a queue each: on the shared queue the capture's submits waited behind the window's 4K frames, p50 8-12 ms instead of 2 ms, and
+/// the render thread waits for every field's picture; v0.4.1). `gpu_env` = RAC_GSCAP_GPU, `dev_env` = RAC_GSCAP_DEV: `window` = never,
+/// `second` = on any Vulkan window; unset = automatic: NVIDIA on Vulkan, and only while RAC_GSCAP_GPU is unset (any value there means
+/// the window's device, the old A/B switch). AMD and Intel (GitHub #12) and DX12 keep the window's device.
+pub(crate) fn second_device_wanted(want: &str, gpu_env: Option<&str>, dev_env: Option<&str>, backend: wgpu::Backend, vendor: u32) -> bool {
+    if want != "1" || backend != wgpu::Backend::Vulkan {
+        return false;
+    }
+    match dev_env.filter(|v| !v.is_empty()) {
+        Some("window") => false,
+        Some("second") => true,
+        _ => vendor == NVIDIA && gpu_env.is_none_or(str::is_empty),
+    }
+}
+
+/// The capture's second device on the window's adapter: the window's `wgpu::Instance` is the adapter's, so no second instance (and no
+/// second VkInstance, the RTSS / #12 trigger) is created. None when the driver refuses it.
+fn second_device(adapter: &wgpu::Adapter) -> Option<Dev> {
+    // Tests only: RAC_TEST_GSGPU_NODEV pretends the driver refused the second device (the capture then takes the window's device).
+    let d = if std::env::var_os("RAC_TEST_GSGPU_NODEV").is_some() { None } else { device_on(adapter) };
+    if let Some(d) = &d {
+        eprintln!("gscap gpu: {} second device on the window's adapter (same instance, own queue)", d.info.name);
+    }
+    d
+}
+
 /// [PC] (speed) Waits until the `want` map callbacks counted in `done` have run (the lazy readback, `Gpu::rb_finish`). The window
 /// shares this device: a blocking `Device::poll(wait_indefinitely)` holds wgpu's snatch lock (read) for the whole GPU wait, so the
 /// render thread's buffer drops, `write_buffer`s and submits queue up behind it and the GPU idles. This polls without blocking and
 /// yields / sleeps 50 us in between. `RAC_GSCAP_WAIT=1` = the old blocking poll (A/B), which is also the fallback after `POLL_LIMIT`.
-pub(super) fn wait_maps(dev: &wgpu::Device, done: &std::sync::atomic::AtomicU32, want: u32, block: bool) {
+/// `sub`: the readback's own submission (`submit`'s result), which a blocking wait waits for, not for the capture's later work.
+pub(super) fn wait_maps(dev: &wgpu::Device, done: &std::sync::atomic::AtomicU32, want: u32, block: bool, sub: wgpu::SubmissionIndex) {
+    let t = crate::viewer::framecsv::on().then(Instant::now);
+    wait_maps_on(dev, done, want, block, on_window_device(), Some(sub));
+    if let Some(t) = t.filter(|_| block) {
+        crate::viewer::framecsv::wait('R', t); // frame-time CSV row (RAC_FRAME_CSV): the capture thread's wait for the GPU
+    }
+}
+
+/// `shared`: `dev` is the window's device (`Dev::shared`). A device of the capture's own (the second device, `own`) has its own snatch
+/// lock and fence, so a blocking poll on it (wgpu `device_poll` takes only that device) cannot stall the window: it waits in the driver
+/// for submission `sub` instead of polling with 50 us sleeps (`sleep` rounds up to the timer resolution on Windows).
+pub(super) fn wait_maps_on(dev: &wgpu::Device, done: &std::sync::atomic::AtomicU32, want: u32, block: bool, shared: bool, sub: Option<wgpu::SubmissionIndex>) {
     if !block {
         dev.poll(wgpu::PollType::Poll).ok();
         return;
+    }
+    if !shared {
+        dev.poll(wgpu::PollType::Wait { submission_index: sub, timeout: None }).ok();
+        if done.load(Ordering::SeqCst) >= want {
+            return;
+        }
     }
     static OLD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if *OLD.get_or_init(|| std::env::var_os("RAC_GSCAP_WAIT").is_some_and(|v| v != "0")) {

@@ -12,6 +12,22 @@ impl Retail {
 		self.snap.mode == 0 && !self.snap.front && !self.failed
 	}
 
+	/// The game is in gameplay NOW, for the pad of the field about to be sent (`tick_inner`, right after `native_delay` took the newest
+	/// snapshot): its mode, not the shown (delayed) snapshot's, which lags up to 2 fields in the modes `native_delay` queues. R2 goes
+	/// to retail exactly while retail is out of gameplay (the pause menu's L1 + R2 code scanner) and is the aim from the first gameplay
+	/// field on. Lockstep: the field after the one that showed gameplay has no R2 for retail (leaving the pause with R2 held: no
+	/// crouch), the field after the one that showed the pause has it. Run-ahead (depth > 1, gameplay modes only, never the pause
+	/// menu) sends fields before the newest snapshot arrives: a mode change reaches the pad up to depth - 1 fields late.
+	pub fn pad_gameplay(&self) -> bool {
+		snapshot::live_pad().0 == 0 && !self.snap.front && !self.failed
+	}
+
+	/// The hero is Ratchet in his own body (form 0), as of the newest field: the only body with an aim (strafe.rs / aim.rs); for
+	/// Clank, Giant Clank and the Hologuise the pad's R2 goes to retail.
+	pub fn pad_ratchet(&self) -> bool {
+		snapshot::live_pad().1 == 0
+	}
+
 	/// The vendor screen is up (game mode 5): the world behind it stands still.
 	pub fn vendor(&self) -> bool {
 		self.snap.mode == 5 && !self.snap.front
@@ -56,10 +72,11 @@ impl Retail {
 
 	/// Retail's skip test for the movie playing (`take_movie` stored its rule), for every movie the game plays, in the front
 	/// end and in a level alike: true when the keys now give a press the rule accepts that was not down at the previous call
-	/// (`movie_poll`). Start is Esc / Enter; the combo's L1 + R1 + L2 + R2 are C, Left Ctrl, V, B (`pad_from_keys`).
+	/// (`movie_poll`). Start is Esc / Enter or the controller's Start (the controller skips movies too: it was ignored before v0.4.1);
+	/// the combo's L1 + R1 + L2 + R2 are C, Left Ctrl, V, B (`pad_from_keys`), or a plain Start while the Start skips cutscenes row is On.
 	pub fn movie_pressed(&mut self, held: impl Fn(winit::keyboard::KeyCode) -> bool) -> bool {
 		let taps = &self.taps;
-		let (hit, now) = movie_poll(self.movie_rule, self.movie_prev, |k| held(k) || taps.contains_key(&k));
+		let (hit, now) = movie_poll(self.movie_rule, self.movie_prev, |k| held(k) || taps.contains_key(&k), prompts::pad_buttons(), pcskip::skip());
 		self.movie_prev = now;
 		hit
 	}
@@ -100,12 +117,13 @@ impl Retail {
 	/// over the movie's last picture, GS alpha (Cs-Cd)*As+Cd [C stage 6]): the held movie picture's tint, as
 	/// `fmv::present::Presenter::tint` (rgb added, a = how much of the picture shows).
 	pub fn movie_tint(&self) -> Option<[f32; 4]> {
-		let (_, _, px) = self.snap.ov.as_ref().filter(|_| self.snap.ov_disp)?;
+		let (_, _, px, _) = self.snap.ov.as_ref().filter(|_| self.snap.ov_disp)?;
 		let p = *px.first()?;
 		px.iter().all(|q| *q == p).then(|| p.map(|c| c as f32 / 255.0))
 	}
 
-	pub fn take_overlay(&mut self) -> Option<(u32, u32, Vec<[u8; 4]>)> {
+	/// The overlay picture with the guard that was measured on it (`HudGuard`: what the HUD position's corner cells must know).
+	pub fn take_overlay(&mut self) -> Option<(u32, u32, Vec<[u8; 4]>, HudGuard)> {
 		self.snap.ov.take()
 	}
 

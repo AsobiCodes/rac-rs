@@ -12,7 +12,6 @@ pub static ST_SPU_REANCHOR: std::sync::atomic::AtomicU64 = std::sync::atomic::At
 pub static ST_SPU_LATE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// Stream declick fades started (gain left 1.0), by cause, and output frames mixed with a gain below 1.0.
 pub static ST_FADE_UNDER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-pub static ST_FADE_PAUSE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static ST_FADE_CLOSE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static ST_FADE_IDLE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static ST_FADE_FRAMES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -36,7 +35,7 @@ impl Probe {
 			let (Ok(csv), Ok(raw)) = (std::fs::File::create(format!("{prefix}.csv")), std::fs::File::create(format!("{prefix}.f32"))) else { return };
 			let (mut csv, mut raw) = (std::io::BufWriter::new(csv), std::io::BufWriter::new(raw));
 			let _ = writeln!(csv, "# rate {rate} channels {channels}");
-			let _ = writeln!(csv, "n,t_ns,frames,mix_ns,cb_ns,play_ns,stream_under,stream_open,spu_push,spu_reanchor,spu_late,fade_under,fade_pause,fade_close,fade_idle,fade_frames");
+			let _ = writeln!(csv, "n,t_ns,frames,mix_ns,cb_ns,play_ns,stream_under,stream_open,spu_push,spu_reanchor,spu_late,fade_under,fade_close,fade_idle,fade_frames");
 			let mut k = 0u64;
 			for (line, pcm) in rx {
 				let _ = writeln!(csv, "{line}");
@@ -57,7 +56,7 @@ impl Probe {
 		let epoch = *self.epoch.get_or_insert(ts.callback);
 		let ns = |t: cpal::StreamInstant| (t.as_nanos() as i128 - epoch.as_nanos() as i128) as i64;
 		let line = format!(
-			"{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+			"{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
 			self.n,
 			start.duration_since(self.t0).as_nanos(),
 			data.len() / channels.max(1),
@@ -70,7 +69,6 @@ impl Probe {
 			ST_SPU_REANCHOR.load(Relaxed),
 			ST_SPU_LATE.load(Relaxed),
 			ST_FADE_UNDER.load(Relaxed),
-			ST_FADE_PAUSE.load(Relaxed),
 			ST_FADE_CLOSE.load(Relaxed),
 			ST_FADE_IDLE.load(Relaxed),
 			ST_FADE_FRAMES.load(Relaxed)
@@ -264,6 +262,9 @@ pub struct StreamSource {
 	pub rate: u32,
 	state: Mutex<StreamState>,
 	closed: std::sync::atomic::AtomicBool,
+	/// [PC] Device callbacks that visited this stream, whether or not it had data: tells a dead output device (this stops) from a
+	/// starved stream (this runs, `played` holds); see `fmv/player.rs` (the audio clock watchdog).
+	pulls: std::sync::atomic::AtomicU64,
 }
 
 struct StreamState {
@@ -272,17 +273,19 @@ struct StreamState {
 	phase: f64,
 	played: u64,
 	volume: f32,
-	/// Silent and not consuming until set (priming) or while paused.
+	/// Silent and not consuming until set (priming).
 	playing: bool,
-	paused: bool,
-	/// [PC] Declick: gain 0..1 that ramps down over `FADE_FRAMES` when the queue runs dry, the stream pauses or closes (the last
+	/// [PC] Declick: gain 0..1 that ramps down over `FADE_FRAMES` when the queue runs dry, the stream is stopped (`set_playing(false)`) or closes (the last
 	/// frame is held and faded instead of cutting to zero) and back up when data plays again. 1.0 = untouched samples.
 	gain: f32,
 	hold: [f32; 2],
 }
 
-/// Length of the stream declick ramp in output frames (2 ms at 48 kHz).
+/// Length of the stream declick ramp in output frames (2 ms at 48 kHz): underruns and a stopped stream.
 const FADE_FRAMES: f32 = 96.0;
+/// Length of the ramp when a stream is closed (a skipped or finished movie): 20 ms at 48 kHz, played over the stream's own samples
+/// while it still has some, else over the held last frame. A 2 ms ramp is a click to the ear; 20 ms is not (v0.4.1, GitHub #7).
+const CLOSE_FRAMES: f32 = 960.0;
 
 impl StreamSource {
 	/// Appends interleaved L,R samples.
@@ -300,6 +303,11 @@ impl StreamSource {
 	/// Source frames consumed so far (the audio clock, in 1/rate seconds).
 	pub fn played(&self) -> u64 {
 		self.state.lock().map_or(0, |s| s.played)
+	}
+
+	/// Device callbacks that have visited this stream so far (the output device is alive while this counts up).
+	pub fn pulls(&self) -> u64 {
+		self.pulls.load(std::sync::atomic::Ordering::Relaxed)
 	}
 
 	pub fn set_playing(&self, playing: bool) {
@@ -436,62 +444,80 @@ fn mixer(
 			// A closed stream stays until its fade-out has run (a skipped movie must not cut off in mid-wave).
 			streams.retain(|s| !s.closed.load(std::sync::atomic::Ordering::Relaxed) || s.state.lock().is_ok_and(|st| st.gain > 0.0));
 			for src in streams.iter() {
-				let Ok(mut st) = src.state.lock() else { continue };
-				let step = src.rate as f64 / rate;
-				let vol = st.volume;
-				let closed = src.closed.load(std::sync::atomic::Ordering::Relaxed);
-				let wants = st.playing && !st.paused && !closed;
-				for frame in data.chunks_exact_mut(channels) {
-					let (l, r);
-					if wants && st.queue.len() >= 4 {
-						let f = st.phase as f32;
-						let mix = |c: usize| {
-							let (a, b) = (st.queue[c] as f32, st.queue[2 + c] as f32);
-							(a + (b - a) * f) / 32768.0 * vol
-						};
-						(l, r) = (mix(0), mix(1));
-						st.hold = [l, r];
-						st.phase += step;
-						while st.phase >= 1.0 && st.queue.len() >= 4 {
-							st.queue.drain(..2);
-							st.phase -= 1.0;
-							st.played += 1;
-						}
-						// Back up after a fade (not before: gain 1.0 leaves the samples exactly as they were).
-						if st.gain < 1.0 {
-							st.gain = (st.gain + 1.0 / FADE_FRAMES).min(1.0);
-						}
-					} else {
-						if wants {
-							ST_STREAM_UNDER.fetch_add(1, std::sync::atomic::Ordering::Relaxed); // underrun: the clock holds
-						}
-						if st.gain <= 0.0 {
-							break;
-						}
-						// No data (or paused / closed): hold the last frame and fade it out, no step to zero.
-						if st.gain >= 1.0 {
-							let c = if closed { &ST_FADE_CLOSE } else if wants { &ST_FADE_UNDER } else if st.paused { &ST_FADE_PAUSE } else { &ST_FADE_IDLE };
-							c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-						}
-						st.gain = (st.gain - 1.0 / FADE_FRAMES).max(0.0);
-						(l, r) = (st.hold[0], st.hold[1]);
-					}
-					let g = st.gain;
-					if g < 1.0 {
-						ST_FADE_FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-					}
-					let (l, r) = (l * g, r * g);
-					if channels > 1 {
-						frame[0] += l;
-						frame[1] += r;
-					} else {
-						frame[0] += (l + r) * 0.5;
-					}
-				}
+				mix_stream(src, data, channels, rate);
 			}
 		}
 		for x in data.iter_mut() {
 			*x = x.clamp(-1.0, 1.0);
+		}
+	}
+}
+
+/// [PC] One stream into the output buffer (`data`: interleaved, `channels` per frame, at `rate` Hz): its queue resampled, or the last frame
+/// held and faded (declick) when it has no data, is stopped or is closed. A closed stream that still has data keeps playing it while the
+/// gain ramps down over `CLOSE_FRAMES`: the ramp runs over the stream's own wave, not over a held sample (no thump, no click).
+fn mix_stream(src: &StreamSource, data: &mut [f32], channels: usize, rate: f64) {
+	use std::sync::atomic::Ordering::Relaxed;
+	let Ok(mut st) = src.state.lock() else { return };
+	src.pulls.fetch_add(1, Relaxed);
+	let step = src.rate as f64 / rate;
+	let vol = st.volume;
+	let closed = src.closed.load(Relaxed);
+	let wants = st.playing && !closed;
+	let plays_out = closed && st.playing;
+	for frame in data.chunks_exact_mut(channels) {
+		if closed && st.gain <= 0.0 {
+			break;
+		}
+		let (l, r);
+		if (wants || plays_out) && st.queue.len() >= 4 {
+			let f = st.phase as f32;
+			let mix = |c: usize| {
+				let (a, b) = (st.queue[c] as f32, st.queue[2 + c] as f32);
+				(a + (b - a) * f) / 32768.0 * vol
+			};
+			(l, r) = (mix(0), mix(1));
+			st.hold = [l, r];
+			st.phase += step;
+			while st.phase >= 1.0 && st.queue.len() >= 4 {
+				st.queue.drain(..2);
+				st.phase -= 1.0;
+				st.played += 1;
+			}
+			if closed {
+				if st.gain >= 1.0 {
+					ST_FADE_CLOSE.fetch_add(1, Relaxed);
+				}
+				st.gain = (st.gain - 1.0 / CLOSE_FRAMES).max(0.0);
+			} else if st.gain < 1.0 {
+				// Back up after a fade (not before: gain 1.0 leaves the samples exactly as they were).
+				st.gain = (st.gain + 1.0 / FADE_FRAMES).min(1.0);
+			}
+		} else {
+			if wants {
+				ST_STREAM_UNDER.fetch_add(1, Relaxed); // underrun: the clock holds
+			}
+			if st.gain <= 0.0 {
+				break;
+			}
+			// No data (or stopped / closed): hold the last frame and fade it out, no step to zero.
+			if st.gain >= 1.0 {
+				let c = if closed { &ST_FADE_CLOSE } else if wants { &ST_FADE_UNDER } else { &ST_FADE_IDLE };
+				c.fetch_add(1, Relaxed);
+			}
+			st.gain = (st.gain - 1.0 / if closed { CLOSE_FRAMES } else { FADE_FRAMES }).max(0.0);
+			(l, r) = (st.hold[0], st.hold[1]);
+		}
+		let g = st.gain;
+		if g < 1.0 {
+			ST_FADE_FRAMES.fetch_add(1, Relaxed);
+		}
+		let (l, r) = (l * g, r * g);
+		if channels > 1 {
+			frame[0] += l;
+			frame[1] += r;
+		} else {
+			frame[0] += (l + r) * 0.5;
 		}
 	}
 }
@@ -653,8 +679,9 @@ impl Audio {
 		ST_STREAM_OPEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 		let s = Arc::new(StreamSource {
 			rate,
-			state: Mutex::new(StreamState { queue: Default::default(), phase: 0.0, played: 0, volume: self.master, playing: false, paused: false, gain: 1.0, hold: [0.0; 2] }),
+			state: Mutex::new(StreamState { queue: Default::default(), phase: 0.0, played: 0, volume: self.master, playing: false, gain: 1.0, hold: [0.0; 2] }),
 			closed: Default::default(),
+			pulls: Default::default(),
 		});
 		if let Ok(mut v) = self.streams.lock() {
 			v.push(s.clone());
@@ -833,8 +860,8 @@ mod tests {
 		out.extend(b.chunks_exact(2).map(|f| f[0]));
 	}
 
-	/// [PC] Stream declick (FMV audio): gain 1.0 leaves the samples exactly as they were; an underrun, `set_playing(false)` (the player's
-	/// pause) and `close` fade the held frame to 0 over `FADE_FRAMES` frames instead of cutting to zero; data again fades back in;
+	/// [PC] Stream declick (FMV audio): gain 1.0 leaves the samples exactly as they were; an underrun, `set_playing(false)` (the stream
+	/// stopped) and `close` fade the held frame to 0 over `FADE_FRAMES` frames instead of cutting to zero; data again fades back in;
 	/// a closed stream leaves the list once its fade has ended.
 	#[test]
 	fn stream_declick() {
@@ -871,14 +898,39 @@ mod tests {
 		pull(&mut mix, 200, &mut out);
 		assert!(rises(&out[n - 1..n + 97]), "resume: fade-in");
 		assert!(out[n + 100..].iter().all(|&v| v == 0.5));
-		// Close: the held frame fades out, then the stream is dropped.
+		// Close (CLOSE_FRAMES, 20 ms): the 400 queued frames play out while the gain ramps down, then the held frame fades on; no step to zero.
 		let n = out.len();
+		let cstep = 0.5 / CLOSE_FRAMES + 1e-6;
 		s.close();
-		pull(&mut mix, 200, &mut out);
-		assert!(falls(&out[n - 1..n + 100]), "close: fade, no step to zero");
-		assert!(out[n + 100..].iter().all(|&v| v == 0.0));
+		pull(&mut mix, 1200, &mut out);
+		assert!(out[n - 1..n + 960].windows(2).all(|w| w[0] >= w[1] && w[0] - w[1] <= cstep), "close: fade, no step to zero");
+		assert!(out[n + 965..].iter().all(|&v| v == 0.0));
 		assert_eq!(a.streams.lock().unwrap().len(), 1, "the stream stays until its fade has run");
 		pull(&mut mix, 10, &mut out);
 		assert!(a.streams.lock().unwrap().is_empty(), "the faded-out closed stream leaves the list");
+	}
+
+	/// [PC] Closing a stream with data left fades its own wave (not a held sample) over CLOSE_FRAMES, and the device callback count `pulls`
+	/// goes up on every callback (the player's dead-device test).
+	#[test]
+	fn stream_close_fades_over_its_own_wave() {
+		let (mut a, mut mix) = Audio::offline(48000.0, 2);
+		let s = a.open_stream(48000);
+		let wave: Vec<i16> = (0..2000usize).flat_map(|i| if (i / 24) % 2 == 0 { [16384i16, 16384] } else { [-16384, -16384] }).collect();
+		s.push(&wave);
+		s.set_playing(true);
+		let mut out = Vec::new();
+		pull(&mut mix, 100, &mut out);
+		assert_eq!(s.pulls(), 1);
+		assert!(out.iter().all(|&v| v.abs() == 0.5), "gain 1.0 leaves the samples untouched");
+		s.close();
+		let n = out.len();
+		pull(&mut mix, 1000, &mut out);
+		assert_eq!(s.pulls(), 2);
+		let tail = &out[n..];
+		assert!(tail.iter().any(|&v| v < 0.0) && tail.iter().any(|&v| v > 0.0), "the wave keeps playing while it fades");
+		let amp = |k: usize| tail[k].abs();
+		assert!(amp(100) < amp(0) && amp(500) < amp(100) && amp(900) < amp(500), "the ramp is linear over 20 ms");
+		assert!(tail[965..].iter().all(|&v| v.abs() < 1e-3));
 	}
 }

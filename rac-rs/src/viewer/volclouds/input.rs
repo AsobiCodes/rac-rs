@@ -6,11 +6,26 @@ use super::*;
 /// The Volumetric clouds level of the frame (Graphics -> Volumetric clouds: 0 Classic, 1 Low, 2 Medium, 3 High), only with Lighting
 /// Enhanced like the other effects. RAC_TUNE=cl_q=N (0..3) overrides the row for tuning.
 pub(in crate::viewer) fn level(gfx: &crate::retail::pcext::Graphics) -> u8 {
+	use crate::viewer::pipe_guard::{off, Effect};
+	level_if(gfx, off(Effect::VolClouds) || off(Effect::Post))
+}
+
+/// `level` with the refusal given: tests check the gate without the process-wide mask, which other tests read in parallel.
+fn level_if(gfx: &crate::retail::pcext::Graphics, refused: bool) -> u8 {
 	let tuned = crate::devtune::f32("cl_q", -1.0);
-	if !gfx.enhanced() {
-		return 0;
+	if !gfx.enhanced() || refused {
+		return 0; // [PC] a refused cloud or post shader (pipe_guard.rs): no sky backdrop without its clouds, no Enhanced sky under a refused Post
 	}
 	if tuned >= 0.0 { (tuned as u8).min(3) } else { gfx.clouds_q.min(3) }
+}
+
+/// Seconds for the wind and the cloud evolution, as `frame::clock` but in f64 (the test clock's value under RAC_TEST_CLOCK).
+fn clock() -> f64 {
+	static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+	if crate::viewer::test_clock::clock_on() {
+		return f64::from(crate::viewer::test_clock::secs(|| 0.0));
+	}
+	T0.get_or_init(std::time::Instant::now).elapsed().as_secs_f64() - f64::from(crate::viewer::handler::frame_clock::lag())
 }
 
 /// The inputs of one frame.
@@ -27,7 +42,8 @@ pub(in crate::viewer) struct Input<'a> {
 	pub light: [f32; 3],
 	pub to_light: [f32; 3],
 	pub quality: u8,
-	pub time: f32,
+	/// Seconds of the cloud clock (f64: it is never wrapped, and an f32 loses the frame step after hours).
+	pub time: f64,
 }
 
 impl<'a> Input<'a> {
@@ -58,7 +74,19 @@ impl<'a> Input<'a> {
 			light: frame::key_colour(rows),
 			to_light: params::key_to_light(rows),
 			quality,
-			time: frame::clock(),
+			time: clock(),
 		})
+	}
+}
+
+#[cfg(test)]
+mod level_tests {
+	use super::*;
+
+	#[test]
+	fn a_refused_cloud_shader_gives_level_zero() {
+		let g = crate::retail::pcext::Graphics { lighting: 1, clouds_q: 2, ..crate::retail::pcext::Graphics::CLASSIC };
+		assert_eq!(level_if(&g, false), 2);
+		assert_eq!(level_if(&g, true), 0, "no sky backdrop without its clouds");
 	}
 }

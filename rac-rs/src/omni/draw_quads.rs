@@ -64,12 +64,16 @@ pub(super) fn solid(out: &mut Vec<Quad>, l: &Layout, x: f32, y: f32, w: f32, h: 
 	out.push(Quad { tex: FONT, rect: [x0, y0, x1 - x0, y1 - y0], uv: [u / ATLAS_W, v / ATLAS_H, (u + 3.0) / ATLAS_W, (v + 5.0) / ATLAS_H], colour, angle: 0.0, corners: None });
 }
 
-fn glyphs(out: &mut Vec<Quad>, l: &Layout, text: &str, x: f32, y: f32, size: f32, colour: [f32; 4]) {
+/// `limit`: `out` never grows past this many quads (the frame's glyph budget, `build`).
+fn glyphs(out: &mut Vec<Quad>, l: &Layout, text: &str, x: f32, y: f32, size: f32, colour: [f32; 4], limit: usize) {
 	if colour[3] <= 0.0 {
 		return;
 	}
 	let (h, adv) = (LINE * size, LINE * size * ADVANCE);
 	for (i, ch) in text.chars().enumerate() {
+		if out.len() >= limit {
+			break;
+		}
 		let g = glyph_of(ch);
 		if g == b' ' {
 			continue;
@@ -94,7 +98,7 @@ pub fn game_text_width(font: &(usize, Vec<Glyph>), text: &str, size: f32) -> f32
 }
 
 /// `text` in the game's default font (the same cells and advances as the retail HUD text, viewer/hudart.rs `HudArt::font`).
-fn game_glyphs(out: &mut Vec<Quad>, l: &Layout, font: &(usize, Vec<Glyph>), text: &str, x: f32, y: f32, size: f32, colour: [f32; 4]) {
+fn game_glyphs(out: &mut Vec<Quad>, l: &Layout, font: &(usize, Vec<Glyph>), text: &str, x: f32, y: f32, size: f32, colour: [f32; 4], limit: usize) {
 	if colour[3] <= 0.0 {
 		return;
 	}
@@ -102,6 +106,9 @@ fn game_glyphs(out: &mut Vec<Quad>, l: &Layout, font: &(usize, Vec<Glyph>), text
 	let colour = [colour[0] * 2.0, colour[1] * 2.0, colour[2] * 2.0, colour[3]];
 	let mut cx = x;
 	for ch in text.chars() {
+		if out.len() >= limit {
+			break;
+		}
 		let Some(g) = game_glyph(font, ch) else { continue };
 		if ch != ' ' {
 			let [x0, y0] = l.to_window(cx, y + g.dy as f32 * size);
@@ -113,7 +120,9 @@ fn game_glyphs(out: &mut Vec<Quad>, l: &Layout, font: &(usize, Vec<Glyph>), text
 	}
 }
 
-pub(super) fn text(out: &mut Vec<Quad>, l: &Layout, art: Option<&Art>, f: &Frame, c: &OmniDrawCmd) {
+/// `room`: at most this many more quads are added (a mod's text can be a megabyte long; the frame's quads must fit the device's buffers).
+pub(super) fn text(out: &mut Vec<Quad>, l: &Layout, art: Option<&Art>, f: &Frame, c: &OmniDrawCmd, room: usize) {
+	let limit = out.len().saturating_add(room);
 	let s = f.text(c);
 	let size = if c.w.is_finite() && c.w > 0.0 { c.w.min(16.0) } else { 1.0 };
 	let font = art.and_then(|a| a.font.as_ref());
@@ -124,8 +133,8 @@ pub(super) fn text(out: &mut Vec<Quad>, l: &Layout, art: Option<&Art>, f: &Frame
 		_ => c.x,
 	};
 	let mut put = |dx: f32, colour: [f32; 4]| match font {
-		Some(ft) => game_glyphs(out, l, ft, s, x + dx, c.y + dx, size, colour),
-		None => glyphs(out, l, s, x + dx, c.y + dx, size, colour),
+		Some(ft) => game_glyphs(out, l, ft, s, x + dx, c.y + dx, size, colour, limit),
+		None => glyphs(out, l, s, x + dx, c.y + dx, size, colour, limit),
 	};
 	// Shadow (colour2, 0 = none): one game pixel down and right, scaled with the size.
 	if c.color2 & 255 != 0 {
@@ -154,16 +163,30 @@ fn bar(out: &mut Vec<Quad>, l: &Layout, c: &OmniDrawCmd) {
 	solid(out, l, c.x, c.y, c.w * frac, c.h, rgba(c.color));
 }
 
-/// All quads of a list, `hud` layer first.
-pub fn build(f: &Frame, l: &Layout, art: Option<&Art>) -> Vec<Quad> {
+/// The most text and icon quads one frame may hold. The draw pass keeps its vertex / index buffers for the session (they only grow), so the
+/// budget is a fixed 64K quads (a 64-byte `Vertex`: 16 MiB of vertices plus 1.5 MiB of indices), not the device's largest buffer: one huge text must not pin hundreds of MB.
+pub const QUAD_BUDGET: usize = 65_536;
+
+/// `QUAD_BUDGET`, or fewer when the device's largest buffer cannot hold 4 vertices of `vertex_bytes` per quad.
+pub fn quad_budget(max_buffer_size: u64, vertex_bytes: u64) -> usize {
+	let fits = max_buffer_size / (4 * vertex_bytes.max(1));
+	(fits.min(QUAD_BUDGET as u64)) as usize
+}
+
+/// All quads of a list, `hud` layer first. `max_quads`: the most text and icon quads the frame may hold (`quad_budget`); the rest of
+/// the text is not drawn.
+pub fn build(f: &Frame, l: &Layout, art: Option<&Art>, max_quads: usize) -> Vec<Quad> {
 	let mut out = Vec::with_capacity(f.cmds.len() * 4);
 	for layer in [0u32, 1] {
 		for c in f.cmds.iter().filter(|c| (c.layer != 0) as u32 == layer) {
 			match c.kind {
-				KIND_TEXT => text(&mut out, l, art, f, c),
+				KIND_TEXT => {
+					let room = max_quads.saturating_sub(out.len());
+					text(&mut out, l, art, f, c, room);
+				}
 				KIND_RECT => solid(&mut out, l, c.x, c.y, c.w, c.h, rgba(c.color)),
 				KIND_BAR => bar(&mut out, l, c),
-				KIND_ICON => icon(&mut out, l, art, c),
+				KIND_ICON if out.len() < max_quads => icon(&mut out, l, art, c),
 				// Unknown kinds are ignored.
 				_ => {}
 			}
@@ -198,7 +221,7 @@ mod tests {
 		let mut r = cmd(KIND_RECT, 0);
 		(r.x, r.y, r.w, r.h, r.color) = (0.0, 0.0, 512.0, 448.0, 0xFFFFFFFF);
 		let l = Layout::plain(1920.0, 1080.0);
-		let q = build(&frame(&[r], &[]), &l, None);
+		let q = build(&frame(&[r], &[]), &l, None, usize::MAX);
 		assert_eq!(q.len(), 1);
 		assert!((q[0].rect[0] - 240.0).abs() < 0.01 && (q[0].rect[2] - 1440.0).abs() < 0.01 && (q[0].rect[3] - 1080.0).abs() < 0.01);
 	}
@@ -208,14 +231,14 @@ mod tests {
 		let mut b = cmd(KIND_BAR, 0);
 		(b.x, b.y, b.w, b.h, b.value, b.color, b.color2) = (100.0, 50.0, 200.0, 10.0, 0.25, 0x00FF00FF, 0x000000FF);
 		let l = Layout::plain(1024.0, 768.0);
-		let q = build(&frame(&[b], &[]), &l, None);
+		let q = build(&frame(&[b], &[]), &l, None, usize::MAX);
 		assert_eq!(q.len(), 2);
 		assert!((q[1].rect[2] / q[0].rect[2] - 0.25).abs() < 1e-4);
 		// A fraction outside 0..1 or NaN is clamped.
 		b.value = f32::NAN;
-		assert_eq!(build(&frame(&[b], &[]), &l, None).len(), 1);
+		assert_eq!(build(&frame(&[b], &[]), &l, None, usize::MAX).len(), 1);
 		b.value = 7.0;
-		let q = build(&frame(&[b], &[]), &l, None);
+		let q = build(&frame(&[b], &[]), &l, None, usize::MAX);
 		assert!((q[1].rect[2] - q[0].rect[2]).abs() < 1e-3);
 	}
 
@@ -224,21 +247,53 @@ mod tests {
 		let mut t = cmd(KIND_TEXT, 0);
 		(t.x, t.y, t.w, t.text_len, t.color) = (256.0, 20.0, 1.0, 4, 0xFFFFFFFF);
 		let l = Layout::plain(1024.0, 768.0);
-		let left = build(&frame(&[t], b"TEST"), &l, None);
+		let left = build(&frame(&[t], b"TEST"), &l, None, usize::MAX);
 		assert_eq!(left.len(), 4);
 		t.align = 1;
-		let centre = build(&frame(&[t], b"TEST"), &l, None);
+		let centre = build(&frame(&[t], b"TEST"), &l, None, usize::MAX);
 		let width = text_width("TEST", 1.0);
 		assert!((centre[0].rect[0] - (l.to_window(256.0 - width / 2.0, 0.0)[0])).abs() < 0.01);
 		t.align = 2;
-		let right = build(&frame(&[t], b"TEST"), &l, None);
+		let right = build(&frame(&[t], b"TEST"), &l, None, usize::MAX);
 		assert!((right[3].rect[0] + right[3].rect[2] - l.to_window(256.0, 0.0)[0]).abs() < 0.01);
 		// A shadow doubles the glyph quads and is drawn first.
 		t.color2 = 0x000000FF;
-		let shadowed = build(&frame(&[t], b"TEST"), &l, None);
+		let shadowed = build(&frame(&[t], b"TEST"), &l, None, usize::MAX);
 		assert_eq!(shadowed.len(), 8);
 		assert_eq!(shadowed[0].colour[3], 1.0);
 		assert_eq!(shadowed[0].colour[0], 0.0);
+	}
+
+	#[test]
+	fn the_frame_never_holds_more_quads_than_the_budget() {
+		let mut t = cmd(KIND_TEXT, 0);
+		(t.x, t.y, t.w, t.text_len, t.color, t.color2) = (0.0, 0.0, 1.0, 100, 0xFFFFFFFF, 0x000000FF);
+		let pool = vec![b'A'; 100];
+		let l = Layout::plain(1024.0, 768.0);
+		// One 100-glyph command with a shadow would be 200 quads; 10 is all the budget gives, over several commands too.
+		assert_eq!(build(&frame(&[t], &pool), &l, None, 10).len(), 10);
+		assert_eq!(build(&frame(&[t, t, t], &pool), &l, None, 150).len(), 150);
+		assert_eq!(build(&frame(&[t], &pool), &l, None, 0).len(), 0);
+		// Icons stop at the budget as well; rects and bars are never text and stay (their count is bounded by the command cap).
+		let mut r = cmd(KIND_RECT, 0);
+		(r.w, r.h, r.color) = (4.0, 4.0, 0xFFFFFFFF);
+		assert_eq!(build(&frame(&[r, t, r], &pool), &l, None, 5).len(), 6);
+	}
+
+	#[test]
+	fn the_quad_budget_is_64k_unless_the_device_holds_fewer() {
+		// The default 256 MiB buffer limit would allow ~1M quads of a 64-byte vertex: the budget stays 64K.
+		assert_eq!(quad_budget(256 << 20, 64), 65_536);
+		assert_eq!(quad_budget(u64::MAX, 64), 65_536);
+		// A small device buffer (4 vertices * 64 bytes = 256 bytes per quad) cuts it further; zero stays zero.
+		assert_eq!(quad_budget(256 * 100, 64), 100);
+		assert_eq!(quad_budget(0, 64), 0);
+		// The one text of a mod, 1M glyphs, is cut at the budget.
+		let mut t = cmd(KIND_TEXT, 0);
+		(t.x, t.y, t.w, t.text_len, t.color) = (0.0, 0.0, 1.0, 200_000, 0xFFFFFFFF);
+		let pool = vec![b'A'; 200_000];
+		let l = Layout::plain(1024.0, 768.0);
+		assert_eq!(build(&frame(&[t], &pool), &l, None, quad_budget(256 << 20, 64)).len(), QUAD_BUDGET);
 	}
 
 	#[test]
@@ -248,7 +303,7 @@ mod tests {
 		let mut b = cmd(KIND_RECT, 0);
 		(b.w, b.h, b.color, b.x) = (10.0, 10.0, 0x00FF00FF, 2.0);
 		let l = Layout::plain(512.0, 448.0 * 0.75 * 1.0);
-		let q = build(&frame(&[a, b, cmd(99, 0), cmd(KIND_ICON, 0)], &[]), &l, None);
+		let q = build(&frame(&[a, b, cmd(99, 0), cmd(KIND_ICON, 0)], &[]), &l, None, usize::MAX);
 		// Two rects: the hud layer one (green) first although it came second in the list.
 		assert_eq!(q.len(), 2);
 		assert_eq!(q[0].colour[1], 1.0);
@@ -277,7 +332,7 @@ mod tests {
 		t.text_len = s.len() as u32;
 		let l = ident();
 		let a = art();
-		let q = build(&frame(&[t], s), &l, Some(&a));
+		let q = build(&frame(&[t], s), &l, Some(&a), usize::MAX);
 		// 'A', 'A', '?', and 'z' (no glyph) as '?': four quads; the space draws none.
 		assert_eq!(q.len(), 4);
 		assert!(q.iter().all(|q| q.tex == 7));
@@ -300,15 +355,15 @@ mod tests {
 		t.text_len = 2;
 		let l = ident();
 		let a = art();
-		let q = build(&frame(&[t], s), &l, Some(&a));
+		let q = build(&frame(&[t], s), &l, Some(&a), usize::MAX);
 		assert!((q[0].rect[0] - (256.0 - 10.0)).abs() < 1e-3);
 		t.color2 = 0x000000FF;
-		let q = build(&frame(&[t], s), &l, Some(&a));
+		let q = build(&frame(&[t], s), &l, Some(&a), usize::MAX);
 		assert_eq!(q.len(), 4);
 		assert_eq!(q[0].colour[0], 0.0);
 		assert!((q[0].rect[0] - q[2].rect[0] - 1.0).abs() < 1e-3);
 		// Without the art the 5x7 font answers (slot FONT).
-		let q = build(&frame(&[t], s), &l, None);
+		let q = build(&frame(&[t], s), &l, None, usize::MAX);
 		assert!(q.iter().all(|q| q.tex == FONT));
 	}
 
@@ -318,23 +373,23 @@ mod tests {
 		(i.x, i.y, i.w, i.h, i.icon, i.color) = (10.0, 20.0, 0.0, 0.0, 0, 0);
 		let l = ident();
 		let a = art();
-		let q = build(&frame(&[i], &[]), &l, Some(&a));
+		let q = build(&frame(&[i], &[]), &l, Some(&a), usize::MAX);
 		assert_eq!(q.len(), 1);
 		assert_eq!(q[0].tex, 9);
 		assert_eq!(q[0].rect, [10.0, 20.0, 32.0, 16.0]);
 		assert_eq!(q[0].colour, [1.0; 4]);
 		// Given size and tint.
 		(i.w, i.h, i.color) = (64.0, 64.0, 0xFF000080);
-		let q = build(&frame(&[i], &[]), &l, Some(&a));
+		let q = build(&frame(&[i], &[]), &l, Some(&a), usize::MAX);
 		assert_eq!(q[0].rect, [10.0, 20.0, 64.0, 64.0]);
 		assert!((q[0].colour[3] - 128.0 / 255.0).abs() < 1e-4);
 		// An icon the level does not hold, an index outside the table, and no art at all draw nothing.
 		i.icon = 1;
-		assert!(build(&frame(&[i], &[]), &l, Some(&a)).is_empty());
+		assert!(build(&frame(&[i], &[]), &l, Some(&a), usize::MAX).is_empty());
 		i.icon = 500;
-		assert!(build(&frame(&[i], &[]), &l, Some(&a)).is_empty());
+		assert!(build(&frame(&[i], &[]), &l, Some(&a), usize::MAX).is_empty());
 		i.icon = 0;
-		assert!(build(&frame(&[i], &[]), &l, None).is_empty());
+		assert!(build(&frame(&[i], &[]), &l, None, usize::MAX).is_empty());
 	}
 
 	#[test]
@@ -343,7 +398,7 @@ mod tests {
 		(t.w, t.color) = (1.0, 0xFFFFFFFF);
 		let s = "a\u{e9}\u{4e2d}".as_bytes();
 		t.text_len = s.len() as u32;
-		let q = build(&frame(&[t], s), &Layout::plain(640.0, 480.0), None);
+		let q = build(&frame(&[t], s), &Layout::plain(640.0, 480.0), None, usize::MAX);
 		assert_eq!(q.len(), 3);
 	}
 }

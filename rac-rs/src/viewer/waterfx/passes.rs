@@ -16,12 +16,23 @@ impl WaterFx {
 		self.heave.mir.filter(now, &mirrors)
 	}
 
+	/// The sky map's targets before the groups that hold its depth view (made once water is in view), the post-bound targets, and an
+	/// empty shore map for a new level (it keeps bed / ground marks over frames for 4e9 of them).
+	fn ready(&mut self, device: &wgpu::Device, enc: &mut wgpu::CommandEncoder, (depth, scene, lin, glow, generation): (&wgpu::TextureView, &wgpu::TextureView, &wgpu::TextureView, &wgpu::TextureView, u64), game: usize) {
+		self.sky.ensure(device);
+		self.prepare(device, depth, scene, lin, glow, generation);
+		if self.shore_game != game {
+			enc.clear_buffer(&self.shore, 0, None);
+			self.shore_game = game;
+		}
+	}
+
 	/// After the level pass: the water meshes `draws` into the position target. Call before the post chain; `depth` is the level
 	/// pass's MSAA depth, `scene` / `lin` / `glow` / `generation` the post's targets (`post::Post::water_inputs`); `parts`: the
 	/// particle pass ran (Particles Enhanced), so the glow target holds their cover.
 	#[allow(clippy::too_many_arguments)]
 	pub(in crate::viewer) fn positions(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, enc: &mut wgpu::CommandEncoder, depth: &wgpu::TextureView, (scene, lin, glow, generation): (&wgpu::TextureView, &wgpu::TextureView, &wgpu::TextureView, u64), f: &WaterFrame, draws: &[WaterDraw], mirrors: &[f32], parts: bool) {
-		self.prepare(device, depth, scene, lin, glow, generation);
+		self.ready(device, enc, (depth, scene, lin, glow, generation), f.game);
 		let Some(t) = &self.t else { return };
 		let (w, h) = (t.key.0 as f32, t.key.1 as f32);
 		let (sun, glint) = match f.key {

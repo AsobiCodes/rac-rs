@@ -21,7 +21,7 @@ pub(super) fn set(level: u8) {
 	FOG_Q.store(level.min(3), Ordering::Relaxed);
 }
 
-/// The scale of retail's own fog (f32 bits; 1.0 = the retail picture): the volumetric fog (viewer/volfog/frame.rs `Input::new`)
+/// The scale of retail's own fog (f32 bits; 1.0 = the retail picture): the volumetric fog (viewer/gpu/draw/prepare.rs, from `volfog::Plan`)
 /// lowers it while it draws, because retail's fog would paint a flat opaque floor under the haze. The world uniform upload
 /// (viewer/gpu/draw/prepare.rs -> volfog `fade_retail_fog`) multiplies the fog's share (1 - f) by it. The GS capture is not
 /// involved: the world's fog is drawn by the native shaders (viewer.rs), not by captured GS prims.

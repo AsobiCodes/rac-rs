@@ -18,6 +18,11 @@ struct Params { w: array<vec4<u32>, 16> }
 // The sharp HUD's planes (lane G, gpu.rs `hd_*`, the `k_hd` block at the end of this file): plane p pixel i is two words, f16 (r, g) and
 // (b, a); the stage plane (plane 6) is RGBA8, one word.
 @group(0) @binding(8) var<storage, read_write> hdp: array<u32>;
+// The texture-pack replacement images (gpu_repl.rs): `repl_img` is the RGBA8 atlas (straight alpha, 255 = opaque), `repl_tab` one texel per
+// id (x = ax | ay << 16, y = aw | ah << 16: the image's place; z = rw | rh << 16: the named rectangle's size in GS texels). 1 x 1 stand-ins
+// until a pack is on; a prim with record word 1 = 0 never reads them.
+@group(0) @binding(9) var repl_img: texture_2d<f32>;
+@group(0) @binding(10) var repl_tab: texture_2d<u32>;
 
 fn pw(i: u32) -> u32 {
     return P.w[i >> 2u][i & 3u];
@@ -836,6 +841,105 @@ fn tex_h(pb: u32) -> u32 {
     return 1u << min(((prims[pb + R_TEX0] >> 30u) | (prims[pb + R_TEX0 + 1u] << 2u)) & 0xfu, 10u);
 }
 
+// ---- texture-pack replacements. Record word 1 = id (12 bits, 0 = the original texture) | x0 << 12 | y0 << 22: the origin of the named
+// rectangle in the GS texture (gpu_repl.rs `pack_word`). ----
+const R_REPL: u32 = 1u;
+
+struct RpEnt {
+    // The image in the atlas: x, y, width, height.
+    a: vec4<i32>,
+    // The named rectangle's size and origin in GS texels.
+    r: vec2<i32>,
+    o: vec2<i32>,
+}
+
+fn rp_ent(pb: u32) -> RpEnt {
+    let w = prims[pb + R_REPL];
+    let t = textureLoad(repl_tab, vec2<i32>(i32(w & 0xfffu), 0), 0);
+    return RpEnt(
+        vec4<i32>(i32(t.x & 0xffffu), i32(t.x >> 16u), i32(t.y & 0xffffu), i32(t.y >> 16u)),
+        vec2<i32>(max(i32(t.z & 0xffffu), 1), max(i32(t.z >> 16u), 1)),
+        vec2<i32>(i32((w >> 12u) & 0x3ffu), i32(w >> 22u)),
+    );
+}
+
+// Pixel (x, y) of the image (inside it), r g b a all 0..255.
+fn rp_px(e: RpEnt, x: i32, y: i32) -> vec4<f32> {
+    return textureLoad(repl_img, vec2<i32>(e.a.x + clamp(x, 0, e.a.z - 1), e.a.y + clamp(y, 0, e.a.w - 1)), 0) * 255.0;
+}
+
+// The GS texel (x, y) of a replaced texture on the 512 path: the mean of a 4 x 4 grid over the image pixels the texel covers (colour
+// weighted by alpha where there is any), rgb rounded to 0..255, alpha to the GS scale (128 = opaque), as f32 bits like `texel`. The loop
+// bound is opaque (`zr`) so the FAST kernels do not unroll 16 loads.
+fn repl_box(pb: u32, x: u32, y: u32) -> vec4<u32> {
+    let e = rp_ent(pb);
+    let b = vec2<f32>(vec2<i32>(clamp(i32(x) - e.o.x, 0, e.r.x - 1), clamp(i32(y) - e.o.y, 0, e.r.y - 1)));
+    let k = vec2<f32>(e.a.zw) / vec2<f32>(e.r);
+    var plain = vec3<f32>(0.0);
+    var wrgb = vec3<f32>(0.0);
+    var asum = 0.0;
+    for (var j = 0u; j < 16u + zr(); j++) {
+        let p = floor((b + (vec2<f32>(f32(j & 3u), f32(j >> 2u)) + vec2<f32>(0.5)) * 0.25) * k);
+        let c = rp_px(e, i32(p.x), i32(p.y));
+        plain += c.rgb;
+        wrgb += c.rgb * c.a;
+        asum += c.a;
+    }
+    let rgb = select(plain / 16.0, wrgb / asum, asum > 0.5);
+    return bitcast<vec4<u32>>(floor(vec4<f32>(rgb, asum / 16.0 * (128.0 / 255.0)) + vec4<f32>(0.5)));
+}
+
+// One axis of the texel position of a replaced texture under the prim's CLAMP mode (0 repeat, 2 region clamp, else clamp; mode 3 never
+// gets a replacement).
+fn rp_wrap(m: u32, c: f32, size: f32, lo: f32, hi: f32) -> f32 {
+    switch m & 3u {
+        case 0u: {
+            return c - floor(c / size) * size;
+        }
+        case 2u: {
+            return clamp(c, lo, hi + 1.0);
+        }
+        default: {
+            return clamp(c, 0.0, size);
+        }
+    }
+}
+
+// The sharp pass's texture colour of a replaced texture: the point `uv` (texel units, kept inside the prim's rectangle `rc` and wrapped
+// as CLAMP says) in the named rectangle, bilinear over the image pixels with the taps kept inside the image; colour weighted by alpha
+// when the prim reads the texture's alpha (`usea`, as `hd_tex`). rgb 0..255, alpha on the GS scale.
+fn hd_repl(pb: u32, uv: vec2<f32>, rc: vec4<i32>, usea: bool) -> vec4<f32> {
+    let e = rp_ent(pb);
+    let cl = prims[pb + R_CLAMP];
+    let clh = prims[pb + R_CLAMP + 1u];
+    let q0 = clamp(uv, vec2<f32>(rc.xy), vec2<f32>(rc.zw) + vec2<f32>(1.0));
+    let p = vec2<f32>(
+        rp_wrap(cl, q0.x, f32(tex_w(pb)), f32((cl >> 4u) & 0x3ffu), f32((cl >> 14u) & 0x3ffu)),
+        rp_wrap(cl >> 2u, q0.y, f32(tex_h(pb)), f32(((cl >> 24u) | (clh << 8u)) & 0x3ffu), f32((clh >> 2u) & 0x3ffu)),
+    );
+    let q = (p - vec2<f32>(e.o)) * (vec2<f32>(e.a.zw) / vec2<f32>(e.r)) - vec2<f32>(0.5);
+    // The prim's TEX1 filter bit (MMAG, bit 5) as in `hd_tex`: clear = point sampling (the image pixel under the texel), set = bilinear.
+    if ((prims[pb + R_TEX1] & 0x20u) == 0u) {
+        let c = rp_px(e, i32(floor(q.x + 0.5)), i32(floor(q.y + 0.5)));
+        return vec4<f32>(c.rgb, c.a * (128.0 / 255.0));
+    }
+    let fl = floor(q);
+    let f = q - fl;
+    let i0 = vec2<i32>(fl);
+    var plain = vec3<f32>(0.0);
+    var wrgb = vec3<f32>(0.0);
+    var asum = 0.0;
+    for (var k = 0u; k < 4u; k++) {
+        let c = rp_px(e, i0.x + i32(k & 1u), i0.y + i32(k >> 1u));
+        let a = c.a * (128.0 / 255.0);
+        let w = select(1.0 - f.x, f.x, (k & 1u) != 0u) * select(1.0 - f.y, f.y, (k >> 1u) != 0u);
+        plain += w * c.rgb;
+        wrgb += w * a * c.rgb;
+        asum += w * a;
+    }
+    return vec4<f32>(select(plain, wrgb / asum, usea && asum > 0.5), asum);
+}
+
 // draw.rs `View::texel_slow` (channels as f32 bits).
 fn texel(pb: u32, u: i32, v: i32) -> vec4<u32> {
     let t0 = prims[pb + R_TEX0];
@@ -843,6 +947,9 @@ fn texel(pb: u32, u: i32, v: i32) -> vec4<u32> {
     let clh = prims[pb + R_CLAMP + 1u];
     let x = wrapc(cl, u, tex_w(pb), (cl >> 4u) & 0x3ffu, (cl >> 14u) & 0x3ffu);
     let y = wrapc(cl >> 2u, v, tex_h(pb), ((cl >> 24u) | (clh << 8u)) & 0x3ffu, (clh >> 2u) & 0x3ffu);
+    if ((prims[pb + R_REPL] & 0xfffu) != 0u) {
+        return repl_box(pb, x, y);
+    }
     let psm = (t0 >> 20u) & 0x3fu;
     let raw = rd_px(psm, t0 & 0x3fffu, (t0 >> 14u) & 0x3fu, x, y);
     if (psm == 0x13u || psm == 0x1bu) {
@@ -2574,6 +2681,8 @@ fn k_hd(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) li: 
             fp = max(max(abs(ux - uv), abs(uy - uv)), vec2<f32>(HD_FPMIN));
             if (twin) {
                 t = hd_tex_twin(uv, rc, kx, ky);
+            } else if ((prims[pb + R_REPL] & 0xfffu) != 0u) {
+                t = hd_repl(pb, uv, rc, usea);
             } else if (max(fp.x, fp.y) < 1.0) {
                 pend = true;
                 let pos = uv - vec2<f32>(0.5);

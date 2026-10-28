@@ -24,6 +24,8 @@ pub fn enable(dir: &str) -> Result<(), String> {
 	set_pools(count_pools(level, at, |a| at(a) as u16));
 	// The disc of the run (ORACLE_ISO, else the oracle's default PAL image) and its video mode (retail/disc.rs).
 	ee_oracle::ver::from_iso(&std::env::var("ORACLE_ISO").unwrap_or_else(|_| ee_oracle::DEFAULT_ISO.into()));
+	// Every recompiled-table build (a level load) voids the hook layer's cache and the code guard's spans, as on the cold boot.
+	ee_oracle::ver::on_rebuild(disc::rebuilt);
 	let _ = STATE.set(dir.to_string());
 	let _ = START_LEVEL.set(level);
 	Ok(())
@@ -43,7 +45,7 @@ pub fn enable_cold(iso: &str) -> Result<(), String> {
 	// The disc (PAL or USA) and its video mode (retail/disc.rs).
 	ee_oracle::ver::from_iso(iso);
 	disc::announce();
-	ee_oracle::ver::on_rebuild(disc::rescope);
+	ee_oracle::ver::on_rebuild(disc::rebuilt);
 	let _ = STATE.set("cold:".to_string());
 	let _ = START_LEVEL.set(0);
 	Ok(())
@@ -55,10 +57,10 @@ pub fn warm_gpu() -> Result<(), String> {
 	if gscap::gpu_warm() { Ok(()) } else { Err("no GPU for the capture".into()) }
 }
 
-/// The window's device (viewer/gpu/setup.rs, before the game loads): the GS capture shares it when it is Vulkan (any vendor), else
-/// it is on by default on NVIDIA only, with a device of its own (gscap draw/gpu_shared.rs).
-pub fn gpu_capture_window(dev: &wgpu::Device, q: &wgpu::Queue, info: &wgpu::AdapterInfo) {
-	gscap::gpu_window(dev, q, info);
+/// The window's device (viewer/gpu/setup.rs, before the game loads): the GS capture draws on it, except on an NVIDIA Vulkan window,
+/// where it gets a second device (own queue) on the window's adapter; DX12 windows always share (gscap draw/gpu_shared.rs).
+pub fn gpu_capture_window(dev: &wgpu::Device, q: &wgpu::Queue, info: &wgpu::AdapterInfo, adapter: &wgpu::Adapter) {
+	gscap::gpu_window(dev, q, info, adapter);
 }
 
 /// The window is about to open its device (viewer/handler.rs `resumed`): the GS capture waits for it.
@@ -93,4 +95,25 @@ pub fn gsfull_on() -> bool {
 /// The level of the savestate `enable` loaded (None outside retail mode).
 pub fn start_level() -> Option<u32> {
 	START_LEVEL.get().copied()
+}
+
+#[cfg(test)]
+mod tests {
+	/// A savestate start (`enable`) and the cold boot (`enable_cold`) both register the table-rebuild hook (`ver::on_rebuild`), which voids the hook
+	/// layer's cache and the mod code guard's spans (review N2). Both functions need a disc and a process-wide state to run, so the check reads
+	/// the source: each function body must name the registration.
+	#[test]
+	fn both_game_starts_register_the_rebuild_hook() {
+		let src = include_str!("session.rs");
+		let body = |from: &str, to: &str| {
+			let a = src.find(from).unwrap_or_else(|| panic!("{from} not found"));
+			let b = a + src[a..].find(to).unwrap_or_else(|| panic!("{to} not found"));
+			&src[a..b]
+		};
+		let enable = body("pub fn enable(dir", "pub fn enable_cold(");
+		let cold = body("pub fn enable_cold(", "pub fn warm_gpu(");
+		for (name, text) in [("enable", enable), ("enable_cold", cold)] {
+			assert!(text.contains("ee_oracle::ver::on_rebuild(disc::rebuilt)"), "{name} does not register disc::rebuilt with ver::on_rebuild");
+		}
+	}
 }

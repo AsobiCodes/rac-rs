@@ -2,6 +2,8 @@
 //! Three crooked quads in the level pass (the world's own view-projection, depth-tested without depth write, alpha blended: the
 //! transparent margin carries the shadow and the tape overhang), tinted to the dim garage light. The textures are uploaded
 //! once, when the "kofi art" thread is done; the resources live in a thread-local (render thread), like `split.rs`.
+//! The sheets show with Lighting Classic too, on purpose (user decision 2026-10-27: "Keep the Ko-fi drawings visible in Classic too"):
+//! only the Classic half of the split view and `RAC_KOFI=0` hide them. Not a bug, not to be gated by the Lighting row.
 
 use super::*;
 use std::cell::RefCell;
@@ -48,10 +50,10 @@ impl Gpu {
 		let tint = [TINT[0] * k, TINT[1] * k, TINT[2] * k, 1.0];
 		let places = crate::kofi::placements();
 		let (mut verts, mut idx, mut binds) = (Vec::new(), Vec::new(), Vec::new());
-		for (i, d) in art.iter().enumerate() {
+		for (d, place) in crate::kofi::sheets(art, &places) {
 			let tex = crate::level::Texture { w: d.w, h: d.h, rgba: d.rgba.clone() };
 			binds.push(self.upload_texture(Some(&tex)));
-			let c = crate::kofi::corners(&places[i], d.w, d.h, LIFT);
+			let c = crate::kofi::corners(place, d.w, d.h, LIFT);
 			let uv = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
 			let base = verts.len() as u32;
 			verts.extend((0..4).map(|k| Vertex { pos: c[k], uv: uv[k], normal: [0.0; 3], colour: tint, light: [0.0; 4] }));

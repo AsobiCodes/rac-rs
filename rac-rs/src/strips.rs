@@ -41,11 +41,29 @@ pub struct EnvPass {
 }
 
 fn at(img: &[u8], va: usize, len: usize) -> Option<&[u8]> {
+	// USA: Novalis's overlay image (level 1; the tables below are PAL addresses).
+	if crate::retail::disc::usa() {
+		return crate::retail::disc::ov_bytes(img, crate::retail::disc::va_level(1, va as u32) as usize, len);
+	}
 	img.get(va.checked_sub(IMAGE_BASE)?..)?.get(..len)
 }
 
 fn word(img: &[u8], va: usize) -> Option<u32> {
 	Some(u32::from_le_bytes(at(img, va, 4)?.try_into().ok()?))
+}
+
+/// Like `at` for an address that was READ from the image (a pointer stored in a table): on the USA disc it already is a USA
+/// address, so it must not go through the PAL -> USA map a second time.
+fn at_ptr(img: &[u8], va: usize, len: usize) -> Option<&[u8]> {
+	if crate::retail::disc::usa() {
+		return crate::retail::disc::ov_bytes(img, va, len);
+	}
+	at(img, va, len)
+}
+
+/// A word at a pointer-derived address (see `at_ptr`).
+fn word_ptr(img: &[u8], va: usize) -> Option<u32> {
+	Some(u32::from_le_bytes(at_ptr(img, va, 4)?.try_into().ok()?))
 }
 
 fn float(img: &[u8], va: usize) -> Option<f32> {
@@ -57,7 +75,7 @@ fn floats<const N: usize>(img: &[u8], va: usize, n: usize) -> Option<Vec<[f32; N
 		.map(|j| {
 			let mut v = [0.0; N];
 			for (k, x) in v.iter_mut().enumerate() {
-				*x = float(img, va + (j * N + k) * 4)?;
+				*x = f32::from_bits(word_ptr(img, va + (j * N + k) * 4)?);
 			}
 			Some(v)
 		})
@@ -109,7 +127,7 @@ pub fn parse_env_passes(ov: &[u8]) -> Option<Vec<EnvPass>> {
 			Some(EnvPass {
 				pos: floats::<3>(ov, word(ov, ENV_POS + k * 4)? as usize, n)?,
 				normal: floats::<3>(ov, word(ov, ENV_NORMAL + k * 4)? as usize, n)?,
-				colour: (0..n).map(|j| word(ov, colour_at + j * 4)).collect::<Option<_>>()?,
+				colour: (0..n).map(|j| word_ptr(ov, colour_at + j * 4)).collect::<Option<_>>()?,
 			})
 		})
 		.collect()

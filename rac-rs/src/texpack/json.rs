@@ -199,7 +199,8 @@ impl P<'_> {
 							if (0xd800..0xdc00).contains(&u) && self.s[self.i..].starts_with(b"\\u") {
 								self.i += 2;
 								let lo = self.hex4()?;
-								u = 0x10000 + ((u - 0xd800) << 10) + lo.wrapping_sub(0xdc00);
+								// A high surrogate needs a low one after it; anything else is one replacement character.
+								u = if (0xdc00..0xe000).contains(&lo) { 0x10000 + ((u - 0xd800) << 10) + (lo - 0xdc00) } else { 0xfffd };
 							}
 							char::from_u32(u).unwrap_or('\u{fffd}')
 						}
@@ -227,6 +228,17 @@ mod tests {
 		assert_eq!(j.get("name").and_then(Json::as_str), Some("Caf\u{e9} \"HD\""));
 		assert_eq!(j.get("extra").and_then(|e| e.get("a")).and_then(Json::as_array).map(|a| a.len()), Some(3));
 		assert_eq!(j.get("missing"), None);
+	}
+
+	#[test]
+	fn surrogate_pairs_combine_and_a_bad_pair_is_one_replacement_character() {
+		// `~` stands for a backslash in the JSON text.
+		let (q, bs) = ('"', char::from(0x5c_u8).to_string());
+		let text = |s: &str| parse(&format!("{q}{}{q}", s.replace('~', &bs))).unwrap().as_str().map(str::to_owned);
+		assert_eq!(text("~ud83d~ude00"), char::from_u32(0x1f600).map(String::from));
+		// A high surrogate followed by an escape that is no low surrogate: this subtracted below zero (a panic with overflow checks).
+		assert_eq!(text("~ud800~u0041"), Some(char::REPLACEMENT_CHARACTER.to_string()));
+		assert_eq!(text("~ud800"), Some(char::REPLACEMENT_CHARACTER.to_string()));
 	}
 
 	#[test]

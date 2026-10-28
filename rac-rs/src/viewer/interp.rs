@@ -13,8 +13,8 @@
 //!   by order among the items of the same kind; an item without a partner, of another kind or `SNAP_DIST` away is drawn as the
 //!   field has it.
 //! - Cuts (one field drawn unblended): the camera jumped or turned far beyond its motion of the field before, or zoomed abruptly
-//!   (`cam_cut`; in game view, where the camera follows the hero, only a hero teleport or a boom snap: a player turn of any speed
-//!   blends); the level, game mode or scene view changed; a frozen or held field (menus, pause, the front end); the first field
+//!   (`cam_cut`; in game view, where the camera follows the hero, only a hero teleport, a boom snap or a boom swung more than 160 degrees
+//!   round the hero at once with the Modern camera: a player turn of up to 160 degrees blends); the level, game mode or scene view changed; a frozen or held field (menus, pause, the front end); the first field
 //!   after a load.
 //! - Effect meshes stay watertight (`weld`: one move per shared vertex) and a standing mesh missing for one field is carried
 //!   over from the field before (`still::hold`).
@@ -24,7 +24,7 @@
 //! Latency: the newest field starts to show at once and is fully shown one field later (+10 ms on average at 50 Hz).
 use super::smooth::{lerp3, lerp_angle, near};
 use crate::particles::{OrbDraw, PointLight, WorldQuad};
-use crate::retail::{Cam, Retail, RetailFx, RetailShadows, SmoothDraw};
+use crate::retail::{boom_turn, orbits, Cam, Retail, RetailFx, RetailShadows, SmoothDraw, ARC_MAX_TURN};
 use crate::shadows::RecPrim;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -159,13 +159,20 @@ fn dist(a: V3, b: V3) -> f32 {
 /// (the boom also pulls in and out by 1.5-3 m around walls and with the pitch of a flick), and a turn of any speed is not a
 /// cut: a fast mouse flick turns the boom by 0.4-1.2 rad in one field and swings the eye 2-5 m around the hero; taking that for
 /// a cut drew the newest field unblended for a whole field at every flick start (lane yflk, Kalebo III real-clock flick run: 30
-/// cuts in 640 fields, all flick starts; the picture stopped and jumped, the user's "camera off" frames).
-fn cam_cut(a: &Cam, b: &Cam, hero: Option<(V3, V3)>, last: (f32, f32, f32)) -> ((f32, f32, f32), bool) {
+/// cuts in 640 fields, all flick starts; the picture stopped and jumped, the user's "camera off" frames). The exception is a boom
+/// that jumps to the far side of the hero (a scripted or region camera swap). `Retail::camera` moves the eye on the arc round
+/// the hero (`retail::camera_arc`: the boom turns about the vertical axis, so the eye stays at the boom's distance, the way the
+/// yaw is blended), which is well defined up to the turn where the way round gets ambiguous. That is `swung`: the boom's
+/// horizontal direction (eye minus hero, both longer than `MIN_BOOM`) turned by more than `ARC_MAX_TURN` (2.8 rad, about 160
+/// degrees) in one field, with the Modern camera only (the Classic camera blends such a swap as before); a mouse turn-around at Mouse speed 200 % (lane fx10: it was a cut at 3-D 120 degrees, 134-158 degrees of
+/// yaw at gameplay pitches, with the straight chord) blends.
+fn cam_cut(a: &Cam, b: &Cam, hero: Option<(V3, V3)>, last: (f32, f32, f32), modern: bool) -> ((f32, f32, f32), bool) {
 	const BOOM_SNAP: f32 = 4.0;
 	let (d, follow, jump) = match hero {
 		Some((ha, hb)) => {
 			let (h, boom) = (dist(ha, hb), (dist(a.0, ha) - dist(b.0, hb)).abs());
-			(h.max(boom), true, (h > 1.5 || boom > BOOM_SNAP) && h.max(boom) > 3.0 * last.0 + 0.75)
+			let swung = modern && boom_turn(a.0, ha, b.0, hb).is_some_and(|t| t.abs() > ARC_MAX_TURN) && orbits(a.0, ha, b.0, hb);
+			(h.max(boom), true, swung || ((h > 1.5 || boom > BOOM_SNAP) && h.max(boom) > 3.0 * last.0 + 0.75))
 		}
 		None => {
 			let d = dist(a.0, b.0);
@@ -218,7 +225,7 @@ pub(super) fn field(r: &Retail, on: bool) {
 						(Some(ha), Some(hb)) if !f.key.2 => Some((ha, hb)),
 						_ => None,
 					};
-					cam_cut(a, b, hero, s.last_move)
+					cam_cut(a, b, hero, s.last_move, crate::retail::modcam::on())
 				}
 				_ => ((0.0, 0.0, 0.0), true),
 			},
@@ -294,6 +301,11 @@ pub(super) fn frame(r: Option<&mut Retail>, want: bool, alpha: f32) -> bool {
 				},
 				orbs: match (&p.orbs, &c.orbs) {
 					(Some(a), Some(b)) => Some(blend_orbs(a, b, alpha)),
+					_ => None,
+				},
+				// Game view: the camera's eye follows the arc round the hero (`Retail::camera`, `retail::camera_arc`).
+				cam_hero: match (p.fx.as_ref().and_then(|x| x.hero), c.fx.as_ref().and_then(|x| x.hero)) {
+					(Some(ha), Some(hb)) if !c.key.2 => Some((ha, hb)),
 					_ => None,
 				},
 			}),
@@ -629,36 +641,52 @@ fn blend_orbs(a: &[OrbDraw], b: &[OrbDraw], t: f32) -> Vec<OrbDraw> {
 mod tests {
 	use super::*;
 
+	/// `cam_cut` with the Modern camera on (the swung cut is Modern only).
+	fn modern_cut(a: &Cam, b: &Cam, hero: Option<(V3, V3)>, last: (f32, f32, f32)) -> ((f32, f32, f32), bool) {
+		cam_cut(a, b, hero, last, true)
+	}
+
 	#[test]
 	fn steady_motion_is_no_cut() {
 		let cam = |x: f32, yaw: f32| -> Cam { ([x, 0.0, 0.0], yaw, 0.0, 0.7) };
 		// Hoverboard-like steady 0.8 m per field.
-		let (mv, cut) = cam_cut(&cam(0.0, 0.0), &cam(0.8, 0.0), None, (0.8, 0.0, 0.0));
+		let (mv, cut) = modern_cut(&cam(0.0, 0.0), &cam(0.8, 0.0), None, (0.8, 0.0, 0.0));
 		assert!(!cut, "{mv:?}");
 		// A mouse turn of 20 degrees in one field after a still one.
-		assert!(!cam_cut(&cam(0.0, 0.0), &cam(0.0, 0.35), None, (0.0, 0.0, 0.0)).1);
+		assert!(!modern_cut(&cam(0.0, 0.0), &cam(0.0, 0.35), None, (0.0, 0.0, 0.0)).1);
 		// Running speeds up from rest (0.25 m after 0).
-		assert!(!cam_cut(&cam(0.0, 0.0), &cam(0.25, 0.0), None, (0.0, 0.0, 0.0)).1);
+		assert!(!modern_cut(&cam(0.0, 0.0), &cam(0.25, 0.0), None, (0.0, 0.0, 0.0)).1);
 	}
 
 	#[test]
 	fn scene_cuts_and_teleports_are_cuts() {
 		let cam = |x: f32, yaw: f32, tan: f32| -> Cam { ([x, 0.0, 0.0], yaw, 0.0, tan) };
-		assert!(cam_cut(&cam(0.0, 0.0, 0.7), &cam(6.0, 0.0, 0.7), None, (0.1, 0.0, 0.0)).1, "eye jump");
-		assert!(cam_cut(&cam(0.0, 0.0, 0.7), &cam(0.5, 1.6, 0.7), None, (0.1, 0.01, 0.0)).1, "turned 90 degrees");
-		assert!(cam_cut(&cam(0.0, 0.0, 0.7), &cam(0.0, 0.0, 0.4), None, (0.0, 0.0, 0.0)).1, "zoom cut");
+		assert!(modern_cut(&cam(0.0, 0.0, 0.7), &cam(6.0, 0.0, 0.7), None, (0.1, 0.0, 0.0)).1, "eye jump");
+		assert!(modern_cut(&cam(0.0, 0.0, 0.7), &cam(0.5, 1.6, 0.7), None, (0.1, 0.01, 0.0)).1, "turned 90 degrees");
+		assert!(modern_cut(&cam(0.0, 0.0, 0.7), &cam(0.0, 0.0, 0.4), None, (0.0, 0.0, 0.0)).1, "zoom cut");
 		// Game view (the camera follows the hero): a fast orbit is not a cut, a hero teleport or a boom snap is.
 		let orbit = |yaw: f32| -> Cam { ([7.0 * yaw.cos(), 7.0 * yaw.sin(), 2.0], yaw + std::f32::consts::PI, -0.3, 0.7) };
 		let h = Some(([0.0; 3], [0.0; 3]));
-		assert!(!cam_cut(&orbit(0.0), &orbit(0.9), h, (0.0, 0.0, 0.0)).1, "mouse flick");
-		assert!(cam_cut(&orbit(0.0), &orbit(0.9), None, (0.0, 0.0, 0.0)).1, "same turn without the hero");
-		assert!(cam_cut(&orbit(0.0), &orbit(0.0), Some(([0.0; 3], [8.0, 0.0, 0.0])), (0.0, 0.0, 0.0)).1, "hero teleport");
+		assert!(!modern_cut(&orbit(0.0), &orbit(0.9), h, (0.0, 0.0, 0.0)).1, "mouse flick");
+		assert!(!modern_cut(&orbit(0.0), &orbit(1.2), h, (0.0, 0.0, 0.0)).1, "the fastest observed flick");
+		assert!(!modern_cut(&orbit(0.0), &orbit(0.0), h, (0.0, 0.0, 0.0)).1, "a still camera");
+		assert!(modern_cut(&orbit(0.0), &orbit(std::f32::consts::PI), h, (0.0, 0.0, 0.0)).1, "boom swapped to the far side of a still hero");
+		assert!(!modern_cut(&orbit(0.0), &orbit(2.5), h, (0.0, 0.0, 0.0)).1, "a 143 degree turn-around blends (the eye goes round the hero)");
+		assert!(!modern_cut(&orbit(0.0), &orbit(-2.7), h, (0.0, 0.0, 0.0)).1, "also the other way round");
+		assert!(modern_cut(&orbit(0.0), &orbit(2.95), h, (0.0, 0.0, 0.0)).1, "boom swung past 160 degrees");
+		assert!(!cam_cut(&orbit(0.0), &orbit(2.95), h, (0.0, 0.0, 0.0), false).1, "the Classic camera blends such a swap, as before the arc");
+		// A boom under half a metre (the eye at the hero's feet) has no direction: no cut from noise.
+		let at_feet = |x: f32| -> Cam { ([x, 0.0, 0.0], 0.0, 0.0, 0.7) };
+		assert!(!modern_cut(&at_feet(0.2), &at_feet(-0.2), h, (0.0, 0.0, 0.0)).1, "tiny booms");
+		assert!(modern_cut(&orbit(0.0), &orbit(std::f32::consts::PI), h, (0.2, 3.0, 0.0)).1, "also after a fast field before");
+		assert!(modern_cut(&orbit(0.0), &orbit(0.9), None, (0.0, 0.0, 0.0)).1, "same turn without the hero");
+		assert!(modern_cut(&orbit(0.0), &orbit(0.0), Some(([0.0; 3], [8.0, 0.0, 0.0])), (0.0, 0.0, 0.0)).1, "hero teleport");
 		let near: Cam = ([0.5, 0.0, 2.0], std::f32::consts::PI, -0.3, 0.7);
-		assert!(cam_cut(&orbit(0.0), &near, h, (0.0, 0.0, 0.0)).1, "boom snapped in");
+		assert!(modern_cut(&orbit(0.0), &near, h, (0.0, 0.0, 0.0)).1, "boom snapped in");
 		let pulled: Cam = ([5.0, 0.0, 2.0], std::f32::consts::PI, -0.3, 0.7);
-		assert!(!cam_cut(&orbit(0.0), &pulled, h, (0.0, 0.0, 0.0)).1, "boom pulled in by a wall");
+		assert!(!modern_cut(&orbit(0.0), &pulled, h, (0.0, 0.0, 0.0)).1, "boom pulled in by a wall");
 		// A slow scene zoom is not.
-		assert!(!cam_cut(&cam(0.0, 0.0, 0.7), &cam(0.0, 0.0, 0.69), None, (0.0, 0.0, 0.015)).1);
+		assert!(!modern_cut(&cam(0.0, 0.0, 0.7), &cam(0.0, 0.0, 0.69), None, (0.0, 0.0, 0.015)).1);
 	}
 
 	#[test]

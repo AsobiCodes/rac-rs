@@ -23,8 +23,9 @@
 use ee_oracle::cpu::Cpu;
 use ee_oracle::rec::{register_hand, Hand};
 use std::sync::{atomic::{AtomicBool, Ordering}, Mutex};
-use crate::retail::disc::va;
+use crate::{fmath::Fm, retail::disc::va};
 pub mod classic;
+pub mod sticks;
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static IN: AtomicBool = AtomicBool::new(false);
@@ -67,7 +68,7 @@ pub struct Input {
 	pub zoom: i8,
 	/// F7 pressed: toggle the modern camera.
 	pub toggle: bool,
-	/// The camera keys' share of the right stick (Q/E, Z/X), offset from 0x80, 0 = not held (modcam_turn.rs `stick_axes`).
+	/// The camera keys' share of the right stick (Q/E, Z/X), offset from 0x80, 0 = not held (modcam_turn.rs `camera_sticks`).
 	pub keys: [i8; 2],
 }
 
@@ -516,8 +517,8 @@ fn wrap(a: f32) -> f32 {
 /// Camera rows for a view yaw / pitch (pitch > 0 looks down), the convention `retail::read_cam` / basis_euler read
 /// back: row0 forward, row1 left, row2 up (euler = [r1.z atan2 r2.z, asin(-r0.z), r0.y atan2 r0.x]).
 pub fn rows(yaw: f32, pitch: f32) -> [[f32; 3]; 3] {
-	let (sy, cy) = yaw.sin_cos();
-	let (sp, cp) = pitch.sin_cos();
+	let (sy, cy) = yaw.fsin_cos();
+	let (sp, cp) = pitch.fsin_cos();
 	[[cy * cp, sy * cp, -sp], [-sy, cy, 0.0], [cy * sp, sy * sp, cp]]
 }
 
@@ -562,7 +563,7 @@ impl Frame {
 	/// of the carried axis against world x when `u` came back to world z, folded into the yaw so the heading stays).
 	fn carry(a: [f32; 3], u: [f32; 3]) -> (Frame, f32) {
 		if u == [0.0, 0.0, 1.0] {
-			return (FLAT, if a == FLAT.a { 0.0 } else { a[1].atan2(a[0]) });
+			return (FLAT, if a == FLAT.a { 0.0 } else { a[1].fatan2(a[0]) });
 		}
 		let d = dot3(a, u);
 		let mut p = [a[0] - u[0] * d, a[1] - u[1] * d, a[2] - u[2] * d];
@@ -581,8 +582,8 @@ impl Frame {
 		if self.flat() {
 			return rows(yaw, pitch);
 		}
-		let (sy, cy) = yaw.sin_cos();
-		let (sp, cp) = pitch.sin_cos();
+		let (sy, cy) = yaw.fsin_cos();
+		let (sp, cp) = pitch.fsin_cos();
 		let comb = |x: f32, y: f32, z: f32| [self.a[0] * x + self.b[0] * y + self.u[0] * z, self.a[1] * x + self.b[1] * y + self.u[1] * z, self.a[2] * x + self.b[2] * y + self.u[2] * z];
 		[comb(cy * cp, sy * cp, -sp), comb(-sy, cy, 0.0), comb(cy * sp, sy * sp, cp)]
 	}
@@ -767,7 +768,7 @@ fn write_rows(c: &mut Cpu, rec: u32, e: [f32; 3], r: &[[f32; 3]; 3]) {
 /// Yaw / pitch of the record's rows (retail.rs read_cam convention).
 fn rec_angles(c: &mut Cpu, rec: u32) -> (f32, f32) {
 	let r0 = rv(c, rec);
-	(r0[1].atan2(r0[0]), (-r0[2]).clamp(-1.0, 1.0).asin())
+	(r0[1].fatan2(r0[0]), (-r0[2]).clamp(-1.0, 1.0).fasin())
 }
 
 struct Guard;
@@ -1025,14 +1026,14 @@ fn k_of(tau: f32) -> f32 {
 	if tau <= 1e-4 {
 		1.0
 	} else {
-		1.0 - (-dt() / tau).exp()
+		1.0 - (-dt() / tau).fexp()
 	}
 }
 /// One field of a critically damped spring on the offset `y` (velocity `v`) from its goal, smoothing time `ts` (w = 2 / ts, the
 /// exact solution, so no overshoot and no step-size trouble): (y, v) afterwards.
 fn crit(y: f32, v: f32, ts: f32) -> (f32, f32) {
 	let w = 2.0 / ts.max(0.02);
-	let e = (-w * dt()).exp();
+	let e = (-w * dt()).fexp();
 	let t = v + w * y;
 	((y + t * dt()) * e, (v - w * t * dt()) * e)
 }
@@ -1062,7 +1063,7 @@ fn dyn_track(c: &mut Cpu, st: &mut St, fr: &Frame, hero: [f32; 3], hero_goal: [f
 			d.hv[i] += (dp[i] / dt() - d.hv[i]) * a;
 		}
 	}
-	d.speed = dot3(d.hv, fr.a).hypot(dot3(d.hv, fr.b));
+	d.speed = dot3(d.hv, fr.a).fhypot(dot3(d.hv, fr.b));
 	d.vz = dot3(d.hv, fr.u);
 	// A jump or fall state with no ground contact; two fields in a row (a bump on a slope is not a jump).
 	let flying = matches!(c.mem.rd32(HERO_GROUP), 2 | 4) && c.mem.rd16(HERO_AIRBORNE) != 0;
@@ -1134,14 +1135,14 @@ fn dyn_auto(st: &mut St, fr: &Frame) {
 	let ease = sstep((idle_s - t.rc_delay) / t.rc_ramp);
 	if sp >= t.rc_speed && st.dy.rc_used < t.rc_budget {
 		let (vx, vy) = (dot3(st.dy.hv, fr.a), dot3(st.dy.hv, fr.b));
-		let ang = wrap(vy.atan2(vx) - st.yaw);
+		let ang = wrap(vy.fatan2(vx) - st.yaw);
 		// Running toward the camera (more than about 110 deg off the view direction): no swing.
-		let gate = sstep((ang.cos() + 0.5) / 0.3);
+		let gate = sstep((ang.fcos() + 0.5) / 0.3);
 		// The swing tapers off over the last 0.4 rad of its budget (no sudden stop).
 		let taper = sstep((t.rc_budget - st.dy.rc_used) / 0.4);
-		let rate = (t.rc_base + t.rc_side * ang.sin().abs()) * gate * ease * sstep((sp - t.rc_speed) / 2.0) * taper;
+		let rate = (t.rc_base + t.rc_side * ang.fsin().abs()) * gate * ease * sstep((sp - t.rc_speed) / 2.0) * taper;
 		let lim = t.rc_max * dt();
-		let turn = (ang * (1.0 - (-rate * dt()).exp())).clamp(-lim, lim);
+		let turn = (ang * (1.0 - (-rate * dt()).fexp())).clamp(-lim, lim);
 		st.yaw = wrap(st.yaw + turn);
 		st.dy.rc_used += turn.abs();
 	}
@@ -1184,7 +1185,7 @@ fn dyn_probe(c: &mut Cpu, lv: &Lv, st: &mut St, fr: &Frame, hero: [f32; 3]) {
 	if st.dy.speed > 1.5 && !st.dy.is_air {
 		if st.field % 3 == 0 {
 			let (vx, vy) = (dot3(st.dy.hv, fr.a), dot3(st.dy.hv, fr.b));
-			let l = vx.hypot(vy).max(1e-3);
+			let l = vx.fhypot(vy).max(1e-3);
 			let ahead = t.drop_ahead + t.drop_ahead_k * st.dy.speed;
 			let dirw = add3(scale3(fr.a, vx / l), scale3(fr.b, vy / l));
 			let s = add3(add3(hero, scale3(dirw, ahead)), scale3(fr.u, 0.7));
@@ -1365,7 +1366,7 @@ fn step(c: &mut Cpu, lv: &'static Lv, rec: u32, st: &mut St) {
 				let rows3 = [f, cross3(u, f), u];
 				write_rows(c, rec, e, &rows3);
 				st.last_rows = rows3;
-				st.last = (e, f[1].atan2(f[0]), (-f[2]).clamp(-1.0, 1.0).asin());
+				st.last = (e, f[1].fatan2(f[0]), (-f[2]).clamp(-1.0, 1.0).fasin());
 			}
 		} else {
 			st.blend = 0;
@@ -1383,8 +1384,8 @@ fn step(c: &mut Cpu, lv: &'static Lv, rec: u32, st: &mut St) {
 		let e = if st.blend > 0 && !fresh { st.last.0 } else { rv(c, rec + 0x30) };
 		let d = sub(e, piv_goal);
 		let l = len3(d).max(MIN_LEN);
-		st.yaw = (-dot3(d, fr.b)).atan2(-dot3(d, fr.a));
-		st.pitch = (dot3(d, fr.u) / l).clamp(-1.0, 1.0).asin().clamp(PITCH.0, PITCH.1);
+		st.yaw = (-dot3(d, fr.b)).fatan2(-dot3(d, fr.a));
+		st.pitch = (dot3(d, fr.u) / l).clamp(-1.0, 1.0).fasin().clamp(PITCH.0, PITCH.1);
 		st.len = l.min(ZOOM.1);
 		st.pivot = piv_goal;
 		(st.rise, st.rise_v, st.rise_goal) = (0.0, 0.0, 0.0);
@@ -1412,26 +1413,26 @@ fn step(c: &mut Cpu, lv: &'static Lv, rec: u32, st: &mut St) {
 		eprintln!("retail: modcam feel {} (field {})", if dynamic { "Smooth" } else { "Static" }, st.field);
 	}
 	// Input: mouse (0.003 rad a count, RAC_MODCAM_SENS scales), the right stick (keys Q/E turn the view left / right,
-	// Z/X tilt it up / down), wheel zoom. modcam_turn.rs: the controller's stick turns like the mouse, the keys as ever.
+	// Z/X tilt it up / down; read with the game's own dead zone, no second one: `stick_axes`), wheel zoom.
+	// modcam_turn.rs: the worker already gave the controller's stick the mouse's sign.
 	let inp = st.inp;
-	let rs = super::modcam_turn::stick_axes([st.rstick[0], st.rstick[1]], inp.keys);
-	let dz = |v: f32| if v.abs() < 0.2 { 0.0 } else { v };
+	let rs = super::modcam_turn::stick_axes([st.rstick[0], st.rstick[1]]);
 	let (lr, ud) = (if c.mem.rd8(OPT_LR) == 0 { -1.0 } else { 1.0 }, if c.mem.rd8(OPT_UD) == 0 { -1.0 } else { 1.0 });
 	// Camera speed row = the stick's factor, Mouse speed row = the mouse's (pcext.rs camopts / mousespeed): percent / 50, 1.0 until set.
 	let (mouse_k, stick_k) = (super::pcext::mousespeed_scale(), super::pcext::camspeed_scale());
 	// Dynamic: the mouse stays direct, the right stick ramps up (a gentle acceleration; keys Q/E Z/X ramp too).
 	let (sx, sy) = if dynamic {
-		st.dy.rs = [ramp1(st.dy.rs[0], dz(rs[0])), ramp1(st.dy.rs[1], dz(rs[1]))];
+		st.dy.rs = [ramp1(st.dy.rs[0], rs[0]), ramp1(st.dy.rs[1], rs[1])];
 		(st.dy.rs[0], st.dy.rs[1])
 	} else {
-		(dz(rs[0]), dz(rs[1]))
+		(rs[0], rs[1])
 	};
 	let g = super::modcam_turn::Gains { mouse: MOUSE, sens: sens(), mouse_k, rot: ROTATE_RATE, tilt: TILT_STEP, stick_k, lr, ud };
 	let (dyaw, dpitch) = super::modcam_turn::turn(inp.look, [sx, sy], &g);
 	st.dist = (st.dist - inp.zoom as f32 * 0.5).clamp(ZOOM.0, ZOOM.1);
 	// Aim mode (RMB): the mouse keeps turning the camera as it does without RMB; nothing is picked or framed.
 	// Aim mode is a ground feature: on a magnetic wall retail stows the guns (0x1413fc) and the facing / aim yaw words are world-z.
-	st.aiming = inp.aim && super::pcext::strafe_on() && flat;
+	st.aiming = classic::aim_mode(inp.aim, super::pcext::strafe_on(), flat, c.mem.rd8(BODY_FORM));
 	if st.aiming != st.aim_logged {
 		st.aim_logged = st.aiming;
 		eprintln!("retail: modcam aim {} (field {})", if st.aiming { "on" } else { "off" }, st.field);
@@ -1441,7 +1442,7 @@ fn step(c: &mut Cpu, lv: &'static Lv, rec: u32, st: &mut St) {
 	st.yaw = wrap(st.yaw + dyaw);
 	st.pitch = (st.pitch + dpitch).clamp(PITCH.0, PITCH.1);
 	if dynamic {
-		let input = inp.look != [0, 0] || dz(rs[0]) != 0.0 || dz(rs[1]) != 0.0 || inp.zoom != 0 || inp.aim;
+		let input = inp.look != [0, 0] || rs != [0.0, 0.0] || inp.zoom != 0 || inp.aim;
 		dyn_track(c, st, &fr, hero, piv, input);
 		if !st.aiming {
 			dyn_auto(st, &fr);
@@ -1702,7 +1703,6 @@ pub fn post_field(m: &ee_oracle::Machine) {
 	}
 }
 
-
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -1719,7 +1719,7 @@ mod tests {
 				}
 			}
 			// read_cam / basis_euler's Euler.
-			let e = [r[1][2].atan2(r[2][2]), (-r[0][2]).asin(), r[0][1].atan2(r[0][0])];
+			let e = [r[1][2].fatan2(r[2][2]), (-r[0][2]).fasin(), r[0][1].fatan2(r[0][0])];
 			assert!(e[0].abs() < 1e-5 && (e[1] - p).abs() < 1e-5 && wrap(e[2] - y).abs() < 1e-5);
 			// The eye sits behind and (pitch > 0) above the pivot.
 			let ey = eye([0.0; 3], y, p, 5.0);
@@ -1761,7 +1761,7 @@ mod tests {
 		assert!((r - 1.0).abs() < 1e-5);
 		assert!(ramp1(1.0, 0.0) < 1.0 && 1.0 - ramp1(1.0, 0.0) > ramp1(0.0, 1.0));
 		assert_eq!(sstep(2.0), 1.0);
-		assert!((k_of(0.5) - (1.0 - (-0.04f32).exp())).abs() < 1e-6);
+		assert!((k_of(0.5) - (1.0 - (-0.04f32).fexp())).abs() < 1e-6);
 	}
 
 	fn reset_st() {

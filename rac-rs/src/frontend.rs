@@ -103,7 +103,6 @@ const VIDEO_MODE: u32 = 0x4f3b;
 const HZ50: u32 = 0x4f3c;
 const HZ60: u32 = 0x4f3d;
 const SOUND: u32 = 0x4f22;
-const LANGUAGES: u32 = 0x4f2c;
 const SELECT_FILE: u32 = 0x4f27;
 const NO_SAVE: u32 = 0x5232;
 const EMPTY_SLOT: u32 = 0x5217;
@@ -488,6 +487,7 @@ pub struct Menu {
 	pub press_lang: usize,
 	/// Retail mode: the text ids of the Options rows as the game lists them (viewer/front_mirror.rs); empty = the PAL rows.
 	pub front_rows: Vec<u32>,
+	pub lang_rows: Vec<u32>, // Retail mode: the Language page's row text ids as the game lists them (`frontend_lang`)
 }
 
 /// Where a page's panels, header and rows go (PAL 512x448): the rest rects of the class-0x472 slot
@@ -750,7 +750,7 @@ impl Menu {
 			hold_t: 0.0,
 			ram_alpha: None,
 			press_lang: 0,
-			front_rows: Vec::new(),
+			front_rows: Vec::new(), lang_rows: Vec::new(),
 		}
 	}
 
@@ -870,7 +870,7 @@ impl Menu {
 		found.filter(|s| s.is_finite() && *s > 0.0).unwrap_or(256.0 / (0.63 * 6.0))
 	}
 
-	fn items(&self, text: &Text) -> Vec<(String, bool)> {
+	pub(crate) fn items(&self, text: &Text) -> Vec<(String, bool)> {
 		let t = |id| (crate::retail::prompts::for_text(text.get(id)), true);
 		let onoff = |b: bool| text.get(if b { ON } else { OFF });
 		let s = &self.settings;
@@ -890,7 +890,7 @@ impl Menu {
 			Page::Options if !self.front_rows.is_empty() => self.front_rows.iter().map(|&id| t(id)).collect(),
 			Page::Options if crate::retail::disc::usa() => vec![t(LANGUAGE), t(SOUND)],
 			Page::Options => vec![t(LANGUAGE), t(VIDEO), t(SOUND)],
-			Page::Language => (0..5).map(|i| t(LANGUAGES + i)).collect(),
+			Page::Language => crate::frontend_lang::rows(&self.lang_rows).into_iter().map(t).collect(),
 			Page::Video => vec![(format!("{}  {}", text.get(VIDEO_MODE), text.get(if s.hz60 { HZ60 } else { HZ50 })), true)],
 			Page::Graphics => crate::retail::pcext::title_rows().into_iter().map(|(label, value)| (format!("{}  {}", text.get(label), text.get(value)), true)).collect(),
 			Page::Sound => {
@@ -1018,7 +1018,7 @@ impl Menu {
 			Page::Options => OPTIONS,
 			Page::Language => LANGUAGE,
 			Page::Video => VIDEO_OPTIONS,
-			Page::Graphics => if crate::retail::pcmods::title_open() { crate::retail::pcmods::ID_HEADER } else { crate::retail::pcext::ID_GRAPHICS_HDR },
+			Page::Graphics => if crate::retail::pcmods::title_open() { crate::retail::pcmods::ID_HEADER } else { crate::retail::pcext::cullwarn::title_header_id() },
 			Page::Sound => SOUND_OPTIONS,
 			Page::Weapons => WEAPONS,
 			Page::Gadgets => GADGETS,
@@ -1162,7 +1162,7 @@ impl Menu {
 		}
 		if let (Some(hd), Some(r)) = (&header, lay.title) {
 			// Headers are lavender like unselected rows (retail capture) [I].
-			fit_text(out, &art.font, hd, [r[0] + 6.0, r[1] + 4.0, r[2] - 12.0, r[3] - 8.0], k, ox, UNSELECTED);
+			crate::frontend_lines::fit_header(out, &art.font, hd, [r[0] + 6.0, r[1] + 4.0, r[2] - 12.0, r[3] - 8.0], k, ox, UNSELECTED, self.page == Page::Graphics && hd.contains('\x01'));
 		}
 		let colour = |i: usize, enabled: bool| -> [f32; 4] {
 			if !enabled {
@@ -1936,7 +1936,7 @@ fn globe(out: &mut Vec<Quad>, layers: [usize; 3], inset: i32, planet: usize, g: 
 	}
 }
 
-fn fit_text(out: &mut Vec<Quad>,font: &(usize, Vec<hud::Glyph>), s: &str, r: [f32; 4], k: f32, ox: f32, colour: [f32; 4]) {
+pub(crate) fn fit_text(out: &mut Vec<Quad>,font: &(usize, Vec<hud::Glyph>), s: &str, r: [f32; 4], k: f32, ox: f32, colour: [f32; 4]) {
 	let glyph = |c: char| font.1.get(c as usize).copied().filter(|g| g.adv != 0);
 	let width: f32 = s.chars().filter_map(glyph).map(|g| g.adv as f32).sum();
 	if width <= 0.0 {

@@ -9,7 +9,7 @@ use crate::overlay::Quad;
 use crate::retail::edge_cut_rows;
 
 /// Overlay quads for a window `sw` x `sh` with `k` = window aspect / (4/3); `rows` = the overlay texture height (448, or the
-/// window's height with the sharp HUD: the cut marks stay in the 448 PS2 rows, so the margins split in that row space).
+/// window's height with the sharp HUD: the cut marks stay in the frame's own PS2 rows, 448 in play, 512 in some PAL screens: one entry per row, so the margins split in that row space).
 pub(super) fn quads(tex: usize, sw: f32, sh: f32, k: f32, rows: u32) -> Vec<Quad> {
 	match edge_cut_rows() {
 		Some(cut) if k > 1.0 && rows > 0 => margins(&cut, tex, sw, sh, k, cut.len() as u32),

@@ -66,6 +66,8 @@ pub(in crate::viewer) struct SkyModel {
 	pub(super) dumped: Cell<usize>,
 	/// [PC] Gemlik's animated star (viewer/star.rs).
 	pub(in crate::viewer) star: crate::viewer::star::StarFx,
+	/// [PC] The starfield's pipeline (viewer/starfield.rs), made once per Gpu.
+	pub(in crate::viewer) starfield: crate::viewer::starfield::StarPipe,
 }
 
 impl SkyModel {
@@ -96,16 +98,24 @@ impl SkyModel {
 }
 
 impl Gpu {
-	/// Every frame before the level pass: decides whether the new sky is on, recaptures the retail sky when due.
-	pub(in crate::viewer) fn cloud_sky(&self, enc: &mut wgpu::CommandEncoder, scene: &Scene, u: &Uniforms, gfx: &crate::retail::pcext::Graphics) {
+	/// Every frame before the level pass: decides whether the new sky is on, recaptures the retail sky when due. `active` = the
+	/// clouds' own gate (`volclouds::Input::new`: Enhanced pass with the modern renderer, not under water, no warp, no ship fight):
+	/// where the clouds are not drawn the retail shells stay.
+	pub(in crate::viewer) fn cloud_sky(&self, enc: &mut wgpu::CommandEncoder, scene: &Scene, u: &Uniforms, gfx: &crate::retail::pcext::Graphics, active: bool) {
 		let sm = &self.volclouds.sky;
-		let on = input::level(gfx) > 0 && params::look(self.level).is_some() && !scene.warp_shown && !self.ship_fight;
+		let on = active && input::level(gfx) > 0 && params::look(self.level).is_some();
 		let Some(sky) = scene.sky.as_ref().filter(|s| on && !s.draws.is_empty()) else {
 			sm.on.set(None);
 			sm.captured.set(None);
 			return;
 		};
-		let r = sm.res.get_or_init(|| self.sky_res());
+		// [PC] pipe_guard.rs: a driver that refuses the sky model shaders (DX12 FXC) keeps retail's sky, it does not crash the game.
+		let built = || crate::viewer::pipe_guard::guard(&self.device, crate::viewer::pipe_guard::Effect::VolClouds, || self.sky_res()).map(|r| sm.res.get_or_init(|| r));
+		let Some(r) = sm.res.get().or_else(built) else {
+			sm.on.set(None);
+			sm.captured.set(None);
+			return;
+		};
 		let sun = params::sun_dir(crate::viewer::post::sky_sun(self.level), params::key_to_light(&self.sun_rows()));
 		sm.sun.set(sun);
 		let due = match sm.captured.get() {

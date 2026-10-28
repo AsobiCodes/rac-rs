@@ -30,20 +30,24 @@ pub(super) fn hero_layers(parts: Option<&crate::retail::HeroParts>, p: &crate::p
 
 /// Modern controls: the `PoseFix` (retail/strafe.rs) of the drawn skin matrices `drawn` against the hero pose retail ticked: its
 /// own clock (`clock`, before `draw_clock` reversed the rig's) and FROM frame, its leg bends; None while the strafe draw is off.
-pub(super) fn strafe_fix(rig: &anim::PropAnim, a: &anim::Animated, q: &crate::retail::HeroParts, clock: Option<crate::retail::Clock>, drawn: &[[f32; 12]]) -> Option<crate::retail::strafe::PoseFix> {
+/// The rig is posed with retail's clock and FROM frame put in place and its own put back after (no clone of the rig per pose).
+pub(super) fn strafe_fix(rig: &mut anim::PropAnim, a: &anim::Animated, q: &crate::retail::HeroParts, clock: Option<crate::retail::Clock>, drawn: &[[f32; 12]]) -> Option<crate::retail::strafe::PoseFix> {
 	crate::retail::strafe::pose_fix(q.strafe, a, drawn, || {
-		let mut l = rig.clone();
+		let own_clock = rig.clock.clone();
 		if let Some(c) = clock {
-			let k = &mut l.clock;
+			let k = &mut rig.clock;
 			(k.cur, k.next, k.old_seq, k.new_seq, k.p, k.m, k.r) = (c.cur as i32, c.next as i32, c.old_seq, c.new_seq, c.p, c.m, c.r);
 		}
 		let joints = a.skeleton.parents.len();
-		if !q.from_frame.is_empty() && joints > 0 {
-			l.from_ram = anim::parse_frame(&q.from_frame, 0, joints).ok();
-		}
+		let own_from = (!q.from_frame.is_empty() && joints > 0).then(|| std::mem::replace(&mut rig.from_ram, anim::parse_frame(&q.from_frame, 0, joints).ok()));
 		let mut fx = q.hero_fx.clone();
 		fx.extend_from_slice(&q.pose_ops);
-		l.pose_held(a, &fx, None, None, &[None, None])
+		let logic = rig.pose_held(a, &fx, None, None, &[None, None]);
+		rig.clock = own_clock;
+		if let Some(f) = own_from {
+			rig.from_ram = f;
+		}
+		logic
 	})
 }
 

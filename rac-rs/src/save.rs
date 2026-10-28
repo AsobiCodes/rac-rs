@@ -408,23 +408,6 @@ impl Summary {
 	}
 }
 
-#[cfg(not(windows))]
-fn local_clock() -> [u8; 8] {
-	let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-	let (days, rem) = ((secs / 86400) as i64, (secs % 86400) as u32);
-	// Days since 1970-01-01 to a civil date.
-	let z = days + 719468;
-	let era = z.div_euclid(146097);
-	let doe = z.rem_euclid(146097);
-	let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-	let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-	let mp = (5 * doy + 2) / 153;
-	let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
-	let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-	let year = (yoe + era * 400 + i64::from(month <= 2)) as u32;
-	clock_bytes(year, month, day, rem / 3600, rem / 60 % 60, rem % 60)
-}
-
 pub fn slot_path(slot: usize) -> PathBuf {
 	let dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())).unwrap_or_default();
 	dir.join("saves").join(format!("slot{slot}.bin"))

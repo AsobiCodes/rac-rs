@@ -6,9 +6,12 @@
 //!   callback's words show up in the next field's jobs, none in its own). So at field N's end the oracle has kicked
 //!   chain N - 1 and chain N sits in RAM (tag list page + packet buffers, double-buffered).
 //! - The chain start: the start of the chain kicked this field (chain N - 1) is found by matching its first job
-//!   (stage 7: a known start whose walk passes through the field's owners, the one not used last field first; else a
-//!   4 KB page whose first tag carries the kicked chain's first tag words): the tag pages alternate (Rilgar r0230
-//!   0x330000 / 0x490000; Eudora two pages with the same first block, so a first-block match alone is ambiguous).
+//!   (`choose`). A start counts only if its first tag opens like job 0 (the same two VIF words), its walk hits the first tag
+//!   (`c0`) of EVERY owner of the field (`OwnerHits`; a walk that hits none is never taken) and passes through and leaves the last
+//!   owner's range. Tried first: the level's known starts, the one not used last field first; when none hits every owner, a scan of
+//!   the 4 KB pages that open like job 0 (only a scan winner is remembered; a scan that could not beat a partial known start is not
+//!   repeated while that start gives the same hits, `Starts.dry`). The known starts are forgotten on a level change. The tag pages
+//!   alternate (Rilgar r0230 0x330000 / 0x490000; Eudora two pages with the same first block, so a first-block match alone is ambiguous).
 //! - Chain N is walked from RAM the way the oracle's DMA walk does it (`mem.rs vif1_kick`: tag ids 0-7, call / ret
 //!   stack, TTE tag words with block marks, a piece ends at a tag with the IRQ bit = one kick) only up to the end of
 //!   the field's last VU1 owner (point P): the chain's final tag is written after the field's end (r0230: RAM at the
@@ -114,10 +117,8 @@ pub struct Picker {
 	/// The model until the first `submit` moves it to its thread.
 	model: Option<VuModel>,
 	th: Option<Sender<VuJob>>,
-	/// Chain start addresses that walked through an owner (Rilgar and Eudora alternate two tag pages) and the one
-	/// used last field.
-	known: Vec<u32>,
-	last: Option<u32>,
+	/// Chain start addresses of this level (see `Starts`).
+	starts: Starts,
 	spare: Spare,
 	spare_rx: Receiver<Spare>,
 }
@@ -321,6 +322,189 @@ impl Shadow {
 	}
 }
 
+/// Which of a field's VU1 owners a chain walk meets (v0.4.1, Hoven / Kalebo water that vanished): `run` finds an owner's packets by the
+/// tag that STARTS its range (`c0`, a tag address of the walk), so a candidate chain start is only the field's chain when its walk hits
+/// the `c0` of every owner. Passing through and leaving the last owner's range is not enough: a stale tag page (the other page of the
+/// pair, or one from an earlier field) whose old tags lie in the same packet buffer passes that test with other tag addresses and
+/// leaves every owner without output (the effects layer lost its water, in the user's log "walked 203374 owners 1 drawn []").
+struct OwnerHits {
+	/// The owners' first tags, sorted, one entry per distinct address.
+	c0: Vec<u32>,
+	lo: u32,
+	hi: u32,
+	seen: Vec<bool>,
+}
+
+impl OwnerHits {
+	/// `tg`: (owner index, c0, c1) as `prep` collects them.
+	fn new(tg: &[(usize, u32, u32)]) -> OwnerHits {
+		let mut c0: Vec<u32> = tg.iter().map(|t| t.1).collect();
+		c0.sort_unstable();
+		c0.dedup();
+		let lo = c0.first().copied().unwrap_or(0);
+		let hi = tg.iter().map(|t| t.2).max().unwrap_or(0);
+		let seen = vec![false; c0.len()];
+		OwnerHits { c0, lo, hi, seen }
+	}
+
+	/// The walk is at the tag `tadr` (called for every tag of the walk, before it is read).
+	fn note(&mut self, tadr: u32) {
+		if tadr >= self.lo && tadr < self.hi {
+			if let Ok(i) = self.c0.binary_search(&tadr) {
+				self.seen[i] = true;
+			}
+		}
+	}
+
+	/// Owners (distinct first tags) the walk has hit.
+	fn count(&self) -> usize {
+		self.seen.iter().filter(|&&s| s).count()
+	}
+
+	/// Owners (distinct first tags) in all.
+	fn need(&self) -> usize {
+		self.c0.len()
+	}
+}
+
+/// The best candidate chain so far: the first one that hits every owner wins at once; else the one that hits the most owners (the
+/// first of equals), which is what the walk did before the owners were checked (the first that passed through the last one).
+struct Pick<T> {
+	best: Option<(T, usize)>,
+	need: usize,
+}
+
+impl<T> Pick<T> {
+	fn new(need: usize) -> Pick<T> {
+		Pick { best: None, need }
+	}
+
+	/// Offers a candidate that hit `hits` owners; true: it hits all of them (stop looking).
+	fn offer(&mut self, item: T, hits: usize) -> bool {
+		if self.best.as_ref().is_none_or(|b| hits > b.1) {
+			self.best = Some((item, hits));
+		}
+		hits >= self.need
+	}
+
+	/// No candidate hits every owner yet.
+	fn wants_more(&self) -> bool {
+		self.best.as_ref().is_none_or(|b| b.1 < self.need)
+	}
+}
+
+/// The chain starts `Picker::prep` found on this level (v0.4.1, Hoven river that vanished). Rilgar and Eudora alternate two tag pages, so
+/// the starts that walked through an owner are kept and tried first. They belong to ONE level: the packet buffers lie elsewhere on the
+/// next one, where a kept page can hold vertex floats that read as DMA tags (Hoven after Pokitaru: 0x32c000 walked 3.17M words and still
+/// met the river's first tag), so `enter` forgets them when the level changes.
+#[derive(Default)]
+struct Starts {
+	level: Option<u32>,
+	/// Starts that walked through an owner, the oldest first (at most 4).
+	known: Vec<u32>,
+	/// The start used last field.
+	last: Option<u32>,
+	/// (start, hits): the last page scan found nothing better than this known start's partial hit count. While the best known candidate is
+	/// that start with the same hits, `choose` does not scan again (a level where some owner's first tag is never a walk tag would scan
+	/// the 32 MB of RAM every field).
+	dry: Option<(u32, usize)>,
+}
+
+impl Starts {
+	/// A field of `level` begins. True: the level changed and starts were forgotten.
+	fn enter(&mut self, level: u32) -> bool {
+		if self.level == Some(level) {
+			return false;
+		}
+		self.level = Some(level);
+		let had = !self.known.is_empty() || self.last.is_some();
+		self.known.clear();
+		self.last = None;
+		self.dry = None;
+		had
+	}
+
+	/// The field took the start `chosen.0` (`.1`: the page scan found it) or had no chain: the start is the one used last, and a start the
+	/// scan found is kept. A known start is never added again, so a stale page is not promoted by being tried.
+	fn used(&mut self, chosen: Option<(u32, bool)>) {
+		if let Some((a, true)) = chosen {
+			self.remember(a);
+		}
+		self.last = chosen.map(|c| c.0);
+	}
+
+	/// The starts to try, in order: the known ones except the one used last field (alternating tag pages), then that one. Only pages whose
+	/// first qword (`first`) carries the kicked chain's first job words (`opens_like`, the test of the page scan) are tried; the number
+	/// left out comes second.
+	fn tryable(&self, job0: Option<(u32, u32)>, first: impl Fn(u32) -> u128) -> (Vec<u32>, usize) {
+		let mut all: Vec<u32> = self.known.iter().copied().filter(|&a| Some(a) != self.last).collect();
+		all.extend(self.last);
+		let n = all.len();
+		all.retain(|&a| opens_like(first(a), job0));
+		let left = n - all.len();
+		(all, left)
+	}
+
+	/// A start the page scan found.
+	fn remember(&mut self, a: u32) {
+		if !self.known.contains(&a) {
+			self.known.push(a);
+			if self.known.len() > 4 {
+				self.known.remove(0);
+			}
+		}
+	}
+}
+
+/// Can the page whose first qword is `t` start the chain the machine kicked? Its first tag carries the same two VIF words as the kicked
+/// chain's first job `job0` (words 0 and 1). No job (or one with fewer words): nothing to compare, every page may.
+fn opens_like(t: u128, job0: Option<(u32, u32)>) -> bool {
+	job0.is_none_or(|(a0, a1)| (t >> 64) as u32 == a0 && (t >> 96) as u32 == a1)
+}
+
+/// The chain start of a field (pure, `Picker::prep` gives it the machine walk as `plan_at`). `cands`: the known starts to try, in order;
+/// `need`: the number of distinct owner first tags; `plan_at(start)`: the walk of that start (None: it does not pass through and leave
+/// the last owner) with the number of first tags it hit. A walk that hits none is no candidate (`run` would find no packets for any owner
+/// and the chain would be fed from the wrong place). The first candidate that hits every owner wins; else the page scan `scan` (the
+/// addresses of the pages that open like job 0 and are not known yet, lazily) is tried, unless `dry` says it already found nothing
+/// better than the best known candidate; else the candidate with the most hits stays. `dry` is set when a scan could not beat a known
+/// partial start and cleared when it found a better one or a full candidate turned up. Returns (start, plan, found by the scan).
+fn choose<P, I: Iterator<Item = u32>>(
+	need: usize,
+	cands: &[u32],
+	dry: &mut Option<(u32, usize)>,
+	scan: Option<impl FnOnce() -> I>,
+	mut plan_at: impl FnMut(u32) -> Option<(P, usize)>,
+) -> Option<(u32, P, bool)> {
+	let mut pick: Pick<(u32, P, bool)> = Pick::new(need);
+	for &a in cands {
+		if let Some((plan, h)) = plan_at(a).filter(|p| p.1 > 0) {
+			if pick.offer((a, plan, false), h) {
+				break;
+			}
+		}
+	}
+	if !pick.wants_more() {
+		*dry = None;
+	} else {
+		let known = pick.best.as_ref().map(|b| (b.0.0, b.1));
+		if let Some(scan) = scan.filter(|_| !(known.is_some() && *dry == known)) {
+			for a in scan() {
+				if let Some((plan, h)) = plan_at(a).filter(|p| p.1 > 0) {
+					if pick.offer((a, plan, true), h) {
+						break;
+					}
+				}
+			}
+			*dry = match &pick.best {
+				Some(((a, _, false), h)) => Some((*a, *h)),
+				_ => None,
+			};
+		}
+	}
+	pick.best.map(|((a, p, s), _)| (a, p, s))
+}
+
 impl Picker {
 	/// `dir`: the savestate directory (VU1 memories as the savestate left them; zero when missing, e.g. a cold boot).
 	pub fn new(dir: &str) -> Picker {
@@ -337,7 +521,7 @@ impl Picker {
 		});
 		let (btx, spare_rx) = channel();
 		let model = VuModel { vif, vu: Vu1::new(&d, &mi), full, prev: Vec::new(), fails: 0, scratch: Out::default(), back: Some(btx), chk, chk_n: (0, 0), chk_fields: 0, fields_seen: 0 };
-		Picker { model: Some(model), th: None, known: Vec::new(), last: None, spare: Spare::default(), spare_rx }
+		Picker { model: Some(model), th: None, starts: Starts::default(), spare: Spare::default(), spare_rx }
 	}
 }
 
@@ -379,9 +563,11 @@ impl Shadow {
 
 impl Picker {
 	/// The field's end, on the worker (reads RAM): the unclaimed VU1 owners of `own` and chain N walked from RAM up to
-	/// the end of the last one. The start: a known start whose walk passes through the owners (the one not used last
-	/// field first: alternating tag pages), else a 4 KB page whose first tag carries the kicked chain's first tag words
-	/// and whose walk passes through them. `run` checks the walk against the next field's jobs word for word (`fails`).
+	/// the end of the last one. The start (`choose`): the first tag must open like job 0 (the kicked chain's first two VIF words), the
+	/// walk must hit the first tag (`c0`) of every owner (`OwnerHits`) and leave the last owner's range. Known starts of this level come
+	/// first (the one not used last field first: alternating tag pages); only when none hits every owner, a scan of the 4 KB pages that
+	/// open like job 0 (a scan winner is remembered, a dry scan is not repeated). The starts are forgotten when the level changes.
+	/// `run` checks the walk against the next field's jobs word for word (`fails`).
 	pub fn prep(&mut self, m: &Machine, own: &[Own], bi: &super::efx_draw::BuildIn, pending: Pending) -> Work {
 		let t0 = std::time::Instant::now();
 		for s in self.spare_rx.try_iter() {
@@ -411,68 +597,61 @@ impl Picker {
 			}
 		}
 		sp_add(1, t_cen.elapsed().as_nanos() as u64);
+		self.starts.enter(bi.level);
+		let job0 = pending.first().and_then(|j| Some((*j.0.first()?, *j.0.get(1)?)));
 		let mut chain = None;
+		let mut used = None;
 		if let Some(&(_, lc0, lc1)) = tg.last() {
-			let try_walk = |s: u32, sp: &mut Spare| -> Option<Vec<Piece>> {
+			// Plan first (tags only): a start that does not pass through the owners costs no data copy, the winner is copied once.
+			// Returns the plan and how many owners' first tags it hit (none hit: not a candidate).
+			let plan_at = |s: u32| -> Option<(Vec<Vec<PlanTag>>, usize)> {
 				let mut inside = false;
 				let mut left = false;
-				// Plan first (tags only): a start that does not pass through the owners costs no data copy, the winner is copied once.
+				let mut hits = OwnerHits::new(&tg);
 				let t_pl = std::time::Instant::now();
 				let plan = plan_chain(m, s, |t| {
 					let i = t >= lc0 && t < lc1;
 					left = inside && !i;
 					inside |= i;
+					hits.note(t);
 					left
 				});
 				sp_add(2, t_pl.elapsed().as_nanos() as u64);
 				let plan = plan?;
 				sp_add(7, plan.iter().map(|p| p.len() as u64).sum());
-				left.then(|| {
-					let t_b = std::time::Instant::now();
-					let c = build_chain(m, &plan, sp);
-					sp_add(3, t_b.elapsed().as_nanos() as u64);
-					sp_add(5, c.iter().map(|p| p.w.len() as u64).sum());
-					c
-				})
+				(left && hits.count() > 0).then(|| (plan, hits.count()))
 			};
-			let mut cand: Vec<u32> = self.known.iter().copied().filter(|&a| Some(a) != self.last).collect();
-			cand.extend(self.last);
-			for a in cand {
-				if let Some(c) = try_walk(a, &mut self.spare) {
-					chain = Some((a, c));
-					break;
-				}
-			}
-			if chain.is_none() {
-				// Discovery: a page whose first tag carries the kicked chain's first tag words (job 0's first two words).
-				if let Some((Some(&a0), Some(&a1))) = pending.first().map(|j| (j.0.first(), j.0.get(1))) {
-					let ram = (m.cpu.mem.ram.len() as u32) & !0xfff;
-					let t_disc = std::time::Instant::now();
+			let (cand, left_out) = self.starts.tryable(job0, |a| qw(m, a));
+			// Discovery: a page whose first tag carries the kicked chain's first tag words (job 0's first two words).
+			let t_disc = std::cell::Cell::new(None);
+			let known = &self.starts.known;
+			let scan = job0.map(|j| {
+				let t_disc = &t_disc;
+				move || {
+					t_disc.set(Some(std::time::Instant::now()));
 					sp_add(6, 1);
-					for a in (0..ram).step_by(0x1000) {
-						let t = qw(m, a);
-						if (t >> 64) as u32 != a0 || (t >> 96) as u32 != a1 || self.known.contains(&a) {
-							continue;
-						}
-						if let Some(c) = try_walk(a, &mut self.spare) {
-							self.known.push(a);
-							if self.known.len() > 4 {
-								self.known.remove(0);
-							}
-							chain = Some((a, c));
-							break;
-						}
-					}
-					sp_add(4, t_disc.elapsed().as_nanos() as u64);
+					let ram = (m.cpu.mem.ram.len() as u32) & !0xfff;
+					(0..ram).step_by(0x1000).filter(move |&a| opens_like(qw(m, a), Some(j)) && !known.contains(&a))
 				}
+			});
+			let chosen = choose(OwnerHits::new(&tg).need(), &cand, &mut self.starts.dry, scan, plan_at);
+			if let Some(t) = t_disc.get() {
+				sp_add(4, t.elapsed().as_nanos() as u64);
 			}
-			if chain.is_none() && log() {
-				eprintln!("efxvu no chain start walks through the last owner {lc0:x} (known {:x?})", self.known);
+			if let Some((a, plan, from_scan)) = chosen {
+				let t_b = std::time::Instant::now();
+				let c = build_chain(m, &plan, &mut self.spare);
+				sp_add(3, t_b.elapsed().as_nanos() as u64);
+				sp_add(5, c.iter().map(|p| p.w.len() as u64).sum());
+				chain = Some(c);
+				used = Some((a, from_scan));
+			} else if log() {
+				eprintln!("efxvu no chain: no start hits an owner's first tag and leaves the last owner {lc0:x} (owners {}, known {:x?}, {left_out} left out by their first words, dry {:x?})", tg.len(), self.starts.known, self.starts.dry);
 			}
 		}
-		self.last = chain.as_ref().map(|c| c.0);
+		self.starts.used(used);
 		let fns = tg.iter().map(|t| own[t.0].fnp).collect();
-		Work { chain: chain.map(|c| c.1), tg, walk_ms: t0.elapsed().as_secs_f64() * 1e3, fns, vj: pending }
+		Work { chain, tg, walk_ms: t0.elapsed().as_secs_f64() * 1e3, fns, vj: pending }
 	}
 
 	/// The field's VU1 work and effects build go to the VU1 thread (started on the first call) and run while the worker
@@ -834,5 +1013,298 @@ pub fn prof_wait(ns: u64) {
 	}
 	if ACC[2].fetch_add(1, Relaxed) % 200 == 199 {
 		eprintln!("vu1prof: tick waited for the VU1 reply: avg {:.3} ms, worst {:.2} ms, > 0.1 ms in {} of 200 ticks", ACC[0].swap(0, Relaxed) as f64 / 200e6, ACC[1].swap(0, Relaxed) as f64 / 1e6, ACC[3].swap(0, Relaxed));
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// Two owners: [0x1000, 0x1800) and [0x1800, 0x2000).
+	fn tg() -> Vec<(usize, u32, u32)> {
+		vec![(0, 0x1000, 0x1800), (3, 0x1800, 0x2000)]
+	}
+
+	/// The v0.4.1 water bug: a stale tag page (old tags in the same packet buffer) passes through the last owner's range and leaves it,
+	/// but none of its tag addresses is an owner's first tag, so `run` finds no packets for any owner. It must count as no hit.
+	#[test]
+	fn a_stale_tag_page_in_the_owners_ranges_hits_no_first_tag() {
+		let mut stale = OwnerHits::new(&tg());
+		for t in [0x0f00u32, 0x1010, 0x1400, 0x1810, 0x1ff0, 0x2000] {
+			stale.note(t);
+		}
+		assert_eq!((stale.count(), stale.need()), (0, 2));
+		let mut real = OwnerHits::new(&tg());
+		for t in [0x0f00u32, 0x1000, 0x1400, 0x1800, 0x1ff0, 0x2000] {
+			real.note(t);
+		}
+		assert_eq!((real.count(), real.need()), (2, 2));
+	}
+
+	#[test]
+	fn a_walk_that_meets_only_some_first_tags_counts_them() {
+		let mut h = OwnerHits::new(&tg());
+		for t in [0x1000u32, 0x1000, 0x1400] {
+			h.note(t);
+		}
+		assert_eq!(h.count(), 1, "a first tag met twice counts once");
+		// outside every owner range nothing is looked up, whatever the address
+		h.note(0x0ff0);
+		h.note(0x2000);
+		assert_eq!(h.count(), 1);
+	}
+
+	#[test]
+	fn owners_with_the_same_first_tag_are_one_hit_and_no_owners_need_nothing() {
+		let h = OwnerHits::new(&[(0, 0x1000, 0x1800), (1, 0x1000, 0x1800), (2, 0x1800, 0x1c00)]);
+		assert_eq!(h.need(), 2);
+		let none = OwnerHits::new(&[]);
+		assert_eq!((none.need(), none.count()), (0, 0));
+	}
+
+	#[test]
+	fn the_first_candidate_that_hits_every_owner_wins_even_after_a_stale_one() {
+		// The order `prep` tries them in: the other page of the pair first, then the page used last field.
+		let mut pick = Pick::new(2);
+		assert!(pick.wants_more());
+		assert!(!pick.offer("stale page", 0), "passes through the last owner but meets no first tag");
+		assert!(pick.wants_more());
+		assert!(pick.offer("real page", 2));
+		assert!(!pick.wants_more());
+		assert_eq!(pick.best.map(|b| b.0), Some("real page"));
+		// a later candidate is not needed: the caller stops at the first full one, but offering more cannot take the win away
+		let mut pick = Pick::new(2);
+		assert!(pick.offer("real", 2));
+		assert!(pick.offer("other full", 2));
+		assert_eq!(pick.best.map(|b| b.0), Some("real"));
+	}
+
+	#[test]
+	fn without_a_full_candidate_the_one_with_most_hits_is_used_like_before() {
+		let mut pick = Pick::new(3);
+		assert!(!pick.offer("a", 1));
+		assert!(!pick.offer("b", 2));
+		assert!(!pick.offer("c", 2), "the first of equals stays");
+		assert!(pick.wants_more());
+		assert_eq!(pick.best.map(|b| b.0), Some("b"));
+		let empty: Pick<&str> = Pick::new(1);
+		assert!(empty.best.is_none() && empty.wants_more());
+	}
+
+	/// The first qword of a tag page: low half the DMA tag, high half the two VIF words the page opens with.
+	fn page(w2: u32, w3: u32) -> u128 {
+		(w3 as u128) << 96 | (w2 as u128) << 64 | 0x1234
+	}
+
+	/// Starts as Pokitaru (level 11) left them: two pages alternate, 0x49c000 was used last.
+	fn pokitaru() -> Starts {
+		let mut s = Starts::default();
+		assert!(!s.enter(11), "the first level has nothing to forget");
+		s.remember(0x32c000);
+		s.remember(0x49c000);
+		s.last = Some(0x49c000);
+		s
+	}
+
+	/// The v0.4.1 Hoven bug: the kept pages of the old level are tried first on the next one (known / last were set in `Picker::new`
+	/// only). A level change forgets them; the same level keeps them.
+	#[test]
+	fn a_level_change_forgets_the_chain_starts_of_the_old_level() {
+		let mut s = pokitaru();
+		assert!(!s.enter(11), "same level: nothing forgotten");
+		assert_eq!((s.known.clone(), s.last), (vec![0x32c000, 0x49c000], Some(0x49c000)));
+		assert!(s.enter(12), "Hoven: the Pokitaru pages are forgotten");
+		assert!(s.known.is_empty() && s.last.is_none());
+		assert!(!s.enter(12));
+		let (tried, left) = s.tryable(Some((1, 2)), |_| page(1, 2));
+		assert!(tried.is_empty() && left == 0, "a stale known start from another level is not tried");
+	}
+
+	/// Even on the same level a kept page is only tried when its first tag opens with job 0's words (as the page scan demands).
+	#[test]
+	fn a_known_start_whose_first_tag_words_differ_from_job_0_is_skipped() {
+		let s = pokitaru();
+		let ram = |a: u32| if a == 0x32c000 { page(0x3f80_0000, 0x4000_0000) } else { page(0x1100_0000, 0x0100_0000) };
+		// 0x32c000 holds floats now (vertex data of the next level); 0x49c000 still opens like the kicked chain.
+		let (tried, left) = s.tryable(Some((0x1100_0000, 0x0100_0000)), ram);
+		assert_eq!((tried, left), (vec![0x49c000], 1));
+		// both open like it: the page not used last field first, then the one used last field
+		let (tried, left) = s.tryable(Some((0x1100_0000, 0x0100_0000)), |_| page(0x1100_0000, 0x0100_0000));
+		assert_eq!((tried, left), (vec![0x32c000, 0x49c000], 0));
+		// the second word counts too
+		let (tried, _) = s.tryable(Some((0x1100_0000, 0x0100_0000)), |_| page(0x1100_0000, 0x0200_0000));
+		assert!(tried.is_empty());
+	}
+
+	#[test]
+	fn without_a_job_every_known_start_is_tried_and_the_scan_remembers_at_most_four() {
+		let s = pokitaru();
+		assert_eq!(s.tryable(None, |_| 0), (vec![0x32c000, 0x49c000], 0));
+		assert!(opens_like(0, None) && !opens_like(0, Some((1, 0))) && opens_like(page(5, 6), Some((5, 6))));
+		let mut s = Starts::default();
+		for a in [0x1000u32, 0x2000, 0x3000, 0x3000, 0x4000, 0x5000] {
+			s.remember(a);
+		}
+		assert_eq!(s.known, vec![0x2000, 0x3000, 0x4000, 0x5000], "no duplicate, the oldest goes");
+	}
+
+	use std::cell::{Cell, RefCell};
+
+	/// A fake chain walker for `choose`: `table` maps a start to the owners' first tags its walk hits (None: it does not leave the last
+	/// owner, `plan_at` gives None); the plan is the start itself; `seen` records the starts walked, in order.
+	fn fake<'a>(table: &'a [(u32, Option<usize>)], seen: &'a RefCell<Vec<u32>>) -> impl FnMut(u32) -> Option<(u32, usize)> + 'a {
+		move |a| {
+			seen.borrow_mut().push(a);
+			table.iter().find(|t| t.0 == a).and_then(|t| t.1).map(|n| (a, n))
+		}
+	}
+
+	/// The page scan: these pages, lazily; `called` counts the scans started.
+	fn pages<'a>(list: &[u32], called: &'a Cell<u32>) -> Option<impl FnOnce() -> std::vec::IntoIter<u32> + 'a> {
+		let v = list.to_vec();
+		Some(move || {
+			called.set(called.get() + 1);
+			v.into_iter()
+		})
+	}
+
+	/// No page scan possible (the field kicked no job).
+	fn no_scan() -> Option<fn() -> std::vec::IntoIter<u32>> {
+		None
+	}
+
+	#[test]
+	fn the_scan_runs_only_when_no_known_start_hits_every_owner() {
+		let (seen, scans, mut dry) = (RefCell::new(vec![]), Cell::new(0), None);
+		let table = [(0xa000, Some(3)), (0xb000, Some(1)), (0xc000, Some(3))];
+		// the first full candidate wins at once: neither the next candidate nor the scan is touched
+		let r = choose(3, &[0xa000, 0xb000], &mut dry, pages(&[0xc000], &scans), fake(&table, &seen));
+		assert_eq!(r, Some((0xa000, 0xa000, false)));
+		assert_eq!((seen.borrow().clone(), scans.get()), (vec![0xa000], 0));
+		// only a partial candidate: the scan runs and its full page wins
+		seen.borrow_mut().clear();
+		let r = choose(3, &[0xb000], &mut dry, pages(&[0xc000], &scans), fake(&table, &seen));
+		assert_eq!(r, Some((0xc000, 0xc000, true)));
+		assert_eq!((seen.borrow().clone(), scans.get()), (vec![0xb000, 0xc000], 1));
+		// a scan page after the first full one is not walked
+		seen.borrow_mut().clear();
+		let r = choose(3, &[], &mut dry, pages(&[0xc000, 0xa000], &scans), fake(&table, &seen));
+		assert_eq!((r, seen.borrow().clone()), (Some((0xc000, 0xc000, true)), vec![0xc000]));
+		// no candidates and no scan possible: no chain
+		assert_eq!(choose(3, &[], &mut dry, no_scan(), fake(&table, &seen)), None);
+	}
+
+	#[test]
+	fn without_a_full_candidate_the_known_start_with_most_hits_stays_when_the_scan_finds_nothing_better() {
+		let (seen, scans, mut dry) = (RefCell::new(vec![]), Cell::new(0), None);
+		let table = [(0xa000, Some(1)), (0xb000, Some(2)), (0xc000, Some(2)), (0xd000, None)];
+		// b hits more than a; the scan page c only ties it: the known b stays (the first of equals), nothing is remembered
+		let r = choose(3, &[0xa000, 0xb000], &mut dry, pages(&[0xd000, 0xc000], &scans), fake(&table, &seen));
+		assert_eq!(r, Some((0xb000, 0xb000, false)));
+		assert_eq!(dry, Some((0xb000, 2)));
+		// a scan page that hits more beats it (a fresh latch: the same start with the same hits would not be scanned again)
+		let table = [(0xa000, Some(1)), (0xb000, Some(2)), (0xc000, Some(2)), (0xe000, Some(3))];
+		let r = choose(4, &[0xa000, 0xb000], &mut None, pages(&[0xc000, 0xe000], &scans), fake(&table, &seen));
+		assert_eq!(r, Some((0xe000, 0xe000, true)));
+	}
+
+	#[test]
+	fn only_a_scan_winner_is_remembered_and_the_start_taken_is_the_last_one() {
+		let (seen, scans) = (RefCell::new(vec![]), Cell::new(0));
+		let table = [(0xa000, Some(1)), (0xb000, Some(2)), (0xc000, Some(1))];
+		let mut s = Starts::default();
+		s.enter(7);
+		s.remember(0xa000);
+		// field 1: a is partial, the scan finds b (full): b is remembered and is the last start
+		let (cand, _) = s.tryable(None, |_| 0);
+		let r = choose(2, &cand, &mut s.dry, pages(&[0xb000], &scans), fake(&table, &seen));
+		s.used(r.map(|c| (c.0, c.2)));
+		assert_eq!((s.known.clone(), s.last), (vec![0xa000, 0xb000], Some(0xb000)));
+		// field 2: the known b wins (a is tried first, the page used last field second): nothing new is remembered
+		let (cand, _) = s.tryable(None, |_| 0);
+		assert_eq!(cand, vec![0xa000, 0xb000]);
+		let r = choose(2, &cand, &mut s.dry, pages(&[0xc000], &scans), fake(&table, &seen));
+		assert_eq!(r, Some((0xb000, 0xb000, false)));
+		s.used(r.map(|c| (c.0, c.2)));
+		assert_eq!((s.known.clone(), s.last), (vec![0xa000, 0xb000], Some(0xb000)));
+		// field 3: only partial starts, the scan page c is no better than the known a: a is taken, not remembered twice, and is last
+		let mut s2 = Starts::default();
+		s2.remember(0xa000);
+		let r = choose(2, &[0xa000], &mut s2.dry, pages(&[0xc000], &scans), fake(&table, &seen));
+		assert_eq!(r, Some((0xa000, 0xa000, false)));
+		s2.used(r.map(|c| (c.0, c.2)));
+		assert_eq!((s2.known.clone(), s2.last), (vec![0xa000], Some(0xa000)));
+		// a scan page that only ties with nothing known is a scan winner too (it was the best the scan had)
+		let mut s3 = Starts::default();
+		let r = choose(2, &[], &mut s3.dry, pages(&[0xc000], &scans), fake(&table, &seen));
+		assert_eq!(r, Some((0xc000, 0xc000, true)));
+		s3.used(r.map(|c| (c.0, c.2)));
+		assert_eq!((s3.known.clone(), s3.last), (vec![0xc000], Some(0xc000)));
+		// no chain this field: the last start is forgotten, the known ones stay
+		s3.used(None);
+		assert_eq!((s3.known.clone(), s3.last), (vec![0xc000], None));
+	}
+
+	#[test]
+	fn a_walk_that_hits_no_owner_is_no_candidate_and_no_scan_winner() {
+		let (seen, scans, mut dry) = (RefCell::new(vec![]), Cell::new(0), None);
+		let table = [(0xa000, Some(0)), (0xb000, Some(0)), (0xc000, Some(1))];
+		// the walk passes through and leaves the last owner but meets no first tag: not taken, known or found by the scan
+		assert_eq!(choose(2, &[0xa000], &mut dry, pages(&[0xb000], &scans), fake(&table, &seen)), None);
+		assert_eq!((dry, scans.get()), (None, 1), "no known candidate, so nothing to latch");
+		// a 1-hit page behind a 0-hit one is taken
+		let r = choose(2, &[0xa000], &mut dry, pages(&[0xb000, 0xc000], &scans), fake(&table, &seen));
+		assert_eq!(r, Some((0xc000, 0xc000, true)));
+		// a 0-hit known start does not make the next field skip the scan either
+		assert_eq!(choose(2, &[0xa000], &mut dry, pages(&[0xb000], &scans), fake(&table, &seen)), None);
+		assert_eq!(scans.get(), 3);
+	}
+
+	#[test]
+	fn a_dry_scan_is_not_repeated_while_the_known_start_gives_the_same_hits() {
+		let (seen, scans, mut dry) = (RefCell::new(vec![]), Cell::new(0), None);
+		let table = [(0xa000, Some(2)), (0xb000, None), (0xc000, Some(1))];
+		let one = |dry: &mut Option<(u32, usize)>, table: &[(u32, Option<usize>)], scans: &Cell<u32>| {
+			choose(3, &[0xa000], dry, pages(&[0xb000, 0xc000], scans), fake(table, &seen))
+		};
+		// field 1: a hits 2 of 3 owners, the scan finds nothing better: latch (a, 2)
+		assert_eq!(one(&mut dry, &table, &scans), Some((0xa000, 0xa000, false)));
+		assert_eq!((dry, scans.get()), (Some((0xa000, 2)), 1));
+		// fields 2 and 3: same start, same hits: no scan
+		for _ in 0..2 {
+			assert_eq!(one(&mut dry, &table, &scans), Some((0xa000, 0xa000, false)));
+		}
+		assert_eq!((dry, scans.get()), (Some((0xa000, 2)), 1));
+		// a hits one owner less (the field is another one): scan again, the latch follows
+		let table1 = [(0xa000, Some(1)), (0xb000, None), (0xc000, Some(1))];
+		assert_eq!(one(&mut dry, &table1, &scans), Some((0xa000, 0xa000, false)));
+		assert_eq!((dry, scans.get()), (Some((0xa000, 1)), 2));
+		// a better page appears (and a hits 2 now, not the latched 1, so the scan runs): the scan finds it, the latch is cleared
+		let table2 = [(0xa000, Some(2)), (0xb000, Some(3)), (0xc000, Some(1))];
+		assert_eq!(one(&mut dry, &table2, &scans), Some((0xb000, 0xb000, true)));
+		assert_eq!((dry, scans.get()), (None, 3));
+		// a full known start clears the latch and never scans
+		dry = Some((0xa000, 2));
+		let table3 = [(0xa000, Some(3))];
+		assert_eq!(one(&mut dry, &table3, &scans), Some((0xa000, 0xa000, false)));
+		assert_eq!((dry, scans.get()), (None, 3));
+		// no scan possible (no job): the latch is left as it is
+		dry = Some((0xa000, 2));
+		assert_eq!(choose(3, &[0xa000], &mut dry, no_scan(), fake(&table, &seen)), Some((0xa000, 0xa000, false)));
+		assert_eq!(dry, Some((0xa000, 2)));
+		// another candidate with the same hits does not use the latch of a
+		let table4 = [(0xa000, Some(2)), (0xd000, Some(2))];
+		assert_eq!(choose(3, &[0xd000], &mut dry, pages(&[], &scans), fake(&table4, &seen)), Some((0xd000, 0xd000, false)));
+		assert_eq!((dry, scans.get()), (Some((0xd000, 2)), 4));
+	}
+
+	#[test]
+	fn a_level_change_clears_the_dry_latch() {
+		let mut s = Starts::default();
+		s.enter(11);
+		s.dry = Some((0x32c000, 2));
+		assert!(!s.enter(11) && s.dry.is_some());
+		s.enter(12);
+		assert_eq!(s.dry, None);
 	}
 }

@@ -11,6 +11,13 @@ pub fn take_sound_of(m: &mut ee_oracle::Machine) -> SndBatch {
 	crate::spumix::drain(m)
 }
 
+/// [PC] The part of `Retail::lockstep` that the field snapshot decides: the front end, a level-load loop, and the views that draw no
+/// world (`frozen_view`: the menus, and the ship's loading / warp substates), or RAC_RUN_AHEAD=0 (`off`). The modes that draw the
+/// world (gameplay 0, scenes 2, the vendor 5, the ship's takeoff / landing / flight streams) are not in lockstep.
+fn snap_lockstep(s: &Snap, off: bool) -> bool {
+	off || s.front || s.frozen || s.turbo
+}
+
 impl Retail {
 	/// One PAL field: takes the field the thread finished, then hands it this tick's pad.
 	/// The sound requests of the field `tick` just took (each field's list is handed out once).
@@ -31,8 +38,8 @@ impl Retail {
 			let w = crate::runlog::waiting("the GS capture thread's overlay of the last field");
 			let got = (l.0)();
 			drop(w);
-			if let Some((w, rows, px, disp)) = got {
-				self.snap.ov = Some((w, rows, px));
+			if let Some((w, rows, px, disp, guard)) = got {
+				self.snap.ov = Some((w, rows, px, guard));
 				self.snap.ov_disp = disp;
 			}
 		}
@@ -170,6 +177,9 @@ impl Retail {
 				})
 			} else {
 				let (mut buttons, mut sticks) = (buttons, sticks);
+				// The pad's R2 is the aim's or retail's by the mode and body form of the field just taken (`native_delay` above): the
+				// pause menu's R2 scanner gets it from its first field, and leaving the pause gives retail no crouch (prompts.rs `route_r2`).
+				prompts::route_r2(&mut buttons, self.pad_gameplay(), self.pad_ratchet());
 				// The keys that skipped a movie stay away from the game until released.
 				self.movie_mask &= buttons;
 				buttons &= !self.movie_mask;
@@ -211,17 +221,23 @@ impl Retail {
 		}
 	}
 
-	/// [PC] The run-ahead depth for this tick (`ahead`). 1 outside gameplay and scenes (the front end, menus, movies, level
-	/// loads and travel, the title boot) and with RAC_RUN_AHEAD=0; else the fields that end while one frame draws, up to 3:
-	/// 1 while frames come at least once a field (a fast PC is in lockstep as before), raised at once when frames slow
-	/// down, lowered when they are fast again.
-	pub(super) fn depth(&mut self) -> u32 {
+	/// [PC] The worker is in lockstep (`depth` is 1 and stays 1): outside the modes that draw the world (the front end, menus, movies,
+	/// level loads and travel, the title boot) and with RAC_RUN_AHEAD=0. A frame runs exactly one field there, so the frame rate is
+	/// the game speed (viewer/pace.rs applies no frame cap there).
+	pub fn lockstep(&self) -> bool {
 		static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 		let off = *OFF.get_or_init(|| std::env::var("RAC_RUN_AHEAD").is_ok_and(|v| v == "0"));
-		let s = &self.snap;
-		let free = !off && (s.mode == 0 || s.mode == 2) && !s.front && !s.frozen && !s.turbo && s.level == self.level
-			&& self.movie_req.is_none() && !fmv_bridge::waiting() && !self.tb.as_ref().is_some_and(|t| t.active());
-		if !free {
+		snap_lockstep(&self.snap, off) || self.snap.level != self.level || self.movie_req.is_some() || fmv_bridge::waiting() || self.tb.as_ref().is_some_and(|t| t.active())
+	}
+
+	/// [PC] The run-ahead depth for this tick (`ahead`). 1 in lockstep (`lockstep`); else the fields that end while one frame draws, up to
+	/// 3: 1 while frames come at least once a field (a fast PC is in lockstep as before), raised at once when frames slow
+	/// down, lowered when they are fast again. The modes: gameplay 0, scenes 2, the vendor 5 and the ship streams 6 (takeoff,
+	/// landing, flights). Before, only 0 and 2 ran ahead: with 1 field in flight a frame longer than a field (a slow GPU, 4K)
+	/// made one game step per frame in the vendor and in Clank's boarding / leaving the ship, so the animation ran at the
+	/// frame rate while the sound (real time) did not (GitHub issue 37).
+	pub(super) fn depth(&mut self) -> u32 {
+		if self.lockstep() {
 			self.ahead = 1;
 			return 1;
 		}
@@ -260,5 +276,38 @@ impl Retail {
 	pub fn shot_field_wait(&self) -> bool {
 		// Field N = the snap of the Nth field is shown (and in --gsfull the frame of that field is rasterised).
 		std::env::var("RAC_SHOT_FIELD").ok().and_then(|v| v.parse::<u32>().ok()).is_some_and(|f| { let f = f + SHOT_ALLOW.load(std::sync::atomic::Ordering::Relaxed); self.snap.field < f || self.gsfull.is_some() && GSF_SHOWN.load(std::sync::atomic::Ordering::Relaxed) < f as u64 })
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// The snapshot the worker makes of a field in `mode` / ship substate `ship` (snapshot.rs sets `frozen` this way).
+	fn snap(mode: u32, ship: u32) -> Snap {
+		Snap { mode, ship, frozen: frozen_view(mode, ship), ..Default::default() }
+	}
+
+	/// Issue 37: the vendor (5) and the ship streams (6) ran in lockstep, one game step per frame whenever a frame took longer
+	/// than a field (4K): the animation fell behind the sound. Every view that draws the world runs ahead; the menus, the front
+	/// end, level loads and the ship's loading / warp substates do not.
+	#[test]
+	fn the_worker_runs_ahead_in_every_world_view() {
+		let ahead: Vec<(u32, u32)> = (0..16).flat_map(|m| (0..10).map(move |sh| (m, sh))).filter(|&(m, sh)| (m == 6 || sh == 0) && !snap_lockstep(&snap(m, sh), false)).collect();
+		// Gameplay 0, scenes 2, the vendor 5, and mode 6 in its takeoff (0), flight (3), flight (7) and landing (8) streams.
+		assert_eq!(ahead, vec![(0, 0), (2, 0), (5, 0), (6, 0), (6, 3), (6, 7), (6, 8)]);
+		// Mode 6 loading / warp substates, the menus (3) and every other mode stay in lockstep.
+		assert!([1, 2, 4, 5, 6, 9].iter().all(|&sh| snap_lockstep(&snap(6, sh), false)));
+		assert!([1, 3, 4, 7, 8, 9, 10, 15].iter().all(|&m| snap_lockstep(&snap(m, 0), false)));
+	}
+
+	/// The other lockstep reasons: the front end, a level-load loop, RAC_RUN_AHEAD=0 (a world view changes nothing there).
+	#[test]
+	fn front_end_load_loops_and_the_off_switch_force_lockstep() {
+		let world = snap(0, 0);
+		assert!(!snap_lockstep(&world, false));
+		assert!(snap_lockstep(&world, true));
+		assert!(snap_lockstep(&Snap { front: true, ..snap(0, 0) }, false));
+		assert!(snap_lockstep(&Snap { turbo: true, ..snap(0, 0) }, false));
 	}
 }

@@ -7,7 +7,9 @@ impl Gpu {
 		let DrawTarget { frame, view, mut enc, cuts, .. } = dt;
 		let frame = frame?;
 		self.movie.draw(&self.queue, &mut enc, &view, sw, sh);
-		let (w, h) = (self.config.width, self.config.height);
+		// [PC] Render scale (rscale.rs): the offscreen picture is copied onto the window image; readbacks are the window image.
+		self.rscale_blit(&mut enc, &frame.texture.create_view(&Default::default()));
+		let (w, h) = self.win_size();
 		let row = (w * 4).next_multiple_of(256);
 		let readback = capture.then(|| {
 			let buf = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("shot"), size: (row * h) as u64, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });

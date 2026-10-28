@@ -158,9 +158,9 @@ unsafe extern "C" fn raycast_cb(user: *mut c_void, from3: *const f32, to3: *cons
 	let (from, to) = unsafe { ([*from3, *from3.add(1), *from3.add(2)], [*to3, *to3.add(1), *to3.add(2)]) };
 	let r = cast(c, super::host::state(user).ntsc, from, to);
 	super::counts::bump(match r {
-		Some(Some(_)) => "raycast hit",
-		Some(None) => "raycast miss",
-		None => "raycast refused",
+		Some(Some(_)) => super::counts::Counter::RaycastHit,
+		Some(None) => super::counts::Counter::RaycastMiss,
+		None => super::counts::Counter::RaycastRefused,
 	});
 	match r {
 		Some(Some(six)) => {

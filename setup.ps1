@@ -2452,9 +2452,139 @@ function Install-Dxc([string]$exeDir) {
 
 # Things that come with the game (since v0.4.0), in bundled\: omniloader.dll = the OmniLoader mod loader (our own MIT/Apache code, built
 # with MSVC and the static CRT, no game data), copied next to rac-rs.exe (without it the game simply runs without script mods); and
-# bundled\mods\<folder> = mods that come preinstalled (Arsenal Mastery), mirrored into mods\<folder>. Nothing is switched on here: a mod
-# runs only when the player turns it on (launcher Mods page or title-screen Options > Mods, which write mods\active.txt); mods\active.txt
-# and mods\settings.json are never touched. Runs at the end of every setup/update/repair build. A problem is a warning, never a failed setup.
+# bundled\mods\<folder> = mods that come preinstalled (Arsenal Mastery), copied into mods\<folder> when the mod is missing or an older
+# version is installed. A mod that is installed with the same or a higher version (the launcher's mod update, or the player's own copy) is
+# never touched or downgraded; an older one is first moved whole to <root>\mod_backups\<folder>-<version> (outside mods\, where the game
+# would load it as a second copy). Nothing is switched on here: a mod runs only when the player turns it on (launcher Mods page or
+# title-screen Options > Mods, which write mods\active.txt); mods\active.txt, mods\settings.json and the mods' save data (player\omni) are
+# never touched. Runs at the end of every setup/update/repair build. A problem is a warning, never a failed setup.
+
+# Mod versions: MAJOR.MINOR.PATCH with an optional -suffix, a leading v is dropped (the rules of the mod loader and of the launcher's
+# updater). Gives $null for anything else, else an object with Num (3 numbers) and Pre (the suffix or $null).
+function ConvertTo-ModVersion([string]$text) {
+    if (-not $text) { return $null }
+    $m = [regex]::Match($text.Trim(), '^[vV]?(0|[1-9][0-9]{0,17})\.(0|[1-9][0-9]{0,17})\.(0|[1-9][0-9]{0,17})(?:-([A-Za-z0-9.-]+))?$')
+    if (-not $m.Success) { return $null }
+    $pre = $null
+    if ($m.Groups[4].Success) { $pre = $m.Groups[4].Value }
+    return [pscustomobject]@{ Num = @([long]$m.Groups[1].Value, [long]$m.Groups[2].Value, [long]$m.Groups[3].Value); Pre = $pre }
+}
+
+# -1 / 0 / 1 when version a is below / equal to / above version b; $null when either is not a version. A suffixed version is below the
+# plain one; suffix parts split at dots compare as numbers when both are numbers, numbers sit below words.
+function Compare-ModVersion([string]$a, [string]$b) {
+    $x = ConvertTo-ModVersion $a
+    $y = ConvertTo-ModVersion $b
+    if (($null -eq $x) -or ($null -eq $y)) { return $null }
+    for ($i = 0; $i -lt 3; $i++) {
+        if ($x.Num[$i] -lt $y.Num[$i]) { return -1 }
+        if ($x.Num[$i] -gt $y.Num[$i]) { return 1 }
+    }
+    if (($null -eq $x.Pre) -and ($null -eq $y.Pre)) { return 0 }
+    if ($null -eq $x.Pre) { return 1 }
+    if ($null -eq $y.Pre) { return -1 }
+    $p = $x.Pre.Split('.')
+    $q = $y.Pre.Split('.')
+    for ($i = 0; $i -lt [Math]::Max($p.Length, $q.Length); $i++) {
+        if ($i -ge $p.Length) { return -1 }
+        if ($i -ge $q.Length) { return 1 }
+        $pn = $p[$i] -match '^(0|[1-9][0-9]{0,17})$'
+        $qn = $q[$i] -match '^(0|[1-9][0-9]{0,17})$'
+        if ($pn -and $qn) {
+            if ([long]$p[$i] -lt [long]$q[$i]) { return -1 }
+            if ([long]$p[$i] -gt [long]$q[$i]) { return 1 }
+        } elseif ($pn) { return -1 }
+        elseif ($qn) { return 1 }
+        else {
+            $c = [string]::CompareOrdinal($p[$i], $q[$i])
+            if ($c -lt 0) { return -1 }
+            if ($c -gt 0) { return 1 }
+        }
+    }
+    return 0
+}
+
+# id and version of the mod in folder $dir (omni-mod.json, else openrac-mod.json); $null when there is none or it cannot be read.
+function Read-ModManifest([string]$dir) {
+    foreach ($f in @('omni-mod.json', 'openrac-mod.json')) {
+        $p = Join-Path $dir $f
+        if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { continue }
+        try {
+            $j = (Get-Content -LiteralPath $p -Raw -Encoding UTF8) | ConvertFrom-Json
+            return [pscustomobject]@{ Id = [string]$j.id; Version = [string]$j.version }
+        } catch { return $null }
+    }
+    return $null
+}
+
+# One folder of bundled\mods into mods\: fresh copy, replacement of an older installed version (with a backup), or nothing.
+function Install-BundledMod([System.IO.DirectoryInfo]$m) {
+    $modsDir = Join-Path $root 'mods'
+    $new = Read-ModManifest $m.FullName
+    $newId = ''
+    $newVer = ''
+    if ($new) { $newId = $new.Id; $newVer = $new.Version }
+    # the installed copy: the folder of the same name, unless it holds another mod; else the folder whose manifest has the same id
+    # (the launcher or the player may have put it under another name; a second copy would be a duplicate mod id in the game)
+    $have = $null
+    $haveMf = $null
+    $same = Join-Path $modsDir $m.Name
+    if (Test-Path -LiteralPath $same -PathType Container) {
+        $have = Get-Item -LiteralPath $same
+        $haveMf = Read-ModManifest $have.FullName
+    }
+    if ($newId -and (Test-Path -LiteralPath $modsDir -PathType Container) -and -not ($haveMf -and ($haveMf.Id -eq $newId))) {
+        foreach ($d in @(Get-ChildItem -LiteralPath $modsDir -Directory)) {
+            if ($have -and ($d.FullName -eq $have.FullName)) { continue }
+            $mf = Read-ModManifest $d.FullName
+            if ($mf -and ($mf.Id -eq $newId)) { $have = $d; $haveMf = $mf; break }
+        }
+    }
+    if (-not $have) {
+        & robocopy $m.FullName $same /E /COPY:DAT /DCOPY:T /R:1 /W:1 /NP /NFL /NDL /NJH /NJS | Out-Null
+        if ($LASTEXITCODE -ge 8) { throw "could not copy the mod $($m.Name) (robocopy $LASTEXITCODE)" }
+        Write-Host "  bundled mod: $($m.Name) in mods\$($m.Name) (off until you turn it on)"
+        return
+    }
+    # a folder of that name that holds another mod is not ours to replace
+    if ($newId -and $haveMf -and $haveMf.Id -and ($haveMf.Id -ne $newId)) {
+        Write-Host "  bundled mod: $($m.Name) not copied (mods\$($have.Name) holds another mod, '$($haveMf.Id)')" -ForegroundColor Yellow
+        return
+    }
+    $haveVer = ''
+    if ($haveMf) { $haveVer = $haveMf.Version }
+    # never replace what is not clearly older: an equal or higher version, or a bundled version that cannot be read
+    $cmp = Compare-ModVersion $haveVer $newVer
+    if ($null -ne $cmp) {
+        if ($cmp -ge 0) {
+            Write-Host "  bundled mod: $($m.Name) $newVer not copied (mods\$($have.Name) has $haveVer, which is the same or newer)"
+            return
+        }
+    } elseif ($null -eq (ConvertTo-ModVersion $newVer)) {
+        Write-Host "  bundled mod: $($m.Name) not copied (its version '$newVer' cannot be read, so mods\$($have.Name) is left as it is)" -ForegroundColor Yellow
+        return
+    }
+    # older (or an installed version that cannot be read): move it whole to mod_backups, then copy the bundled one in its place
+    $tag = 'unknown'
+    if ($haveVer) { $tag = ($haveVer -replace '[^A-Za-z0-9._-]', '_') }
+    if ($tag.Length -gt 40) { $tag = $tag.Substring(0, 40) }
+    $backups = Join-Path $root 'mod_backups'
+    New-Item -ItemType Directory -Force -Path $backups | Out-Null
+    $bk = Join-Path $backups "$($have.Name)-$tag"
+    $n = 2
+    while (Test-Path -LiteralPath $bk) { $bk = Join-Path $backups "$($have.Name)-$tag ($n)"; $n++ }
+    $target = $have.FullName
+    Move-Item -LiteralPath $target -Destination $bk
+    & robocopy $m.FullName $target /E /COPY:DAT /DCOPY:T /R:1 /W:1 /NP /NFL /NDL /NJH /NJS | Out-Null
+    if ($LASTEXITCODE -ge 8) {
+        $rc = $LASTEXITCODE
+        Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue
+        Move-Item -LiteralPath $bk -Destination $target -ErrorAction SilentlyContinue
+        throw "could not copy the mod $($m.Name) (robocopy $rc); the installed version was put back"
+    }
+    Write-Host "  bundled mod: $($m.Name) $newVer replaces $haveVer in mods\$($have.Name); the old one is kept in mod_backups\$(Split-Path -Leaf $bk)"
+}
+
 function Install-Bundled([string]$exeDir) {
     $b = Join-Path $root 'bundled'
     try {
@@ -2471,10 +2601,7 @@ function Install-Bundled([string]$exeDir) {
         $bm = Join-Path $b 'mods'
         if (Test-Path -LiteralPath $bm -PathType Container) {
             foreach ($m in @(Get-ChildItem -LiteralPath $bm -Directory)) {
-                $to = Join-Path (Join-Path $root 'mods') $m.Name
-                & robocopy $m.FullName $to /MIR /COPY:DAT /DCOPY:T /R:1 /W:1 /NP /NFL /NDL /NJH /NJS | Out-Null
-                if ($LASTEXITCODE -ge 8) { throw "could not copy the mod $($m.Name) (robocopy $LASTEXITCODE)" }
-                Write-Host "  bundled mod: $($m.Name) in mods\$($m.Name) (off until you turn it on)"
+                try { Install-BundledMod $m } catch { Write-Host "  bundled mod $($m.Name): $($_.Exception.Message); the game still runs, without that mod" -ForegroundColor Yellow }
             }
         }
     } catch {
@@ -3047,8 +3174,8 @@ set "ORACLE_STUBS=%~dp0oracle\stubs.txt"
 set /p ORACLE_HAND_SKIP=<"%~dp0oracle\hand\hand_skip.txt"
 set "RAC_PLAYER_DIR=%~dp0player"
 if not exist "%RAC_PLAYER_DIR%" mkdir "%RAC_PLAYER_DIR%"
-rem Language: en fr de es it  (set it before the next line to change the game language, e.g.  set COLD_LANG=de)
-if not defined COLD_LANG set COLD_LANG=en
+rem Language: the game starts in the language picked in Options, Language (or in the launcher), English before that.
+rem To force one for every start, add a line here like:  set COLD_LANG=de   (en fr de es it)
 rem Safety copies of your save card before each start (the newest two starts)
 if exist "%RAC_PLAYER_DIR%\card.start1.bin" copy /y "%RAC_PLAYER_DIR%\card.start1.bin" "%RAC_PLAYER_DIR%\card.start2.bin" >nul
 if exist "%RAC_PLAYER_DIR%\card.bin" copy /y "%RAC_PLAYER_DIR%\card.bin" "%RAC_PLAYER_DIR%\card.start1.bin" >nul

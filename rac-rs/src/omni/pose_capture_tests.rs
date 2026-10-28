@@ -157,3 +157,64 @@ fn reads_ask_the_renderer_and_get_the_published_frames() {
 	clear();
 	assert!(!reads_on() && rendered().0.is_empty());
 }
+
+// A live hold keeps its capture however many newer snapshots a mod takes (the 256 limit evicts others), and a renewed hold whose capture is
+// gone takes a new one instead of staying dead.
+#[test]
+fn a_live_hold_keeps_its_capture_beyond_the_snapshot_cap() {
+	let _t = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+	clear();
+	let mut s = Store::default();
+	assert_eq!(s.set(7, 111, &[hold(20, 0)]), Ok(1));
+	service(&local(0.0));
+	for _ in 0..(MAX_SNAPSHOTS * 2) {
+		request(0, 111);
+	}
+	s.step();
+	for _ in 0..MAX_SNAPSHOTS {
+		request(0, 111);
+	}
+	let r = s.records(7);
+	assert_eq!(r.len(), 1, "the hold still has its capture");
+	assert_eq!(r[0].rot, [20.0 / 200.0, 0.0, 0.0, 1.0]);
+	// A hold whose capture was forgotten (a scene tick) is renewed with a new capture.
+	forget_snapshots();
+	assert!(s.records(7).is_empty());
+	assert_eq!(s.set(7, 111, &[hold(20, 0)]), Ok(1));
+	assert!(pending(), "the dead capture is replaced");
+	service(&local(0.25));
+	assert_eq!(s.records(7)[0].rot, [20.0 / 200.0 + 0.25, 0.0, 0.0, 1.0]);
+	clear();
+}
+
+// An explicit hold snapshot is pinned while the batch is checked: a `hold(0)` earlier in the same batch (a new snapshot, which evicts the
+// oldest unpinned one) must not evict it before its own op is applied.
+#[test]
+fn an_explicit_hold_source_survives_a_new_snapshot_taken_earlier_in_the_same_batch() {
+	let _t = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+	clear();
+	let mut s = Store::default();
+	let oldest = request(0, 111);
+	for _ in 1..MAX_SNAPSHOTS {
+		request(0, 111);
+	}
+	// The cap is full and `oldest` is the next to go. Joint 10 (a hold of now: a new snapshot) comes first, joint 20 names `oldest`.
+	assert_eq!(s.set(7, 111, &[hold(10, 0), hold(20, oldest)]), Ok(2));
+	assert!(covers(oldest, 20).is_ok(), "the named snapshot is still there");
+	service(&local(0.0));
+	assert_eq!(s.records(7).len(), 2, "both holds have their capture");
+	clear();
+}
+
+// Clearing the state (a level change) turns the debug dots off at once; a scene tick's `forget_snapshots` leaves them.
+#[test]
+fn clear_switches_the_debug_dots_off_but_forgetting_snapshots_does_not() {
+	let _t = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+	clear();
+	set_debug(true);
+	request(0, 4);
+	forget_snapshots();
+	assert!(debug_on() && !pending());
+	clear();
+	assert!(!debug_on());
+}

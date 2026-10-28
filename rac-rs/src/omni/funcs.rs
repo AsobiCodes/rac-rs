@@ -9,6 +9,7 @@
 
 use ee_oracle::hs_reloc::Reloc;
 use std::collections::HashMap;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Mutex, OnceLock};
 
 /// The specs built into the exe.
@@ -24,6 +25,8 @@ pub struct FuncSpec {
 	pub pal: u32,
 	pub name: String,
 	pub reloc: Reloc,
+	/// Successful `call_game` calls of this function (counts.rs).
+	pub calls: AtomicU64,
 }
 
 fn hex(s: &str) -> Option<u32> {
@@ -38,7 +41,7 @@ pub fn parse_funcs(text: &str) -> Vec<FuncSpec> {
 	let mut flush = |head: &mut Option<(u32, u32, String)>, body: &mut String| {
 		if let Some((ntsc, pal, name)) = head.take() {
 			match Reloc::parse(body) {
-				Some(reloc) => out.push(FuncSpec { ntsc, pal, name, reloc }),
+				Some(reloc) => out.push(FuncSpec { ntsc, pal, name, reloc, calls: AtomicU64::new(0) }),
 				None => eprintln!("omni: the spec of game function {name} does not parse, it is not available to native mods"),
 			}
 		}
@@ -145,14 +148,16 @@ struct Cache {
 
 static CACHE: Mutex<Option<Cache>> = Mutex::new(None);
 
-/// The runtime entry of function `number` in the code that is loaded now.
-pub fn resolve(c: &ee_oracle::cpu::Cpu, number: u32, ntsc: bool, level_word: i32) -> Result<u32, String> {
+/// The runtime entry of function `number` in the code that is loaded now, with its spec (looked up once, the caller counts on it).
+/// Every call re-checks the cached entry against the code in RAM (`still_there`): an overlay copied in since the table was built (the
+/// hook layer's epoch only moves at the next vblank) must not be called at a stale address, so this is not cached per epoch.
+pub fn resolve(c: &ee_oracle::cpu::Cpu, number: u32, ntsc: bool, level_word: i32) -> Result<(u32, &'static FuncSpec), String> {
 	let spec = find_spec(number, ntsc).ok_or_else(|| format!("game function number 0x{number:x} is not known to this port"))?;
 	let mut g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
 	let cache = g.get_or_insert_with(|| Cache { found: HashMap::new(), failed: HashMap::new() });
 	if let Some(&e) = cache.found.get(&number) {
 		if still_there(c, &spec.reloc, e) {
-			return Ok(e);
+			return Ok((e, spec));
 		}
 		cache.found.remove(&number);
 	}
@@ -162,7 +167,7 @@ pub fn resolve(c: &ee_oracle::cpu::Cpu, number: u32, ntsc: bool, level_word: i32
 	match find_in(&code_words(c), CODE_LO, &spec.reloc) {
 		Some(e) => {
 			cache.found.insert(number, e);
-			Ok(e)
+			Ok((e, spec))
 		}
 		None => {
 			cache.failed.insert(number, level_word);

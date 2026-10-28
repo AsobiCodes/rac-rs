@@ -11,8 +11,9 @@
 //!
 //! Faithful base: the amount comes from the level's own retail fog (`density::level_params`); a level without retail fog gets none.
 //! Shared with a later cloud layer: `noise.rs` (the 3D noise volume), `scatter.rs`, `temporal.rs`; the fog only adds `density.rs`.
-//! Quality: High = half-size grid (the linear depth grid), 32 steps; Medium = quarter size, 20 steps; Low = quarter size, 12
-//! steps and no sun shadow map (mist without shafts).
+//! Quality (what runs; `quality`): the grid is a divisor of the half-size linear depth grid. High = 32 steps, divisor 2 (a quarter of
+//! the picture, the same grid as Medium; RAC_FOG_DIV=1 gives the half-size grid, gfxq.rs); Medium = 20 steps, divisor 2; Low = 12
+//! steps, divisor 2 and no sun shadow map (mist without shafts). Low and Medium draw 0.6 and 0.8 of the amount.
 
 use super::*;
 
@@ -25,7 +26,7 @@ pub(in crate::viewer) mod scatter;
 pub(in crate::viewer) mod soft;
 pub(in crate::viewer) mod temporal;
 
-pub(super) use frame::fade_retail_fog;
+pub(super) use frame::{fade_retail_fog, retail_fog_scale, wants_ocean_heights, Plan};
 
 /// The device features the fog asks for: timestamps (RAC_FOG_LOG) and the forced early depth test (`soft::level_source`).
 pub(super) fn gpu_features(adapter: &wgpu::Adapter) -> wgpu::Features {
@@ -33,6 +34,11 @@ pub(super) fn gpu_features(adapter: &wgpu::Adapter) -> wgpu::Features {
 }
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
+/// The jitter counter of the march (`scatter.rs`: `fract(ign + 0.618034 * march.z)`) wraps here, like the clouds' (volclouds.rs, % 8): an f32
+/// counter that grows without end loses the fractional part of the product after a few hours. 1000 x 0.618034 = 618.034, so the
+/// wrap moves the offset by 0.034 only, and the product stays below 618 (an f32 step of 6e-5).
+const JITTER_PERIOD: u32 = 1000;
 
 /// What a Fog level costs: march steps, the grid's divisor of the linear depth grid, and whether the sun's shadow map is read.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -50,7 +56,7 @@ pub(super) const fn quality(level: u8) -> Option<Quality> {
 		0 => None,
 		1 => Some(Quality { steps: 12.0, div: 2, shadows: false, amount: 0.6 }),
 		2 => Some(Quality { steps: 20.0, div: 2, shadows: true, amount: 0.8 }),
-		_ => Some(Quality { steps: 32.0, div: 1, shadows: true, amount: 1.0 }),
+		_ => Some(Quality { steps: 32.0, div: 2, shadows: true, amount: 1.0 }),
 	}
 }
 
@@ -216,6 +222,25 @@ struct Targets {
 	hist: [wgpu::TextureView; 2],
 }
 
+/// The resources the pass's bind groups hold besides the targets' history views (wgpu handles compare by identity): the groups are
+/// rebuilt only when one of them is a different object, not every frame.
+#[derive(PartialEq)]
+struct BindKey {
+	lin: wgpu::TextureView,
+	sun_map: wgpu::TextureView,
+	water: Option<wgpu::TextureView>,
+	gmap: Option<wgpu::TextureView>,
+	soft: wgpu::Buffer,
+	depth: wgpu::TextureView,
+	cur: wgpu::TextureView,
+}
+
+/// The three bind groups (march, accumulate, apply) for each history flip, built on first use under `key`.
+struct Binds {
+	key: BindKey,
+	groups: [Option<[wgpu::BindGroup; 3]>; 2],
+}
+
 /// The inputs of one frame.
 pub(super) struct Input<'a> {
 	pub cam: &'a Camera,
@@ -254,6 +279,11 @@ pub(super) struct VolFog {
 	pipes: Option<Pipes>,
 	ubuf: Option<wgpu::Buffer>,
 	t: Option<Targets>,
+	/// The bind groups of the last frames (`BindKey`).
+	binds: Option<Binds>,
+	/// (height, patches) per descriptor of the whole ocean (`Ocean::heights`), refreshed by `Gpu::set_ocean_heights` for the levels that
+	/// want it (`wants_ocean_heights`): `Plan::new` (frame.rs) reads it for the fog sheet and the water mist.
+	pub(in crate::viewer) ocean_heights: Vec<(f32, usize)>,
 	/// The previous frame's camera rows, the frame count since the history was valid, which history texture is the newer.
 	prev: Option<[[f32; 4]; 4]>,
 	frames: u32,
@@ -278,9 +308,18 @@ pub(super) fn cam_rows(cam: &Camera, aspect: f32) -> [[f32; 4]; 4] {
 }
 
 impl VolFog {
+	/// A frame on which the pass does not draw (`Plan::new` is None: Classic, under water, a level without a volume): the bind-group
+	/// cache lets go of the full-size views it holds (MSAA depth, `lin`, the soft buffer), so a resize or a render scale change
+	/// while the fog is off does not keep the old ones alive. One `is_some` check per frame while nothing is cached.
+	pub(super) fn idle(&mut self) {
+		if self.binds.is_some() {
+			self.binds = None;
+		}
+	}
+
 	/// `ulayout`: the level shader's group 0 (`soft.rs` rebinds it with the no-Z texel buffer).
 	pub(super) fn new(format: wgpu::TextureFormat, ulayout: &wgpu::BindGroupLayout) -> VolFog {
-		VolFog { format, pipes: None, ubuf: None, t: None, prev: None, frames: 0, flip: 0, level: usize::MAX, ground: 0.0, gmap: (u32::MAX, None), last_time: 0.0, timer: None, soft: soft::Soft::new(ulayout) }
+		VolFog { format, pipes: None, ubuf: None, t: None, binds: None, ocean_heights: Vec::new(), prev: None, frames: 0, flip: 0, level: usize::MAX, ground: 0.0, gmap: (u32::MAX, None), last_time: 0.0, timer: None, soft: soft::Soft::new(ulayout) }
 	}
 
 	/// The whole WGSL of the pass.
@@ -412,7 +451,7 @@ impl VolFog {
 		u.wind = [0.8, 0.35, t("fog_wind", 0.7), inp.time];
 		u.look = [t("fog_wisp", 0.85), t("fog_scale", 46.0), t("fog_detail", 17.0), t("fog_sun", 0.4)];
 		u.size = [fsize.0 as f32, fsize.1 as f32, 1.0 / fsize.0 as f32, 1.0 / fsize.1 as f32];
-		u.march = [q.steps, p.cap.min(inp.far), self.frames as f32, if fresh { 1.0 } else { temporal::BLEND }];
+		u.march = [q.steps, p.cap.min(inp.far), (self.frames % JITTER_PERIOD) as f32, if fresh { 1.0 } else { temporal::BLEND }];
 		u.proj = [inp.cam.tan_half * inp.aspect, inp.cam.tan_half, RETAIL_NEAR, inp.far];
 		let g = inp.fog;
 		let slope = (g[3] - g[2]) / (g[1] - g[0]).max(0.001);
@@ -436,7 +475,7 @@ impl VolFog {
 	pub(super) fn run(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, enc: &mut wgpu::CommandEncoder, inp: &Input, depth: &wgpu::TextureView) -> bool {
 		let (Some(mut q), true) = (quality(inp.quality), inp.size.0 > 0) else { return false };
 		if let (3.., Some(div)) = (inp.quality, super::gfxq::fog_div()) {
-			q.div = div; // RAC_FOG_DIV (gfxq.rs)
+			q.div = div; // RAC_FOG_DIV (gfxq.rs): an override, unset = `quality`
 		}
 		let params = density::level_params(inp.level, inp.fog, inp.sheet_z, inp.mist_z, crate::devtune::f32("fog_amount", 0.8) * q.amount);
 		if frame::fog_log() {
@@ -451,7 +490,9 @@ impl VolFog {
 			tm.poll(device);
 		}
 		if self.pipes.is_none() {
-			self.pipes = Some(self.build(device, queue));
+			// [PC] pipe_guard.rs: a driver that refuses the fog shader (DX12 FXC) turns the fog off, it does not crash the game.
+			let Some(p) = super::pipe_guard::guard(device, super::pipe_guard::Effect::VolFog, || self.build(device, queue)) else { return false };
+			self.pipes = Some(p);
 			self.timer = gputime::GpuTimer::new(device, queue);
 		}
 		let key_ok = self.t.as_ref().is_some_and(|t| t.key.2 == inp.generation && t.key.0 == inp.size.0.div_ceil(2).div_ceil(q.div) && t.key.1 == inp.size.1.div_ceil(2).div_ceil(q.div));
@@ -481,8 +522,9 @@ impl VolFog {
 		let u = self.uniform(inp, q, &params, fresh, fsize);
 		queue.write_buffer(&ubuf, 0, bytemuck::bytes_of(&u));
 		let (Some(pipes), Some(t), Some(soft)) = (&self.pipes, &self.t, self.soft.buffer()) else { return false };
-		let depth = depth.texture().create_view(&wgpu::TextureViewDescriptor { aspect: wgpu::TextureAspect::DepthOnly, ..Default::default() });
-		let group = |cur: &wgpu::TextureView, hist: &wgpu::TextureView| {
+		let key = BindKey { lin: inp.lin.clone(), sun_map: inp.sun_map.clone(), water: inp.water.cloned(), gmap: self.gmap.1.as_ref().map(|g| g.0.clone()), soft: soft.clone(), depth: depth.clone(), cur: t.cur.clone() };
+		let mut binds = self.binds.take().filter(|b| b.key == key).unwrap_or(Binds { key, groups: [None, None] });
+		let group = |depth: &wgpu::TextureView, cur: &wgpu::TextureView, hist: &wgpu::TextureView| {
 			device.create_bind_group(&wgpu::BindGroupDescriptor {
 				label: Some("volfog"),
 				layout: &pipes.layout,
@@ -499,7 +541,7 @@ impl VolFog {
 					wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(inp.water.unwrap_or(&pipes.dummy)) },
 					wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(self.gmap.1.as_ref().map_or(&pipes.dummy, |g| &g.0)) },
 					wgpu::BindGroupEntry { binding: 11, resource: soft.as_entire_binding() },
-					wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(&depth) },
+					wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(depth) },
 				],
 			})
 		};
@@ -511,7 +553,7 @@ impl VolFog {
 				label: Some(label),
 				color_attachments: &both[..if i == 2 { 2 } else { 1 }],
 				depth_stencil_attachment: None,
-				timestamp_writes: timer.as_ref().and_then(|tm| tm.writes(i)).or_else(|| crate::viewer::passtime::rw(&format!("fog {label}"))),
+				timestamp_writes: timer.as_ref().and_then(|tm| tm.writes(i)).or_else(|| crate::viewer::passtime::rw(label)),
 				occlusion_query_set: None,
 				multiview_mask: None,
 			});
@@ -520,12 +562,17 @@ impl VolFog {
 			p.draw(0..3, 0..1);
 		};
 		let clear = wgpu::LoadOp::Clear(wgpu::Color::BLACK);
-		pass(enc, 0, "volfog march", &t.cur, &pipes.march, &group(&pipes.dummy, &pipes.dummy), clear);
-		pass(enc, 1, "volfog accumulate", &t.hist[write], &pipes.resolve, &group(&t.cur, &t.hist[read]), clear);
-		pass(enc, 2, "volfog apply", inp.scene, &pipes.apply, &group(&t.hist[write], &pipes.dummy), wgpu::LoadOp::Load);
+		let groups = binds.groups[read].get_or_insert_with(|| {
+			let dv = depth.texture().create_view(&wgpu::TextureViewDescriptor { aspect: wgpu::TextureAspect::DepthOnly, ..Default::default() });
+			[group(&dv, &pipes.dummy, &pipes.dummy), group(&dv, &t.cur, &t.hist[read]), group(&dv, &t.hist[write], &pipes.dummy)]
+		});
+		pass(enc, 0, "volfog march", &t.cur, &pipes.march, &groups[0], clear);
+		pass(enc, 1, "volfog accumulate", &t.hist[write], &pipes.resolve, &groups[1], clear);
+		pass(enc, 2, "volfog apply", inp.scene, &pipes.apply, &groups[2], wgpu::LoadOp::Load);
 		if let Some(tm) = &mut self.timer {
 			tm.finish(enc);
 		}
+		self.binds = Some(binds);
 		self.prev = Some(cam_rows(inp.cam, inp.aspect));
 		self.flip = write;
 		self.frames = self.frames.wrapping_add(1);

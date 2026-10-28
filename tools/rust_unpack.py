@@ -10,6 +10,8 @@ rustup would: every file that a package's manifest.in lists goes to the same rel
 bin\\cargo.exe, lib\\rustlib\\<host>\\...). DEST is the folder rustup would have made (toolchain\\rustup\\toolchains\\<version>-<host>),
 so the linker folder setup.ps1 puts on PATH is where it always was. It is built in DEST.part and renamed at the end: a stopped
 install leaves no half toolchain. Uses only the standard library (tarfile reads .tar.xz).
+Since v0.4.1 setup.sh (Linux) uses it too, with the three packages rustc, cargo, rust-std of x86_64-unknown-linux-gnu: no rustup and no
+hard links, and the files keep their executable bit.
 """
 import os
 import shutil
@@ -61,6 +63,8 @@ def unpack(pkg, part):
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
                 with t.extractfile(m) as src, open(dst, 'wb') as out:
                     shutil.copyfileobj(src, out, 1 << 20)
+                if os.name == 'posix':
+                    os.chmod(dst, (m.mode & 0o777) | 0o600)       # keeps the executable bit (rustc, cargo, rust-lld, ...)
                 done.add(rel)
                 n += 1
         missing = sorted(files - done)
@@ -81,9 +85,9 @@ def main():
     total = 0
     for pkg in sys.argv[2:]:
         total += unpack(pkg, part)
-    for need in ('bin/rustc.exe', 'bin/cargo.exe'):
-        if not os.path.isfile(os.path.join(part, *need.split('/'))):
-            sys.exit('rust_unpack.py: %s is missing after unpacking' % need)
+    for need in ('rustc', 'cargo'):
+        if not any(os.path.isfile(os.path.join(part, 'bin', need + ext)) for ext in ('.exe', '')):
+            sys.exit('rust_unpack.py: bin/%s is missing after unpacking' % need)
     if os.path.isdir(dest):
         shutil.rmtree(dest)
     os.replace(part, dest)

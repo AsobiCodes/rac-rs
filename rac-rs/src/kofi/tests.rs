@@ -63,3 +63,16 @@ fn quad_faces_the_room_and_is_not_mirrored() {
 	let t = corners(&Placement { tilt: 0.1, ..p }, 100, 50, 0.0);
 	assert!(t[1][2] > t[0][2]);
 }
+
+#[test]
+fn a_drawing_without_a_placement_is_left_out() {
+	let places = placements();
+	// 1x1 stubs with the supporters' names: the test is about `zip` and the names, not about the pictures.
+	let stub = |name: &'static str| Drawing { name, texts: Vec::new(), w: 1, h: 1, rgba: vec![[0; 4]] };
+	let art: Vec<Drawing> = scenes::SUPPORTERS.iter().map(|&n| stub(n)).collect();
+	let mut four: Vec<Drawing> = scenes::SUPPORTERS.iter().map(|&n| stub(n)).collect();
+	four.push(stub("extra"));
+	let hung: Vec<&str> = sheets(&four, &places).map(|(d, _)| d.name).collect();
+	assert_eq!(hung, ["Scrolt", "korixx", "reTokyo"], "the 4th drawing has no wall spot and must not panic");
+	assert_eq!(sheets(&art, &places[..2]).count(), 2, "a placement missing for the last drawing");
+}

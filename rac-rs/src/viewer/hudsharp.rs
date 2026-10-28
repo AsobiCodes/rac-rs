@@ -32,13 +32,17 @@ pub(super) fn set(on: bool, flat: [usize; 2]) {
 /// Whether a quad of HUD texture `tex` (of `slots` slots) takes the sharp shader: slot 0 is the solid rectangles (the built-in font
 /// cell), the retail overlay / filter and the item / popup / portrait panels have ids past the slots; the flat slots stay nearest.
 pub(super) fn wants(tex: usize, slots: usize) -> bool {
-	ON.load(Ordering::Relaxed) && tex >= 1 && tex < slots && FLAT.iter().all(|f| f.load(Ordering::Relaxed) != tex)
+	ON.load(Ordering::Relaxed) && !super::pipe_guard::off(super::pipe_guard::Effect::HudSharp) && tex >= 1 && tex < slots && FLAT.iter().all(|f| f.load(Ordering::Relaxed) != tex)
 }
 
-/// The sharp HUD pipelines [alpha blend, additive], built on first use. `like` is any pipeline made with the level layout (group 0 the
+/// The sharp HUD pipelines [alpha blend, additive], built on first use; None when the driver refused the shader (pipe_guard.rs: the
+/// quads then take the plain HUD pipeline, as with the option off). `like` is any pipeline made with the level layout (group 0 the
 /// uniforms, group 1 `tex_layout`): its group 0 layout is shared so the pass keeps its bind groups.
-pub(super) fn pipelines(device: &wgpu::Device, like: &wgpu::RenderPipeline, tex_layout: &wgpu::BindGroupLayout, format: wgpu::TextureFormat, depth_format: wgpu::TextureFormat) -> &'static [wgpu::RenderPipeline; 2] {
-	PIPES.get_or_init(|| {
+pub(super) fn pipelines(device: &wgpu::Device, like: &wgpu::RenderPipeline, tex_layout: &wgpu::BindGroupLayout, format: wgpu::TextureFormat, depth_format: wgpu::TextureFormat) -> Option<&'static [wgpu::RenderPipeline; 2]> {
+	if let Some(p) = PIPES.get() {
+		return Some(p);
+	}
+	let built = super::pipe_guard::guard(device, super::pipe_guard::Effect::HudSharp, || {
 		let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("hud sharp"), bind_group_layouts: &[Some(&like.get_bind_group_layout(0)), Some(tex_layout)], immediate_size: 0 });
 		let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("hud sharp"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("hud sharp", SHADER.into())) });
 		let additive = wgpu::BlendState {
@@ -79,7 +83,8 @@ pub(super) fn pipelines(device: &wgpu::Device, like: &wgpu::RenderPipeline, tex_
 			})
 		};
 		[make(wgpu::BlendState::ALPHA_BLENDING), make(additive)]
-	})
+	})?;
+	Some(PIPES.get_or_init(|| built))
 }
 
 #[cfg(test)]

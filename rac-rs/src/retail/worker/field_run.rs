@@ -29,12 +29,23 @@ impl Worker {
 		// Turret sections (Batalia, Gaspar, Hoven): the same counts steer the turret through its stick (shipmouse.rs).
 		let turret = if front || booting || disc::extras_off() { None } else { shipmouse::turret(&m, shipmouse::y_inverted(&m)) };
 		let pad_sticks = shipmouse_state.step(ship, ship && shipmouse::y_inverted(&m), fin.mc.look, fin.sticks);
-		let pad_sticks = shipmouse_state.step_turret(turret, fin.mc.look, pad_sticks);
+		let mut pad_sticks = shipmouse_state.step_turret(turret, fin.mc.look, pad_sticks);
+		// Modern camera: the controller's right stick gets the mouse's sign for every camera, modcam's or retail's (modcam/sticks.rs);
+		// the recording keeps the raw sticks, so a replay re-derives the same bytes. Not with the Classic camera, in the front end,
+		// the title boot, a ship fight or a turret section.
+		let cam_stick = !front && !booting && !disc::extras_off() && !ship && turret.is_none();
+		if cam_stick {
+			pad_sticks = modcam::sticks::camera_sticks(&m, pad_sticks, fin.mc.keys);
+		}
 		m.set_pad(fin.buttons, pad_sticks);
 		// Button prompts: the device of this field (prompts.rs).
 		prompts::begin_field(field, &mut m.cpu.mem);
 		if !front && !booting && !disc::extras_off() {
 			let mut fin2 = pcext::pre_field(&mut m, &fin);
+			if cam_stick {
+				// modcam turns on the same right stick bytes the game reads.
+				fin2.sticks[..2].copy_from_slice(&pad_sticks[..2]);
+			}
 			// The mouse steers the ship or the turret, not the modern camera, in a ship fight / turret section.
 			if ship || turret.is_some() {
 				fin2.mc.look = [0, 0];

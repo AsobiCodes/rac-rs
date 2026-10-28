@@ -8,7 +8,7 @@ impl App {
 		let drawn_cam = std::mem::take(&mut f.drawn_cam);
 		if let Some(g) = &mut self.gpu {
 			// [PC] Graphics -> Lighting Enhanced (viewer/post.rs): only over a retail level drawn by rac-rs (set below).
-			g.modern_ok = false;
+			g.modern_ok = false; g.hud_place = None;
 			// Retail mode: the game's own HUD and menus (GS capture) replace rac-rs's. The 4:3 frame fills the
 			// window height, centred; the edge columns stretch to the sides (clamped).
 			if let Some(r) = self.retail.as_mut().filter(|r| r.gs && r.front_ram().is_none()) {
@@ -21,10 +21,10 @@ impl App {
 				g.level = self.level;
 				if full {
 					if let Some(f) = r.take_gsfull_frame() {
-						g.set_retail_overlay(f.w, f.h, bytemuck::cast_slice(&f.rgba));
+						g.set_retail_overlay(f.w, f.h, bytemuck::cast_slice(&f.rgba), Default::default(), false);
 					}
-				} else if let Some((w, rows, px)) = r.take_overlay() {
-					g.set_retail_overlay(w, rows, &px);
+				} else if let Some((w, rows, px, guard)) = r.take_overlay() {
+					g.set_retail_overlay(w, rows, &px, guard, hud_place::live(r));
 				}
 				g.hud.clear();
 				g.hud_split = None;
@@ -46,7 +46,7 @@ impl App {
 							// of it [PC: widescreen].
 							crate::retail::queue_b::rc_bar_quads(RETAIL_OV_TEX, sw, sh, &mut g.hud);
 						} else {
-							g.hud.extend(edge_fill::quads(RETAIL_OV_TEX, sw, sh, k, g.retail_ov.as_ref().map_or(0, |o| o.3)));
+							let qs = hud_place::overlay_quads(g, r, k); g.hud.extend(qs);
 						}
 						// Retail shop screen: what retail draws through VU1 (absent from the GS capture), from the shop slot mobys
 						// (retail::shop_snap): the world item over the pad, panel 1's item + bolt icon and panel 2's vendor actor.
@@ -234,7 +234,7 @@ impl App {
 			}
 			test_clock::sub_next(self.shot.is_some(), taken); profile::frame_end(self.smooth.ticks);
 			if !test_clock::unpaced() { // [PC] TEST ONLY: RAC_TEST_UNPACED has no frame cap (viewer/test_clock.rs).
-				self.pace.wait(&g.window, g.config.present_mode != wgpu::PresentMode::Fifo);
+				self.pace.wait(&g.window, g.config.present_mode == wgpu::PresentMode::Fifo, self.retail.as_ref().is_some_and(|r| r.lockstep()));
 			}
 			g.window.request_redraw();
 		}

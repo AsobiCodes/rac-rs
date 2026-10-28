@@ -14,7 +14,7 @@ impl Gpu {
 		// adapter has it, else the core Depth24PlusStencil8).
 		let stencil32 = adapter.features().contains(wgpu::Features::DEPTH32FLOAT_STENCIL8);
 		let depth_format = if stencil32 { wgpu::TextureFormat::Depth32FloatStencil8 } else { wgpu::TextureFormat::Depth24PlusStencil8 };
-		let stencil_feature = if stencil32 { wgpu::Features::DEPTH32FLOAT_STENCIL8 } else { wgpu::Features::empty() } | crate::texpack::gpu_features(&adapter) | crate::retail::gpu_capture_features(&adapter) | crate::viewer::volfog::gpu_features(&adapter) | super::passtime::features(&adapter); // [PC] texture packs: BC formats only with a textures mod; GS capture (shares this device on Vulkan): pipeline cache
+		let stencil_feature = if stencil32 { wgpu::Features::DEPTH32FLOAT_STENCIL8 } else { wgpu::Features::empty() } | crate::texpack::gpu_features(&adapter) | crate::retail::gpu_capture_features(&adapter) | crate::viewer::volfog::gpu_features(&adapter) | super::passtime::features(&adapter); // [PC] texture packs: BC formats when the adapter has them; GS capture (shares this device on Vulkan): pipeline cache
 		// [PC] perf (lane D5b, tiegpu.rs): the tie vertex buffer (64 B x ~3M vertices) is bound as one storage buffer, which needs more than
 		// the 128 MiB default binding size where the adapter offers it (else the path stays off).
 		let storage_bind = adapter.limits().max_storage_buffer_binding_size.min(512 << 20).max(wgpu::Limits::default().max_storage_buffer_binding_size);
@@ -42,13 +42,13 @@ impl Gpu {
 		config.present_mode = present_mode(&surface.get_capabilities(&adapter).present_modes, std::env::var("RAC_VSYNC").is_ok_and(|v| v == "1"), std::env::var("RAC_PRESENT").ok().as_deref());
 		// [PC] Swapchain frames in flight: wgpu's 2, 3 on DirectX 12 (renderer.rs); RAC_FRAME_LATENCY (1..3) is the A/B knob.
 		config.desired_maximum_frame_latency = super::renderer::frame_latency(adapter.get_info().backend, std::env::var("RAC_FRAME_LATENCY").ok().and_then(|v| v.parse::<u32>().ok()), config.desired_maximum_frame_latency);
-		configure_surface(&surface, &device, &config);
+		configure_surface(&surface, &device, &config);  let win = super::rscale::start_size(&device, &mut config); // [PC] Render scale (rscale.rs): `config` holds the RENDER size from here on, the swapchain above got the window size
 		eprintln!("gpu: {:?} {}, present mode {:?}, frame latency {}", adapter.get_info().backend, adapter.get_info().name, config.present_mode, config.desired_maximum_frame_latency);
 		// The driver (bug reports: a fault on one driver version only).
 		let ai = adapter.get_info();
 		eprintln!("gpu: driver {} {}, vendor {:#06x} device {:#06x}, {:?}", ai.driver, ai.driver_info, ai.vendor, ai.device, ai.device_type);
 		// The GS capture shares this device when it is Vulkan, else it is on by default on NVIDIA only (gscap draw/gpu_shared.rs).
-		crate::retail::gpu_capture_window(&device, &queue, &ai);
+		crate::retail::gpu_capture_window(&device, &queue, &ai, &adapter);
 
 		let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
 			label: Some("level"),
@@ -358,7 +358,7 @@ impl Gpu {
 			});
 			super::gpuskin::PropsGpu::new(&device, skin_layout, opaque, cull, moby, [mc0, mc1, mc2, mc3])
 		})();
-		let sun = super::sunshadow::SunShadow::new(&device, Some(&props_gpu.layout), bindless.as_ref().filter(|b| b.indirect.is_some()).map(|b| &b.layout));
+		let sun = super::pipe_guard::build(&device, super::pipe_guard::Effect::SunShadow, || super::sunshadow::SunShadow::new(&device, Some(&props_gpu.layout), bindless.as_ref().filter(|b| b.indirect.is_some()).map(|b| &b.layout)));
 		let ubuf = buffer(&device, "uniforms", bytemuck::bytes_of(&Uniforms::zeroed()), wgpu::BufferUsages::UNIFORM);
 		let ubind = device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("uniforms"), layout: &ulayout, entries: &sun.entries(&ubuf) });
 		let mirror: Vec<super::mirror::Mirror> = (0..super::mirror::MAX_MIRRORS).map(|_| super::mirror::Mirror::new(&device, &ulayout, &sun)).collect();
@@ -406,7 +406,7 @@ impl Gpu {
 		// Nearest, repeating: menu frame sprites tile (0x1a noise, 0x1c scanlines).
 		let nearest = device.create_sampler(&wgpu::SamplerDescriptor { address_mode_u: wgpu::AddressMode::Repeat, address_mode_v: wgpu::AddressMode::Repeat, ..Default::default() });
 		let depth = depth_view(&device, config.width, config.height, depth_format);
-		let shadow = super::shadowvol::ShadowPipes::new(&device, &ulayout, config.format, depth_format);
+		let shadow = super::pipe_guard::build(&device, super::pipe_guard::Effect::ShadowVol, || super::shadowvol::ShadowPipes::new(&device, &ulayout, config.format, depth_format));
 		let msaa = msaa_view(&device, config.format, config.width, config.height);
 		let movie = crate::fmv::present::Presenter::new(&device, config.format);
 		let new_panel = || {
@@ -430,14 +430,14 @@ impl Gpu {
 			}
 		};
 		let (item_panel, popup_panel, portrait_panel) = (new_panel(), new_panel(), new_panel());
-		let post = super::post::Post::new(&device, config.format); let volfog = super::volfog::VolFog::new(config.format, &ulayout); let volclouds = super::volclouds::VolClouds::new(config.format, depth_format);
-		let waterfx = super::waterfx::WaterFx::new(&device, config.format, depth_format, &tex_layout);
+		let post = super::pipe_guard::build(&device, super::pipe_guard::Effect::Post, || super::post::Post::new(&device, config.format)); let volfog = super::volfog::VolFog::new(config.format, &ulayout); let volclouds = super::volclouds::VolClouds::new(config.format, depth_format);
+		let waterfx = super::pipe_guard::build(&device, super::pipe_guard::Effect::Water, || super::waterfx::WaterFx::new(&device, config.format, depth_format, &tex_layout));
 		let under = super::underwater::Under::new(&device, config.format);
 		let partfx = super::partfx::PartFx::new(&device, &shader, &ulayout, &tex_layout, config.format, depth_format);
-		let veg = super::vegfx::VegFx::new(&device, &ulayout, &tex_layout, config.format, depth_format);
+		let veg = super::pipe_guard::build(&device, super::pipe_guard::Effect::Veg, || super::vegfx::VegFx::new(&device, &ulayout, &tex_layout, config.format, depth_format));
 		let presenter = super::presenter::Presenter::new(queue.clone(), ai.vendor);
 		let queue = presenter.gated();
-		let mut gpu = Gpu { window, surface, device, queue, presenter, config, pipeline, pipeline_cull, moby_pipelines, moby_cull, shrub_pipelines, clamp_sampler, wrap_samplers, tfrag_pipeline, tfrag_pipeline_lt, tie_pipelines, sky_pipeline, sky_add_pipeline, hud_pipeline, clear_pipeline, pbuf, pbind, preview: None, preview_gold: false, preview_pair: None, preview_worn: None, preview2: None, shop_models: Vec::new(), shop_panel_models: Vec::new(), item_panel, popup_panel, portrait_panel, portrait_shown: false, popup_bolt: None, icon_bolt: None, icon_bolt_sphere: None, popup_bolt_sphere: None, panel_posed: None, metal: MetalDraw::default(), props_gpu, bindless, hud_split: None, hud_textures: Vec::new(), nearest, hud: Vec::new(), retail_ov: None, ubuf, ubind, tex_layout, sampler, depth, msaa, scene: None, lighting: None, reserved_lights: None, fog_live: None, shrub_cap: shrubs::SHRUB_CAP, part_far: crate::water::PART_FAR, under_flag: false, under_surf: None, under, points: [[0.0; 4]; 16], table: [None; 8], moby_dyn: Vec::new(), hero_placed: (gameplay::SPAWN_AMBIENT, 0), hero_env: gameplay::placed_env(gameplay::SPAWN_AMBIENT, 0), scene_actor_light: None, marker_v: None, prop_v: None, class_uv: HashMap::new(), marker_ghosts: [None; 5], hero_gens: (0, 0), marker_bomb: None, marker_light: None, part_pipelines, strip_pipeline, pool_pipeline, pool_add_pipeline, part_tex: None, part_verts: BTreeMap::new(), line_pipeline, line_verts: Vec::new(), part_defs: Vec::new(), fx_meshes: HashMap::new(), fx_tex: HashMap::new(), orig_gpu: Default::default(), fx_quads: Vec::new(), water_quads: Vec::new(), strip_draws: Vec::new(), pool_draws: Vec::new(), ocean_pipeline, ocean_tex: None, ocean_draws: Vec::new(), ocean_rgba: Vec::new(), ocean_frame: None, ocean_level_fog: false, ocean_fog: None, ocean_g_pipeline, ocean_ram: Vec::new(), warp_fx: None, movie, hero_tint_out: None, depth_format, shadow, volume_buf: None, volume_counts: (0, 0), marker_tilt: [0.0; 2], post, volfog, volclouds, waterfx, mirror, bed, partfx, veg, level: usize::MAX, modern_ok: false, sun, ship_fight: false, reshade: Default::default() };
+		let mut gpu = Gpu { window, surface, device, queue, presenter, config, pipeline, pipeline_cull, moby_pipelines, moby_cull, shrub_pipelines, clamp_sampler, wrap_samplers, tfrag_pipeline, tfrag_pipeline_lt, tie_pipelines, sky_pipeline, sky_add_pipeline, hud_pipeline, clear_pipeline, pbuf, pbind, preview: None, preview_gold: false, preview_pair: None, preview_worn: None, preview2: None, shop_models: Vec::new(), shop_panel_models: Vec::new(), item_panel, popup_panel, portrait_panel, portrait_shown: false, popup_bolt: None, icon_bolt: None, icon_bolt_sphere: None, popup_bolt_sphere: None, panel_posed: None, metal: MetalDraw::default(), props_gpu, bindless, hud_split: None, hud_textures: Vec::new(), nearest, hud: Vec::new(), retail_ov: None, ubuf, ubind, tex_layout, sampler, depth, msaa, scene: None, lighting: None, reserved_lights: None, fog_live: None, shrub_cap: shrubs::SHRUB_CAP, part_far: crate::water::PART_FAR, under_flag: false, under_surf: None, under, points: [[0.0; 4]; 16], table: [None; 8], moby_dyn: Vec::new(), hero_placed: (gameplay::SPAWN_AMBIENT, 0), hero_env: gameplay::placed_env(gameplay::SPAWN_AMBIENT, 0), scene_actor_light: None, marker_v: None, prop_v: None, class_uv: HashMap::new(), marker_ghosts: [None; 5], hero_gens: (0, 0), marker_bomb: None, marker_light: None, part_pipelines, strip_pipeline, pool_pipeline, pool_add_pipeline, part_tex: None, part_verts: BTreeMap::new(), line_pipeline, line_verts: Vec::new(), part_defs: Vec::new(), fx_meshes: HashMap::new(), fx_tex: HashMap::new(), orig_gpu: Default::default(), fx_quads: Vec::new(), water_quads: Vec::new(), strip_draws: Vec::new(), pool_draws: Vec::new(), ocean_pipeline, ocean_tex: None, ocean_draws: Vec::new(), ocean_rgba: Vec::new(), ocean_frame: None, ocean_level_fog: false, ocean_fog: None, ocean_g_pipeline, ocean_ram: Vec::new(), warp_fx: None, movie, hero_tint_out: None, depth_format, shadow, volume_buf: None, volume_counts: (0, 0), marker_tilt: [0.0; 2], post, volfog, volclouds, waterfx, mirror, bed, partfx, veg, level: usize::MAX, modern_ok: false, sun, ship_fight: false, hud_place: None, retail_ov_guard: Default::default(), reshade: Default::default(), rscale: Default::default() }; gpu.rscale_plan(win);
 		let font = gpu.upload(Some(&overlay::font_texture()), &gpu.nearest);
 		gpu.hud_textures.push(font);
 		// prog2 maps each sprite's full texture (decomp/notes/particles.md "Draw size"); this soft disc is only
@@ -458,12 +458,14 @@ impl Gpu {
 		if w == 0 || h == 0 {
 			return;
 		}
-		self.config.width = w;
-		self.config.height = h;
+		// [PC] Render scale (rscale.rs): (w, h) is the WINDOW size; `config` takes the render size, the swapchain the window size.
 		self.presenter.flush();
-		configure_surface(&self.surface, &self.device, &self.config);
-		self.depth = depth_view(&self.device, w, h, self.depth_format);
-		self.msaa = msaa_view(&self.device, self.config.format, w, h);
+		let (rw, rh) = self.rscale_plan((w, h));
+		self.config.width = rw;
+		self.config.height = rh;
+		self.reconfigure_surface();
+		self.depth = depth_view(&self.device, rw, rh, self.depth_format);
+		self.msaa = msaa_view(&self.device, self.config.format, rw, rh);
 		self.post.reset();
 	}
 }

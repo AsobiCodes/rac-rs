@@ -25,6 +25,8 @@ const HEADER_SECTION: usize = 4;
 /// One HUD image: a texture drawn with one palette.
 pub struct Sprite {
 	pub tex: Texture,
+	/// The PCSX2 name of this picture (texture + palette), only when a texture pack is active (`texpack::front_hd` looks it up).
+	pub name: Option<crate::texpack::name::TexName>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -108,11 +110,14 @@ fn build(h: &[u8], banks: &[Option<&[u8]>]) -> R<Hud> {
 	}
 
 	let bank = |b: usize| banks[b];
-	let palette = |i: usize| -> Option<Vec<[u8; 4]>> {
+	// Names only with a texture pack active: without one the sprites are exactly what they were.
+	let naming = crate::texpack::hudrepl::enabled();
+	let palette = |i: usize| -> Option<(Vec<[u8; 4]>, u64)> {
 		let b = bank_of(&pal_limits, i)?;
 		let e = span(h, t_pals + i * 8, 8).ok()?;
 		let off = (u32_at(e, 0).ok()? & 0x7fff_ffff) as usize;
-		Some(palette_rgba(span(bank(b)?, off, 1024).ok()?))
+		let raw = span(bank(b)?, off, 1024).ok()?;
+		Some((palette_rgba(raw), if naming { crate::texpack::hash::clut_hash(raw) } else { 0 }))
 	};
 	let texture = |i: usize| -> Option<(usize, usize, Vec<u8>)> {
 		let b = bank_of(&tex_limits, i)?;
@@ -126,16 +131,21 @@ fn build(h: &[u8], banks: &[Option<&[u8]>]) -> R<Hud> {
 		Some((w, hh, { let _ = need; raw[..(w*hh).min(raw.len())].to_vec() }))
 	};
 
-	let pals: Vec<Option<Vec<[u8; 4]>>> = (0..npals).map(palette).collect();
+	let pals: Vec<Option<(Vec<[u8; 4]>, u64)>> = (0..npals).map(palette).collect();
 	let texs: Vec<Option<(usize, usize, Vec<u8>)>> = (0..ntexs).map(texture).collect();
 	let mut frames = Vec::new();
+	let mut tex_hash: std::collections::HashMap<usize, u64> = std::collections::HashMap::new();
 	for f in 0..nframes {
 		let e = span(h, t_frames + f * 4, 4)?;
 		let (p, t) = (u16_at(e, 0)? as usize, u16_at(e, 2)? as usize);
 		let s = match (pals.get(p).and_then(|x| x.as_ref()), texs.get(t).and_then(|x| x.as_ref())) {
-			(Some(pal), Some((w, hh, px))) => Some(Sprite {
-				tex: Texture { w: *w, h: *hh, rgba: px.iter().map(|&v| pal[v as usize]).collect() },
-			}),
+			(Some((pal, clut)), Some((w, hh, px))) => {
+				let name = (naming && px.len() == w * hh).then(|| {
+					let t0 = *tex_hash.entry(t).or_insert_with(|| crate::texpack::hash::tex_hash_single(crate::texpack::hash::Level { px, w: *w, h: *hh }));
+					crate::texpack::name::TexName::palette(t0, *clut, crate::texpack::hash::bits_t8(*w, *hh))
+				});
+				Some(Sprite { tex: Texture { w: *w, h: *hh, rgba: px.iter().map(|&v| pal[v as usize]).collect() }, name })
+			}
 			_ => None,
 		};
 		frames.push(s);
@@ -291,6 +301,7 @@ mod tests {
 			let fonts = level_fonts(&l, &glyphs).unwrap();
 			assert_eq!(fonts.len(), 3);
 			if info.id == 0 {
+				std::fs::create_dir_all(OUT).unwrap();
 				for (i, f) in fonts.iter().enumerate() {
 					std::fs::write(format!("{OUT}/font{}.png", i + 1), png(&flat(&f.tex))).unwrap();
 				}

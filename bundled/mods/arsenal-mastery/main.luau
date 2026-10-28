@@ -3,8 +3,36 @@
 -- A module that is missing or fails is skipped with one log line.
 local omni = omni
 
+-- Log lines: written at once while the mod loads; once it runs they are queued and written one per tick (two when many wait).
+-- One log call costs about a millisecond of script time (the host writes and flushes a file), and the loader stops a mod that spends
+-- more than its budget per tick on half of the ticks: a burst of lines (hits, level-ups, perks) must not cost a whole tick each.
+local running = false
+local queue, qhead, qtail = {}, 1, 0
+local QUEUE_MAX = 400
+local dropped_lines = 0
+
 local function log(msg)
-	omni.log("[am] " .. msg)
+	if not running then
+		omni.log("[am] " .. msg)
+	elseif qtail - qhead < QUEUE_MAX then
+		qtail += 1
+		queue[qtail] = msg
+	else
+		dropped_lines += 1
+	end
+end
+
+local function flush_log()
+	if qhead > qtail then return end
+	local n = (qtail - qhead >= 20) and 2 or 1
+	for _ = 1, n do
+		if qhead > qtail then break end
+		local msg = queue[qhead]
+		queue[qhead] = nil
+		qhead += 1
+		omni.log("[am] " .. msg)
+	end
+	if qhead > qtail then qhead, qtail = 1, 0 end
 end
 
 -- Without the omni extension (another loader or port) the mod does nothing.
@@ -33,8 +61,13 @@ local api = {
 
 -- Order matters: levels first (events reach it before the others), then the effects, then the bars.
 -- gold, mega, ammo and perks belong to other stages: when one is missing it is skipped with one log line.
+local mcache_ok, mcache = pcall(require, "mcache")
 local files = { "levels", "power", "nanotech", "assist", "wrench", "gold", "mega", "ammo", "perks", "bars", "hudbar" }
 local modules = {}
+if mcache_ok and type(mcache) == "table" then
+	mcache.setup()
+	table.insert(modules, { name = "mcache", mod = mcache, hidden = true, fl = {} })
+end
 for _, name in ipairs(files) do
 	local m = nil
 	if name == "levels" then
@@ -50,14 +83,30 @@ for _, name in ipairs(files) do
 	if m ~= nil then
 		local ok, err = pcall(m.setup, api)
 		if ok then
-			table.insert(modules, { name = name, mod = m })
+			table.insert(modules, { name = name, mod = m, fl = {} })
 		else
 			log(name .. ": setup failed (" .. string.sub(tostring(err), 1, 100) .. "), skipped")
 		end
 	end
 end
 
--- Calls mod[method](a, b) for every module that has it; a module whose call errors is dropped with one log line.
+-- A call that errors is logged (the first three times) and the module goes on; a module whose same call errors MAX_FAILS times in a
+-- row is dropped with one log line. (A single transient error used to drop the module for good.)
+local MAX_FAILS = 8
+
+local function failed_call(i, e, what, err)
+	local n = (e.fl[what] or 0) + 1
+	e.fl[what] = n
+	if n <= 3 then log(e.name .. "." .. what .. " failed (" .. string.sub(tostring(err), 1, 100) .. ")") end
+	if n >= MAX_FAILS then
+		log(e.name .. "." .. what .. " failed " .. n .. " times in a row, module dropped")
+		table.remove(modules, i)
+		return true
+	end
+	return false
+end
+
+-- Calls mod[method](a, b) for every module that has it.
 local function dispatch(method, a, b)
 	local i = 1
 	while i <= #modules do
@@ -67,9 +116,9 @@ local function dispatch(method, a, b)
 		if f ~= nil then
 			local ok, err = pcall(f, a, b)
 			if not ok then
-				log(e.name .. "." .. method .. " failed (" .. string.sub(tostring(err), 1, 100) .. "), module dropped")
-				table.remove(modules, i)
-				dropped = true
+				dropped = failed_call(i, e, method, err)
+			elseif e.fl[method] ~= nil and e.fl[method] ~= 0 then
+				e.fl[method] = 0
 			end
 		end
 		if not dropped then i += 1 end
@@ -85,9 +134,9 @@ local function dispatch_event(name, a, b)
 		if f ~= nil then
 			local ok, err = pcall(f, name, a, b)
 			if not ok then
-				log(e.name .. ".on_event(" .. name .. ") failed (" .. string.sub(tostring(err), 1, 100) .. "), module dropped")
-				table.remove(modules, i)
-				dropped = true
+				dropped = failed_call(i, e, "on_event(" .. name .. ")", err)
+			elseif e.fl["on_event(" .. name .. ")"] ~= nil then
+				e.fl["on_event(" .. name .. ")"] = 0
 			end
 		end
 		if not dropped then i += 1 end
@@ -103,8 +152,12 @@ omni.on_frame(function()
 	tick += 1
 	dispatch("on_frame", tick)
 	dispatch("draw")
+	flush_log()
 end)
 
 local names = {}
-for _, e in ipairs(modules) do table.insert(names, e.name) end
+for _, e in ipairs(modules) do
+	if not e.hidden then table.insert(names, e.name) end
+end
 log("ready: " .. table.concat(names, " "))
+running = true

@@ -53,7 +53,7 @@ pub(crate) mod gs_state;
 mod warpfx;
 mod clip;
 mod shadowvol;
-mod post; mod volclouds; mod volfog; mod star; mod starfield;
+mod post; mod volclouds; mod volfog; mod star; mod starfield; mod pipe_guard;
 mod sunshadow;
 mod waterfx;
 mod under_detect; mod underwater;
@@ -71,7 +71,7 @@ mod herocache; mod follow;
 mod gpucache;
 mod tiegpu;
 mod interp;
-mod profile; mod passtime; mod gfxq;
+mod profile; mod passtime; mod gfxq; pub(crate) mod framecsv;
 mod pace;
 mod test_clock;
 mod presenter;
@@ -1336,7 +1336,7 @@ struct Gpu {
 	/// [PC] Dynamic shadows (sunshadow.rs): the cascade maps, bound in the level's group 0 with their compare sampler.
 	sun: sunshadow::SunShadow,
 	/// Retail mode: a ship fight is on (`shipmouse::in_ship_fight`): space, no sun to cast from (handler.rs sets it).
-	ship_fight: bool, reshade: gpu::reshade::Slot, // [PC] ReShade add-on (gpu/reshade.rs)
+	ship_fight: bool, hud_place: Option<handler::hud_place::Place>, retail_ov_guard: handler::hud_hold::Held, reshade: gpu::reshade::Slot, rscale: gpu::rscale::RScale, // [PC] ReShade add-on (gpu/reshade.rs); render scale state (gpu/rscale.rs)
 	/// The loaded level (handler.rs; [PC] Water Enhanced gives Gaspar's lava its own look, waterfx.rs `LAVA_SLOT`).
 	level: usize,
 	/// SCN-3: the lighting word the scene actors copied from the hero when the scene started (FUN_00244e58); None outside a scene.

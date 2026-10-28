@@ -26,6 +26,8 @@ struct DrawFrame {
 	gfx: crate::retail::pcext::Graphics,
 	post_on: bool,
 	sun: Option<super::sunshadow::SunFrame>,
+	/// What the volumetric fog pass draws this frame (decided with the world uniforms).
+	fog: Option<super::volfog::Plan>,
 }
 
 /// Water, river and particle flags of the frame and the water draws the level pass records for the water pass.

@@ -7,7 +7,9 @@ pub fn run(iso_path: &str, level: usize, shot: Option<String>, start: Option<[f3
 	let mut app = new_app(iso_path, level, shot, start, play, front, give)?;
 	profile::init_from_env();
 	let event_loop = EventLoop::new()?;
-	event_loop.run_app(&mut app)?;
+	let ran = event_loop.run_app(&mut app);
+	framecsv::flush(); // RAC_FRAME_CSV: the rows of the last second
+	ran?;
 	Ok(())
 }
 

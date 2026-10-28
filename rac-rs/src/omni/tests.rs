@@ -301,3 +301,33 @@ fn call_original_flags_a_missing_result_in_the_reserved_bit() {
 	assert_eq!((none.is_float, none.reserved, none.i), (0, super::cabi::OMNI_VALUE_NO_RESULT, 0));
 	assert_eq!(super::cabi::OMNI_VALUE_NO_RESULT, 1);
 }
+
+#[test]
+fn json_refuses_nesting_past_the_cap_and_numbers_that_are_not_finite() {
+	// A hostile manifest of thousands of `[` is an error, not a stack overflow.
+	assert!(parse(&"[".repeat(10_000)).is_err());
+	assert!(parse(&format!("{}{}", "{\"a\":".repeat(10_000), "1")).is_err());
+	// Real nesting is far below the cap.
+	assert!(parse(&format!("{}{}", "[".repeat(100), "]".repeat(100))).is_ok());
+	// A number that overflows f64 would be written as `inf` (not JSON) into settings.json: refused when read.
+	assert!(parse(r#"{"max":1e999}"#).is_err());
+	assert!(parse(r#"{"min":-1e999}"#).is_err());
+	let j = parse(r#"{"max":1e300}"#).unwrap();
+	assert_eq!(parse(&j.to_text()).unwrap(), j);
+}
+
+#[test]
+fn only_the_abi_the_host_speaks_is_accepted() {
+	use super::cabi::{abi_check, ABI_VERSION};
+	assert!(abi_check(ABI_VERSION).is_ok());
+	assert!(abi_check(ABI_VERSION + 1).unwrap_err().contains("ABI 2"), "a newer major has other struct layouts");
+	assert!(abi_check(0).is_err());
+}
+
+#[test]
+fn a_failed_load_switches_every_installed_hook_back_to_the_game() {
+	use std::sync::atomic::Ordering;
+	super::hooks::slot(249).active.store(true, Ordering::SeqCst);
+	super::hooks::deactivate_all();
+	assert!(!super::hooks::slot(249).active.load(Ordering::SeqCst));
+}

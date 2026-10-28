@@ -61,6 +61,7 @@ fn start_art_thread() {
 		return;
 	}
 	let _ = std::thread::Builder::new().name("kofi art".into()).spawn(|| {
+		crate::retail::hot::idle(); // as the vegetation replan thread: the sheets must not take a core from the game on a 4-core PC
 		let v = (0..SUPPORTERS.len()).map(scenes::draw).collect();
 		let _ = ART.set(v);
 	});
@@ -81,22 +82,20 @@ pub struct Placement {
 	pub tilt: f32,
 }
 
-/// The three sheets on the garage walls (Scrolt, korixx, reTokyo). `RAC_TUNE` can override each number while placing them
-/// (`kofiN_x`, `_y`, `_z`, `_facing`, `_w`, `_tilt`; N = 0..2).
+/// The three sheets on the garage walls (Scrolt, korixx, reTokyo).
 pub fn placements() -> [Placement; 3] {
 	// The flat green panel of the -x garage wall, right of the turbine: left to right Scrolt, korixx, reTokyo, just below eye height (z 34.1; above ~35 the arch leans into the room and would cut the top of a sheet). The wall
 	// slants (its plane moves about 0.25 m toward +x per metre of y), so the sheets face -0.25 rad off the x axis and each has its own x.
-	let table: [Placement; 3] = [
+	[
 		Placement { c: [139.90, 97.8, 34.1], facing: -0.25, w: 1.2, tilt: 0.05 },
 		Placement { c: [140.26, 99.3, 34.1], facing: -0.25, w: 1.2, tilt: -0.04 },
 		Placement { c: [140.70, 100.8, 34.1], facing: -0.25, w: 1.2, tilt: 0.03 },
-	];
-	let mut out = table;
-	for (i, p) in out.iter_mut().enumerate() {
-		let t = |k: &str, d: f32| crate::devtune::f32(&format!("kofi{i}_{k}"), d);
-		*p = Placement { c: [t("x", p.c[0]), t("y", p.c[1]), t("z", p.c[2])], facing: t("facing", p.facing), w: t("w", p.w), tilt: t("tilt", p.tilt) };
-	}
-	out
+	]
+}
+
+/// Each drawing with its placement; the shorter list bounds the loop (a drawing without a placement is not hung).
+pub fn sheets<'a>(art: &'a [Drawing], places: &'a [Placement]) -> impl Iterator<Item = (&'a Drawing, &'a Placement)> {
+	art.iter().zip(places)
 }
 
 /// The four corners (top-left, top-right, bottom-right, bottom-left, seen from the room) of a sheet with the texture aspect

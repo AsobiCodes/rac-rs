@@ -135,7 +135,7 @@ impl App {
 				self.movie = Some(fmv::player::Player::start(&self.iso_path, &m, lang, self.audio.as_mut()));
 			}
 			if let Some(g) = &self.gpu {
-				r.aspect = g.config.width as f32 / g.config.height.max(1) as f32;
+				r.set_aspect(g.config.width as f32 / g.config.height.max(1) as f32);
 			}
 			// A movie ended and the game fades its last picture out (retail draws the fade into the display buffer over the
 			// movie): the held picture takes the fade's tint until the next picture (a caption) covers it. Mirrors
@@ -194,8 +194,8 @@ impl App {
 		// buffer, drawn by `front_mirror_frame`; any other mode is the mirror's own scene.
 		if let Some(r) = self.retail.as_mut() {
 			if r.front_ram().is_some_and(|f| f.dialog.mode == 6) {
-				if let (Some((w, rows, px)), Some(g)) = (r.take_overlay(), self.gpu.as_mut()) {
-					g.set_retail_overlay(w, rows, &px);
+				if let (Some((w, rows, px, guard)), Some(g)) = (r.take_overlay(), self.gpu.as_mut()) {
+					g.set_retail_overlay(w, rows, &px, guard, false);
 					self.fm_ov = true;
 				}
 			} else {
@@ -258,6 +258,8 @@ impl App {
 						fe.menu.front_rows = it.texts.iter().map(|&t| t as u32).collect();
 					}
 				}
+				// The Language rows in the game's own order (English, French, German, Spanish, Italian: not the text ids' order).
+				if page == frontend::Page::Language { crate::frontend_lang::follow(&mut fe.menu.lang_rows, &m.items); }
 				fe.menu.follow(page, sel_of(m, page, fr.slot_cur), slots)
 			}
 			Some((None, _)) => {}

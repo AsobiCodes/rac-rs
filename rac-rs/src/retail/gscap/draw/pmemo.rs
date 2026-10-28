@@ -190,6 +190,10 @@ impl Gs {
         for v in vs {
             s.extend([v.x as u64, v.y as u64, v.z as u64, u32::from_le_bytes(v.rgba) as u64, v.q.to_bits() as u64, v.s.to_bits() as u64, v.t.to_bits() as u64, v.u as u64, v.v as u64, v.f as u64]);
         }
+        // A texture-pack table the prim samples is part of its record (by its serial: an evicted table's address may be reused).
+        if let Some(c) = &self.repl.cpu_cur {
+            s.extend([c.tab.serial, c.x as u64, c.y as u64]);
+        }
         let rec = lane_hash(u64_bytes(&s));
         let misses = match pm.seen.get(&rec) {
             None => {

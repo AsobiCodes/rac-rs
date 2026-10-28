@@ -484,7 +484,7 @@ pub struct BuildIn {
 	pub pkts: Vec<Option<efx_own::Pkt>>,
 	env: Vec<(u8, u64)>,
 	slots: Vec<u64>,
-	level: u32,
+	pub(super) level: u32,
 	/// [PC] Per owner: the move its world points get (retail/strafe.rs `exhaust_shift`), None for most.
 	shift: Vec<Option<[f32; 3]>>,
 	/// [PC] Free camera: Hoven's abyss water built for any view (retail/free_water.rs; empty with the game camera).

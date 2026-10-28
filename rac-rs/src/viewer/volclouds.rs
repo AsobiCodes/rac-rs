@@ -73,6 +73,17 @@ struct Targets {
 	key: (u32, u32, u64),
 	cur: wgpu::TextureView,
 	hist: [wgpu::TextureView; 2],
+	/// The bind groups over these targets (made at the first march after them, kept while the targets and the sky model map stay).
+	groups: Option<Groups>,
+}
+
+/// The fixed set of bind groups of a target generation: the march (no history), the accumulate step per history read side, and the
+/// apply step per history texture (also the reuse frame's, which shows the newest history untouched).
+struct Groups {
+	skymap: wgpu::TextureView,
+	march: wgpu::BindGroup,
+	accumulate: [wgpu::BindGroup; 2],
+	apply: [wgpu::BindGroup; 2],
 }
 
 pub(super) struct VolClouds {
@@ -84,7 +95,7 @@ pub(super) struct VolClouds {
 	t: Option<Targets>,
 	/// The previous frame's camera rows and clock, the frame count, which history texture is the newer.
 	prev: Option<[[f32; 4]; 4]>,
-	prev_time: f32,
+	prev_time: f64,
 	frames: u32,
 	flip: usize,
 	level: usize,
@@ -199,7 +210,7 @@ impl VolClouds {
 				})
 				.create_view(&Default::default())
 		};
-		Targets { key: (fw, fh, inp.generation), cur: make("volclouds now"), hist: [make("volclouds history 0"), make("volclouds history 1")] }
+		Targets { key: (fw, fh, inp.generation), cur: make("volclouds now"), hist: [make("volclouds history 0"), make("volclouds history 1")], groups: None }
 	}
 
 	/// The uniform of this frame; `fresh` = no usable history (the current frame counts fully). RAC_TUNE cl_* knobs (ENV.md).
@@ -216,11 +227,13 @@ impl VolClouds {
 		u.cover = [c(look.cu, "cl_cu"), c(look.sc, "cl_sc"), t("cl_sigma", 0.08) * look.density, t("cl_eros", 0.7)];
 		u.scale = [t("cl_weather", 14000.0 * look.size), t("cl_shape", 3000.0 * look.size), t("cl_detail", 250.0), t("cl_evolve", 0.0025)];
 		let (speed, heading) = (t("cl_wind", look.wind), t("cl_heading", look.heading));
-		u.wind = [heading.cos() * speed * inp.time, heading.sin() * speed * inp.time, inp.time, t("cl_shear", 500.0)];
+		// (The clock and the wind offset are f64 on the CPU: in an f32 clock the frame step is quantised after hours of play.)
+		let (cs, sn) = (f64::from(heading.cos()) * f64::from(speed), f64::from(heading.sin()) * f64::from(speed));
+		u.wind = [(cs * inp.time) as f32, (sn * inp.time) as f32, inp.time as f32, t("cl_shear", 500.0)];
 		// The wind's drift since the last frame (the reprojection follows the moving clouds).
 		let dt = if fresh { 0.0 } else { inp.time - self.prev_time };
 		let j = JITTER[(self.frames % 8) as usize];
-		u.jit = [j[0], j[1], heading.cos() * speed * dt, heading.sin() * speed * dt];
+		u.jit = [j[0], j[1], (cs * dt) as f32, (sn * dt) as f32];
 		u.genus = [c(look.ac, "cl_ac"), c(look.ci, "cl_ci"), c(look.cc, "cl_cc"), c(look.tower, "cl_tower")];
 		u.alt = [radius + t("cl_mid", look.mid), t("cl_midthick", 420.0), radius + t("cl_high", look.high), t("cl_pale", look.pale)];
 		let thick = (u.shell[2] - u.shell[1]).max(1.0);
@@ -266,12 +279,17 @@ impl VolClouds {
 		let _s = super::profile::span("volclouds");
 		let cu = (look.cu + crate::devtune::f32("cl_cu", 0.0)).clamp(0.0, 1.0);
 		let cov = [cu, (cu + crate::devtune::f32("cl_farcov", look.farcov)).min(1.0)];
-		if !self.noise.get_or_insert_with(|| noise3d::Noise::new(device)).step(queue, enc, cov) {
+		// [PC] pipe_guard.rs: a driver that refuses the noise or cloud shader (DX12 FXC) turns the clouds off, it does not crash the game.
+		if self.noise.is_none() {
+			self.noise = super::pipe_guard::guard(device, super::pipe_guard::Effect::VolClouds, || noise3d::Noise::new(device));
+		}
+		if !self.noise.as_mut().is_some_and(|n| n.step(queue, enc, cov)) {
 			self.prev = None;
 			return false;
 		}
 		if self.pipes.is_none() {
-			self.pipes = Some(self.build(device));
+			let Some(p) = super::pipe_guard::guard(device, super::pipe_guard::Effect::VolClouds, || self.build(device)) else { return false };
+			self.pipes = Some(p);
 		}
 		let timer = self.timer.get_or_insert_with(|| gputime::GpuTimer::new(device, queue));
 		if let Some(tm) = timer.as_mut() {
@@ -292,37 +310,46 @@ impl VolClouds {
 		let mut u = self.uniform(inp, q, look, sun, fresh, fsize);
 		u.reuse[0] = if reuse { 1.0 } else { 0.0 };
 		queue.write_buffer(&ubuf, 0, bytemuck::bytes_of(&u));
-		let (Some(pipes), Some(t), Some(noise)) = (&self.pipes, &self.t, &self.noise) else { return false };
-		let group = |cur: &wgpu::TextureView, hist: &wgpu::TextureView| {
-			let view = wgpu::BindingResource::TextureView;
-			device.create_bind_group(&wgpu::BindGroupDescriptor {
-				label: Some("volclouds"),
-				layout: &pipes.layout,
-				entries: &[
-					wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() },
-					wgpu::BindGroupEntry { binding: 2, resource: view(&noise.shape) },
-					wgpu::BindGroupEntry { binding: 3, resource: view(&noise.detail) },
-					wgpu::BindGroupEntry { binding: 4, resource: view(&noise.weather) },
-					wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&noise.sampler) },
-					wgpu::BindGroupEntry { binding: 6, resource: view(cur) },
-					wgpu::BindGroupEntry { binding: 7, resource: view(hist) },
-					wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&pipes.lsamp) },
-					wgpu::BindGroupEntry { binding: 9, resource: view(&skymap) },
-				],
-			})
-		};
+		let (Some(pipes), Some(t), Some(noise)) = (&self.pipes, &mut self.t, &self.noise) else { return false };
+		if t.groups.as_ref().is_none_or(|g| g.skymap != skymap) {
+			let group = |cur: &wgpu::TextureView, hist: &wgpu::TextureView| {
+				let view = wgpu::BindingResource::TextureView;
+				device.create_bind_group(&wgpu::BindGroupDescriptor {
+					label: Some("volclouds"),
+					layout: &pipes.layout,
+					entries: &[
+						wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() },
+						wgpu::BindGroupEntry { binding: 2, resource: view(&noise.shape) },
+						wgpu::BindGroupEntry { binding: 3, resource: view(&noise.detail) },
+						wgpu::BindGroupEntry { binding: 4, resource: view(&noise.weather) },
+						wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&noise.sampler) },
+						wgpu::BindGroupEntry { binding: 6, resource: view(cur) },
+						wgpu::BindGroupEntry { binding: 7, resource: view(hist) },
+						wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&pipes.lsamp) },
+						wgpu::BindGroupEntry { binding: 9, resource: view(&skymap) },
+					],
+				})
+			};
+			t.groups = Some(Groups {
+				skymap: skymap.clone(),
+				march: group(&pipes.dummy, &pipes.dummy),
+				accumulate: [group(&t.cur, &t.hist[0]), group(&t.cur, &t.hist[1])],
+				apply: [group(&t.hist[0], &pipes.dummy), group(&t.hist[1], &pipes.dummy)],
+			});
+		}
+		let Some(g) = t.groups.as_ref() else { return false };
 		self.skipped = reuse;
 		if reuse {
-			self.ready = Some(group(&t.hist[self.flip], &pipes.dummy));
+			self.ready = Some(g.apply[self.flip].clone());
 			return true;
 		}
 		let tm = self.timer.as_ref().and_then(|t| t.as_ref());
-		let pass = |enc: &mut wgpu::CommandEncoder, i: u32, label: &str, target: &wgpu::TextureView, pipeline: &wgpu::RenderPipeline, g: &wgpu::BindGroup| {
+		let pass = |enc: &mut wgpu::CommandEncoder, i: u32, label: &'static str, target: &wgpu::TextureView, pipeline: &wgpu::RenderPipeline, g: &wgpu::BindGroup| {
 			let mut p = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
 				label: Some(label),
 				color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: target, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store } })],
 				depth_stencil_attachment: None,
-				timestamp_writes: tm.and_then(|tm| tm.writes(i)).or_else(|| crate::viewer::passtime::rw(&format!("cloud {label}"))),
+				timestamp_writes: tm.and_then(|tm| tm.writes(i)).or_else(|| crate::viewer::passtime::rw(label)),
 				occlusion_query_set: None,
 				multiview_mask: None,
 			});
@@ -330,9 +357,9 @@ impl VolClouds {
 			p.set_bind_group(0, g, &[]);
 			p.draw(0..3, 0..1);
 		};
-		pass(enc, 0, "volclouds march", &t.cur, &pipes.cloud, &group(&pipes.dummy, &pipes.dummy));
-		pass(enc, 1, "volclouds accumulate", &t.hist[write], &pipes.resolve, &group(&t.cur, &t.hist[read]));
-		self.ready = Some(group(&t.hist[write], &pipes.dummy));
+		pass(enc, 0, "volclouds march", &t.cur, &pipes.cloud, &g.march);
+		pass(enc, 1, "volclouds accumulate", &t.hist[write], &pipes.resolve, &g.accumulate[read]);
+		self.ready = Some(g.apply[write].clone());
 		if let Some(tm) = self.timer.as_mut().and_then(|t| t.as_mut()) {
 			tm.finish(enc);
 		}

@@ -994,8 +994,8 @@ crate::texpack::extra_hd::apply_fx(&l, &mut fx_textures, front); crate::loadlog:
 					art_textures.push(t);
 					art_textures.len()
 				};
-				let logo = frontend::logo(&l).map_err(|e| eprintln!("title logo: {e}")).ok().map(&mut slot);
-				let press = (0..5).filter_map(|i| frontend::press_start(&l, i).map_err(|e| eprintln!("press start {i}: {e}")).ok().map(&mut slot)).collect();
+				let logo = frontend::logo(&l).map_err(|e| eprintln!("title logo: {e}")).ok().map(|t| crate::texpack::front_hd::logo(&l, t)).map(&mut slot);
+				let press = (0..5).filter_map(|i| frontend::press_start(&l, i).map_err(|e| eprintln!("press start {i}: {e}")).ok().map(|t| crate::texpack::front_hd::press_start(&l, i, t)).map(&mut slot)).collect();
 				*front_art = art.font.clone().map(|font| frontend::Art { font, font2: art.font2.clone(), logo, press, vol: art.vol, frame: art.frame, icons: art.items.clone(), pics: art.pics.clone() });
 			}
 crate::loadlog::say(|| "host: sfx done".into());

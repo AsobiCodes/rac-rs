@@ -1,6 +1,7 @@
 //! The moby as the interpreter left it (`Moby`), the 4:3 side-test and cull inputs (`SideOnly`, `Culls`, `DrawView`),
 //! the animation clock, the hero's attached parts, and the readers of the hero's joints, layers and draw basis.
 
+use crate::fmath::Fm;
 use super::*;
 
 /// One moby as the interpreter left it after a field.
@@ -46,7 +47,7 @@ pub struct Moby {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SideOnly {
 	pub(super) vx: f32,
-	vy: f32,
+	pub(super) vy: f32,
 	pub(super) vz: f32,
 	pub(super) w: f32,
 	pub(super) tan_v: f32,
@@ -63,7 +64,7 @@ impl SideOnly {
 	/// grown by `lag.grow` (1/1024 m). A smoothed frame's camera lies between the last two ticks (`Retail::camera`) while
 	/// retail's verdict is the newest tick's, so without it a moby at the trailing screen edge vanishes while still on screen.
 	pub fn inside_lag(&self, aspect: f32, lag: ViewLag) -> bool {
-		let turn = |t: f32| if lag.ang > 0.0 { (t.atan() + lag.ang).min(1.45).tan() } else { t };
+		let turn = |t: f32| if lag.ang > 0.0 { (t.fatan() + lag.ang).min(1.45).ftan() } else { t };
 		let (tx, ty) = (turn(self.tan_v * aspect), turn(self.tan_v));
 		let (sx, sy) = ((1.0 + tx * tx).sqrt(), (1.0 + ty * ty).sqrt());
 		let w = self.w + lag.grow;
@@ -394,21 +395,21 @@ pub(super) fn basis_pose(m: &ee_oracle::Machine, a: u32, unmirror: bool) -> ([f3
 /// carry only `x - z` (`y > 0`) or `x + z` (`y < 0`): the old atan2 of two zeros gave x = z = 0 and turned the moby 90 degrees. There x
 /// = 0 and z comes from row 1, the same matrix.
 fn euler_from_rows(r0: [f32; 3], r1: [f32; 3], r2: [f32; 3]) -> [f32; 3] {
-	let y = (-r0[2]).clamp(-1.0, 1.0).asin();
-	if r0[0].hypot(r0[1]) < 1e-4 {
-		return [0.0, y, -r1[0].atan2(r1[1])];
+	let y = (-r0[2]).clamp(-1.0, 1.0).fasin();
+	if r0[0].fhypot(r0[1]) < 1e-4 {
+		return [0.0, y, -r1[0].fatan2(r1[1])];
 	}
-	[r1[2].atan2(r2[2]), y, r0[1].atan2(r0[0])]
+	[r1[2].fatan2(r2[2]), y, r0[1].fatan2(r0[0])]
 }
 
 #[cfg(test)]
 mod euler_tests {
-	use super::euler_from_rows;
+	use super::{euler_from_rows, Fm};
 
 	/// The rows the viewer's Euler order builds: row 0 `[cy cz, cy sz, -sy]`, row 1 `[sx sy cz - cx sz, sx sy sz + cx cz, sx cy]`,
 	/// row 2 `[cx sy cz + sx sz, cx sy sz - sx cz, cx cy]`.
 	fn rows(x: f32, y: f32, z: f32) -> [[f32; 3]; 3] {
-		let (sx, cx, sy, cy, sz, cz) = (x.sin(), x.cos(), y.sin(), y.cos(), z.sin(), z.cos());
+		let (sx, cx, sy, cy, sz, cz) = (x.fsin(), x.fcos(), y.fsin(), y.fcos(), z.fsin(), z.fcos());
 		[[cy * cz, cy * sz, -sy], [sx * sy * cz - cx * sz, sx * sy * sz + cx * cz, sx * cy], [cx * sy * cz + sx * sz, cx * sy * sz - sx * cz, cx * cy]]
 	}
 

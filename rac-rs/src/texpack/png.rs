@@ -32,12 +32,20 @@ impl Header {
 	}
 }
 
+/// A zeroed buffer of `n` bytes, or the refusal when the allocation fails (a big image on a small machine must not abort the game).
+fn zeroed(n: usize) -> Result<Vec<u8>, String> {
+	let mut v = Vec::new();
+	v.try_reserve_exact(n).map_err(|_| format!("png: out of memory for {n} bytes"))?;
+	v.resize(n, 0);
+	Ok(v)
+}
+
 fn unfilter(h: &Header, raw: &[u8]) -> Result<Vec<u8>, String> {
 	let (row, bpp) = (h.row_bytes(), (h.channels() * h.depth).div_ceil(8));
 	if raw.len() < (row + 1) * h.h {
 		return Err("png: image data too short".into());
 	}
-	let mut out = vec![0u8; row * h.h];
+	let mut out = zeroed(row * h.h)?;
 	for y in 0..h.h {
 		let f = raw[y * (row + 1)];
 		let src = &raw[y * (row + 1) + 1..(y + 1) * (row + 1)];
@@ -78,6 +86,14 @@ fn sample(row: &[u8], i: usize, depth: usize, index: bool) -> u8 {
 	}
 }
 
+/// Width and height from the IHDR chunk at the start of a PNG file (the first 24 bytes are enough), or None.
+pub fn peek(head: &[u8]) -> Option<(u32, u32)> {
+	if head.get(..8) != Some(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) || head.get(12..16) != Some(b"IHDR") || head.len() < 24 {
+		return None;
+	}
+	Some((be32(&head[16..]), be32(&head[20..])))
+}
+
 /// Decodes a PNG file to RGBA8 (engine alpha scale).
 pub fn load(file: &[u8]) -> Result<Image, String> {
 	if file.get(..8) != Some(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
@@ -111,8 +127,10 @@ pub fn load(file: &[u8]) -> Result<Image, String> {
 	}
 	let raw = inflate::zlib(&idat, (h.row_bytes() + 1) * h.h)?;
 	let px = unfilter(&h, &raw)?;
+	drop(raw);
 	let row = h.row_bytes();
-	let mut rgba = Vec::with_capacity(h.w * h.h * 4);
+	let mut rgba = Vec::new();
+	rgba.try_reserve_exact(h.w * h.h * 4).map_err(|_| format!("png: out of memory for {}x{}", h.w, h.h))?;
 	for y in 0..h.h {
 		let r = &px[y * row..(y + 1) * row];
 		for x in 0..h.w {

@@ -103,7 +103,7 @@ impl Wakes {
 			return;
 		}
 		let step = frame.wrapping_sub(self.frame);
-		self.dt = if (1..=5).contains(&step) { step as f32 / 50.0 } else { 0.0 };
+		self.dt = if (1..=5).contains(&step) { step as f32 / crate::retail::disc::field_rate() } else { 0.0 };
 		self.frame = frame;
 		self.hero = hero;
 		self.cands.clear();

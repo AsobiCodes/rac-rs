@@ -21,7 +21,7 @@
 //! "Space" plus the label would be wider than retail's legend box (see `substitute`).
 //!
 //! The gamepad (XInput): A = Cross, B = Circle, X = Square, Y = Triangle, LB = L1, RB = R1, LT = L2, RT = R2, Back = Select,
-//! Start = Start, d-pad, both sticks analog with radial deadzones and a DualShock 2's square range (`stick`), L3 / R3. A PlayStation controller (pspad.rs: DualShock 4,
+//! Start = Start, d-pad, both sticks analog as PCSX2 gives them to the game by default (`stick`), L3 / R3. A PlayStation controller (pspad.rs: DualShock 4,
 //! DualSense, read over HID) arrives as an XInput report with its buttons in their PS2 places and goes the same way. The pads
 //! are merged with the keyboard (OR of buttons, the larger deflection of each stick axis) and work without any switch; only
 //! the keyboard prompts follow `RAC_PC_EXT`.
@@ -30,6 +30,7 @@
 //! runs; `RAC_PROMPT_CANARY=1` fills the pool range with 0xA5 and logs any field that finds a byte of it changed by anything but
 //! this file (the proof that retail never writes there). `RAC_PROMPT_LOG=from-to` prints every text lookup of those fields
 //! ("prompts: lookup field F id X kb|pad"); both are off unless the variable is set.
+use crate::fmath::Fm;
 use ee_oracle::cpu::Cpu;
 use ee_oracle::rec::Hand;
 use ee_oracle::mem::Mem;
@@ -452,7 +453,7 @@ pub(crate) fn real_pads_off() -> bool {
 
 /// Start of the run (Retail::load): says which pad is there (the device stays the keyboard until the pad is used).
 pub fn init() {
-	if super::pcext::enabled() && !real_pads_off() && (xinput::connected() | super::pspad::connected()) {
+	if super::pcext::enabled() && !real_pads_off() && (xinput::connected() | super::hidpad::connected()) {
 		eprintln!("retail: prompts: gamepad found, keyboard prompts until it is used");
 	}
 }
@@ -522,7 +523,7 @@ fn canary(mem: &mut Mem, field: u32) {
 	static ARMED: AtomicBool = AtomicBool::new(false);
 	static BAD: Mutex<u32> = Mutex::new(0);
 	if !ARMED.swap(true, Ordering::Relaxed) {
-		for a in (LO..HI).filter(|a| !super::pcctl::RANGE.contains(a) && !super::pcctl::DBG_RANGE.contains(a) && !super::pcmods::RANGE.contains(a)) {
+		for a in (LO..HI).filter(|a| !super::pcctl::RANGE.contains(a) && !super::pcctl::DBG_RANGE.contains(a) && !super::pcmods::RANGE.contains(a) && !super::pcdisp::RANGE.contains(a)) {
 			mem.wr8(a, 0xa5);
 		}
 		eprintln!("retail: canary armed {LO:#x}..{HI:#x} at field {field}");
@@ -534,7 +535,7 @@ fn canary(mem: &mut Mem, field: u32) {
 	let mut bad = BAD.lock().unwrap();
 	for a in LO..HI {
 		// The Controls page (pcctl.rs) lives in the range too and writes its own bytes, and so does its Debug section's text pool; the Mods page (pcmods.rs) likewise.
-		if (own_lo..own_hi).contains(&a) || co.contains(&a) || super::pcctl::RANGE.contains(&a) || super::pcctl::DBG_RANGE.contains(&a) || super::pcmods::RANGE.contains(&a) || mem.rd8(a) == 0xa5 {
+		if (own_lo..own_hi).contains(&a) || co.contains(&a) || super::pcctl::RANGE.contains(&a) || super::pcctl::DBG_RANGE.contains(&a) || super::pcmods::RANGE.contains(&a) || super::pcdisp::RANGE.contains(&a) || mem.rd8(a) == 0xa5 {
 			continue;
 		}
 		*bad += 1;
@@ -685,26 +686,29 @@ pub struct XRaw {
 	pub ry: i16,
 }
 
-/// XInput's recommended deadzones (XINPUT_GAMEPAD_LEFT/RIGHT_THUMB_DEADZONE) and trigger threshold.
+/// XInput's recommended deadzones (XINPUT_GAMEPAD_LEFT/RIGHT_THUMB_DEADZONE) and trigger threshold. The stick deadzones only keep
+/// the rest noise from rac-rs's own readers (`pad_activity`, the prompts): scaled by `AXIS_SCALE` they stay inside the game's own
+/// dead zone, so the game never sees them.
 const DZ_LEFT: f32 = 7849.0;
 const DZ_RIGHT: f32 = 8689.0;
 const TRIGGER: u8 = 30;
+/// PCSX2's default "Analog Sensitivity" of a DualShock 2 (133 %, with no dead zone of its own): a modern stick reaches the full
+/// byte before its edge, as a DualShock 2 did.
+const AXIS_SCALE: f32 = 1.33;
 
-/// One stick: radial deadzone, then the rest of the throw scaled to the full 1..=255 range; y up in XInput = low byte on the PS2.
-/// The round throw goes onto the square, as a DualShock 2 reports it: at every angle the larger axis carries the throw, so a
-/// full diagonal is full on both axes. Retail reads each axis on its own (dead zone 47/127, full at 124/127) and runs only at
-/// a stick strength >= 0.82 (decomp/notes/hero_movement.md); on the circle a full diagonal gave 0.76 and Ratchet walked.
+/// One stick as PCSX2 gives it to the game by default: each axis times `AXIS_SCALE`, clamped to 1..=255; y up in XInput = low byte
+/// on the PS2. Inside the radial deadzone `dz` the stick is centred. Retail reads each axis on its own (dead zone 47/127, full at
+/// 124/127; decomp/notes/camera.md, the pad reader) and runs at a stick strength >= 0.82 (hero_movement.md), so its own dead zone
+/// is the only one the player feels: Ratchet moves from about 28 % of the throw, runs from about 66 % and is at full speed from
+/// about 74 %. v0.4.0 rescaled the throw past `dz` to the full range, so the game's dead zone came on top of it: Ratchet moved
+/// only from about 53 % and ran from 90 % (player report #30, "having to tilt the analog stick quite far before he moves").
 fn stick(x: i16, y: i16, dz: f32) -> (u8, u8) {
 	let (x, y) = (x as f32, y as f32);
-	let mag = (x * x + y * y).sqrt();
-	if mag <= dz {
+	if x.fhypot(y) <= dz {
 		return (0x80, 0x80);
 	}
-	let s = ((mag - dz) / (32767.0 - dz)).min(1.0);
-	let (ux, uy) = (x / mag, y / mag);
-	let k = s / ux.abs().max(uy.abs());
-	let (nx, ny) = (ux * k, uy * k);
-	((0x80 as f32 + nx * 127.0).round().clamp(1.0, 255.0) as u8, (0x80 as f32 - ny * 127.0).round().clamp(1.0, 255.0) as u8)
+	let b = |v: f32| (0x80 as f32 + v / 32767.0 * AXIS_SCALE * 127.0).round().clamp(1.0, 255.0) as u8;
+	(b(x), b(-y))
 }
 
 /// The controller's pressed physical buttons as `binds::PHYS` masks: the XInput buttons plus the triggers (past `TRIGGER`) as bits 16 / 17.
@@ -749,7 +753,7 @@ fn pad_read() -> Option<(PadState, u32)> {
 	if real_pads_off() {
 		return None;
 	}
-	let (xr, pr) = (xinput::raw(), super::pspad::state());
+	let (xr, pr) = (xinput::raw(), super::hidpad::state());
 	if xr.is_none() && pr.is_none() {
 		return None;
 	}
@@ -789,13 +793,69 @@ pub fn pad_peek() -> Option<PadState> {
 	pad_state()
 }
 
+/// The connected pads' buttons now as PS2 bits (0 without a pad), without `poll_pad`'s prompt-device bookkeeping: the skip test of a
+/// playing movie reads them (`Retail::movie_pressed`; a movie parks the game thread, so `tick_keys` is the only other reader).
+pub fn pad_buttons() -> u16 {
+	pad_state().map_or(0, |p| p.buttons)
+}
+
+/// R2 is the aim and is kept from the game: in gameplay only (`gameplay`: game mode 0), with the modern camera on, or with Camera
+/// Classic while Strafe aiming is On (`aim_button`). Elsewhere it is retail's R2: the pause menu's button-code scanner (L1 + R2
+/// held, exactly: Novalis FUN_002988a0 `held & 0xf == 6`, decomp/notes/hero_movement.md HERO-19b) needs it. In gameplay retail's
+/// R2 only crouches and swims fast like its R1 (mask 10, hero_crouch_ledge.md), so nothing is lost there.
+fn r2_is_aim(gameplay: bool, aim_button: bool) -> bool {
+	gameplay && aim_button
+}
+
+/// The aim takes R2 away from the game only for Ratchet in his own body (`ratchet`: body form 0): Clank, Giant Clank and the
+/// Hologuise have no aim (strafe.rs and aim.rs need form 0), so retail gets their R2 as it is (whether any of their moves reads it
+/// is not decoded; passing it on is retail-exact either way).
+fn r2_stripped(aim: bool, ratchet: bool) -> bool {
+	aim && ratchet
+}
+
+/// Where the pad's R2 goes this field: (modern camera's aim mode down, retail's pad has R2). `pad_r2`: the pad's R2 is held;
+/// `gameplay` / `ratchet`: the newest field's mode and body form; `aim_button`: Camera Classic + Strafe aiming On, or the modern camera.
+/// Form 0 in gameplay: the aim takes R2. Everywhere else R2 is retail's, and nothing aims (no modcam aim for Clank / Hologuise).
+fn r2_route(pad_r2: bool, gameplay: bool, ratchet: bool, aim_button: bool) -> (bool, bool) {
+	let strip = r2_stripped(r2_is_aim(gameplay, aim_button), ratchet);
+	(strip && pad_r2, pad_r2 && !strip)
+}
+
+/// Bit 0: the pad's R2 is held (this field's `poll_pad`); bit 1: the keyboard's R2 key (B) is held in the same field (never stripped).
+static R2_HELD: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Takes the pad's R2 out of `buttons` when the aim has it (the call of `Retail::tick_inner`, after the newest snapshot is taken, so
+/// the mode / body form are those of the field just finished: no lag in lockstep; with run-ahead (depth > 1) a mode change reaches
+/// the pad up to depth - 1 fields late, `Retail::pad_gameplay`) and sets the modern camera's aim mode.
+/// `buttons` holds the pad's R2 from `poll_pad`; the keyboard's R2 key stays.
+pub fn route_r2(buttons: &mut u16, gameplay: bool, ratchet: bool) {
+	let down = apply_r2(buttons, R2_HELD.load(Ordering::Relaxed), gameplay, ratchet, super::modcam::classic::aim_button());
+	super::modcam::pad_aim(down);
+}
+
+/// `route_r2` without the globals: `held` as `R2_HELD`; returns whether the aim mode is down.
+fn apply_r2(buttons: &mut u16, held: u8, gameplay: bool, ratchet: bool, aim_button: bool) -> bool {
+	let (aim_down, to_game) = r2_route(held & 1 != 0, gameplay, ratchet, aim_button);
+	if held & 3 == 1 && !to_game {
+		*buttons &= !2;
+	}
+	aim_down
+}
+
 /// Gamepad input for this field (Retail::tick_keys, window thread): merges the pad's buttons and sticks into the keyboard's and
-/// makes the gamepad the device when `pad_activity` says so. Nothing without a connected pad.
+/// makes the gamepad the device when `pad_activity` says so. Nothing without a connected pad. The pad's R2 is merged like the other
+/// buttons and noted (`R2_HELD`); whether the aim keeps it from the game is decided later, where the newest snapshot is known
+/// (`route_r2`).
 pub fn poll_pad(buttons: &mut u16, sticks: &mut [u8; 4]) {
 	let pr = pad_read();
 	PHYS_PREV.store(PHYS_NOW.load(Ordering::Relaxed), Ordering::Relaxed);
 	PHYS_NOW.store(pr.map_or(0, |r| r.1), Ordering::Relaxed);
-	let Some((mut p, _)) = pr else { return };
+	let Some((p, _)) = pr else {
+		R2_HELD.store(0, Ordering::Relaxed);
+		return;
+	};
+	R2_HELD.store((p.buttons & 2 != 0) as u8 | (((*buttons & 2 != 0) as u8) << 1), Ordering::Relaxed);
 	static PREV: Mutex<PadState> = Mutex::new(PadState::IDLE);
 	if let Ok(mut prev) = PREV.lock() {
 		if pad_activity(&prev, &p) {
@@ -803,14 +863,6 @@ pub fn poll_pad(buttons: &mut u16, sticks: &mut [u8; 4]) {
 			PAD_PULSE.store(true, Ordering::Relaxed);
 		}
 		*prev = p;
-	}
-	// With the modern camera on, or Camera Classic with Strafe aiming On, R2 is the aim / strafe mode (RMB on the keyboard) and
-	// does not reach the game (retail's R1 does the same as its R2).
-	let r2 = p.buttons & 2 != 0;
-	let aim = super::modcam::classic::aim_button();
-	super::modcam::pad_aim(r2 && aim);
-	if aim {
-		p.buttons &= !2;
 	}
 	(*buttons, *sticks) = merge((*buttons, *sticks), &p);
 }
@@ -930,6 +982,49 @@ mod xinput {
 mod tests {
 	use super::*;
 
+	#[test]
+	fn r2_is_the_aim_only_in_gameplay() {
+		assert!(r2_is_aim(true, true));
+		assert!(!r2_is_aim(false, true), "the pause menu's L1 + R2 code scanner needs R2");
+		assert!(!r2_is_aim(true, false) && !r2_is_aim(false, false));
+	}
+
+	#[test]
+	fn r2_goes_to_retail_for_clank_and_the_hologuise() {
+		assert!(r2_stripped(true, true), "Ratchet: R2 is the aim, not the game's crouch");
+		assert!(!r2_stripped(true, false), "Clank / Giant Clank / Hologuise: no aim exists, retail keeps R2");
+		assert!(!r2_stripped(false, true) && !r2_stripped(false, false));
+	}
+
+	#[test]
+	fn the_pad_r2_has_one_meaning_per_mode_and_body() {
+		// (pad_r2, gameplay, ratchet, aim_button) -> (aim down, retail has R2)
+		assert_eq!(r2_route(true, true, true, true), (true, false), "Ratchet playing: aim, not the crouch");
+		assert_eq!(r2_route(true, true, false, true), (false, true), "Clank / Giant Clank / Hologuise: retail's R2, no modcam aim");
+		assert_eq!(r2_route(true, false, true, true), (false, true), "the pause menu: the code scanner gets R2, nothing aims");
+		assert_eq!(r2_route(true, true, true, false), (false, true), "no aim button (Classic, Strafe aiming Off): retail's R2");
+		assert_eq!(r2_route(false, true, true, true), (false, false), "not held: nothing");
+		assert_eq!(r2_route(false, false, false, false), (false, false));
+	}
+
+	/// The field's buttons through `apply_r2`: R2 is retail's in the pause (mode 3), none of it in gameplay as Ratchet, and the
+	/// keyboard's B key is never taken. Leaving the pause with R2 held gives retail no crouch (gameplay at once), entering it keeps R2.
+	#[test]
+	fn apply_r2_takes_only_the_pads_r2_and_only_when_the_aim_has_it() {
+		let go = |held: u8, b: u16, gameplay: bool, ratchet: bool, aim_button: bool| {
+			let mut b = b;
+			let down = apply_r2(&mut b, held, gameplay, ratchet, aim_button);
+			(b, down)
+		};
+		assert_eq!(go(1, 0x12, true, true, true), (0x10, true), "gameplay as Ratchet: R2 is the aim's");
+		assert_eq!(go(1, 0x12, false, true, true), (0x12, false), "the pause menu: retail gets R2 (L1 + R2 scanner)");
+		assert_eq!(go(1, 0x12, true, false, true), (0x12, false), "Clank: retail gets R2, modcam's aim stays up");
+		assert_eq!(go(1, 0x12, true, true, false), (0x12, false), "no aim button: retail's R2");
+		assert_eq!(go(3, 0x02, true, true, true), (0x02, true), "the keyboard's B key (R2) is not the pad's and stays");
+		assert_eq!(go(0, 0x02, true, true, true), (0x02, false), "B alone: untouched, no pad aim");
+		assert_eq!(go(0, 0x00, true, true, true), (0x00, false));
+	}
+
 	const KBD: Ctx = Ctx { modern_camera: true, menu: None };
 
 	/// The glyph hook displaces no other hand: no registered hand shares an entry with a wrapper twin (it declines, retail draws).
@@ -1037,8 +1132,11 @@ mod tests {
 		binds::init(None, Some("cross:b,circle:a,l2:lb"));
 		assert_eq!(map_xinput(&x(0x1000)).buttons, 0x20, "A is Circle now");
 		assert_eq!(map_xinput(&x(0x2000)).buttons, 0x40, "B is Cross now");
-		assert_eq!(map_xinput(&x(0x100)).buttons, 1, "LB is L2 now");
+		assert_eq!(map_xinput(&x(0x100)).buttons, 1 | 4, "LB is L2 now and still L1 (a button may drive several functions)");
 		assert_eq!(map_xinput(&x(0x1000 | 0x2000)).buttons, 0x60);
+		// The file of a player who moved L1 off LB as well (the Controls page lists every function that differs from the default).
+		binds::init(None, Some("cross:b,circle:a,l2:lb,l1:lt"));
+		assert_eq!(map_xinput(&x(0x100)).buttons, 1, "LB is L2 only");
 		binds::init(None, None);
 		assert_eq!(map_xinput(&x(0x1000)).buttons, 0x40);
 		assert_eq!(phys_mask(&XRaw { buttons: 0x1000, lt: 200, rt: 10, ..Default::default() }), 0x1000 | 1 << 16);
@@ -1116,24 +1214,73 @@ mod tests {
 		assert_eq!(st(0, -32768, 0, 0)[3], 0xff, "full down");
 		assert_eq!(st(0, 0, 32767, 0)[0], 0xff, "right stick full right");
 		assert_eq!(st(0, 0, 0, 32767)[1], 1, "right stick up");
-		// Just outside the deadzone is nearly centre (the throw is rescaled); half way is about half.
-		let a = st(8000, 0, 0, 0)[2];
-		assert!(a > 0x80 && a < 0x84, "{a}");
-		let half = st(7849 + (32767 - 7849) / 2, 0, 0, 0)[2];
-		assert!((half as i32 - (0x80 + 63)).abs() <= 1, "{half}");
-		// Diagonals keep their direction and reach the square's corner, as on a DualShock 2: a full push up-right is full right
-		// and full up (retail then runs; on the circle each axis was 90/127 and Ratchet walked).
-		assert_eq!(st(23170, 23170, 0, 0), [0x80, 0x80, 0xff, 1], "full diagonal = corner");
-		let d = st(20000, 20000, 0, 0);
+		// Not rescaled past the deadzone: each axis is the throw times 1.33 (PCSX2's default), so half a throw is 0x80 + 84 and
+		// three quarters are already full.
+		assert_eq!(st(16384, 0, 0, 0)[2], 0x80 + 84);
+		assert_eq!(st(-16384, 0, 0, 0)[2], 0x80 - 84);
+		assert_eq!(st(24576, 0, 0, 0)[2], 0xff);
+		// Diagonals keep their direction: a full push up-right is as far right as up.
+		let d = st(23170, 23170, 0, 0);
 		assert!(d[2] > 0x80 && d[3] < 0x80 && (d[2] as i32 - 0x80) == (0x80 - d[3] as i32), "{d:?}");
-		// The larger axis carries the throw at every angle: a full push at 30 degrees is full right and tan(30) up.
-		let e = st(28377, 16384, 0, 0);
-		assert_eq!(e[2], 0xff, "{e:?}");
-		assert!((0x80 - e[3] as i32 - 73).abs() <= 1, "{e:?}");
-		// Half a throw on the diagonal is half on each axis (not 0.35 as on the circle).
-		let h = (7849.0 + (32767.0 - 7849.0) / 2.0) / std::f32::consts::SQRT_2;
-		let g = st(h as i16, h as i16, 0, 0);
-		assert!((g[2] as i32 - (0x80 + 63)).abs() <= 1, "{g:?}");
+	}
+
+	/// Retail's reading of one stick byte (the pad reader, decomp/notes/camera.md: d = |byte - 0x7f|, 0 up to 0x2f, else
+	/// (d - 0x30) / 0x4c up to 1, negative below 0x7f).
+	fn retail_axis(b: u8) -> f32 {
+		let d = (b as i32 - 0x7f).abs();
+		let v = if d <= 0x2f { 0.0 } else { ((d - 0x30) as f32 / 0x4c as f32).min(1.0) };
+		if b < 0x7f { -v } else { v }
+	}
+
+	/// What the game reads from a stick tilted by `t` (0..=1 of the throw) in the direction (ux, uy), both sticks the same.
+	fn game_reads(ux: f32, uy: f32, t: f32) -> [f32; 4] {
+		let (x, y) = ((ux * t * 32767.0) as i16, (uy * t * 32767.0) as i16);
+		map_xinput(&XRaw { lx: x, ly: y, rx: x, ry: y, ..Default::default() }).sticks.map(retail_axis)
+	}
+
+	/// Player report #30 (v0.4.0): "having to tilt the analog stick quite far before he moves at all". On both sticks and in the
+	/// four directions the game now reads the stick from about 28 % of the throw, the run threshold 0.82 from about 66 % and full
+	/// from about 74 %, as with PCSX2's defaults; v0.4.0's rescaled throw put the game's dead zone on top of its own: about 53 %,
+	/// 90 % and 98 %.
+	#[test]
+	fn the_game_reads_the_stick_from_its_own_dead_zone_on() {
+		for (ux, uy) in [(1.0f32, 0.0f32), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+			for i in [0, 2] {
+				// The tilt (in thousandths of the throw) where the game's reading of stick `i` reaches `level`.
+				let at = |level: f32| (0..=1000).find(|&k| game_reads(ux, uy, k as f32 / 1000.0)[i..i + 2].iter().any(|v| v.abs() >= level)).unwrap_or(2000);
+				let (moves, runs, full) = (at(1e-6), at(0.82), at(1.0));
+				assert!((270..=300).contains(&moves), "({ux}, {uy}) stick {i}: the game reads it from {moves}/1000");
+				assert!(runs <= 680 && full <= 760, "({ux}, {uy}) stick {i}: run from {runs}/1000, full from {full}/1000");
+			}
+		}
+	}
+
+	/// The bytes are within 2 of the ones PCSX2 gives the game by default (each half axis clamp(v * 1.33 * 255), then 127 + (raw + 1)
+	/// / 2 or 127 - raw / 2; our centre is 0x80), and where the deadzone centres the stick, the game reads nothing from PCSX2's bytes
+	/// either: the deadzone only keeps the rest noise from rac-rs's own readers.
+	#[test]
+	fn the_game_gets_pcsx2s_bytes_and_never_sees_the_deadzone() {
+		let pcsx2 = |v: f32| {
+			let raw = |v: f32| (v * 1.33 * 255.0).clamp(0.0, 255.0) as u32;
+			if v > 0.0 { (127 + (raw(v) + 1) / 2) as u8 } else { (127 - raw(-v) / 2) as u8 }
+		};
+		for deg in (0..360).step_by(3) {
+			let (ux, uy) = ((deg as f32).to_radians().fcos(), (deg as f32).to_radians().fsin());
+			for k in 0..=200 {
+				let t = k as f32 / 200.0;
+				let (x, y) = ((ux * t * 32767.0) as i16, (uy * t * 32767.0) as i16);
+				let s = map_xinput(&XRaw { lx: x, ly: y, rx: x, ry: y, ..Default::default() }).sticks;
+				let p = [pcsx2(x as f32 / 32767.0), pcsx2(-(y as f32) / 32767.0)];
+				for (j, &b) in s.iter().enumerate() {
+					let q = p[j % 2];
+					if b == 0x80 {
+						assert_eq!(retail_axis(q), 0.0, "{deg} degrees, tilt {t}: the deadzone hides {q} from the game");
+					} else {
+						assert!((b as i32 - q as i32).abs() <= 2, "{deg} degrees, tilt {t}: {b} vs PCSX2's {q}");
+					}
+				}
+			}
+		}
 	}
 
 	/// Retail's own per-axis reading (decomp/notes/hero_crouch_ledge.md: d = |byte - 0x7f|, zero up to 0x2f, else (d - 0x30) / 0x4c
@@ -1146,8 +1293,8 @@ mod tests {
 		};
 		for deg in 0..360 {
 			let a = (deg as f32).to_radians();
-			let s = map_xinput(&XRaw { lx: (a.cos() * 32767.0) as i16, ly: (a.sin() * 32767.0) as i16, ..Default::default() }).sticks;
-			let m = axis(s[2]).hypot(axis(s[3])).min(1.0);
+			let s = map_xinput(&XRaw { lx: (a.fcos() * 32767.0) as i16, ly: (a.fsin() * 32767.0) as i16, ..Default::default() }).sticks;
+			let m = axis(s[2]).fhypot(axis(s[3])).min(1.0);
 			assert!(m >= 0.82, "{deg} degrees: strength {m}");
 		}
 	}

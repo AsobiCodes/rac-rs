@@ -23,7 +23,13 @@ pub(super) struct ShipMesh {
 impl ShipMesh {
 	/// Reads the tables from a Veldin overlay image; `None` when the image is too short.
 	pub(super) fn from_overlay(ov: &[u8]) -> Option<ShipMesh> {
-		let at = |va: usize, len: usize| ov.get(va.checked_sub(IMAGE_BASE)?..)?.get(..len);
+		// USA: Veldin's overlay image (level 0), the PAL addresses mapped.
+		let at = |va: usize, len: usize| {
+			if crate::retail::disc::usa() {
+				return crate::retail::disc::ov_bytes(ov, crate::retail::disc::va_level(0, va as u32) as usize, len);
+			}
+			ov.get(va.checked_sub(IMAGE_BASE)?..)?.get(..len)
+		};
 		let vec4 = |b: &[u8]| -> Vec<[f32; 4]> { b.chunks_exact(16).map(|c| [0, 4, 8, 12].map(|o| f32::from_le_bytes(c[o..o + 4].try_into().unwrap()))).collect() };
 		let pos = vec4(at(POSITIONS, VERTS * 16)?);
 		let nrm = vec4(at(NORMALS, VERTS * 16)?);

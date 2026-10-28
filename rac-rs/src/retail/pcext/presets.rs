@@ -3,7 +3,8 @@
 //! The values are ONE data file, `rac-rs/assets/gfx_presets.txt` (`<preset>.<key>=<value>` lines, built in with `include_str!`; the
 //! RAC-RS Launcher shows the same three presets from the same table). A preset sets the picture options (lighting, draw distance, frame
 //! smoothing, HUD, ambient occlusion, dynamic shadows, water, particles, sun rays, vegetation, global illumination, waves, fog, clouds); it never
-//! touches the camera, controls, language, display mode, culling or renderer. High is the game's default picture.
+//! touches the camera, controls, language, display mode or renderer. Every preset sets Culling On (v0.4.1: Off gives no gameplay benefit and
+//! only costs speed); Culling Off with the other rows at a preset reads as Custom. High is the game's default picture.
 //!
 //! Choosing a preset (the player cycles the row) writes its values into the Graphics rows' bytes and the HUD row; the sync code then
 //! sees them as any other change (renderer verdict, `pc_options.txt`). The row always shows the preset that matches the current
@@ -41,6 +42,8 @@ struct Vals {
 	fog: u8,
 	clouds: u8,
 	texfilter: bool,
+	/// Culling On. Not in the table file: every preset has it On.
+	culling: bool,
 }
 
 fn pos(list: &[&str], v: &str) -> Option<u8> {
@@ -82,6 +85,7 @@ fn parse(text: &str) -> Result<[Vals; 3], String> {
 			fog: lv("fog")?,
 			clouds: lv("clouds")?,
 			texfilter: get("texfilter").and_then(|v| flag(v, "smooth", "classic").ok_or(bad("texfilter")))?,
+				culling: true,
 		});
 	}
 	Ok([vals[0], vals[1], vals[2]])
@@ -102,15 +106,16 @@ fn table() -> &'static [Vals; 3] {
 /// The values the Graphics rows' bytes (`GROWS` order) and the HUD row stand for.
 fn vals_of(g: [u8; 15], hud_sharp: bool) -> Vals {
 	let l = swap_rows(g);
-	Vals { lighting: l[0].min(1), draw: pcopts::draw_level(g[12]), smoothing: l[7] == 1, hud_sharp, ao: l[1], shadows: l[2], water: l[4], particles: l[5], sun: l[6], veg: l[8].min(2), gi: l[10], waves: l[11] == 0, fog: l[13], clouds: l[14], texfilter: true }
+	Vals { lighting: l[0].min(1), draw: pcopts::draw_level(g[12]), smoothing: l[7] == 1, hud_sharp, ao: l[1], shadows: l[2], water: l[4], particles: l[5], sun: l[6], veg: l[8].min(2), gi: l[10], waves: l[11] == 0, fog: l[13], clouds: l[14], texfilter: true, culling: g[9] == 0 }
 }
 
-/// `vals_of`'s inverse on the bytes the preset sets; display mode and culling stay as they are.
+/// `vals_of`'s inverse on the bytes the preset sets (culling On); display mode stays as it is.
 fn apply_to(g: &mut [u8; 15], v: Vals) {
 	let mut l = swap_rows(*g);
 	(l[0], l[1], l[2], l[4], l[5], l[6], l[7], l[8], l[10], l[11], l[13], l[14]) = (v.lighting, v.ao, v.shadows, v.water, v.particles, v.sun, v.smoothing as u8, v.veg, v.gi, !v.waves as u8, v.fog, v.clouds);
 	*g = swap_rows(l);
 	g[12] = pcopts::draw_byte(v.draw);
+	g[9] = !v.culling as u8;
 }
 
 /// The Preset row's byte for these values: High first, then Medium, then Low, else 3 (Custom).
@@ -172,9 +177,9 @@ mod tests {
 	#[test]
 	fn the_values_are_the_launchers() {
 		let [low, medium, high] = *table();
-		assert_eq!(low, Vals { lighting: 0, draw: 0, smoothing: false, hud_sharp: false, ao: 1, shadows: 1, water: 1, particles: 1, sun: 1, veg: 0, gi: 0, waves: false, fog: 0, clouds: 0, texfilter: true });
-		assert_eq!(medium, Vals { lighting: 0, draw: 0, smoothing: true, hud_sharp: true, ao: 2, shadows: 2, water: 2, particles: 2, sun: 2, veg: 1, gi: 0, waves: true, fog: 1, clouds: 1, texfilter: true });
-		assert_eq!(high, Vals { lighting: 0, draw: 1, smoothing: true, hud_sharp: true, ao: 3, shadows: 3, water: 3, particles: 3, sun: 3, veg: 1, gi: 0, waves: true, fog: 3, clouds: 3, texfilter: true });
+		assert_eq!(low, Vals { lighting: 0, draw: 0, smoothing: false, hud_sharp: false, ao: 1, shadows: 1, water: 1, particles: 1, sun: 1, veg: 0, gi: 0, waves: false, fog: 0, clouds: 0, texfilter: true, culling: true });
+		assert_eq!(medium, Vals { lighting: 0, draw: 0, smoothing: true, hud_sharp: true, ao: 2, shadows: 2, water: 2, particles: 2, sun: 2, veg: 1, gi: 0, waves: true, fog: 1, clouds: 1, texfilter: true, culling: true });
+		assert_eq!(high, Vals { lighting: 0, draw: 1, smoothing: true, hud_sharp: true, ao: 3, shadows: 3, water: 3, particles: 3, sun: 3, veg: 1, gi: 0, waves: true, fog: 3, clouds: 3, texfilter: true, culling: true });
 	}
 
 	/// The `<preset>.<key>=<value>` lines the launcher's `TABLE` (ui/presets.rs: `("key", ["low", "medium", "high"]),` rows) stands for.
@@ -221,14 +226,15 @@ mod tests {
 	}
 
 	#[test]
-	fn applying_a_preset_reads_back_as_that_preset_and_leaves_display_and_culling() {
+	fn applying_a_preset_reads_back_as_that_preset_sets_culling_on_and_leaves_display() {
 		for start in [[0u8; 15], [1, 3, 2, 1, 3, 1, 2, 0, 2, 1, 3, 1, 2, 2, 2], defaults().0] {
 			for (p, v) in table().iter().enumerate() {
 				let mut g = start;
 				apply_to(&mut g, *v);
 				assert_eq!(detect(g, v.hud_sharp, v.texfilter), p as u8, "preset {p} from {start:?}");
 				assert_eq!(vals_of(g, v.hud_sharp), *v);
-				assert_eq!((g[3], g[9]), (start[3], start[9]), "display mode and culling stay");
+				assert_eq!(g[3], start[3], "display mode stays");
+				assert_eq!(g[9], 0, "every preset sets Culling On, also from Off");
 			}
 		}
 	}
@@ -238,7 +244,7 @@ mod tests {
 	fn any_other_value_is_custom() {
 		let (g, sharp) = defaults();
 		assert_eq!(detect(g, !sharp, true), 3, "HUD Original with the High picture");
-		for row in [0usize, 1, 2, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14] {
+		for row in [0usize, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14] {
 			for to in 0..4u8 {
 				let mut c = g;
 				c[row] = to;
@@ -250,6 +256,9 @@ mod tests {
 		let mut c = g;
 		c[1] = 2;
 		assert_eq!(detect(c, sharp, true), 3, "ambient occlusion Medium with the rest High");
+		let mut off = g;
+		off[9] = 1;
+		assert_eq!(detect(off, sharp, true), 3, "High with Culling Off is Custom, so the row never claims a preset it would not apply");
 		let mut w = g;
 		w[3] = 1;
 		assert_eq!(detect(w, sharp, true), 2, "fullscreen alone does not make it Custom");
@@ -258,6 +267,7 @@ mod tests {
 	/// The host side: the player cycles the row, the rows and the HUD take the preset, the row shows what matches.
 	#[test]
 	fn choosing_sets_the_rows_and_a_changed_row_shows_custom() {
+		let _g = crate::retail::pcopts::globals_guard();
 		let (g, sharp) = defaults();
 		let mut mem = Mem::new();
 		for (a, b) in GROWS.iter().zip(g) {

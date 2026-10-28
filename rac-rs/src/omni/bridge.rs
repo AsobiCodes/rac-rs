@@ -14,8 +14,12 @@ use super::binding::{Sig, Ty};
 use super::cabi::Value;
 use super::hooks::slot;
 use ee_oracle::cpu::Cpu;
+use std::any::Any;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+
+/// A panic payload carried out of a callback of the DLL (the DLL's frames cannot be unwound through).
+pub type Parked = Box<dyn Any + Send>;
 
 /// One dispatch in progress: what `original_cb` needs to run the retail function for it.
 pub struct Ctx {
@@ -26,6 +30,16 @@ pub struct Ctx {
 	pub called: bool,
 	/// The retail callee did not come back (it waits for a frame, frame_wait.rs): the hand ends at once, the host loop goes on from the wait.
 	pub unwound: bool,
+	/// The retail code `original` ran panicked (the oracle unwinds the game thread with panics: `RecRebuilt`, `Quit`): the payload waits here
+	/// until the dispatch is over, then `run` unwinds with it (`park_panic`). A second `original` of the chain is refused while it waits
+	/// (`take_original`): the callee is half-run.
+	///
+	/// DOUBLE DISPATCH (known, rare): when the unwind is a table rebuild (`RecRebuilt`) that a mod's `call_game` made on the game thread
+	/// BEFORE the chain called `original`, the oracle resumes at the pc `Saved::put` restored, which is the hooked function's entry. The
+	/// function starts again, the hook dispatches a second time, and a mod that counts or spawns per call runs its chain twice for that one
+	/// game call (retail state stays correct). If `original` ran first, the resume pc is the return address and only the mod's return
+	/// override is lost. Mod authors: do not rely on exactly-once per call across a `call_game` made before `original`.
+	pub panic: Option<Parked>,
 }
 
 pub static CTX: Mutex<Vec<Ctx>> = Mutex::new(Vec::new());
@@ -39,13 +53,63 @@ pub fn in_hook() -> bool {
 	!ctx().is_empty()
 }
 
-/// A dispatch of hook `n` is in progress (its `original` can take the entry and return address from it).
+/// The innermost dispatch in progress is the one of hook `n` (its `original` can take the entry and return address from it). A chain of
+/// another hook that calls `original(n)` while the dispatch of `n` is further up the stack does not: that call finds the function by its spec.
 pub fn dispatching(n: usize) -> bool {
 	dispatching_in(&ctx(), n)
 }
 
 fn dispatching_in(st: &[Ctx], n: usize) -> bool {
-	st.iter().any(|x| x.slot == n)
+	st.last().is_some_and(|x| x.slot == n)
+}
+
+/// The calling thread is the oracle's game thread (named "ee", oracle `Machine::start`): the only thread whose loop catches `RecRebuilt`.
+/// The mods' between-field calls (`tick`, `pad`, events, settings) run on the retail worker thread, with the game thread parked in its
+/// vblank callback.
+fn on_game_thread() -> bool {
+	std::thread::current().name() == Some("ee")
+}
+
+/// Something above the calling frame catches an unwind: the oracle's loop on the game thread (`on_game`), or a `run_at` (a mod's
+/// `call_game`, `raycast`, ...: `depth` live ones) on the worker between two fields.
+fn catcher_above(on_game: bool, depth: u32) -> bool {
+	on_game || depth > 0
+}
+
+/// A panic of the oracle that no `extern "C"` callback (`original`, `call_game`) can let through.
+/// With a catcher above (`catcher_above`) it is kept in the innermost dispatch and `run` unwinds with it once the DLL call returned, a Rust
+/// frame under that catcher: on the game thread the oracle's loop, between two fields the `run_at` of the mod's `call_game`. That one
+/// swallows it with an empty dispatch stack and `Saved::put` throws the whole half-run call away ("cut short"), so the registers and stack
+/// a half-run callee left never reach the caller (the compiled frames above, of the old table, run on only with the registers `Saved::put`
+/// restored). With no catcher (a hook reached from non-omni retail code on the worker, no `run_at` live) it is swallowed in place; either
+/// way the table rebuild it announces is passed on to the game thread through `rec_unwind`, the flag the vblank callback sets after its own
+/// rebuild: the game thread unwinds its stale compiled frames when it resumes.
+pub fn park_panic(c: &mut Cpu, p: Parked) {
+	let mut unwind = false;
+	park_in(&mut ctx(), p, catcher_above(on_game_thread(), super::native_host::calls_live()), &mut unwind);
+	if unwind {
+		c.rec_unwind = true;
+	}
+}
+
+fn park_in(st: &mut [Ctx], p: Parked, catcher: bool, unwind: &mut bool) {
+	match st.last_mut() {
+		// The first one wins: a later panic is a consequence of the machine already being cut short.
+		Some(cx) if catcher => {
+			cx.panic.get_or_insert(p);
+		}
+		_ => *unwind |= is_unwind_signal(&p),
+	}
+}
+
+/// A panic payload that is no text: the oracle's way to unwind the game thread (`RecRebuilt`, `Quit`; a `panic!` always carries a text).
+pub fn is_unwind_signal(p: &Parked) -> bool {
+	!(p.is::<&str>() || p.is::<String>())
+}
+
+/// A panic is waiting to unwind the game thread: no further game call may run on the machine until it has.
+pub fn panic_parked() -> bool {
+	ctx().iter().any(|x| x.panic.is_some())
 }
 
 /// Re-entrancy guard of one hook (the retail function that `original` calls runs the hand again, which must fall through to retail).
@@ -174,10 +238,15 @@ fn run(n: usize, c: &mut Cpu) -> bool {
 	let sp = super::native_host::sp_before(c);
 	let args = read_args(c, sig);
 	s.calls.fetch_add(1, Ordering::Relaxed);
-	ctx().push(Ctx { slot: n, entry, ra, called: false, unwound: false });
+	ctx().push(Ctx { slot: n, entry, ra, called: false, unwound: false, panic: None });
 	let (code, ret) = super::host::scope(c, || o.loader.dispatch(n as u32, &args));
 	let done = ctx().pop();
 	let Some(done) = done else { return false };
+	if let Some(p) = done.panic {
+		// The retail code under `original` unwound with a panic (the oracle's rebuild / quit, or a real one): passed on to the game thread's
+		// loop from here, a Rust frame, as it would unwind without the hook.
+		std::panic::resume_unwind(p);
+	}
 	if done.unwound {
 		return true;
 	}
@@ -198,24 +267,27 @@ fn run(n: usize, c: &mut Cpu) -> bool {
 	true
 }
 
+/// The entry and return address `original` of hook `n` calls, taken from the innermost dispatch. None: that is no dispatch of `n`, or the
+/// machine already left this call at a frame wait or a panic is parked in it (the retail code under an earlier `original` was cut short,
+/// half-run): a second `original` has nothing to run on and must not start the callee again on that state.
+fn take_original(st: &mut [Ctx], n: usize) -> Option<(u32, u32)> {
+	let cx = st.last_mut().filter(|x| x.slot == n)?;
+	if cx.unwound || cx.panic.is_some() {
+		return None;
+	}
+	cx.called = true;
+	Some((cx.entry, cx.ra))
+}
+
 /// `call_original` of the host: the retail function with the given arguments, for the dispatch of hook `n` in progress.
 pub fn call_retail(c: &mut Cpu, n: usize, sig: &Sig, args: &[Value]) -> Option<Value> {
-	let (entry, ra) = {
-		let mut st = ctx();
-		let cx = st.iter_mut().rev().find(|x| x.slot == n)?;
-		if cx.unwound {
-			// The machine already left this call at a frame wait: a second `original` has nothing to run on.
-			return None;
-		}
-		cx.called = true;
-		(cx.entry, cx.ra)
-	};
+	let (entry, ra) = take_original(&mut ctx(), n)?;
 	put_args(c, sig, args);
 	// No frame callback inside the call (frame_wait.rs): a retail function that waits for frames unwinds instead of parking the game
 	// thread, with this hook's Luau frame and the loader lock, until the next field.
 	// `frame_wait::call` runs the function to its real return (also through a jump out of its compiled span); false only at a frame wait or a stop.
 	if !super::frame_wait::call(c, entry, ra) {
-		if let Some(cx) = ctx().iter_mut().rev().find(|x| x.slot == n) {
+		if let Some(cx) = ctx().last_mut().filter(|x| x.slot == n) {
 			cx.unwound = true;
 		}
 		let name = slot(n).id.get().map_or("?", String::as_str).to_string();
@@ -245,16 +317,111 @@ mod tests {
 	use super::*;
 
 	fn cx(slot: usize, unwound: bool) -> Ctx {
-		Ctx { slot, entry: 0x100, ra: 0x200, called: false, unwound }
+		Ctx { slot, entry: 0x100, ra: 0x200, called: false, unwound, panic: None }
 	}
 
 	#[test]
-	fn only_the_hooks_on_the_stack_are_dispatching() {
+	fn only_the_innermost_dispatch_takes_its_entry() {
 		let st = vec![cx(3, false), cx(7, false)];
-		assert!(dispatching_in(&st, 3) && dispatching_in(&st, 7));
-		// A chain of hook 3 that calls `original` of hook 5 (omni.fn from inside another hook) is not a dispatch of 5.
+		assert!(dispatching_in(&st, 7));
+		// Hook 7's chain calls `original` of hook 3, whose dispatch is further up the stack: that is no dispatch of 3 (F2 of the review).
+		assert!(!dispatching_in(&st, 3));
+		// Nor one of a hook (5) that is not on the stack at all.
 		assert!(!dispatching_in(&st, 5));
 		assert!(!dispatching_in(&[], 3));
+	}
+
+	#[test]
+	fn only_a_panic_without_text_is_an_unwind_signal() {
+		struct Rebuilt;
+		assert!(is_unwind_signal(&(Box::new(Rebuilt) as Parked)));
+		assert!(!is_unwind_signal(&(Box::new("boom") as Parked)));
+		assert!(!is_unwind_signal(&(Box::new(String::from("boom")) as Parked)));
+	}
+
+	#[test]
+	fn a_panic_parked_on_the_game_thread_waits_in_the_innermost_dispatch() {
+		struct Rebuilt;
+		let mut st = vec![cx(3, false), cx(7, false)];
+		let mut unwind = false;
+		park_in(&mut st, Box::new(Rebuilt), true, &mut unwind);
+		assert!(st[0].panic.is_none() && st[1].panic.as_ref().is_some_and(|p| p.is::<Rebuilt>()) && !unwind);
+		// The first panic stays.
+		park_in(&mut st, Box::new("later"), true, &mut unwind);
+		assert!(st[1].panic.as_ref().is_some_and(|p| p.is::<Rebuilt>()));
+	}
+
+	#[test]
+	fn between_fields_an_unwind_signal_is_swallowed_and_passed_on_as_a_flag() {
+		struct Rebuilt;
+		// Worker thread, with and without a dispatch on the stack: nothing is parked (nothing there would catch it), the flag is set.
+		for mut st in [vec![], vec![cx(3, false)]] {
+			let mut unwind = false;
+			park_in(&mut st, Box::new(Rebuilt), false, &mut unwind);
+			assert!(unwind && st.iter().all(|x| x.panic.is_none()));
+		}
+		// A text panic is no rebuild: swallowed without the flag.
+		let mut unwind = false;
+		park_in(&mut [], Box::new("boom"), false, &mut unwind);
+		assert!(!unwind);
+	}
+
+	#[test]
+	fn a_catcher_is_the_game_thread_or_a_live_game_call() {
+		// F1 of review 3: a worker dispatch under a mod's `call_game` has the `run_at` above it, so it parks like the game thread does.
+		assert!(catcher_above(true, 0));
+		assert!(catcher_above(false, 1));
+		assert!(catcher_above(false, 3));
+		// Nothing above (a hook reached from plain retail code between two fields): swallowed in place.
+		assert!(!catcher_above(false, 0));
+	}
+
+	#[test]
+	fn a_worker_dispatch_under_a_game_call_parks_the_panic_and_refuses_a_second_original() {
+		struct Rebuilt;
+		let mut st = vec![cx(3, false)];
+		// The decision `park_panic` takes on the worker with one `run_at` live (depth 1).
+		let mut unwind = false;
+		park_in(&mut st, Box::new(Rebuilt), catcher_above(false, 1), &mut unwind);
+		assert!(st[0].panic.is_some() && !unwind, "parked for `run` to re-throw to the run_at, not swallowed in place");
+		// The half-run callee is not started again by a second `original` of the same chain.
+		assert!(take_original(&mut st, 3).is_none());
+		assert!(!st[0].called);
+		// Without the park (a fresh dispatch) the first `original` takes the entry and return address.
+		let mut fresh = vec![cx(3, false)];
+		assert_eq!(take_original(&mut fresh, 3), Some((0x100, 0x200)));
+		assert!(fresh[0].called);
+		// Another hook's `original` finds no dispatch of its own.
+		assert!(take_original(&mut fresh, 4).is_none());
+	}
+
+	#[test]
+	fn park_panic_between_fields_sets_rec_unwind_and_throws_nothing() {
+		struct Rebuilt;
+		// This test thread is no "ee" thread: the between-field path. The Cpu is a real one; no unwind may escape and none may stay parked.
+		let mut c = Cpu::new(ee_oracle::mem::Mem::new());
+		assert!(!c.rec_unwind);
+		let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| park_panic(&mut c, Box::new(Rebuilt))));
+		assert!(r.is_ok(), "park_panic itself must not unwind");
+		assert!(c.rec_unwind, "the game thread must unwind its stale frames when it resumes");
+		assert!(!panic_parked());
+	}
+
+	#[test]
+	fn a_panic_parked_on_a_thread_named_ee_stays_with_its_dispatch() {
+		struct Rebuilt;
+		let h = std::thread::Builder::new()
+			.name("ee".into())
+			.spawn(|| {
+				assert!(on_game_thread());
+				let mut st = vec![cx(1, false)];
+				let mut unwind = false;
+				park_in(&mut st, Box::new(Rebuilt), on_game_thread(), &mut unwind);
+				!unwind && st[0].panic.is_some()
+			})
+			.unwrap();
+		assert!(h.join().unwrap());
+		assert!(!on_game_thread());
 	}
 
 	#[test]

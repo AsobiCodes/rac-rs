@@ -18,6 +18,7 @@
 //! - Hooks (hash-gated wrappers per level, rows made by scratch_aim/mkaim.py from the twin tables): each overrides only the
 //!   aim or target input of one retail function and then runs the retail function; with `active()` false it returns at once and
 //!   the retail code runs untouched.
+use crate::fmath::Fm;
 use super::{modcam, strafe};
 use ee_oracle::cpu::Cpu;
 use ee_oracle::rec::{register_hand, Hand};
@@ -343,7 +344,7 @@ fn dir_to(from: [f32; 3], to: [f32; 3]) -> (f32, f32) {
 	let fwd = modcam::aim_cam().map_or([1.0, 0.0, 0.0], |c| c.fwd);
 	let d = if dot(d, fwd) < 0.3 { fwd } else { d };
 	let xy = (d[0] * d[0] + d[1] * d[1]).sqrt();
-	(d[1].atan2(d[0]), d[2].atan2(xy))
+	(d[1].fatan2(d[0]), d[2].fatan2(xy))
 }
 
 /// The turn from the hero's logic pose to the drawn one: while aiming and moving, the hero's logic pose (rows +0xc0 = his path
@@ -358,7 +359,7 @@ fn drawn_turn(c: &mut Cpu) -> Option<(f32, f32, [f32; 3])> {
 	if r0[0] == 0.0 && r0[1] == 0.0 {
 		return None;
 	}
-	let (sn, cs) = (want - r0[1].atan2(r0[0])).sin_cos();
+	let (sn, cs) = (want - r0[1].fatan2(r0[0])).fsin_cos();
 	(!(sn.abs() < 1e-6 && cs > 0.0)).then_some((sn, cs, hp))
 }
 
@@ -374,7 +375,7 @@ fn off_drawn(c: &mut Cpu, p: [f32; 3]) -> (f32, f32) {
 	let (h, ay) = (c.mem.rd32(HERO_MOBY) & PTR, modcam::aim_yaw().unwrap_or(0.0));
 	let hp = rv(c, h + 0x10);
 	let o = [p[0] - hp[0], p[1] - hp[1]];
-	(ay.cos() * o[0] + ay.sin() * o[1], -ay.sin() * o[0] + ay.cos() * o[1])
+	(ay.fcos() * o[0] + ay.fsin() * o[1], -ay.fsin() * o[0] + ay.fcos() * o[1])
 }
 
 /// `drawn_point` of the vector at `a`, written back (the caller's muzzle buffer: retail then spawns the shot and its sparks there).
@@ -434,7 +435,7 @@ fn debug_log(m: &mut ee_oracle::Machine) {
 				let pv = m.rd32(hm + 0x78) & PTR;
 				let (a, b) = (m.rdv3(pv), m.rdv3(pv + 0x10));
 				let d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-				let (ayaw, aelev) = (d[1].atan2(d[0]), d[2].atan2((d[0] * d[0] + d[1] * d[1]).sqrt()));
+				let (ayaw, aelev) = (d[1].fatan2(d[0]), d[2].fatan2((d[0] * d[0] + d[1] * d[1]).sqrt()));
 				let aim = modcam::aim_yaw().unwrap_or(f32::NAN);
 				log(&mut s, &format!("tesla arc tick {tick} start {:.2} {:.2} {:.2} end {:.2} {:.2} {:.2} yaw {ayaw:.3} elev {aelev:.3} aim_yaw {aim:.3} hero_yaw {y:.3} target {:#x} t2 {:#x} len {:.2}", a[0], a[1], a[2], b[0], b[1], b[2], m.rd32(pv + 0x20), m.rd32(pv + 0x38), f32::from_bits(m.rd32(pv + 0x24))));
 			}
@@ -484,8 +485,8 @@ fn debug_log(m: &mut ee_oracle::Machine) {
 		n += 1;
 		let rel = cam.map_or(String::new(), |c| {
 			let v = [p[0] - c.eye[0], p[1] - c.eye[1], p[2] + 1.0 - c.eye[2]];
-			let (cy, ey) = (v[1].atan2(v[0]), v[2].atan2((v[0] * v[0] + v[1] * v[1]).sqrt()));
-			let (fy, fe) = (c.fwd[1].atan2(c.fwd[0]), c.fwd[2].atan2((c.fwd[0] * c.fwd[0] + c.fwd[1] * c.fwd[1]).sqrt()));
+			let (cy, ey) = (v[1].fatan2(v[0]), v[2].fatan2((v[0] * v[0] + v[1] * v[1]).sqrt()));
+			let (fy, fe) = (c.fwd[1].fatan2(c.fwd[0]), c.fwd[2].fatan2((c.fwd[0] * c.fwd[0] + c.fwd[1] * c.fwd[1]).sqrt()));
 			format!(" cam yaw {fy:.3} elev {fe:.3} enemy yaw {cy:.3} elev {ey:.3}")
 		});
 		log(&mut s, &format!("actor tick {tick} {a:#x} class {cl} flags {fl:#x} pos {:.1} {:.1} {:.1} dist {d:.1}{rel}", p[0], p[1], p[2]));
@@ -645,7 +646,7 @@ fn blaster_search_any(c: &mut Cpu) -> bool {
 			// Log only: distance and bearing off the shot of the pick, and the pick of retail's own numbers next to it.
 			let tp = rv(c, m + 0x10);
 			let dist = ((tp[0] - mu[0]).powi(2) + (tp[1] - mu[1]).powi(2) + (tp[2] - mu[2]).powi(2)).sqrt();
-			let off = ((tp[1] - mu[1]).atan2(tp[0] - mu[0]) - y0 + 3.0 * std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+			let off = ((tp[1] - mu[1]).fatan2(tp[0] - mu[0]) - y0 + 3.0 * std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
 			let (rm, _, _) = lockon_search(c, mu, y0, p0, LockOn::RETAIL);
 			trace("lockon", format!("target {m:#x} class {} dist {dist:.1} off {:.1} deg retail_pick {rm:#x} yaw {y:.3} pitch {p:.3}", c.mem.rd16(m + 0xa6), off.to_degrees()));
 		}
@@ -734,8 +735,8 @@ fn lockon_search(c: &mut Cpu, mu: [f32; 3], yaw: f32, pitch: f32, k: LockOn) -> 
 		let p = rv(c, m + 0x10);
 		let t = [p[0], p[1], p[2] + lift];
 		let (dx, dy, dz) = (t[0] - mu[0], t[1] - mu[1], t[2] - mu[2]);
-		let bearing = dy.atan2(dx);
-		let elev = dz.atan2((dx * dx + dy * dy).sqrt());
+		let bearing = dy.fatan2(dx);
+		let elev = dz.fatan2((dx * dx + dy * dy).sqrt());
 		let (ry, rp) = if k.nearest { (yaw0, pitch0) } else { (yaw, pitch) };
 		let mut gap = (ry - bearing).abs() % std::f32::consts::TAU;
 		if gap > std::f32::consts::PI {
@@ -744,13 +745,13 @@ fn lockon_search(c: &mut Cpu, mu: [f32; 3], yaw: f32, pitch: f32, k: LockOn) -> 
 		let d = (dx * dx + dy * dy + dz * dz).sqrt();
 		if d <= best_d {
 			let pa = rp + floor * 0.5;
-			let ray = [mu[0] + d * ry.cos() * pa.cos(), mu[1] + d * ry.sin() * pa.cos(), mu[2] + d * pa.sin()];
+			let ray = [mu[0] + d * ry.fcos() * pa.fcos(), mu[1] + d * ry.fsin() * pa.fcos(), mu[2] + d * pa.fsin()];
 			let chord = ((t[0] - ray[0]).powi(2) + (t[1] - ray[1]).powi(2) + (t[2] - ray[2]).powi(2)).sqrt();
-			let mut ang = if d > 1e-4 { 2.0 * (chord / (2.0 * d)).clamp(-1.0, 1.0).asin() } else { 0.0 };
+			let mut ang = if d > 1e-4 { 2.0 * (chord / (2.0 * d)).clamp(-1.0, 1.0).fasin() } else { 0.0 };
 			if ang > k.cone && rec != 0 {
 				let r = c.mem.rd8(rec + 10) as f32 * 0.125;
 				if r < d {
-					ang = (ang - (r / d).clamp(-1.0, 1.0).asin()).max(0.0);
+					ang = (ang - (r / d).clamp(-1.0, 1.0).fasin()).max(0.0);
 				}
 			}
 			if ang < k.cone {
@@ -801,7 +802,7 @@ fn strafe_lock(c: &mut Cpu) {
 	let mp = rv(c, ptr(c.g(5)));
 	let mu = drawn_point(c, mp);
 	let f = cam.fwd;
-	let (yaw, elev) = (f[1].atan2(f[0]), f[2].atan2((f[0] * f[0] + f[1] * f[1]).sqrt()));
+	let (yaw, elev) = (f[1].fatan2(f[0]), f[2].fatan2((f[0] * f[0] + f[1] * f[1]).sqrt()));
 	// The search adds half the hero's floor tilt to the pitch it is given: take it off, so the ray is the camera's.
 	let floor = rf(c, 0x13f634);
 	let (m, _, _) = lockon_search(c, mu, yaw, elev - floor * 0.5, LockOn::wide());
@@ -883,8 +884,8 @@ fn blaster_spawn_any(c: &mut Cpu) -> bool {
 	let hp = rv(c, h + 0x10);
 	let (hy, d48) = (rf(c, HERO_YAW), modcam::aim_yaw().unwrap_or(0.0));
 	let o = [mu[0] - hp[0], mu[1] - hp[1]];
-	let (fx, fy) = (hy.cos() * o[0] + hy.sin() * o[1], -hy.sin() * o[0] + hy.cos() * o[1]);
-	let (gx, gy) = (d48.cos() * o[0] + d48.sin() * o[1], -d48.sin() * o[0] + d48.cos() * o[1]);
+	let (fx, fy) = (hy.fcos() * o[0] + hy.fsin() * o[1], -hy.fsin() * o[0] + hy.fcos() * o[1]);
+	let (gx, gy) = (d48.fcos() * o[0] + d48.fsin() * o[1], -d48.fsin() * o[0] + d48.fcos() * o[1]);
 	trace("blaster_spawn", format!("muzzle {:.2} {:.2} {:.2} yaw {yaw:.3} elev {elev:.3} aim {:.2} {:.2} {:.2} hero {:.2} {:.2} {:.2} hyaw {hy:.3} m48 {d48:.3} off_logic {fx:.2} {fy:.2} off_drawn {gx:.2} {gy:.2} dz {:.2} lock {:#x}", mu[0], mu[1], mu[2], aim.pos[0], aim.pos[1], aim.pos[2], hp[0], hp[1], hp[2], mu[2] - hp[2], lock.map_or(0, |l| l.0)));
 	c.f[12] = yaw.to_bits();
 	c.f[13] = (-elev).to_bits();
@@ -910,7 +911,7 @@ fn bomb_velocity_any(c: &mut Cpu) -> bool {
 	// The throw leaves from `from` (the caller's point beside the hero, on his logic heading; the launch FUN_0029f2b0 reads the
 	// same buffer): turned to the drawn Ratchet, so the lob is solved from, and the bomb leaves, the drawn glove side.
 	let from = drawn_at(c, from_p);
-	let bearing = (aim.pos[1] - from[1]).atan2(aim.pos[0] - from[0]);
+	let bearing = (aim.pos[1] - from[1]).fatan2(aim.pos[0] - from[0]);
 	let sp = c.g(29) as u32;
 	let buf = sp.wrapping_sub(0x200) & !0xf;
 	let saved: Vec<u32> = (0..4).map(|i| c.mem.rd32(buf + 4 * i)).collect();
@@ -961,7 +962,7 @@ fn devastator_spawn_any(c: &mut Cpu) -> bool {
 	let hm = c.mem.rd32(HERO_MOBY) & PTR;
 	let (hp, ay) = (rv(c, hm + 0x10), modcam::aim_yaw().unwrap_or(0.0));
 	let o = [mu[0] - hp[0], mu[1] - hp[1]];
-	trace("devastator_spawn", format!("muzzle {:.2} {:.2} {:.2} yaw {yaw:.3} elev {elev:.3} target {target:#x} aim {:.2} {:.2} {:.2} off_drawn {:.2} {:.2}", mu[0], mu[1], mu[2], aim.pos[0], aim.pos[1], aim.pos[2], ay.cos() * o[0] + ay.sin() * o[1], -ay.sin() * o[0] + ay.cos() * o[1]));
+	trace("devastator_spawn", format!("muzzle {:.2} {:.2} {:.2} yaw {yaw:.3} elev {elev:.3} target {target:#x} aim {:.2} {:.2} {:.2} off_drawn {:.2} {:.2}", mu[0], mu[1], mu[2], aim.pos[0], aim.pos[1], aim.pos[2], ay.fcos() * o[0] + ay.fsin() * o[1], -ay.fsin() * o[0] + ay.fcos() * o[1]));
 	c.f[12] = yaw.to_bits();
 	c.f[13] = (-elev).to_bits();
 	c.f[15] = yaw.to_bits();
@@ -1050,9 +1051,9 @@ fn pyro_held_any(c: &mut Cpu) -> bool {
 	let mut put: Vec<(u32, u32, u32)> = Vec::new();
 	let h = c.mem.rd32(HERO_MOBY) & PTR;
 	let r0 = rv(c, h + 0xc0);
-	let mut frame = r0[1].atan2(r0[0]);
+	let mut frame = r0[1].fatan2(r0[0]);
 	if let Some((sn, cs, hp)) = drawn_turn(c) {
-		frame += sn.atan2(cs);
+		frame += sn.fatan2(cs);
 		let p = rv(c, held + 0x10);
 		let (x, y) = (p[0] - hp[0], p[1] - hp[1]);
 		let mut w = vec![(held + 0x10, hp[0] + cs * x - sn * y), (held + 0x14, hp[1] + sn * x + cs * y)];
@@ -1068,7 +1069,7 @@ fn pyro_held_any(c: &mut Cpu) -> bool {
 	}
 	let mu = joint0(c, entry, held).unwrap_or_else(|| rv(c, held + 0x10));
 	let (yaw, elev) = dir_to(mu, aim.pos);
-	let v = [elev.cos() * yaw.cos(), elev.cos() * yaw.sin(), elev.sin()];
+	let v = [elev.fcos() * yaw.fcos(), elev.fcos() * yaw.fsin(), elev.fsin()];
 	let saved: Vec<u32> = (0..3).map(|i| c.mem.rd32(HERO_HEADING + 4 * i)).collect();
 	for (i, x) in v.iter().enumerate() {
 		c.mem.wr32(HERO_HEADING + 4 * i as u32, x.to_bits());
@@ -1133,7 +1134,7 @@ fn weapon_held_any(c: &mut Cpu, g: &'static AtomicBool, name: &str, yaw_words: &
 		}
 	}
 	let (yaw, elev) = dir_to(mu, aim.pos);
-	for (i, x) in [elev.cos() * yaw.cos(), elev.cos() * yaw.sin(), elev.sin()].iter().enumerate() {
+	for (i, x) in [elev.fcos() * yaw.fcos(), elev.fcos() * yaw.fsin(), elev.fsin()].iter().enumerate() {
 		w.retain(|&(a, _)| a != 0x13f990 + 4 * i as u32);
 		w.push((0x13f990 + 4 * i as u32, x.to_bits()));
 	}
@@ -1216,9 +1217,9 @@ fn mine_velocity_any(c: &mut Cpu) -> bool {
 		c.mem.wr32(buf + 4 * i as u32, *v);
 	}
 	let v = rv(c, out_p);
-	let bearing = (aim.pos[1] - from[1]).atan2(aim.pos[0] - from[0]);
+	let bearing = (aim.pos[1] - from[1]).fatan2(aim.pos[0] - from[0]);
 	let od = off_drawn(c, from);
-	trace("mine_velocity", format!("from {:.2} {:.2} {:.2} aim {:.2} {:.2} {:.2} bearing {bearing:.3} out {:.3} {:.3} {:.3} out_bearing {:.3} off_drawn {:.2} {:.2}", from[0], from[1], from[2], aim.pos[0], aim.pos[1], aim.pos[2], v[0], v[1], v[2], v[1].atan2(v[0]), od.0, od.1));
+	trace("mine_velocity", format!("from {:.2} {:.2} {:.2} aim {:.2} {:.2} {:.2} bearing {bearing:.3} out {:.3} {:.3} {:.3} out_bearing {:.3} off_drawn {:.2} {:.2}", from[0], from[1], from[2], aim.pos[0], aim.pos[1], aim.pos[2], v[0], v[1], v[2], v[1].fatan2(v[0]), od.0, od.1));
 	true
 }
 

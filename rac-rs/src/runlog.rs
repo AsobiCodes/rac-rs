@@ -7,7 +7,7 @@
 //! exe's symbol table); a Windows-level crash leaves its exception, module and call stack. RAC_TEST_CRASH=1 (tests only) crashes
 //! the watchdog thread once the window is open, to check that last part.
 //! Only when stderr goes nowhere (the double-clicked game, Setup's Play): a console or a redirected stderr keeps it, so dev and test
-//! runs are unchanged. RAC_RUN_LOG=1 forces it (tests), RAC_RUN_LOG=0 turns it off. Windows only; elsewhere `start` does nothing.
+//! runs are unchanged. RAC_RUN_LOG=1 forces it (tests), RAC_RUN_LOG=0 turns it off. Windows (the whole log) and Linux (stderr into the file only: runlog_linux.rs); elsewhere `start` does nothing.
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
@@ -39,7 +39,19 @@ pub fn active() -> bool {
 
 /// Starts the run log in `dir` when stderr goes nowhere (see the module doc). Called once on the main thread, after `launch_args`.
 pub fn start(dir: &std::path::Path) -> bool {
-	#[cfg(not(windows))]
+	#[cfg(target_os = "linux")]
+	{
+		if !crate::runlog_linux::redirect(dir) {
+			return false;
+		}
+		LABEL.with(|l| {
+			let _ = l.set("main".into());
+		});
+		ACTIVE.store(true, Ordering::Release);
+		eprintln!("rac-rs run log: {} started (Linux, no watchdog)", crate::app_name());
+		return true;
+	}
+	#[cfg(all(not(windows), not(target_os = "linux")))]
 	{
 		let _ = dir;
 		return false;
@@ -114,7 +126,12 @@ pub fn set_window(w: &winit::window::Window) {
 /// While the guard lives, the watchdog's notes list `what` as a wait of this thread. Only for waits that can last (a frame's
 /// vsync, another thread's result), not for spin loops: it takes a lock.
 pub fn waiting(what: &'static str) -> Waiting {
-	if !active() {
+	// Only the Windows watchdog reads the list; elsewhere a wait would take the lock for nothing, every frame.
+	#[cfg(windows)]
+	let off = !active();
+	#[cfg(not(windows))]
+	let off = true;
+	if off {
 		return Waiting(0);
 	}
 	let thread = LABEL.with(|l| l.get_or_init(|| std::thread::current().name().unwrap_or("unnamed").into()).clone());
@@ -582,6 +599,8 @@ mod win {
 		// SAFETY: Windows calls the filter with valid exception pointers.
 		let r = unsafe { &*(*e).record };
 		let at = r.address as usize;
+		// The mods' log lines still queued come first (omni/logq.rs; never waits for a lock).
+		crate::omni::drain_log_raw(write_raw);
 		// EXCEPTION_ACCESS_VIOLATION: what was touched.
 		let access = match (r.code, r.nparams) {
 			(0xC000_0005, 2..) => format!(", {} {:#x}", ["reading", "writing"].get(r.info[0]).copied().unwrap_or("executing"), r.info[1]),
@@ -602,8 +621,9 @@ mod win {
 			let n = unwind(&mut ctx, lo, hi, &mut pcs);
 			write_raw(&format!("runlog: calls of the crashed thread:\n{}", stack_lines(&pcs[..n], Syms::load().as_ref())));
 		}
-		// RivaTuner running with Vulkan: the box that offers DirectX 12 (rtss_crash.rs; the filter hands on after it).
-		crate::rtss_crash::on_crash(write_raw);
+		// RivaTuner running with Vulkan and the crash in its hook or the NVIDIA driver: the box that offers DirectX 12 (rtss_crash.rs;
+		// the filter hands on after it).
+		crate::rtss_crash::on_crash(r.code, &module_at(at).map_or_else(String::new, |(_, file)| file), write_raw);
 		match PREV.load(Ordering::Relaxed) {
 			// EXCEPTION_CONTINUE_SEARCH: Windows ends the game as without the log.
 			0 => 0,
@@ -695,9 +715,9 @@ mod win {
 				if notes == 1 || STALL_NOTES[notes - 1] == 60 {
 					note_stacks(&mut syms);
 				}
-				// A minute stuck with RivaTuner's hook and Vulkan: the DirectX 12 box, once (rtss_crash.rs).
+				// A minute stuck with RivaTuner's hook and Vulkan: the DirectX 12 box, once, and only for an open window (rtss_crash.rs).
 				if STALL_NOTES[notes - 1] == 60 {
-					crate::rtss_crash::on_freeze(write_raw);
+					crate::rtss_crash::on_freeze(had_window, cpu_secs(main).zip(cpu0).map(|(b, a)| b - a), write_raw);
 				}
 			}
 		}

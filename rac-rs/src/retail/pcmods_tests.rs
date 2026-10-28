@@ -547,3 +547,36 @@ fn the_pause_note_is_blank_without_packs_and_names_the_planet_with_them() {
 	test_open(&mut mem, &root);
 	assert_eq!(state(|st| text(ID_NOTE_L, 0, st)), NOTE[0].to_vec());
 }
+
+#[test]
+fn a_hand_copied_pcsx2_pack_that_is_off_still_gives_the_title_page_and_not_the_pause_row() {
+	let root = dir("by_hand");
+	test_root(Some(&root));
+	let p = root.join("SCES-50916").join("replacements");
+	std::fs::create_dir_all(&p).unwrap();
+	std::fs::write(p.join("1-2-00005dd3.dds"), b"x").unwrap();
+	let mut mem = Mem::new();
+	assert_eq!(build_title(&mut mem, [0x30_0000, 0x30_0200, 0x30_0300], 0), Some([ID_MODS | 3 << 16, TPAGE, 0]), "installed, off: the title row");
+	assert!(load_store().is_none(), "the pause row waits for a pack that is on");
+	std::fs::write(root.join("active.txt"), format!("{FILE_HEADER}\nSCES-50916\n")).unwrap();
+	assert!(load_store().is_some());
+	test_root(None);
+}
+
+/// Without a mod loader (Linux) the script / native mods are left out because they cannot run; texture packs stay. With a loader both are
+/// there, and the mods folder keeps everything either way.
+#[test]
+fn the_script_mods_wait_for_the_loader() {
+	let d = dir("loader");
+	add_script(&d, "am", "arsenal_mastery", "Arsenal Mastery", AM_SETTINGS);
+	add_mod(&d, "pack", "A Pack", "textures");
+	test_root(Some(&d));
+	let s = read_store().expect("the store");
+	assert_eq!((scripts(&s).len(), packs(&s).len()), (1, 1), "read_store as such offers both");
+	let s = without_loader(read_store().expect("the store"), false);
+	assert!(scripts(&s).is_empty(), "no script mods without a loader");
+	assert_eq!(packs(&s).len(), 1, "the texture pack stays");
+	let s = without_loader(read_store().expect("the store"), true);
+	assert_eq!((scripts(&s).len(), packs(&s).len()), (1, 1), "with a loader both are offered");
+	test_root(None);
+}

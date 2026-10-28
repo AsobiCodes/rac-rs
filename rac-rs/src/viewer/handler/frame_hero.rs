@@ -66,7 +66,7 @@ impl App {
 				if let Some(q) = rparts {
 					crate::retail::strafe::twist_mats(&mut mats, a, q.strafe.twist); follow::capture(&q.follow, mats.len(), |j| norm_cols(a.joint_world(&mats, j)));
 				}
-				self.smooth.set_pose_fix(rparts.and_then(|q| strafe_fix(&self.hero_rig.hero, a, q, self.retail.as_ref().and_then(|r| r.hero_clock()), &mats)));
+				if !(hero_check && self.smooth.ticks == 0) { self.smooth.set_pose_fix(/* once per tick: RAC_HERO_CHECK=1 poses every display frame */ rparts.and_then(|q| strafe_fix(&mut self.hero_rig.hero, a, q, self.retail.as_ref().and_then(|r| r.hero_clock()), &mats))); }
 				// HELD-GLOVE: a glove in hand (FUN_0020d018) is posed from the hero's own live local joints, not its clock.
 				let hand_copy = crate::inventory::hand_pose_copy(game.inv.equipped);
 				let hero_local = if hand_copy { self.hero_rig.hero.local_held(a, &hero_fx, throw_pose.as_ref(), layer1_pose.as_ref(), &hold_poses) } else { Vec::new() };

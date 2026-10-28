@@ -13,6 +13,7 @@
 mod draw;
 pub(crate) mod edge_cut;
 mod texname;
+mod texrepl;
 
 use crate::gsfull::vif::{Out, Vif1};
 use crate::gsfull::vu1::Vu1;
@@ -70,16 +71,16 @@ pub struct Overlay {
     pub rows: u32,
     /// The game restored a grabbed frame into the main buffer (the pause menu): the scene is frozen.
     pub frozen: bool,
-    /// Drawn straight into the display buffer on a field with no frame copy (the main loop's no-present fields,
-    /// 0x15f5b8 != 0): the last shown picture with that field's draws over it.
+    /// Drawn straight into the display buffer on a no-present field (0x15f5b8 != 0): the last shown picture with that field's draws over it.
     pub disp: bool,
     pub px: Vec<[f32; 4]>,
-    /// The first `rows` rows as RGBA8, as the CPU capture hands them over (empty with the GPU capture: its `px` holds the
-    /// normalised floats and `retail.rs ov_px` converts them).
+    /// The first `rows` rows as RGBA8 (CPU capture; empty with the GPU capture: its `px` holds floats and `retail.rs ov_px` converts them).
     pub rgba: Vec<[u8; 4]>,
     /// The sharp HUD (lane G, PC extra): the same picture drawn again at the window's resolution by the GPU capture
     /// (`draw/gpu.rs` hd pass); `retail.rs ov_px` hands it over instead of `px` when it is present. None: the 512-wide picture.
     pub hd: Option<Hd>,
+    /// What the HUD position's corner cells must know about this picture (`edge_cut::guard`): it goes with the picture.
+    pub guard: edge_cut::Guard,
 }
 
 /// An overlay drawn at the window's resolution (RGBA8, `w` x `rows`): the 4:3 frame fills the window height.
@@ -254,6 +255,9 @@ pub struct Gs {
     gpu: Option<Box<draw::gpu::Gpu>>,
     /// GPU capture: qwords of the current host -> local transfer so far (`trx` of the CPU path).
     gq: u32,
+    /// GPU capture: IMAGE qwords of the current transfer not yet recorded (`gx_flush`), the first one's qword index `gx_q0`.
+    gx: Vec<u128>,
+    gx_q0: u32,
     /// The GPU capture takes over at the first field end from this field on once it is ready (`gpu_attach`); 0 none.
     gpu_wait: u64,
     /// [PC] (speed) The last block spans `draw_in` / `gpu_raster` asked for, keyed by the registers they derive from (tiny prims
@@ -261,6 +265,8 @@ pub struct Gs {
     sp_t: Option<(u64, (u32, u32))>,
     sp_f: Option<((u64, u64), (u32, u32))>,
     sp_r: Option<((u64, u64), (u32, u32))>,
+    /// [PC] Texture-pack replacements of the overlay prims (texrepl.rs); empty without a pack.
+    repl: texrepl::ReplState,
 }
 
 
@@ -314,8 +320,8 @@ pub fn gpu_prestart(idle: fn()) {
 
 /// The window's device is ready (draw/gpu_shared.rs `window_ready`): the capture shares it when it is Vulkan, and the default of
 /// RAC_GSCAP_GPU follows the window.
-pub fn gpu_window(dev: &wgpu::Device, q: &wgpu::Queue, info: &wgpu::AdapterInfo) {
-    draw::gpu_shared::window_ready(dev, q, info);
+pub fn gpu_window(dev: &wgpu::Device, q: &wgpu::Queue, info: &wgpu::AdapterInfo, adapter: &wgpu::Adapter) {
+    draw::gpu_shared::window_ready(dev, q, info, adapter);
 }
 
 /// A window is starting (draw/gpu_shared.rs `expect_window`): the capture waits for its device instead of opening one of its own.
@@ -367,7 +373,7 @@ impl Gs {
             fog: 0,
             vq: Vec::new(),
             trx: Trx::default(),
-            cur: Overlay { w: W, h: H, rows: H, frozen: false, disp: false, px: vec![[0.0, 0.0, 0.0, 1.0]; (W * H) as usize], rgba: Vec::new(), hd: None },
+            cur: Overlay { w: W, h: H, rows: H, frozen: false, disp: false, px: vec![[0.0, 0.0, 0.0, 1.0]; (W * H) as usize], rgba: Vec::new(), hd: None, guard: Default::default() },
             done: None,
             pend_o: None,
             ready: Default::default(),
@@ -414,10 +420,13 @@ impl Gs {
             p1_nd: 0,
             gpu,
             gq: 0,
+            gx: Vec::new(),
+            gx_q0: 0,
             gpu_wait,
             sp_t: None,
             sp_f: None,
             sp_r: None,
+            repl: Default::default(),
             trace: std::env::var("RAC_GSCAP_TRACE").ok().and_then(|v| {
                 let (a, b) = v.split_once('-')?;
                 Some((a.parse().ok()?, b.parse().ok()?))
@@ -451,6 +460,7 @@ impl Gs {
         let kind = match &job { Job::Vif1(..) => "job vif1", Job::Gif(q, _) if q.is_empty() => "job marker", _ => "job gif" };
         let end = matches!(&job, Job::Gif(q, u64::MAX) if q.is_empty());
         self.run_job(job);
+        self.gx_flush();
         if end && self.gpu_wait != 0 && self.fields >= self.gpu_wait {
             self.gpu_attach();
         }
@@ -654,7 +664,10 @@ impl Gs {
         let num = (code >> 16) & 0xff;
         match cmd {
             0x00 | 0x02..=0x07 | 0x10 | 0x11 | 0x13 => {}
-            0x14 | 0x15 | 0x17 => self.mscal += 1,
+            0x14 | 0x15 | 0x17 => {
+                self.gx_flush();
+                self.mscal += 1;
+            }
             0x01 => {
                 self.vif_cl = imm & 0xff;
                 self.vif_wl = (imm >> 8) & 0xff;
@@ -756,6 +769,9 @@ impl Gs {
 
     /// One GIF qword (paths 2/3).
     pub fn gif(&mut self, q: u128) {
+        if !(self.tag.nloop > 0 && self.tag.flg >= 2) {
+            self.gx_flush();
+        }
         if self.tag.nloop == 0 {
             let nloop = (q & 0x7fff) as u32;
             let pre = (q >> 46) & 1 != 0;
@@ -834,6 +850,9 @@ impl Gs {
 
     fn reg(&mut self, a: u8, v: u64) {
         let a = a & 0x7f;
+        if a != 0x54 {
+            self.gx_flush();
+        }
         match a {
             0x00 => {
                 self.r[0] = v;
@@ -1130,13 +1149,31 @@ impl Gs {
             }
         }
         if self.gpu.is_some() {
-            self.gpu_xfer(self.r[0x50], self.r[0x51], self.r[0x52], self.gq, &[q]);
+            // [PC] (speed) Recorded in one piece by `gx_flush` before anything else happens (a vendor field streams ~57,000
+            // qwords of textures: one `gpu_xfer` call each cost 5.7 ms of the capture's 11 ms).
+            if self.gx.is_empty() {
+                self.gx_q0 = self.gq;
+            }
+            self.gx.push(q);
             self.gq += 1;
             return;
         }
         let mut t = std::mem::take(&mut self.trx);
         self.put(self.r[0x50], self.r[0x51], self.r[0x52], &mut t, q);
         self.trx = t;
+    }
+
+    /// Records the IMAGE qwords `image_in` collected as one GPU transfer step (same result as a call per qword: `xfer` joins
+    /// the pieces of one transfer anyway). Called before every register write, every GIF tag and VU1 start, and at the job end.
+    fn gx_flush(&mut self) {
+        if self.gx.is_empty() {
+            return;
+        }
+        let d = std::mem::take(&mut self.gx);
+        self.gpu_xfer(self.r[0x50], self.r[0x51], self.r[0x52], self.gx_q0, &d);
+        self.repl_shadow(self.r[0x50], self.r[0x51], self.r[0x52], self.gx_q0, &d);
+        self.gx = d;
+        self.gx.clear();
     }
 
     /// One HWREG qword of a transfer (BITBLTBUF, TRXPOS, TRXREG) at position `t`.
@@ -1179,6 +1216,7 @@ impl Gs {
     fn trx_start(&mut self) {
         texname::bump();
         let (bb, pos, rr) = (self.r[0x50], self.r[0x51], self.r[0x52]);
+        self.repl_upload(bb, pos, rr);
         let (dbp, dbw, dpsm) = (((bb >> 32) & 0x3fff) as u32, ((bb >> 48) & 0x3f) as u32, ((bb >> 56) & 0x3f) as u32);
         let (dx, dy) = (((pos >> 32) & 0x7ff) as u32, ((pos >> 48) & 0x7ff) as u32);
         let (rw, rh) = ((rr & 0xfff) as u32, ((rr >> 32) & 0xfff) as u32);
@@ -1326,6 +1364,7 @@ impl Gs {
         for p in &run {
             if self.gpu.is_some() {
                 self.gpu_xfer(p.bb, p.pos, p.rr, 0, &p.data);
+                self.repl_shadow(p.bb, p.pos, p.rr, 0, &p.data);
                 self.gq = p.data.len() as u32;
                 continue;
             }
@@ -1358,6 +1397,7 @@ impl Gs {
         let (rw, rh) = ((rr & 0xfff) as u32, ((rr >> 32) & 0xfff) as u32);
         if self.gpu.is_some() {
             self.gpu_copy();
+            self.repl_copy();
             self.stat(format!("local copy {rw}x{rh} psm {spsm:x}->{dpsm:x}"));
             return;
         }
@@ -1367,6 +1407,7 @@ impl Gs {
                 self.wr_px(dpsm, dbp, dbw, dx + x, dy + y, v);
             }
         }
+        self.repl_copy();
         self.stat(format!("local copy {rw}x{rh} psm {spsm:x}->{dpsm:x}"));
     }
 }

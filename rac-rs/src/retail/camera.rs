@@ -1,6 +1,7 @@
 //! The render camera: where the level overlay keeps it in RAM (`camera_globals`, `read_cam`), the occlusion mask
 //! published with it, and the camera the viewer asks for between two ticks (`Retail::camera`, `view_lag`).
 
+use crate::fmath::Fm;
 use super::*;
 
 /// Retail's occlusion mask of the field the render camera was read from (REN-CULL-OCC); the viewer's tie / fragment / moby tests use it
@@ -22,7 +23,7 @@ pub(super) fn camera_globals(level: u32) -> Option<(u32, u32, u32)> {
 pub(super) fn read_cam(m: &ee_oracle::Machine, level: u32) -> Option<Cam> {
 	let (eye, basis, tan) = camera_globals(level)?;
 	let f = m.rdv3(basis);
-	Some((m.rdv3(eye), f[1].atan2(f[0]), f[2].clamp(-1.0, 1.0).asin(), m.rdf(tan)))
+	Some((m.rdv3(eye), f[1].fatan2(f[0]), f[2].clamp(-1.0, 1.0).fasin(), m.rdf(tan)))
 }
 
 /// The render camera as the OmniLoader host (`omni/draw_w2s.rs`) needs it, read from a RAM image: eye, forward (basis row 0), up (row 2, or
@@ -77,6 +78,18 @@ pub(super) fn read_cam_up(m: &ee_oracle::Machine, level: u32) -> [f32; 3] {
 const LAG_ANG_MAX: f32 = 1.25;
 const LAG_MOVE_MAX: f32 = 6.0;
 
+/// [PC] `Retail::view_lag` between the cameras of two fields `a` (older) and `b` (also the worker's `wide_side::field`).
+pub(super) fn lag_between(a: Cam, b: Cam) -> ViewLag {
+	let mut dy = (b.1 - a.1).abs() % std::f32::consts::TAU;
+	if dy > std::f32::consts::PI {
+		dy = std::f32::consts::TAU - dy;
+	}
+	let zoom = (a.3.fatan() - b.3.fatan()).max(0.0);
+	let d = [b.0[0] - a.0[0], b.0[1] - a.0[1], b.0[2] - a.0[2]];
+	let mv = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+	ViewLag { ang: (dy + (b.2 - a.2).abs() + zoom + 0.03).min(LAG_ANG_MAX), grow: (mv + 0.25).min(LAG_MOVE_MAX) * 1024.0 }
+}
+
 impl Retail {
 	/// The render camera's up vector between the last two ticks (roll; `camera`'s companion).
 	pub fn camera_up(&self, alpha: f32) -> [f32; 3] {
@@ -90,15 +103,14 @@ impl Retail {
 	/// retail's moby verdict uses: the turn and zoom between the ticks plus 0.03 rad, the camera's move plus 0.25 m (the mobys'
 	/// own smoothed motion); capped at `LAG_ANG_MAX` and `LAG_MOVE_MAX` so a camera cut does not draw every side-culled moby.
 	pub fn view_lag(&self) -> ViewLag {
-		let (a, b) = (self.cam_prev, self.cam);
-		let mut dy = (b.1 - a.1).abs() % std::f32::consts::TAU;
-		if dy > std::f32::consts::PI {
-			dy = std::f32::consts::TAU - dy;
-		}
-		let zoom = (a.3.atan() - b.3.atan()).max(0.0);
-		let d = [b.0[0] - a.0[0], b.0[1] - a.0[1], b.0[2] - a.0[2]];
-		let mv = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-		ViewLag { ang: (dy + (b.2 - a.2).abs() + zoom + 0.03).min(LAG_ANG_MAX), grow: (mv + 0.25).min(LAG_MOVE_MAX) * 1024.0 }
+		lag_between(self.cam_prev, self.cam)
+	}
+
+	/// The window's width over height: the moby side test (`aspect`) and the widescreen restores of the effects (`wide_side`); the
+	/// viewer sets it before `sync`.
+	pub fn set_aspect(&mut self, aspect: f32) {
+		self.aspect = aspect;
+		super::wide_side::set_aspect(aspect);
 	}
 
 	/// The camera between the last two ticks (`alpha` 0 = previous, 1 = newest).
@@ -111,6 +123,19 @@ impl Retail {
 		} else if dy < -std::f32::consts::PI {
 			dy += std::f32::consts::TAU;
 		}
-		([l(a.0[0], b.0[0]), l(a.0[1], b.0[1]), l(a.0[2], b.0[2])], a.1 + dy * alpha, l(a.2, b.2), l(a.3, b.3))
+		let mut eye = [l(a.0[0], b.0[0]), l(a.0[1], b.0[1]), l(a.0[2], b.0[2])];
+		// [PC] Game view of a smoothed frame: the eye follows the arc round the hero (a turned boom keeps its length), see `camera_arc`.
+		// Only with the Modern camera on (Camera row, F7): the Classic camera draws the straight blend of retail's own camera exactly (lane fx10:
+		// the arc moved two interpolated frames of a Classic run by ~1,150 pixels, a sub-pixel edge shift).
+		if alpha > 0.0 && alpha < 1.0 && super::modcam::on() {
+			if let Some((ha, hb)) = self.snap.smooth.as_ref().and_then(|d| d.cam_hero) {
+				if let Some((arc, d)) = super::camera_arc::arc(a.0, ha, b.0, hb, alpha) {
+					eye = arc;
+					// The view turns the same way round the hero as the eye does (the two wrapped on their own could disagree near a half turn).
+					dy = super::camera_arc::same_side(dy, d);
+				}
+			}
+		}
+		(eye, a.1 + dy * alpha, l(a.2, b.2), l(a.3, b.3))
 	}
 }

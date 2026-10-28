@@ -76,11 +76,11 @@ impl Gpu {
 				let c = crate::water::gs_rgb(colour); // the target is gamma-space Unorm: raw GS bytes
 				(lights, [spawn; 4], [c[0], c[1], c[2], 1.0], fog)
 			}
-			_ => (self.light_rows(), [[0.4, 0.4, 0.4, 0.0]; 4], [0.0; 4], [0.0, 1.0e9, 255.0, 255.0]),
+			_ => (self.light_rows(), [[0.4, 0.4, 0.4, 0.0]; 4], [0.0, 0.0, 0.0, 1.0], [0.0, 1.0e9, 255.0, 255.0]),
 		};
 		// [PC] Enhanced on a `SKY_KEY_LIT` level: the shading's key light (slot 0) points at the painted sun, as the shadows do.
 		let mut lights = lights;
-		if SKY_KEY_LIT.contains(&self.level) && crate::retail::splitview::fx(self.modern_ok && crate::retail::pcext::graphics().enhanced()) {
+		if SKY_KEY_LIT.contains(&self.level) && crate::retail::splitview::fx(self.modern_ok && crate::retail::pcext::graphics().enhanced() && !super::super::pipe_guard::off(super::super::pipe_guard::Effect::Post)) { // [PC] pipe_guard.rs: a refused Post leaves the plain Classic light
 			lights[0] = self.sun_rows()[0];
 		}
 		// The arrival warp sets its own fog (retail FOGCOL 0,0,0x10; range 0..0x80000) over the departure level's.

@@ -252,6 +252,14 @@ macro_rules! sym {
 	};
 }
 
+/// The structs of another ABI major are not these: refused (the minor steps are negotiated by `omni_abi_minor`).
+pub(super) fn abi_check(v: u32) -> Result<(), String> {
+	if v != ABI_VERSION {
+		return Err(format!("the DLL speaks ABI {v}, this game needs {ABI_VERSION}"));
+	}
+	Ok(())
+}
+
 impl Dll {
 	pub fn open(path: &Path) -> Result<Dll, String> {
 		// SAFETY: loading OmniLoader's DLL; its initialisers only set up Rust statics.
@@ -283,10 +291,7 @@ impl Dll {
 			_lib: lib,
 		};
 		// SAFETY: plain function without arguments.
-		let v = unsafe { (dll.abi_version)() };
-		if v < ABI_VERSION {
-			return Err(format!("the DLL speaks ABI {v}, this game needs {ABI_VERSION} or newer"));
-		}
+		abi_check(unsafe { (dll.abi_version)() })?;
 		Ok(dll)
 	}
 

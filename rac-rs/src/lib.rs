@@ -13,7 +13,8 @@
 //! - Collision and camera: `physics`, `collision`, `camera`.
 //! - Mods: `omni` (OmniLoader host: Luau script mods through omniloader.dll; pad reports and hook points; nothing runs without a mod folder).
 //! - Dev and test aids: `devtune`, `loadlog`, `render` (software rasteriser for checking decoded geometry), `env_doc_tests`,
-//!   `size_limits_tests` (file and fn size limits, SIZE_CAPS.txt).
+//!   `size_limits_tests` (file and fn size limits, SIZE_CAPS.txt), `fmath_scan_tests` (no C-runtime float maths in retail/ and omni/).
+//! - Float maths with the same bits on every OS for code that writes game memory: `fmath`.
 //! - Old hand port (retired 2026-10-08, still compiled): `game`, `player`, `particles`, `flow`.
 // The game as a library (crate rac_game): src/main.rs is its root, included as it is. The exe (package rac-rs-exe in exe/)
 // links it with the recompiled retail code, crate ee-game, which this crate does NOT depend on: so it compiles at the same
@@ -46,3 +47,4 @@ pub fn register() {
 
 #[cfg(test)] mod env_doc_tests;
 #[cfg(test)] mod size_limits_tests;
+#[cfg(test)] mod fmath_scan_tests;

@@ -9,7 +9,8 @@
 # pc_options.txt: lighting classic|enhanced, draw low|medium|high, smoothing on|off, hud sharp|original, ao / shadows / sunrays / gi
 # off|low|medium|high, water / particles classic|low|medium|high, vegetation off|moderate|lush, waves on|off, fog / clouds classic|low|medium|high, texfilter classic|smooth (only active with Lighting Enhanced).
 #
-# Never part of a preset: camera, controls, language, display mode, culling, the renderer (Vulkan / DirectX 12), debug mode.
+# Never part of a preset: camera, controls, language, display mode, the renderer (Vulkan / DirectX 12), debug mode. Every preset sets Culling On
+# (v0.4.1; not a table key, so the launcher's table is unchanged).
 low.lighting=classic
 low.draw=low
 low.smoothing=off

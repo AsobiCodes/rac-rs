@@ -19,6 +19,8 @@ function M.setup(fw)
 
 	local hooks = mb.child_hooks()
 	hooks["projectile.bomb.update"] = function(nxt, bomb)
+		-- a mini bomb of a cluster is never split again: no record reads for it
+		if mb.is_child(bomb) then return nxt(bomb) end
 		local before = omni.struct("moby", bomb)
 		local s0 = before and before.state or -1
 		nxt(bomb)

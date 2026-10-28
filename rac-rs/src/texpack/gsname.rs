@@ -95,6 +95,9 @@ pub struct Name {
 	/// Size in pixels of the hashed rectangle (the region when there is one).
 	pub w: u32,
 	pub h: u32,
+	/// Origin in texels of the hashed rectangle inside the texture (the region's left / top; 0, 0 without a region).
+	pub x: u32,
+	pub y: u32,
 	/// The CLUT part is in the name (T8, T4, T8H, T4HL, T4HH).
 	pub palette: bool,
 	/// True when the hash took the raw GS block path (CT32, T8, T4 without a region and at least one block big).
@@ -341,7 +344,7 @@ pub fn name_for_draw(v: &[u8], tex0: u64, clamp: u64, texa: u64, texclut: u64, w
 		return None;
 	}
 	let region = Region::create(&t, clamp);
-	let ((_, _, _, _), w, h) = rect_of(&t, &region);
+	let ((rx, ry, _, _), w, h) = rect_of(&t, &region);
 	if w <= 0 || h <= 0 {
 		return None;
 	}
@@ -356,7 +359,7 @@ pub fn name_for_draw(v: &[u8], tex0: u64, clamp: u64, texa: u64, texclut: u64, w
 	let (rw, rh) = (if region.has_x() { (region.maxx - region.minx) as u16 as u32 } else { 0 }, if region.has_y() { (region.maxy - region.miny) as u16 as u32 } else { 0 });
 	let name = TexName { tex0: hash, clut: clut.as_ref().map_or(0, |c| clut_hash(c)), region_w: rw, region_h: rh, bits };
 	let sig = want_sig.then(|| signature(v, &t, &region, texa, &clut));
-	Some(Name { name, psm: t.psm, w: w as u32, h: h as u32, palette: pal, raw, sig })
+	Some(Name { name, psm: t.psm, w: w as u32, h: h as u32, x: rx.max(0) as u32, y: ry.max(0) as u32, palette: pal, raw, sig })
 }
 
 #[cfg(test)]
@@ -451,6 +454,9 @@ mod tests {
 		assert_eq!((n.w, n.h, n.raw), (17, 12, false));
 		assert_eq!(n.name.tex0, xxh3_64(&rows));
 		assert_eq!((n.name.region_w, n.name.region_h), (17, 12));
+		assert_eq!((n.x, n.y), (16, 8), "the origin of the hashed rectangle");
+		let whole = name_for_draw(&v, tex0(0x13, 0, 1, 6, 6, 4000), 0, 0, 0, false).unwrap();
+		assert_eq!((whole.x, whole.y, whole.w, whole.h, whole.name.region_w), (0, 0, 64, 64, 0), "no region: origin 0, size of the texture, region size 0");
 	}
 
 	#[test]

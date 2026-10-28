@@ -15,6 +15,7 @@
 //! - `particle_fx`:  Particle sprites, ribbons and lines (set_particles) and their view tests.
 //! - `sky_water`:    Sky spin and sprites, ocean surfaces (set_ocean, set_ocean_ram) and the sea shading mesh.
 //! - `hud_art`:      HUD art textures and the retail overlay texture.
+//! - `rscale`:       Render scale: the picture drawn at a percentage of the window size, the copy onto the window, the window size.
 //! - `reshade`:      ReShade add-on: registers with a loaded ReShade, depth + picture before the HUD (files in `reshade/`).
 //! - `warp_actors`:  Warp (travel) actors: load, pose and clear.
 //! - `draw`:         The per-frame draw: Gpu::draw, strip drawing, debug switches, water mirror choice.
@@ -24,7 +25,7 @@ use super::*;
 use rayon::prelude::*;
 
 mod setup;
-mod renderer;
+pub(in crate::viewer) mod renderer;
 mod scene_ctx;
 pub(in crate::viewer) mod repl_upload;
 pub(in crate::viewer) mod split_orig;
@@ -41,6 +42,7 @@ mod particle_fx;
 mod sky_water;
 mod hud_art;
 pub(in crate::viewer) mod reshade;
+pub(in crate::viewer) mod rscale;
 mod warp_actors;
 mod draw;
 mod tests;

@@ -10,6 +10,7 @@
 //! - Flips: 5 u/s along the flip from the press field (standing flips too), easing to 2 u/s while the stick is let go in the
 //!   air; the landing runs on at the flip's speed. Chaining (Cross pressed just before the landing) is strafe/chain.rs.
 //! Not aiming (or Strafe Off) nothing is written here: retail stays bit-exact.
+use crate::fmath::Fm;
 
 /// Core words (hero_movement.md, hero_crouch_ledge.md): state, run speed (gait, slews toward the target speed), the target
 /// speed of the last field (0 with the stick let go), the carried slide of the stand state (vec4, SetState(0) copies the last
@@ -195,7 +196,7 @@ pub(super) fn pre_field(m: &mut ee_oracle::Machine, stick: (u8, u8), aiming: boo
 		// The speed kept is the run's along the new heading (R&C2: a reversal drops to about 0 the next field and builds up
 		// again; a slight turn keeps nearly all of it). A stick turning no faster than retail's own turn loses nothing.
 		let wish = m.rdf(HERO_WISH);
-		let keep = (wish - m.rdf(HERO_YAW)).cos().max(0.0);
+		let keep = (wish - m.rdf(HERO_YAW)).fcos().max(0.0);
 		if keep < 1.0 {
 			wrf(m, RUN_SPEED, m.rdf(RUN_SPEED) * keep);
 		}

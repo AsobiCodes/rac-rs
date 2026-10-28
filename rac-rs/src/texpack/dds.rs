@@ -1,5 +1,5 @@
-//! DDS replacement textures (PCSX2's `DDSLoader`): BC1 / BC2 / BC3 by FourCC or DX10 header, BC7 (DX10, opaque files only: there is no
-//! CPU decoder, so a BC7 file whose alpha matters is refused), and uncompressed 32 / 24 bit RGB(A) by channel masks. Mip levels
+//! DDS replacement textures (PCSX2's `DDSLoader`): BC1 / BC2 / BC3 by FourCC or DX10 header, BC7 (DX10; `bc7alpha` decides whether it stays
+//! BC7 or becomes RGBA8, `bc7dec` is the CPU decoder), and uncompressed 32 / 24 bit RGB(A) by channel masks. Mip levels
 //! stored in the file are kept. Alpha: a file's alpha is on the PS2 scale (0x80 = opaque, `tfx.glsl`), the engine's on
 //! `min(a * 2, 255)` (`Texture::new`); `load` converts, for BC2 / BC3 by re-coding the alpha blocks (`bc`), so the colour data stays
 //! compressed and no shader changes.
@@ -60,9 +60,14 @@ enum Layout {
 	Raw { bpp: usize, pos: [usize; 3], a: Option<usize> },
 }
 
-fn mask_pos(mask: u32) -> Result<usize, String> {
+/// The byte of a pixel of `bpp` bytes that the channel `mask` selects: the mask must be exactly one whole byte inside the pixel (a zero
+/// mask, a mask outside the pixel's width or a partial byte is refused, so `to_rgba` can never index outside a pixel).
+fn mask_pos(mask: u32, bpp: usize) -> Result<usize, String> {
+	if mask == 0 {
+		return Err("dds: channel mask is zero".into());
+	}
 	let s = mask.trailing_zeros() as usize;
-	if mask == 0xffu32 << s && s % 8 == 0 { Ok(s / 8) } else { Err(format!("dds: channel mask {mask:#x} is not one byte")) }
+	if mask == 0xffu32 << s && s % 8 == 0 && s / 8 < bpp { Ok(s / 8) } else { Err(format!("dds: channel mask {mask:#x} is not one byte of a {bpp}-byte pixel")) }
 }
 
 fn dx10_layout(file: &[u8]) -> Result<Layout, String> {
@@ -76,8 +81,9 @@ fn dx10_layout(file: &[u8]) -> Result<Layout, String> {
 		71 | 72 => Layout::Block(Fmt::Bc1),
 		74 | 75 => Layout::Block(Fmt::Bc2),
 		77 | 78 => Layout::Block(Fmt::Bc3),
-		98 | 99 if u32_at(file, 144) & 7 == 3 => Layout::Block(Fmt::Bc7),
-		98 | 99 => return Err("dds: BC7 with alpha is not supported (no CPU decoder)".into()),
+		// DDS_ALPHA_MODE (0 unknown, 1 straight, 2 premultiplied, 3 opaque, 4 custom) is read in `load`: PCSX2 ignores it, so every mode but
+		// opaque means the PS2 alpha scale (`bc7alpha::apply`).
+		98 | 99 => Layout::Block(Fmt::Bc7),
 		28 | 29 => Layout::Raw { bpp: 4, pos: [0, 1, 2], a: Some(3) },
 		87 | 91 => Layout::Raw { bpp: 4, pos: [2, 1, 0], a: Some(3) },
 		88 => Layout::Raw { bpp: 4, pos: [2, 1, 0], a: None },
@@ -99,9 +105,10 @@ fn layout(file: &[u8]) -> Result<(Layout, usize), String> {
 	if flags & 0x40 == 0 || !matches!(bits, 24 | 32) {
 		return Err(format!("dds: pixel format flags {flags:#x} / {bits} bit is not supported"));
 	}
-	let pos = [mask_pos(u32_at(file, 92))?, mask_pos(u32_at(file, 96))?, mask_pos(u32_at(file, 100))?];
-	let a = if flags & 1 != 0 { Some(mask_pos(u32_at(file, 104))?) } else { None };
-	Ok((Layout::Raw { bpp: bits / 8, pos, a }, 128))
+	let bpp = bits / 8;
+	let pos = [mask_pos(u32_at(file, 92), bpp)?, mask_pos(u32_at(file, 96), bpp)?, mask_pos(u32_at(file, 100), bpp)?];
+	let a = if flags & 1 != 0 { Some(mask_pos(u32_at(file, 104), bpp)?) } else { None };
+	Ok((Layout::Raw { bpp, pos, a }, 128))
 }
 
 fn to_rgba(raw: &[u8], bpp: usize, pos: [usize; 3], a: Option<usize>) -> Vec<u8> {
@@ -110,6 +117,48 @@ fn to_rgba(raw: &[u8], bpp: usize, pos: [usize; 3], a: Option<usize>) -> Vec<u8>
 		out.extend_from_slice(&[p[pos[0]], p[pos[1]], p[pos[2]], a.map_or(255, |i| engine_alpha(p[i]))]);
 	}
 	out
+}
+
+/// Bytes of a file's start that `peek` needs.
+pub const PEEK_BYTES: usize = 148;
+
+/// Size and format of a DDS file from its first `PEEK_BYTES` bytes (what `load` would accept in its header), or None.
+pub fn peek(head: &[u8]) -> Option<(u32, u32, Fmt)> {
+	if head.len() < 128 || &head[..4] != b"DDS " || u32_at(head, 4) != 124 {
+		return None;
+	}
+	let (h, w) = (u32_at(head, 12), u32_at(head, 16));
+	let fmt = match layout(head).ok()?.0 {
+		Layout::Block(f) => f,
+		Layout::Raw { .. } => Fmt::Rgba8,
+	};
+	Some((w, h, fmt))
+}
+
+/// Number of mip levels a DDS header declares (1 without the mipmap flag), from the same bytes as `peek`.
+pub fn peek_mips(head: &[u8]) -> u32 {
+	if head.len() >= 32 && u32_at(head, 8) & 0x20000 != 0 { u32_at(head, 28).max(1) } else { 1 }
+}
+
+/// Number of mip levels the file really STORES (what `load` would read): the header's count (`peek_mips`) clamped to the levels whose
+/// data fits in `file_len` bytes. A header that claims more levels than the file holds is cut there; at least 1.
+pub fn peek_stored_mips(head: &[u8], file_len: u64) -> u32 {
+	let claimed = peek_mips(head).min(16);
+	let Some((lay, mut at)) = (head.len() >= 128 && &head[..4] == b"DDS ").then(|| layout(head).ok()).flatten() else { return 1 };
+	let (h, w) = (u32_at(head, 12), u32_at(head, 16));
+	let mut stored = 0;
+	for k in 0..claimed {
+		let (lw, lh) = ((w >> k).max(1), (h >> k).max(1));
+		at += match lay {
+			Layout::Block(f) => f.level_bytes(lw, lh),
+			Layout::Raw { bpp, .. } => lw as usize * lh as usize * bpp,
+		};
+		if at as u64 > file_len {
+			break;
+		}
+		stored += 1;
+	}
+	stored.max(1)
 }
 
 /// Parses a DDS file.
@@ -147,7 +196,11 @@ pub fn load(file: &[u8]) -> Result<Image, String> {
 			Layout::Block(_) => data.to_vec(),
 		});
 	}
-	Ok(Image { fmt, w, h, levels })
+	let img = Image { fmt, w, h, levels };
+	if fmt == Fmt::Bc7 && u32_at(file, 144) & 7 != 3 {
+		return super::bc7alpha::apply(img);
+	}
+	Ok(img)
 }
 
 #[cfg(test)]
@@ -214,12 +267,21 @@ pub(super) mod tests {
 	}
 
 	#[test]
-	fn bc7_needs_the_opaque_alpha_mode() {
-		let mut f = dds(4, 4, b"DX10", [0; 4], 0, &[&[0u8; 20 + 16]]);
-		f[128..132].copy_from_slice(&98u32.to_le_bytes());
-		f[140..144].copy_from_slice(&1u32.to_le_bytes());
+	fn bad_channel_masks_are_refused_not_a_panic() {
+		// 24-bit file with the usual 32-bit A8R8G8B8 alpha mask (byte 3 of a 3-byte pixel): this indexed outside the pixel.
+		let f = dds(1, 1, &[0; 4], [0xff0000, 0xff00, 0xff, 0xff000000], 24, &[&[1, 2, 3]]);
 		assert!(load(&f).is_err());
-		f[144..148].copy_from_slice(&3u32.to_le_bytes());
-		assert_eq!(load(&f).unwrap().fmt, Fmt::Bc7);
+		// A colour mask in the top byte of a 24-bit pixel.
+		let f = dds(1, 1, &[0; 4], [0xff000000, 0xff00, 0xff, 0], 24, &[&[1, 2, 3]]);
+		assert!(load(&f).is_err());
+		// A zero mask (a shift by 32 in the old code), a partial byte, two bytes.
+		for m in [0u32, 0xf0, 0xffff, 0x1fe] {
+			let f = dds(1, 1, &[0; 4], [m, 0xff00, 0xff, 0], 32, &[&[1, 2, 3, 4]]);
+			assert!(load(&f).is_err(), "mask {m:#x}");
+		}
+		// The same with the alpha flag set and a zero alpha mask.
+		let mut f = dds(1, 1, &[0; 4], [0xff0000, 0xff00, 0xff, 0], 32, &[&[1, 2, 3, 4]]);
+		f[80] |= 1;
+		assert!(load(&f).is_err());
 	}
 }

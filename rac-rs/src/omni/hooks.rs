@@ -20,7 +20,7 @@ use std::ffi::{c_char, c_void};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-/// Hook slots = the binding's hook indices (the binding has 152: 17 engine hooks + 135 moby update functions; the table below must have this many entries).
+/// Hook slots = the binding's hook indices (the built-in binding has 210; the table below must have this many entries, and a launcher binding with more hooks than this cannot install the rest).
 pub const MAX_HOOKS: usize = 256;
 
 /// The specs built into the exe: `hook <id>` then the `reloc`/`mhash`/`mask`/`jabs` lines of the spec.
@@ -127,7 +127,7 @@ pub fn warn_once(n: usize, msg: &str) {
 	let mut s = SEEN.lock().unwrap_or_else(|e| e.into_inner());
 	if !s.iter().any(|(i, m)| *i == n && m == msg) {
 		s.push((n, msg.to_string()));
-		eprintln!("omni: hook {}: {msg}", slot(n).id.get().map_or("?", String::as_str));
+		super::logq::line(&format!("omni: hook {}: {msg}", slot(n).id.get().map_or("?", String::as_str)));
 	}
 }
 
@@ -148,10 +148,14 @@ unsafe extern "C" fn supports_cb(user: *mut c_void, id: *const c_char) -> i32 {
 unsafe extern "C" fn install_cb(user: *mut c_void, index: u32, id: *const c_char) -> i32 {
 	let id = text(id);
 	let n = index as usize;
+	if n >= MAX_HOOKS {
+		eprintln!("omni: hook point {id} has index {n}, the host has {MAX_HOOKS} hook slots: not installed");
+		return -3;
+	}
 	let st = state(user);
 	let (Some(def), Some(reloc)) = (st.binding.hooks.get(n).filter(|h| h.id == id), specs().get(&id)) else { return -1 };
 	let Ok(sig) = Sig::parse(&def.signature) else { return -2 };
-	if n >= MAX_HOOKS || !sig_supported(&sig) {
+	if !sig_supported(&sig) {
 		return -3;
 	}
 	let s = slot(n);
@@ -188,17 +192,32 @@ unsafe extern "C" fn uninstall_cb(_user: *mut c_void, index: u32, _id: *const c_
 	}
 }
 
+/// Every hook point back to the game's own code: `omni_load` failed after it had installed some (load.rs).
+pub fn deactivate_all() {
+	for s in &SLOTS {
+		s.active.store(false, Ordering::SeqCst);
+	}
+}
+
 unsafe extern "C" fn original_cb(_user: *mut c_void, index: u32, args: *const Value, nargs: u32, ret: *mut Value) {
 	let n = index as usize;
 	// SAFETY: the loader passes `nargs` values.
 	let given: &[Value] = if args.is_null() { &[] } else { unsafe { std::slice::from_raw_parts(args, nargs as usize) } };
-	let result = match (host::cpu(), SLOTS.get(n).and_then(|s| s.sig.get())) {
-		// Inside the dispatch of hook `n`: the retail function with the dispatch's entry. Any other time (between two fields, or inside the
-		// dispatch of ANOTHER hook): found by its spec (original.rs).
+	// A panic of the retail code must not leave this `extern "C"` fn (that aborts the process): on the game thread it is parked and unwinds
+	// it when the dispatch it happened in is over; between two fields (worker thread) it is swallowed (bridge.rs `park_panic`).
+	let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match (host::cpu(), SLOTS.get(n).and_then(|s| s.sig.get())) {
+		// Inside the dispatch of hook `n` (the innermost one): the retail function with the dispatch's entry. Any other time (between two
+		// fields, or inside the dispatch of ANOTHER hook): found by its spec (original.rs).
 		(Some(c), Some(sig)) if bridge::dispatching(n) => bridge::call_retail(c, n, sig, given),
 		(Some(c), Some(sig)) => Some(super::original::between_value(c, n, sig, given)),
 		_ => None,
-	};
+	}));
+	let result = ran.unwrap_or_else(|p| {
+		if let Some(c) = host::cpu() {
+			bridge::park_panic(c, p);
+		}
+		None
+	});
 	if !ret.is_null() {
 		// SAFETY: `ret` is one OmniValue the loader gave.
 		unsafe { *ret = ret_value(result) };

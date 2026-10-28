@@ -116,12 +116,19 @@ pub fn load_active(root: &Path) -> Active {
 		let dir = root.join(&id);
 		let md = match std::fs::read_to_string(dir.join("mod.json")) {
 			Ok(t) => parse_mod_json(&t, &id, &dir),
-			Err(_) if dir.join("textures").is_dir() => {
+			Err(_) if super::layout::textures_dir(&dir).is_some() => {
 				out.notes.push(format!("mod \"{id}\": no mod.json, treated as a textures mod"));
 				parse_mod_json("{}", &id, &dir)
 			}
 			Err(_) => Err("no mod.json".to_string()),
 		};
+		// A pack whose images are not in `textures/` (a PCSX2 `replacements` folder copied in as it is): index the folder that holds them.
+		let md = md.map(|mut m| {
+			if !m.textures.is_dir() {
+				m.textures = super::layout::textures_dir(&dir).unwrap_or(m.textures);
+			}
+			m
+		});
 		match md {
 			Ok(m) if m.textures.is_dir() => out.mods.push(m),
 			Ok(m) => out.notes.push(format!("mod \"{}\": no textures folder at {}", m.id, m.textures.display())),

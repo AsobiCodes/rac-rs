@@ -64,6 +64,11 @@ pub fn rebuilt() {
 	EPOCH.fetch_add(1, Ordering::Relaxed);
 }
 
+/// The number of table builds so far (the generation of the cached answers).
+pub fn epoch() -> u64 {
+	EPOCH.load(Ordering::Relaxed)
+}
+
 struct Cache {
 	epoch: u64,
 	items: Vec<(u32, Option<Under>)>,
@@ -151,7 +156,7 @@ pub fn run_under(c: &mut Cpu, u: Under) -> bool {
 /// the retail code runs.
 pub fn under(n: usize, c: &mut Cpu) -> bool {
 	let entry = c.pc;
-	let epoch = EPOCH.load(Ordering::Relaxed);
+	let epoch = epoch();
 	let found = CACHE.lock().unwrap_or_else(|e| e.into_inner()).get(epoch, entry, || find(c, n, entry));
 	found.is_some_and(|u| run_under(c, u))
 }

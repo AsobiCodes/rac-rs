@@ -53,6 +53,27 @@ impl Gpu {
 		);
 	}
 
+	/// This frame's oceans, in this order: `set_ocean` (the patches and texture: the RAM ocean `ram`, else the pure `pure` one once it is
+	/// `shown(frames)`) and `set_ocean_heights` (the heights for the fog: `ram`, else `pure` whether or not it is shown). KER-30: the pure
+	/// Kerwan ocean is not shown while `frames` < 2 (its moby's init tick), but its heights are read as soon as it is known. In retail
+	/// mode Kerwan's ocean comes from RAM (queue_q1::ocean) only while its wrapper is queued, which is not the case on that init tick, so
+	/// the first Kerwan frame has no fog sheet (`sheet_z` None in RAC_FOG_LOG).
+	#[allow(clippy::too_many_arguments)]
+	pub(in crate::viewer) fn set_oceans(&mut self, ram: Option<&crate::ocean::Ocean>, pure: Option<&crate::ocean::Ocean>, eye: [f32; 3], cuboids: &[gameplay::Cuboid], all: bool, frames: u32, level_fog: bool, level: usize) {
+		self.set_ocean(ram.or(pure.filter(|o| o.shown(frames))), eye, cuboids, all, frames, level_fog);
+		self.set_ocean_heights(ram.or(pure), level);
+	}
+
+	/// The heights of the whole ocean for the fog sheet / water mist (volfog/frame.rs `Plan::new`), not of the patches near the camera.
+	/// `ocean` = the level's ocean whether or not it is drawn yet; `level` = the viewer's level of this frame (`Gpu::level` is set later
+	/// in the frame, so the first frame of a new level would still see the old one).
+	pub(in crate::viewer) fn set_ocean_heights(&mut self, ocean: Option<&crate::ocean::Ocean>, level: usize) {
+		match ocean.filter(|_| super::volfog::wants_ocean_heights(level)) {
+			Some(o) => o.heights(&mut self.volfog.ocean_heights),
+			None => self.volfog.ocean_heights.clear(),
+		}
+	}
+
 	/// Retail mode: the retail oceans of Rilgar, Umbris and Gaspar (retail/oldsim.rs `RamOcean`): this field's
 	/// patch strips (camera distance cull), the texture and the fog packed per vertex for `fs_ocean_g`.
 	pub(in crate::viewer) fn set_ocean_ram(&mut self, oceans: &[crate::retail::oldsim::RamOcean], eye: [f32; 3]) {

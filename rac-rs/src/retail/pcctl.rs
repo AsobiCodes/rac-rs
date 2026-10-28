@@ -20,7 +20,8 @@
 //! CURRENT bindings, so the page needs no redraw hook). Confirm flips the row byte to 1; `sync` (worker, every field) sees it and
 //! starts a capture (`binds::capture_begin`): the host (`Retail::tick_keys`) gives the game a neutral pad and binds the next fresh
 //! key or button (Esc or 8 s cancel), then `sync` sees the capture end and puts the byte back to 0, so the row shows the new binding.
-//! A taken key swaps (`binds::KbBinds::assign`). The Reset section's rows restore the defaults and read "Done" for a moment. A
+//! A key or button another function has is shared, nothing else moves (`binds::KbBinds::assign`, v0.4.1); both rows show it, the value
+//! naming the other function ("B / Circle", `shared_value`). The Reset section's rows restore the defaults and read "Done" for a moment. A
 //! section change cancels a capture.
 //!
 //! Debug (the Controls page's 10th and last section, `SEC_DEBUG`): row 1 "Debug mode" Off / On (byte `DBGB`; `pcext::sync` hands it to
@@ -41,6 +42,7 @@
 //! `build_gfx` set their magic word.
 use super::binds::{self, Cap};
 use super::mouse_menu;
+use super::pcdisp;
 use super::pcext::{BASE, GPAGE, GVAL, ID_HIGH, ID_LOW, ID_MEDIUM};
 use ee_oracle::cpu::Cpu;
 use ee_oracle::mem::Mem;
@@ -67,6 +69,8 @@ pub(super) const PRESETB: u32 = CBASE + 0x14;
 const RENDB: u32 = CBASE + 0x13;
 /// The Graphics page's Skip intro row byte (0 Off, 1 On; pcintro.rs). Stays 0 with the default `intro=play`.
 const INTROB: u32 = CBASE + 0x15;
+/// The Graphics page's Start skips cutscenes row byte, INVERTED: 0 = On (the default), 1 = Off (pcskip.rs), so a default RAM stays zero.
+pub(super) const SKIPB: u32 = CBASE + 0x16;
 /// The Debug section's row byte (0 Off, 1 On); set from `devtools::menu` when the page is built.
 pub const DBGB: u32 = CBASE + 0x12;
 /// Set by `build_gfx` / `build_page`: that page is in RAM, so `field` / `sync` may read and write its bytes.
@@ -105,6 +109,8 @@ const ID_VULKAN: u32 = 0x7f7a;
 const ID_DX12: u32 = 0x7f7b;
 /// The Skip intro row's label (its values are retail's Off / On).
 const ID_INTRO: u32 = 0x7f7e;
+/// The Start skips cutscenes row's label (its values are retail's On / Off, in that order: the byte is inverted).
+const ID_SKIPCUT: u32 = 0x7f7f;
 /// The Preset row: its label and the 4th choice "Custom" (Low, Medium, High are pcext's ids). Custom is a choice only while the
 /// state is Custom, so the row cycles Low, Medium, High and from Custom back to Low.
 const ID_PRESET: u32 = 0x7f7c;
@@ -123,19 +129,33 @@ const NSEC: usize = 10;
 /// The Debug section (the last one) and the keys it lists.
 const SEC_DEBUG: usize = 9;
 const NDKEYS: usize = 5;
-const NGSEC: usize = 4;
+const NGSEC: usize = 5;
+/// The Display section (HUD position, HUD scale, FPS limit, Render scale; pcdisp.rs): the Graphics page's 4th section, System follows.
+const SEC_DISPLAY: usize = 3;
 /// The HUD row, the Renderer row and the Preset row in `GSECS` (the 15 rows of `pcext::ROWS` are 0..=14).
 const HUD_ROW: usize = 15;
 const RENDER_ROW: usize = 16;
 const PRESET_ROW: usize = 17;
-/// The Skip intro row, alone in the System section (the other three are full at six rows).
+/// The Skip intro row and the Start skips cutscenes row, the System section (the other three are full at six rows).
 const INTRO_ROW: usize = 18;
+const SKIPCUT_ROW: usize = 19;
+/// The Display section's rows (pcdisp.rs).
+const HUDPOS_ROW: usize = 20;
+const HUDSCALE_ROW: usize = 21;
+const FPS_ROW: usize = 22;
+const RSCALE_ROW: usize = 23;
+/// The Screen section. The Renderer row (Vulkan / DirectX 12) is not offered on Linux: there is no DirectX 12 backend there
+/// (viewer/gpu/renderer.rs ignores a `renderer=dx12` line).
+#[cfg(not(target_os = "linux"))]
+const GSCREEN: &[usize] = &[3, 7, 12, 9, RENDER_ROW, HUD_ROW];
+#[cfg(target_os = "linux")]
+const GSCREEN: &[usize] = &[3, 7, 12, 9, HUD_ROW];
 /// The Graphics sections as indices of `pcext::ROWS` (0 Lighting, 1 Ambient occlusion, 2 Dynamic shadows, 3 Display mode, 4 Water,
 /// 5 Particles, 6 Sun rays, 7 Frame smoothing, 8 Vegetation, 9 Culling, 10 Global illumination, 11 Waves, 12 Draw distance, 13 Volumetric fog, 14 Volumetric clouds).
 /// Picture: Preset, Lighting, Ambient occlusion, Dynamic shadows, Global illumination, Sun rays. Effects: Water, Waves, Particles,
 /// Vegetation, Volumetric fog, Volumetric clouds. Screen: Display mode, Frame smoothing, Draw distance, Culling, Renderer, HUD. Each section is at most six rows (the
 /// panel holds the stepper and six).
-const GSECS: [&[usize]; NGSEC] = [&[PRESET_ROW, 0, 1, 2, 10, 6], &[4, 11, 5, 8, 13, 14], &[3, 7, 12, 9, RENDER_ROW, HUD_ROW], &[INTRO_ROW]];
+const GSECS: [&[usize]; NGSEC] = [&[PRESET_ROW, 0, 1, 2, 10, 6], &[4, 11, 5, 8, 13, 14], GSCREEN, &[HUDPOS_ROW, HUDSCALE_ROW, FPS_ROW, RSCALE_ROW], &[INTRO_ROW, SKIPCUT_ROW]];
 
 /// What a row does in a Controls section.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -222,6 +242,7 @@ static HUD: T5 = [b"HUD", b"HUD", b"HUD", b"HUD", b"HUD"];
 static SHARP: T5 = [b"Sharp", b"Net", b"Scharf", b"N\x94tido", b"Nitido"];
 static RENDERER: T5 = [b"Renderer", b"Rendu", b"Renderer", b"Motor gr\x84fico", b"Renderer"];
 static INTRO: T5 = [b"Skip intro", b"Passer intro", b"Intro \xa7berspringen", b"Saltar intro", b"Salta intro"];
+static SKIPCUT: T5 = [b"Start skips cutscenes", b"Passer avec Start", b"Mit Start \xa7berspringen", b"Saltar con Start", b"Salta con Start"];
 static PRESET: T5 = [b"Preset", b"Pr\x8cr\x8cglage", b"Voreinst.", b"Preajuste", b"Preset"];
 static CUSTOM: T5 = [b"Custom", b"Perso.", b"Eigene", b"Personal", b"Person."];
 static ORIGINAL: T5 = [b"Original", b"Original", b"Original", b"Original", b"Originale"];
@@ -254,6 +275,7 @@ static GSECTIONS: [T5; NGSEC] = [
 	[b"Picture", b"Image", b"Bild", b"Imagen", b"Immagine"],
 	[b"Effects", b"Effets", b"Effekte", b"Efectos visuales", b"Effetti"],
 	[b"Screen", b"Affichage", b"Bildschirm", b"Pantalla", b"Schermo"],
+	pcdisp::SECTION,
 	[b"System", b"Syst\x8ame", b"System", b"Sistema", b"Sistema"],
 ];
 
@@ -263,6 +285,30 @@ fn stepper(name: &[u8]) -> Vec<u8> {
 	v.extend_from_slice(name);
 	v.extend_from_slice(b" >");
 	v
+}
+
+/// The widest value a cell draws today ("Appuyez sur une touche").
+const VALUE_MAX: usize = 22;
+
+/// A function row's value `v` (its key or button) with the other functions `others` that have it too: "B / Circle" (up to two
+/// labels in the game's language `l`), or "B x2" when the labels do not fit the cell; just `v` when nothing shares it. So a shared key
+/// or button is listed on every row it drives, and a player sees at once that binding it again did not take it from the other row.
+fn shared_value(v: Vec<u8>, others: &[usize], l: usize) -> Vec<u8> {
+	for n in (1..=others.len().min(2)).rev() {
+		let mut s = v.clone();
+		for (i, &g) in others[..n].iter().enumerate() {
+			s.extend_from_slice(if i == 0 { b" / " } else { b"/" });
+			s.extend_from_slice(LABELS[g][l]);
+		}
+		if s.len() <= VALUE_MAX {
+			return s;
+		}
+	}
+	let mut s = v;
+	if !others.is_empty() {
+		s.extend_from_slice(format!(" x{}", others.len() + 1).as_bytes());
+	}
+	s
 }
 
 /// Every text of the pages in `lang`: `csec` / `gsec` are the sections the Controls / Graphics page shows, `playstation` picks the
@@ -284,6 +330,7 @@ pub fn text(id: u32, lang: usize, csec: usize, gsec: usize, playstation: bool) -
 		ID_CUSTOM => fixed(&CUSTOM),
 		ID_RENDERER => fixed(&RENDERER),
 		ID_INTRO => fixed(&INTRO),
+		ID_SKIPCUT => fixed(&SKIPCUT),
 		ID_VULKAN | ID_DX12 => super::pcrender::value_text(id == ID_DX12, l),
 		ID_DBG0 => fixed(&DBG_MODE),
 		_ if (ID_DBG_KEY..ID_DBG_KEY + NDKEYS as u32).contains(&id) => fixed(&DBG_KEYS[(id - ID_DBG_KEY) as usize]),
@@ -295,8 +342,14 @@ pub fn text(id: u32, lang: usize, csec: usize, gsec: usize, playstation: bool) -
 			_ => Vec::new(),
 		},
 		_ if (ID_VALUE + 1..ID_VALUE + ROWS as u32).contains(&id) => match target(csec, (id - ID_VALUE) as usize) {
-			Target::Func(Cap::Key(f)) => binds::kb().shown(f).into_bytes(),
-			Target::Func(Cap::Pad(f)) => binds::pad_shown(binds::pad_map()[f], playstation).as_bytes().to_vec(),
+			Target::Func(Cap::Key(f)) => {
+				let b = binds::kb();
+				shared_value(b.shown(f).into_bytes(), &b.shared(f), l)
+			}
+			Target::Func(Cap::Pad(f)) => {
+				let m = binds::pad_map();
+				shared_value(binds::pad_shown(m[f], playstation).as_bytes().to_vec(), &binds::pad_shared(&m, f), l)
+			}
 			_ => Vec::new(),
 		},
 		_ if (ID_PRESS + 1..ID_PRESS + ROWS as u32).contains(&id) => match target(csec, (id - ID_PRESS) as usize) {
@@ -312,8 +365,11 @@ pub fn text(id: u32, lang: usize, csec: usize, gsec: usize, playstation: bool) -
 /// The text lookup hand for the pages' ids (`pcext::text_hook`, 0x7f40..0x7f7f): the string goes into the id's pool slot and its
 /// address into v0, in the game's language `lang`.
 pub fn text_hook(c: &mut Cpu, id: u32, lang: usize) -> bool {
+	if (pcdisp::ID0..pcdisp::ID_END).contains(&id) {
+		return pcdisp::text_hook(c, id, lang);
+	}
 	let (csec, gsec) = state(|st| (st.ctl.sec, st.gfx.sec));
-	let s = text(id, lang, csec, gsec, !super::prompts::real_pads_off() && super::pspad::connected());
+	let s = text(id, lang, csec, gsec, !super::prompts::real_pads_off() && super::hidpad::connected());
 	let at = if (ID_DBG0..ID_DBG_END).contains(&id) { DBG_POOL + SLOT * (id - ID_DBG0) } else { POOL + SLOT * (id - ID0) };
 	let n = s.len().min(SLOT as usize - 1);
 	for (i, b) in s[..n].iter().enumerate() {
@@ -369,6 +425,11 @@ fn gfx_table(rows: &[[u32; 6]], sec: usize, custom: bool) -> Vec<u32> {
 			HUD_ROW => [ID_HUD, HUDB, ID_SHARP, ID_ORIGINAL, 0, 0],
 			RENDER_ROW => [ID_RENDERER, RENDB, ID_VULKAN, ID_DX12, 0, 0],
 			INTRO_ROW => [ID_INTRO, INTROB, ID_OFF, ID_ON, 0, 0],
+			SKIPCUT_ROW => [ID_SKIPCUT, SKIPB, ID_ON, ID_OFF, 0, 0],
+			HUDPOS_ROW => [pcdisp::ID_HUDPOS, pcdisp::POS_B, pcdisp::ID_P43, pcdisp::ID_CORNERS, 0, 0],
+			HUDSCALE_ROW => [pcdisp::ID_HUDSCALE, pcdisp::POS_B + 1, pcdisp::ID_VSCALE, pcdisp::ID_VSCALE, 0, 0],
+			FPS_ROW => [pcdisp::ID_FPS, pcdisp::POS_B + 2, pcdisp::ID_VFPS, pcdisp::ID_VFPS, 0, 0],
+			RSCALE_ROW => [pcdisp::ID_RSCALE, pcdisp::POS_B + 3, pcdisp::ID_VRS, pcdisp::ID_VRS, 0, 0],
 			PRESET_ROW => [ID_PRESET, PRESETB, ID_LOW, ID_MEDIUM, ID_HIGH, if custom { ID_CUSTOM } else { 0 }],
 			_ => rows[i],
 		});
@@ -424,6 +485,8 @@ pub fn build_gfx(mem: &mut Mem, gtab: u32, rows: &[[u32; 6]], hud_sharp: bool, d
 		mem.wr8(HUDB, !hud_sharp as u8);
 		mem.wr8(RENDB, dx12 as u8);
 		mem.wr8(INTROB, super::pcintro::skip() as u8);
+		mem.wr8(SKIPB, !super::pcskip::skip() as u8);
+		pcdisp::build(mem);
 		mem.wr32(G_MAGIC_AT, MAGIC);
 	}
 	state(|st| {
@@ -433,6 +496,12 @@ pub fn build_gfx(mem: &mut Mem, gtab: u32, rows: &[[u32; 6]], hud_sharp: bool, d
 		}
 		write_table(mem, gtab, &gfx_table(rows, st.gfx.sec, st.custom));
 	});
+}
+
+/// The Graphics section on show (`SEC_SCREEN`: the one with the Culling row).
+pub(super) const SEC_SCREEN: usize = 2;
+pub(super) fn gfx_sec() -> usize {
+	state(|st| st.gfx.sec)
 }
 
 /// The page's address (the Options record's argument).
@@ -448,9 +517,19 @@ pub fn renderer_dx12(mem: &mut Mem) -> Option<bool> {
 	(mem.rd32(G_MAGIC_AT) == MAGIC).then(|| mem.rd8(RENDB) != 0)
 }
 
+/// The Graphics page was built on this RAM (its row bytes may be read).
+pub(super) fn gfx_built(mem: &mut Mem) -> bool {
+	mem.rd32(G_MAGIC_AT) == MAGIC
+}
+
 /// The Skip intro row: true = On. None until the Graphics page was built on this RAM.
 pub fn intro_skip(mem: &mut Mem) -> Option<bool> {
 	(mem.rd32(G_MAGIC_AT) == MAGIC).then(|| mem.rd8(INTROB) != 0)
+}
+
+/// The Start skips cutscenes row: true = On (the byte is inverted, 0 = On). None until the Graphics page was built on this RAM.
+pub fn skipcut_on(mem: &mut Mem) -> Option<bool> {
+	(mem.rd32(G_MAGIC_AT) == MAGIC).then(|| mem.rd8(SKIPB) == 0)
 }
 
 /// The Preset row, once per change: the choice the player made (0 Low, 1 Medium, 2 High) since the last look. None until the
@@ -626,6 +705,9 @@ pub fn field(mem: &mut Mem, level: u32, buttons: u16, rows: &[[u32; 6]], gtab: u
 			if let Some(n) = pager_step(&mut st.gfx, sel, dir, NGSEC, || on_selector(mem, level, GPAGE, GVAL)) {
 				go_gfx(mem, st, n, rows, gtab);
 			}
+			if st.gfx.sec == SEC_DISPLAY {
+				pcdisp::field(mem, level, dir);
+			}
 		}
 	});
 }
@@ -721,6 +803,7 @@ mod tests {
 		assert!(CBASE + ROWS as u32 <= G_SEL && HUDB < G_MAGIC_AT && G_MAGIC_AT + 4 <= MAGIC_AT);
 		assert!(RANGE.contains(&RENDB) && RENDB != HUDB && RENDB != DBGB && RENDB != G_SEL && RENDB < G_MAGIC_AT && ID_DX12 < ID_LAST);
 		assert!(RANGE.contains(&INTROB) && ![HUDB, RENDB, DBGB, G_SEL, PRESETB].contains(&INTROB) && INTROB < G_MAGIC_AT && ID_INTRO < ID_LAST);
+		assert!(RANGE.contains(&SKIPB) && ![HUDB, RENDB, DBGB, G_SEL, PRESETB, INTROB].contains(&SKIPB) && SKIPB < G_MAGIC_AT && ID_SKIPCUT < ID_LAST && ID_SKIPCUT != ID_INTRO);
 		assert!(RANGE.contains(&PRESETB) && ![HUDB, RENDB, DBGB, G_SEL].contains(&PRESETB) && PRESETB < G_MAGIC_AT && ID_CUSTOM < ID_LAST && ID_PRESET > ID_RENDERER);
 		assert_eq!(table(0).len(), 7 * 6);
 		assert!(ID_HUD < ID_LAST && ID_ORIGINAL < ID_LAST);
@@ -754,7 +837,7 @@ mod tests {
 					}
 				}
 			}
-			for id in [ID_CONTROLS, ID_HEADER, ID_DESC, ID_PAGE, ID_HUD, ID_SHARP, ID_ORIGINAL, ID_RENDERER, ID_VULKAN, ID_DX12, ID_PRESET, ID_CUSTOM, ID_INTRO] {
+			for id in [ID_CONTROLS, ID_HEADER, ID_DESC, ID_PAGE, ID_HUD, ID_SHARP, ID_ORIGINAL, ID_RENDERER, ID_VULKAN, ID_DX12, ID_PRESET, ID_CUSTOM, ID_INTRO, ID_SKIPCUT] {
 				assert!(!text(id, lang, 0, 0, false).is_empty());
 			}
 		}
@@ -846,8 +929,10 @@ mod tests {
 	fn graphics_sections_cover_the_rows() {
 		let mut all: Vec<usize> = GSECS.iter().flat_map(|s| s.iter().copied()).collect();
 		all.sort();
-		assert_eq!(all, (0..=INTRO_ROW).collect::<Vec<_>>());
+		let want: Vec<usize> = (0..=RSCALE_ROW).filter(|&r| !cfg!(target_os = "linux") || r != RENDER_ROW).collect();
+		assert_eq!(all, want);
 		assert!(GSECS.iter().all(|s| (1..=ROWS - 1).contains(&s.len())));
+		assert!(GSECS[SEC_SCREEN].contains(&9), "SEC_SCREEN is the section of the Culling row (pcext GROWS index 9): cullwarn.rs shows its warning there");
 		let rows = fake_rows();
 		for sec in 0..NGSEC {
 			let t = gfx_table(&rows, sec, false);
@@ -862,14 +947,23 @@ mod tests {
 		assert_eq!(&gfx_table(&rows, 1, false)[6..12], &rows[4], "Effects starts with Water");
 		let s = gfx_table(&rows, 2, false);
 		assert_eq!(&s[s.len() - 6..], &[ID_HUD, HUDB, ID_SHARP, ID_ORIGINAL, 0, 0], "HUD closes the Screen page");
+		#[cfg(not(target_os = "linux"))]
 		assert_eq!(&s[s.len() - 12..s.len() - 6], &[ID_RENDERER, RENDB, ID_VULKAN, ID_DX12, 0, 0]);
-		let sys = gfx_table(&rows, 3, false);
-		assert_eq!(&sys[6..], &[ID_INTRO, INTROB, ID_OFF, ID_ON, 0, 0], "System holds the Skip intro row, Off / On");
+		let disp = gfx_table(&rows, SEC_DISPLAY, false);
+		assert_eq!(&disp[6..12], &[pcdisp::ID_HUDPOS, pcdisp::POS_B, pcdisp::ID_P43, pcdisp::ID_CORNERS, 0, 0], "Display starts with HUD position, 4:3 / Corners");
+		for (i, id) in [pcdisp::ID_VSCALE, pcdisp::ID_VFPS, pcdisp::ID_VRS].into_iter().enumerate() {
+			assert_eq!(&disp[12 + 6 * i + 2..12 + 6 * i + 4], &[id, id], "the other three rows are steppers: two equal choices");
+		}
+		assert_eq!(disp.len(), 6 * 5);
+		let sys = gfx_table(&rows, NGSEC - 1, false);
+		assert_eq!(&sys[6..12], &[ID_INTRO, INTROB, ID_OFF, ID_ON, 0, 0], "System starts with the Skip intro row, Off / On");
+		assert_eq!(&sys[12..], &[ID_SKIPCUT, SKIPB, ID_ON, ID_OFF, 0, 0], "then Start skips cutscenes, On / Off (the byte is inverted)");
 	}
 
 	/// The Graphics table is rewritten for the section; a shorter section leaves no stale record behind its zero record.
 	#[test]
 	fn the_graphics_table_follows_the_section_and_the_hud_byte_survives() {
+		let _g = crate::retail::pcopts::globals_guard();
 		let mut mem = Mem::new();
 		let rows = fake_rows();
 		let gtab = BASE + 0xaa0;
@@ -970,10 +1064,13 @@ mod tests {
 		assert!(binds::capturing(), "a key does not bind a controller function");
 		binds::capture_poll(&[], 0x2000);
 		sync(&mut mem);
-		assert_eq!(text(ID_VALUE + 1, 0, 5, 0, false), b"B");
-		assert_eq!(text(ID_VALUE + 1, 0, 5, 0, true), b"Circle");
-		assert_eq!(text(ID_VALUE + 4, 0, 5, 0, false), b"A", "Circle's row: the button Cross gave up (a swap)");
+		assert_eq!(text(ID_VALUE + 1, 0, 5, 0, true), b"Circle / Circle", "PlayStation name of the button, then the function that shares it");
+		assert_eq!(text(ID_VALUE + 1, 0, 5, 0, false), b"B / Circle", "Cross's row names the function that has B too");
+		assert_eq!(text(ID_VALUE + 4, 0, 5, 0, false), b"B / Cross", "Circle's row: it keeps B (shared, no swap)");
+		assert_eq!(text(ID_VALUE + 4, 1, 5, 0, true), b"Circle / Croix", "PlayStation names, the game's language for the other function");
+		assert_eq!(text(ID_VALUE + 2, 0, 5, 0, false), b"X", "the others are untouched");
 		assert_eq!(binds::pad_map()[binds::CROSS], 1);
+		assert_eq!(binds::pad_map()[binds::CIRCLE], 1);
 		binds::init(None, None);
 		go(&mut mem, 0);
 	}
@@ -1021,6 +1118,7 @@ mod tests {
 	/// preset and gives Custom its 4th choice only while the state is Custom.
 	#[test]
 	fn the_preset_row_reports_choices_and_shows_custom_only_when_custom() {
+		let _g = crate::retail::pcopts::globals_guard();
 		let mut mem = Mem::new();
 		let rows = fake_rows();
 		let gtab = BASE + 0xaa0;

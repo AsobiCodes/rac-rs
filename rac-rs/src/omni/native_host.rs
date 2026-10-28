@@ -3,15 +3,16 @@
 //! (funcs.rs), and asks for room on the game's stack for the arguments of such a call.
 //!
 //! RAM: the pointer is the first machine's RAM buffer (set by `set_ram` before the mods load). A later `Retail::load` builds a NEW machine with a
-//! new buffer; native mods keep the old pointer, so after such a load `machine_check` switches the loaded native mods off (`stale`): their
-//! callbacks, hooks and calls stop, the game runs on as without them. Script mods are not affected (they reach the RAM per call, host.rs).
+//! new buffer; native mods keep the old pointer, so after such a load `machine_check` switches the mods off (`stale`): ALL of them, script
+//! mods too, because they share the one loader tick: no `on_frame`, no events, no hooks, no calls; the game runs on as without them until it
+//! is restarted.
 //!
 //! call_game runs a retail function from inside a callback of the DLL, on the machine in scope (host.rs `scope`): inside a hook it is like
 //! `call_original`; between two fields (`tick`, `pad`) it runs on the machine as it stands at the field boundary. It never leaves a trace in
 //! the registers: they are saved first and restored after; only the instruction count stays advanced. See `do_call` for the refusals.
 
 use super::cabi::{Host, Value};
-use super::counts;
+use super::counts::{self, Counter};
 use super::host::{cpu, state};
 use ee_oracle::cpu::Cpu;
 use std::collections::HashSet;
@@ -28,7 +29,7 @@ const EXE_DATA_END: u32 = 0x15_EF00;
 /// The game stack never goes below the executable's start.
 const STACK_FLOOR: u32 = 0x10_0000;
 /// The level number word (`oracle LEVEL`).
-const LEVEL_WORD: usize = 0x15_ED84;
+pub(super) const LEVEL_WORD: usize = 0x15_ED84;
 /// `OMNI_LEVEL_UNSUPPORTED`.
 const LEVEL_UNSUPPORTED: i32 = i32::MIN;
 
@@ -37,15 +38,17 @@ static STALE: AtomicBool = AtomicBool::new(false);
 static DEPTH: AtomicU32 = AtomicU32::new(0);
 
 /// A line in the run log at most once per key (a mod that fails on every tick must not flood it).
-pub fn say_once(key: &str, msg: &str) {
+pub fn say_once(key: &str, msg: &str) -> bool {
 	static SAID: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 	let mut g = SAID.lock().unwrap_or_else(|e| e.into_inner());
-	if g.get_or_insert_with(HashSet::new).insert(key.to_string()) {
-		eprintln!("omni: {msg}");
+	let first = g.get_or_insert_with(HashSet::new).insert(key.to_string());
+	if first {
+		super::logq::line(&format!("omni: {msg}"));
 	}
+	first
 }
 
-/// Native mods were switched off by a second machine (see the module doc).
+/// The mods were switched off by a second machine (see the module doc).
 pub fn stale() -> bool {
 	STALE.load(Ordering::Relaxed)
 }
@@ -58,7 +61,7 @@ pub fn set_ram(c: &mut Cpu) {
 /// Every `Retail::load` after the mods started: a machine with another RAM buffer invalidates the pointer native mods hold.
 pub fn machine_check(c: &mut Cpu, native: bool) {
 	if native && c.mem.ram.as_mut_ptr() != RAM_PTR.load(Ordering::SeqCst) && !STALE.swap(true, Ordering::SeqCst) {
-		eprintln!("omni: a second game load built a new machine; native mods hold the old game memory and are switched off until the game is restarted");
+		eprintln!("omni: a second game load built a new machine; native mods hold the old game memory, so all mods are switched off until the game is restarted");
 	}
 }
 
@@ -121,7 +124,12 @@ fn level_word_now() -> i32 {
 }
 
 pub(super) fn level_word(c: &Cpu) -> i32 {
-	c.mem.ram.get(LEVEL_WORD..LEVEL_WORD + 4).map_or(-1, |b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+	level_word_in(&c.mem.ram)
+}
+
+/// The level word of a RAM image (-1 when the image is too short).
+pub(super) fn level_word_in(ram: &[u8]) -> i32 {
+	ram.get(LEVEL_WORD..LEVEL_WORD + 4).map_or(-1, |b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
 }
 
 /// The CPU state a call_game must give back (everything a function can change except memory and the instruction count).
@@ -166,7 +174,7 @@ fn put_args(c: &mut Cpu, p: &Placement) {
 /// Runs game function `number` with `args`. Refused (Err with the reason) when: the mods are still loading (`omni::get` is None), no machine is
 /// in scope, the machine stopped, native mods are stale, the depth is 8, the number is unknown or not in the loaded code, or there are more than
 /// 8 arguments of a class. Between two fields the cold-boot field timer is held off for the call, so it cannot fire inside it.
-fn do_call(user: *mut c_void, number: u32, args: &[Value], want_float: bool) -> Result<Value, String> {
+fn do_call(user: *mut c_void, number: u32, args: &[Value], want_float: bool) -> Result<(Value, &'static super::funcs::FuncSpec), String> {
 	if super::get().is_none() {
 		return Err("game functions cannot be called while the mods are loading".into());
 	}
@@ -179,10 +187,16 @@ fn do_call(user: *mut c_void, number: u32, args: &[Value], want_float: bool) -> 
 	}
 	depth_check()?;
 	let ntsc = state(user).disc == "ntsc";
-	let entry = super::funcs::resolve(c, number, ntsc, level_word(c))?;
+	let (entry, spec) = super::funcs::resolve(c, number, ntsc, level_word(c))?;
 	let place = place_args(args).ok_or("more than 8 integer or 8 float arguments")?;
 	run_at(c, entry, |c| put_args(c, &place), |c| if want_float { Value::float(f32::from_bits(c.f[0]) as f64) } else { Value::int(c.g(2) as i32 as i64) })
+		.map(|v| (v, spec))
 		.map_err(|why| format!("game function 0x{number:x} {why}"))
+}
+
+/// A `run_at` is live on the stack (`DEPTH`): it will catch what a callee unwinds with (bridge.rs `park_panic`).
+pub(super) fn calls_live() -> u32 {
+	DEPTH.load(Ordering::SeqCst)
 }
 
 /// Refused when game calls are already nested `MAX_DEPTH` deep.
@@ -200,8 +214,12 @@ pub(super) fn run_at<T>(c: &mut Cpu, entry: u32, set: impl FnOnce(&mut Cpu), rea
 	if super::bridge::unwound() {
 		return Err("was refused: the hooked function already left at a frame wait");
 	}
+	if super::bridge::panic_parked() {
+		return Err("was refused: an earlier game call was cut short by a panic that is still unwinding");
+	}
 	let saved = Saved::take(c);
-	if !super::bridge::in_hook() {
+	let held = !super::bridge::in_hook();
+	if held {
 		c.mem.tick = u64::MAX;
 	}
 	set(c);
@@ -212,19 +230,33 @@ pub(super) fn run_at<T>(c: &mut Cpu, entry: u32, set: impl FnOnce(&mut Cpu), rea
 	let result = match ran {
 		Ok(true) => Ok(read(c)),
 		Ok(false) => Err("did not return (it waits for the next frame)"),
+		// The oracle unwinds the game thread with panics that carry no text (`RecRebuilt`: the recompiled table was rebuilt under compiled
+		// frames; `Quit`): on the game thread they must reach its loop, so they are parked and the DLL call that made this one returns first; between fields
+		// (the worker) nothing could catch them: the call answers an error and the game thread is told through `rec_unwind` (bridge.rs).
+		Err(p) if super::bridge::is_unwind_signal(&p) => {
+			super::bridge::park_panic(c, p);
+			Err("was cut short (the game thread is being unwound)")
+		}
 		Err(_) => Err("panicked"),
 	};
 	saved.put(c);
+	if held {
+		restore_due(c);
+	}
 	result
 }
 
-unsafe extern "C" fn ram_ptr_cb(_user: *mut c_void) -> *mut u8 {
-	RAM_PTR.load(Ordering::SeqCst)
+/// The forced-vblank deadline of the cold-boot machine for the timer `Saved::put` gave back: a VIF1 stop that matured while the timer was held
+/// off (`tick` = MAX) left `due` at MAX (oracle `Mem::mature`), and the field would come late. Same rule as the oracle's `rearm_tick`.
+fn restore_due(c: &mut Cpu) {
+	c.mem.set_due(if c.mem.vif1_pend.is_some() { c.mem.dma_due.min(c.mem.tick) } else { c.mem.tick });
 }
 
-/// The name of game function `number` in `rac1_funcs.txt` (the number when unknown), for the call counters.
-fn func_name(number: u32, ntsc: bool) -> String {
-	super::funcs::find_spec(number, ntsc).map_or_else(|| format!("0x{number:x}"), |f| f.name.clone())
+/// The game's RAM. Writing DATA through it is supported; writing game CODE (0x100000..0x400000 inside a recompiled function) is not: the recompiled
+/// functions never see it and the next table build drops their whole set to the interpreter (codeguard.rs refuses it for `write_mem`; a raw
+/// pointer cannot be checked). Use a hook point to change what a game function does.
+unsafe extern "C" fn ram_ptr_cb(_user: *mut c_void) -> *mut u8 {
+	RAM_PTR.load(Ordering::SeqCst)
 }
 
 unsafe extern "C" fn call_game_cb(user: *mut c_void, addr: u32, args: *const Value, nargs: u32, ret: *mut Value) -> i32 {
@@ -232,12 +264,14 @@ unsafe extern "C" fn call_game_cb(user: *mut c_void, addr: u32, args: *const Val
 	let given: &[Value] = if args.is_null() { &[] } else { unsafe { std::slice::from_raw_parts(args, nargs as usize) } };
 	let want_float = !ret.is_null() && unsafe { (*ret).is_float != 0 };
 	let result = do_call(user, addr, given, want_float);
-	counts::bump(&match &result {
-		Ok(_) => format!("call_game {}", func_name(addr, state(user).ntsc)),
-		Err(_) => "call_game refused".to_string(),
-	});
+	// An answered call came with the spec it found (`resolve`): counted on it, no second lookup.
+	if let Ok((_, spec)) = &result {
+		spec.calls.fetch_add(1, Ordering::Relaxed);
+	} else {
+		counts::bump(Counter::CallGameRefused);
+	}
 	match result {
-		Ok(v) => {
+		Ok((v, _)) => {
 			if !ret.is_null() {
 				// SAFETY: as above.
 				unsafe { *ret = v };
@@ -263,13 +297,13 @@ unsafe extern "C" fn relocate_level_cb(user: *mut c_void, level: i32, addr: u32,
 fn relocate_answer(usa: bool, level: i32, addr: u32, out: *mut u32) -> i32 {
 	match relocate_in(usa, level, addr) {
 		Some(a) => {
-			counts::bump("relocate");
+			counts::bump(Counter::Relocate);
 			// SAFETY: `out` is one u32 the loader gave.
 			unsafe { *out = a };
 			1
 		}
 		None => {
-			counts::bump("relocate (unmapped)");
+			counts::bump(Counter::RelocateUnmapped);
 			say_once(&format!("relocate {addr:x} {level}"), &format!("relocate(0x{addr:x}) in level {level}: not in the overlay data map, the mod gets 0 (its feature that reads it does not work)"));
 			0
 		}

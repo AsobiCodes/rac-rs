@@ -472,14 +472,17 @@ impl Smooth {
 	}
 
 	/// Props: keeps the pose history, adds the blended poses to `fx_posed` (they take precedence in `set_props`) and
-	/// fills `PROP_XF` with the blended placements. `posed` is moved in and stays readable through `posed()`.
-	pub(super) fn props(&mut self, props: &[Prop], posed: HashMap<PoseKey, Posed>, fx_posed: &mut HashMap<usize, Posed>) {
+	/// fills `PROP_XF` with the blended placements. `posed` is moved in and stays readable through `posed()`. `blend[pi]` false = the
+	/// prop's pose is kept in the history but not blended for this frame (a camera-culled moby the sun shadow pass cannot take yet,
+	/// handler/sun_gate.rs); the poses of the props that do blend are blended on the worker pool.
+	pub(super) fn props(&mut self, props: &[Prop], posed: HashMap<PoseKey, Posed>, fx_posed: &mut HashMap<usize, Posed>, blend: &[bool]) {
 		let ticks = self.ticks;
 		Self::roll(ticks, &mut self.posed_last, &mut self.posed_before, posed);
 		Self::roll(ticks, &mut self.fx_last, &mut self.fx_before, fx_posed.clone());
 		let mut xf = vec![None; props.len()];
 		if self.active {
 			let t = self.alpha;
+			let mut jobs: Vec<(usize, &Posed, &Posed)> = Vec::new();
 			for (pi, p) in props.iter().enumerate() {
 				let Some(prev) = self.props_prev.get(pi) else { continue };
 				let cur = PropXf::of(p);
@@ -493,9 +496,18 @@ impl Smooth {
 				let was = self.fx_before.get(&pi).or_else(|| self.posed_before.get(&prev.key));
 				let same = prev.key == cur.key && !self.fx_last.contains_key(&pi) && !self.fx_before.contains_key(&pi);
 				if let (Some(a), Some(b), false) = (was, now, same) {
-					if let Some(bl) = blend_posed(a, b, t) {
-						fx_posed.insert(pi, bl);
+					if blend.get(pi).copied().unwrap_or(true) {
+						jobs.push((pi, a, b));
 					}
+				}
+			}
+			let blended: Vec<Option<Posed>> = {
+				use rayon::prelude::*;
+				if jobs.len() < 3 { jobs.iter().map(|&(_, a, b)| blend_posed(a, b, t)).collect() } else { jobs.par_iter().map(|&(_, a, b)| blend_posed(a, b, t)).collect() }
+			};
+			for ((pi, _, _), bl) in jobs.iter().zip(blended) {
+				if let Some(bl) = bl {
+					fx_posed.insert(*pi, bl);
 				}
 			}
 		}

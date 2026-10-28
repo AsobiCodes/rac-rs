@@ -7,9 +7,15 @@ use rayon::prelude::*;
 
 pub(super) mod pmemo;
 pub(super) mod gpu;
+pub(super) mod gpu_cache;
+pub(super) mod gpu_repl;
+pub(super) mod cpu_repl;
 pub(super) mod gpu_shared;
+pub(super) mod gpu_span;
 #[cfg(test)]
 mod gpu_shared_tests;
+#[cfg(test)]
+mod guard_tests;
 
 #[derive(Clone, Copy)]
 struct St {
@@ -314,14 +320,18 @@ impl Gs {
     fn raster(&mut self, st: &St, ty: u32, vs: &[Vtx]) {
         if st.ov && matches!(ty, 3..=6) {
             let n = if ty == 6 { 2 } else { 3 };
-            let v: Vec<(f32, f32)> = vs.iter().take(n).map(|v| (v.x as f32 / 16.0 - st.ofx, v.y as f32 / 16.0 - st.ofy)).collect();
-            super::edge_cut::note(st.sc, &v);
+            let (v, k) = overlay_points(vs, n, st.ofx, st.ofy);
+            super::edge_cut::note(st.sc, &v[..k]);
+            if super::edge_cut::visible(st.at & 0x10 != 0, st.at & 0x40 != 0, st.tex0, vs.iter().take(n).map(|x| x.rgba[3])) {
+                super::edge_cut::guard::note(st.sc, &v[..k]);
+            }
         }
         if self.gpu.is_some() {
             self.gpu_raster(st, ty, vs);
             return;
         }
         self.tcr = (0, 0, 0, 0);
+        self.repl_cpu_prim(st, ty, vs);
         if st.ov {
             self.mark_prim(st, ty, vs);
         }
@@ -359,7 +369,6 @@ impl Gs {
 
     /// Ends the overlay frame: the finished overlay becomes `done`.
     fn publish(&mut self) {
-        super::edge_cut::publish();
         let t0 = self.prof.is_some().then(std::time::Instant::now);
         let gpu = self.gpu.is_some();
         let mut rows = self.cur.rows;
@@ -368,10 +377,9 @@ impl Gs {
         }
         rows = rows.min(disp_rows());
         self.held_rows = rows;
+        let guard = super::edge_cut::publish(rows as usize);
         if gpu {
-            let blank = Overlay { w: self.cur.w, h: self.cur.h, rows: self.cur.h, frozen: false, disp: false, px: Vec::new(), rgba: Vec::new(), hd: None };
-            let mut o = std::mem::replace(&mut self.cur, blank);
-            o.rows = rows;
+            let o = take_finished(&mut self.cur, rows, guard);
             self.gpu_publish(gpu::CUR, o);
             self.done = None;
         } else {
@@ -395,7 +403,7 @@ impl Gs {
             if self.check {
                 self.check_rgba(&rgba, &self.held, w, rows);
             }
-            self.done = Some(Overlay { w, h, rows, frozen, disp, px: Vec::new(), rgba, hd: None });
+            self.done = Some(Overlay { w, h, rows, frozen, disp, px: Vec::new(), rgba, hd: None, guard });
         }
         if self.log && std::env::var("ORACLE_GSSEQ").is_ok() {
             eprintln!("seq publish {}", self.frames + 1);
@@ -441,11 +449,12 @@ impl Gs {
     pub(super) fn field_end(&mut self) {
         self.copied = false;
         self.to_disp = false;
+        self.repl_frame_end();
         let Some(px) = self.dcur.take() else { return };
-        super::edge_cut::publish();
+        let guard = super::edge_cut::publish(self.held_rows as usize);
         let t0 = self.prof.is_some().then(std::time::Instant::now);
         if self.gpu.is_some() {
-            let o = gpu::meta(self.cur.w, self.cur.h, self.held_rows, false, true);
+            let o = gpu::meta(self.cur.w, self.cur.h, self.held_rows, false, true, guard);
             self.gpu_publish(gpu::DCUR, o);
             return;
         }
@@ -461,7 +470,7 @@ impl Gs {
         if self.check {
             self.check_rgba(&rgba, &self.held, w, rows);
         }
-        self.done = Some(Overlay { w, h, rows, frozen: false, disp: true, px: Vec::new(), rgba, hd: None });
+        self.done = Some(Overlay { w, h, rows, frozen: false, disp: true, px: Vec::new(), rgba, hd: None, guard });
         if std::env::var("RAC_GSDISP").is_ok() {
             eprintln!("gsdisp publish f{}", self.frames);
         }
@@ -518,6 +527,7 @@ impl Gs {
             tcy: self.tcr.1,
             tcw: self.tcr.2,
             tch: self.tcr.3,
+            rp: cpu_repl::RpView::new(self.repl.cpu_cur.as_ref()),
         }
     }
 
@@ -1010,6 +1020,8 @@ struct View {
     tcy: i32,
     tcw: u32,
     tch: u32,
+    /// The texture-pack table the prim samples instead of the GS texture (cpu_repl.rs); empty without a pack.
+    rp: cpu_repl::RpView,
 }
 
 // SAFETY: the pointers stay valid for the prim (the Gs is borrowed mutably for it) and rows never share bytes (`par_ok`).
@@ -1340,6 +1352,9 @@ impl View {
         let cl = st.clamp;
         let x = View::wrap(cl, u, tw, ((cl >> 4) & 0x3ff) as u32, ((cl >> 14) & 0x3ff) as u32);
         let y = View::wrap(cl >> 2, v, th, ((cl >> 24) & 0x3ff) as u32, ((cl >> 34) & 0x3ff) as u32);
+        if self.rp.on() {
+            return self.rp.texel(x, y);
+        }
         let (tbp, tbw, psm) = ((tex0 & 0x3fff) as u32, ((tex0 >> 14) & 0x3f) as u32, ((tex0 >> 20) & 0x3f) as u32);
         let raw = self.rd_px(psm, tbp, tbw, x, y);
         match psm {
@@ -1357,6 +1372,7 @@ impl View {
         let cl = st.clamp;
         let (tbp, tbw, psm) = ((tex0 & 0x3fff) as u32, ((tex0 >> 14) & 0x3f) as u32, ((tex0 >> 20) & 0x3f) as u32);
         let (ulo, uhi) = (((cl >> 4) & 0x3ff) as u32, ((cl >> 14) & 0x3ff) as u32);
+        let psm = if self.rp.on() { u32::MAX } else { psm };
         let yy = View::wrap(cl >> 2, y, th, ((cl >> 24) & 0x3ff) as u32, ((cl >> 34) & 0x3ff) as u32);
         match psm {
             0x00 => {
@@ -1419,4 +1435,42 @@ fn ffloor(x: f32) -> f32 {
 /// Rows of the display buffer: 512 on PAL, 448 on NTSC (the USA disc scissors its display buffer at 448 rows).
 fn disp_rows() -> u32 {
     if ee_oracle::ver::ntsc() { 448 } else { super::H }
+}
+
+/// The first `n` vertices of an overlay primitive in screen pixels (offset removed) and how many there are: the points `edge_cut::note`
+/// takes, in a fixed array (no allocation per primitive).
+fn overlay_points(vs: &[Vtx], n: usize, ofx: f32, ofy: f32) -> ([(f32, f32); 3], usize) {
+    let mut v = [(0.0f32, 0.0f32); 3];
+    let mut k = 0;
+    for (d, s) in v.iter_mut().zip(vs.iter().take(n)) {
+        *d = (s.x as f32 / 16.0 - ofx, s.y as f32 / 16.0 - ofy);
+        k += 1;
+    }
+    (v, k)
+}
+
+/// The finished main picture taken out of `cur` (a blank overlay of the same size takes its place), with `rows` and the guard measured on
+/// THIS picture. The blank is the next picture's overlay and must not carry the guard: it would reach the viewer one picture late.
+fn take_finished(cur: &mut Overlay, rows: u32, guard: super::edge_cut::Guard) -> Overlay {
+    let blank = Overlay { w: cur.w, h: cur.h, rows: cur.h, frozen: false, disp: false, px: Vec::new(), rgba: Vec::new(), hd: None, guard: Default::default() };
+    Overlay { rows, guard, ..std::mem::replace(cur, blank) }
+}
+
+#[cfg(test)]
+mod edge_points_tests {
+    use super::*;
+
+    /// The array holds exactly what the per-primitive Vec held: the first `n` vertices (fewer when the primitive has fewer).
+    #[test]
+    fn overlay_points_equal_the_vec_they_replace() {
+        let vt = |x: u16, y: u16| Vtx { x, y, ..Default::default() };
+        let vs = [vt(16, 32), vt(800, 64), vt(3, 9), vt(7, 7)];
+        for n in [2, 3] {
+            for len in 0..=4 {
+                let old: Vec<(f32, f32)> = vs[..len].iter().take(n).map(|v| (v.x as f32 / 16.0 - 0.5, v.y as f32 / 16.0 - 0.25)).collect();
+                let (new, k) = overlay_points(&vs[..len], n, 0.5, 0.25);
+                assert_eq!(&new[..k], &old[..], "n {n} len {len}");
+            }
+        }
+    }
 }

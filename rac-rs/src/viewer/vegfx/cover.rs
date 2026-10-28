@@ -123,18 +123,43 @@ impl Cover<'_> {
 	/// `SLAB_REACH` m under its top. Swamp levels only; the slabs have no collision, so the floor test cannot see the water.
 	pub(super) fn under_slab(&self, p: [f32; 3]) -> bool {
 		self.swamp
-			&& self.blocks.iter().filter(|&&ii| ii & SLAB_FLAG != 0).any(|&ii| {
-				let m = &self.ties[(ii & !SLAB_FLAG) as usize].lods[0];
-				let (lo, hi) = m.positions.iter().fold(([f32::MAX; 3], [f32::MIN; 3]), |(lo, hi), q| (std::array::from_fn(|k| lo[k].min(q[k])), std::array::from_fn(|k| hi[k].max(q[k]))));
+			&& self.slabs.iter().any(|&(lo, hi)| {
 				let dz = hi[2] - p[2];
 				(0..2).all(|k| p[k] > lo[k] - SLAB_MARGIN && p[k] < hi[k] + SLAB_MARGIN) && dz > SLAB_MIN && dz < SLAB_REACH
 			})
+	}
+
+	/// The census line `veg: shrub faces ..` of RAC_VEG_LOG=1: how many shrub faces there are, how many have an authored texture chain
+	/// and how many no texture at all.
+	pub(super) fn log_shrub_faces(&self) {
+		let (mut n, mut miss, mut chained) = (0, 0, 0);
+		for s in self.shrubs {
+			for &(k, _) in &s.mesh.faces {
+				n += 1;
+				let tk = k & crate::mobies::KEY_MASK & !shrubs::MATERIAL_BITS;
+				chained += self.schains.get((tk & 0xff) as usize).is_some_and(|c| c.is_some()) as usize;
+				miss += self.shrub_tex(k).0.is_none() as usize;
+			}
+		}
+		eprintln!("veg: shrub faces {n}, chained {chained}, no texture {miss}");
 	}
 
 	/// The blade density factor of the level (`SWAMP_DENSITY` on a swamp, else 1).
 	pub(super) fn density(&self) -> f32 {
 		if self.swamp { SWAMP_DENSITY } else { 1.0 }
 	}
+}
+
+/// The bounding boxes (lowest, highest corner of the LOD 0 positions) of the water slabs among `blocks`, made once per plan for
+/// `Cover::under_slab`.
+pub(super) fn slab_boxes(blocks: &std::collections::HashSet<u32>, ties: &[ties::LitTie]) -> Vec<([f32; 3], [f32; 3])> {
+	let mut ids: Vec<u32> = blocks.iter().copied().filter(|ii| ii & SLAB_FLAG != 0).collect();
+	ids.sort_unstable();
+	ids.iter().map(|&ii| slab_box(&ties[(ii & !SLAB_FLAG) as usize].lods[0].positions)).collect()
+}
+
+fn slab_box(positions: &[[f32; 3]]) -> ([f32; 3], [f32; 3]) {
+	positions.iter().fold(([f32::MAX; 3], [f32::MIN; 3]), |(lo, hi), q| (std::array::from_fn(|k| lo[k].min(q[k])), std::array::from_fn(|k| hi[k].max(q[k]))))
 }
 
 /// The grass blocks among the ties (`Cover::blocks`): ties (on the swamp levels: at least `BLOCK_MIN_H` tall) with at least `BLOCK_TOP` m2 of flat
@@ -168,6 +193,85 @@ pub(super) fn tie_blocks(level: usize, tie_set: &[ties::LitTie], ttex: &HashMap<
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// A tie whose LOD 0 holds `positions` (the other LODs and the rest are empty): all `slab_boxes` / `under_slab` read.
+	fn tie(positions: Vec<[f32; 3]>) -> ties::LitTie {
+		let mesh = |positions: Vec<[f32; 3]>| crate::mesh::Mesh {
+			name: String::new(),
+			positions,
+			uvs: Vec::new(),
+			faces: Vec::new(),
+			colours: Vec::new(),
+			lit: None,
+			strip_phase: Vec::new(),
+			normals: Vec::new(),
+		};
+		ties::LitTie {
+			lods: [mesh(positions), mesh(Vec::new()), mesh(Vec::new())],
+			morph: Default::default(),
+			slots: Default::default(),
+			cols: Vec::new(),
+			cull: ties::TieCull { centre: [0.0; 3], radius: 1.0, dist: 1.0, lod: [1.0; 3], occ: (0, 0) },
+		}
+	}
+
+	/// The old `under_slab` folded the slab's positions per query point. The real `slab_boxes` (flag filter, `& !SLAB_FLAG` index, tie
+	/// lookup) feeding the real `Cover::under_slab` must answer like that fold over the flagged ties, and only for them.
+	#[test]
+	fn precomputed_slab_boxes_answer_like_the_per_point_fold() {
+		let slab_pos: Vec<[f32; 3]> = (0..40).map(|i| [10.0 + (i * 7 % 13) as f32 * 4.6, -20.0 + (i * 5 % 11) as f32 * 5.6, 72.0 + (i % 2) as f32 * 1.2]).collect();
+		let slab2_pos: Vec<[f32; 3]> = (0..30).map(|i| [-150.0 + (i * 3 % 7) as f32 * 9.0, 60.0 + (i * 5 % 9) as f32 * 3.0, 131.0 + (i % 2) as f32 * 1.3]).collect();
+		// Tie 1 is a tall block (a block, no slab), tie 3 no block at all; both stand where a wrongly listed box would be seen.
+		let block_pos: Vec<[f32; 3]> = vec![[200.0, 200.0, 54.8], [230.0, 230.0, 58.2]];
+		let other_pos: Vec<[f32; 3]> = vec![[-300.0, -300.0, 10.0], [-260.0, -260.0, 40.0]];
+		let tie_set = vec![tie(slab_pos.clone()), tie(block_pos.clone()), tie(slab2_pos.clone()), tie(other_pos.clone())];
+		let blocks: std::collections::HashSet<u32> = [0 | SLAB_FLAG, 1, 2 | SLAB_FLAG].into_iter().collect();
+		let boxes = slab_boxes(&blocks, &tie_set);
+		assert_eq!(boxes.len(), 2, "only the two flagged ties: {boxes:?}");
+		let fold = |pos: &[[f32; 3]]| pos.iter().fold(([f32::MAX; 3], [f32::MIN; 3]), |(lo, hi), q| (std::array::from_fn(|k| lo[k].min(q[k])), std::array::from_fn(|k| hi[k].max(q[k]))));
+		assert_eq!(boxes, [fold(&slab_pos), fold(&slab2_pos)], "the boxes of ties 0 and 2, in id order");
+		let (no_tex, no_chain) = (HashMap::new(), Vec::new());
+		let cover = |swamp: bool| Cover {
+			tf: HashMap::new(),
+			sh: HashMap::new(),
+			shrubs: &[],
+			stex: &no_tex,
+			schains: &no_chain,
+			tg: HashMap::new(),
+			ties: &tie_set,
+			ttex: HashMap::new(),
+			blocks: blocks.clone(),
+			slabs: boxes.clone(),
+			swamp,
+		};
+		let (swamp, dry) = (cover(true), cover(false));
+		// The old per-point answer: fold the flagged ties' positions at every query.
+		let old = |p: [f32; 3]| {
+			blocks.iter().filter(|&&ii| ii & SLAB_FLAG != 0).any(|&ii| {
+				let (lo, hi) = fold(&tie_set[(ii & !SLAB_FLAG) as usize].lods[0].positions);
+				let dz = hi[2] - p[2];
+				(0..2).all(|k| p[k] > lo[k] - SLAB_MARGIN && p[k] < hi[k] + SLAB_MARGIN) && dz > SLAB_MIN && dz < SLAB_REACH
+			})
+		};
+		let (mut inside, mut near_block, mut near_other) = (0, 0, 0);
+		for x in -90..=60 {
+			for y in -60..=40 {
+				for z in [60.0, 70.0, 73.5, 74.0, 100.0, 120.0, 131.0, 134.0, 160.0] {
+					let p = [x as f32 * 3.1, y as f32 * 3.7, z];
+					assert_eq!(swamp.under_slab(p), old(p), "{p:?}");
+					assert!(!dry.under_slab(p), "a dry level has no water slabs: {p:?}");
+					inside += old(p) as u32;
+				}
+			}
+		}
+		// Beside the tall block (tie 1) and the non-block (tie 3) there is no water, whatever the height.
+		for z in [50.0, 56.0, 60.0, 80.0] {
+			near_block += swamp.under_slab([215.0, 215.0, z]) as u32;
+			near_other += swamp.under_slab([-280.0, -280.0, z]) as u32;
+		}
+		assert!(inside > 1000, "the test covers both answers ({inside})");
+		assert_eq!((near_block, near_other), (0, 0), "only flagged ties make water");
+	}
 
 	#[test]
 	fn slabs_are_no_blocks() {

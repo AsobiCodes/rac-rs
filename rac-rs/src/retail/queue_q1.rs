@@ -196,10 +196,19 @@ fn pool_uv(v: [f32; 3], n: [f32; 3], cam: [f32; 3]) -> [f32; 2] {
 /// FUN_00222d20 (Hoven sphere_visible; frustum block 0x16d0c0) on sphere `s` (x, y, z, r): -1 rejects, 0 straddles, 1 inside.
 /// k = block +0x3c; p = s * k; v = view rows (+0, +0x10, +0x20) applied to p.xyz - block +0x30; reject when z + r <= 0 (sign of
 /// 0 - (z + r) clear), far * k - (z - r) < 0, or a side test a.c z - (|c| - b.c r) < 0 (c = x, y; a = +0x40, b = +0x60).
+/// [PC] A side reject the wider window still shows is kept (`wide_side::keep`; never in a 4:3 window).
 fn sphere_visible(m: &Machine, far: f32, s: [f32; 4]) -> i32 {
-	let q = |a: u32| [m.rdf(a), m.rdf(a + 4), m.rdf(a + 8), m.rdf(a + 0xc)];
 	let b = va(0x16d0c0u32);
-	let (r0, r1, r2, c, a, w, h, g) = (q(b), q(b + 0x10), q(b + 0x20), q(b + 0x30), q(b + 0x40), q(b + 0x50), q(b + 0x60), q(b + 0x70));
+	let blk: [[f32; 4]; 8] = std::array::from_fn(|i| {
+		let a = b + 0x10 * i as u32;
+		[m.rdf(a), m.rdf(a + 4), m.rdf(a + 8), m.rdf(a + 0xc)]
+	});
+	sphere_test(&blk, far, s, super::wide_side::keep)
+}
+
+/// `sphere_visible` on the block's eight vec4 (`blk`), with `keep(view centre, radius, tangent x)` asked at a side reject.
+pub(super) fn sphere_test(blk: &[[f32; 4]; 8], far: f32, s: [f32; 4], keep: impl Fn([f32; 3], f32, f32) -> bool) -> i32 {
+	let [r0, r1, r2, c, a, w, h, g] = *blk;
 	let k = c[3];
 	let p = s.map(|x| x * k);
 	let d = [p[0] - c[0], p[1] - c[1], p[2] - c[2]];
@@ -210,7 +219,10 @@ fn sphere_visible(m: &Machine, far: f32, s: [f32; 4]) -> i32 {
 	let behind = 0.0 - zz[0];
 	let beyond = far_k - zz[1];
 	let side: [f32; 2] = std::array::from_fn(|i| a[i] * v[2] - (v[i].abs() - h[i] * rad));
-	if beyond.is_sign_negative() || !behind.is_sign_negative() || side[0].is_sign_negative() || side[1].is_sign_negative() {
+	if beyond.is_sign_negative() || !behind.is_sign_negative() {
+		return -1;
+	}
+	if (side[0].is_sign_negative() || side[1].is_sign_negative()) && !keep(v, rad, a[0]) {
 		return -1;
 	}
 	let outer: [f32; 2] = std::array::from_fn(|i| a[i] * v[2] * w[i] - (v[i].abs() + h[i] * rad * h[2]));

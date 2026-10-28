@@ -1,5 +1,49 @@
 # Changelog
 
+## v0.4.1
+
+- Updating from v0.4.0 takes about 2 to 10 minutes (only the parts that changed are rebuilt). Your saves and settings are kept.
+- New: Linux (x86-64, issue #6). With the RAC-RS Launcher (its own download, now also for Linux) installing is one click: it downloads the game, asks for your own disc and builds it for you, with no programming tools and no sudo. Without the Launcher: unpack the game, run "sh setup.sh", then "./play.sh" (or build it in a Docker container). An application-menu entry and gamepad support (Xbox, DualShock 4, DualSense) are included. The game starts with Vulkan and writes a run log and a crash log in the player folder. The same recorded fight gives identical game memory on Linux and Windows. Linux support is new: it was tested on Ubuntu and Arch Linux under WSL only, so please report what you find. See the Linux section of the README. Thanks to DeSynkro for the Linux port (pull request #38), which these parts were taken from; the rest of that pull request is not part of this release.
+- New: "Start skips cutscenes" (Pause > Options > Graphics, page System), on by default. Start now skips story movies and the planet arrival and landing scenes, also on a controller (a controller could not skip movies at all before). Off gives the original rule back (Start plus L1, R1, L2 and R2; Esc and Space still skip). Ship takeoff stays unskippable, like the original (issues #34 and #23).
+- New: Display page (Pause > Options > Graphics, page Display): HUD position (4:3 or Corners, which puts the nanotech bar and the bolt counter in the corners of a wide window), HUD scale (75 to 150), FPS limit (default: your screen's refresh rate) and Render scale (50 to 200 percent of the window: lower runs faster on weak PCs, higher is sharper) (issue #33).
+- New: texture packs now also replace the HUD, the pause and Options menus, the vendor, the text and the title screen (v0.4.0 listed these, but only the world textures were replaced). Where the processor draws the HUD (integrated graphics) a pack's colours and art show at the PS2's picture size (issue #32).
+- New: texture packs in the BC7 format (what texconv and similar tools write) now load. Before, most of them were skipped and the original pictures stayed.
+- Fixed: big PNG texture packs (several GB) no longer leave part of a planet with the original textures: they are kept compressed in memory so the whole pack fits (on Novalis 495 of 609 pictures were replaced before, now all 609) (issue #32).
+- Fixed: a texture pack folder copied by hand into the mods folder (a PCSX2 textures folder, loose pictures, any folder name) now shows up in Options > Mods and can be switched on.
+- Fixed: with a texture pack on, a level no longer freezes the picture for a moment while the pack loads, a damaged picture in a pack no longer crashes the game (it is skipped), and leaf and branch shadows no longer go missing, with slower speed, for a whole visit on planets whose pack textures arrive late.
+- Fixed: German and Spanish were swapped in the title screen's Language list (issue #26).
+- Fixed: the language you choose is remembered. Before, the game started in English every time (issue #11).
+- Changed: Culling is On for everyone: it is reset to On once with this update, every Graphics Preset now sets it On, and turning it off shows a warning (it gives no gameplay benefit and puts a heavy load on your hardware). You can still switch it off.
+- Fixed: with Culling Off, objects the game hides on purpose stay hidden (on Veldin, grey wall blocks appeared).
+- Fixed: with the Classic camera, aiming while strafing turned the view the opposite way from normal play; both now match the original. With the Modern camera the right stick no longer flips direction in free look or after the game's own camera takes over, and it no longer zooms the pause map the wrong way (issues #25 and #24).
+- Fixed: remapping a button no longer moves other actions to other buttons. One button can now do several things, the Controls page shows both names (for example "B / Circle"), and fire on the R2 trigger still works while aiming (issue #24).
+- Fixed: controller sticks no longer need a big push before Ratchet moves (the PC dead zone and the game's own were stacked on each other). Walking starts with a small push and running with a bit over half, like in PCSX2 (issue #30).
+- Fixed: a rare one-picture glitch of Ratchet's legs when the strafe direction flips while aiming.
+- Fixed: the pause menu's secret button codes (they need L1 and R2 held together) work again on a controller: since v0.4.0 R2 was taken as the aim button even in menus; it is now the aim button only while you play.
+- Fixed: the Gadgetron vendor and Clank boarding and leaving the ship ran in slow motion, with the voices ahead of the animation, at high resolutions or on slower graphics cards. They now keep the game's speed (4K vendor with a 25 fps limit: 51 to 61 game steps a second instead of 28 to 33) (issue #37).
+- Fixed: movie sound no longer drifts and goes silent on a busy PC (Drek's intro movie), and movies no longer end with a click (issue #7).
+- Fixed: the screen no longer switches off while you play with a controller only. Windows may sleep again once the game window loses focus or is minimised.
+- Fixed: closing the game with Task Manager (or a power cut) during the first seconds no longer switches the graphics card's HUD capture, and with it HUD Sharp, off for good; it now takes two failed starts in a row, and the message says how to switch it back on.
+- Fixed: the RivaTuner (RTSS) message no longer appears after crashes that RivaTuner did not cause.
+- Fixed: DirectX 12 without the extra shader compiler file could crash at the start with fog on, and black streaks could appear in the stars. If a graphics effect is ever refused by the graphics driver, the game now switches that effect off and keeps running. The long first start on DirectX 12 without the compiler file now shows a notice.
+- Fixed: switching Lighting from Enhanced back to Classic left the game's fog faded to about a third of its strength until you left the level.
+- Fixed: with the PC fog on, the item model in the Gadgetron vendor now takes the planet's fog like the rest of the picture.
+- Fixed: with the PC fog on, Kerwan's fog (the sheet at water level and the fog under the buildings) and the fog on other planets with a sea could switch off for a moment and come back whenever no sea was near the camera. It now stays on.
+- Fixed: with Dynamic shadows on, animated objects just outside the picture now cast their shadow in the right pose.
+- Fixed: with Frame smoothing on, a very fast turn of the Modern camera no longer shows a one-picture flick; it is blended over two pictures. A rare ReShade crash is fixed.
+- Fixed: script mods (Arsenal Mastery) were switched off in big fights. A slow moment now only gives one warning; a mod stops only if it stays far over its time. Log lines from mods are also much cheaper. A mod can no longer write into the game's own program code by mistake.
+- New: Arsenal Mastery 0.3.3 (faster; Ammo: Survival no longer gives a shot back for Glove of Doom kills; mini bombs of a cluster are not split again; an error in one hit no longer switches XP and weapon scaling off). It now has its own page, github.com/AsobiCodes/arsenal-mastery, and the launcher (v0.1.2, its own download) can update mods from there.
+- Fixed (USA disc): Hoven's Enhanced water now also appears with the free camera, moving water wakes run at the USA disc's 60 Hz like the rest of the game, and every PAL-to-USA memory address the port uses was checked on all 19 planets, New Game and Quit Game to the title screen.
+- Speed: shops, pause menus and big fights at 4K stutter less: on NVIDIA cards the HUD capture no longer waits behind the picture, and the HUD capture needs far fewer graphics calls in the vendor (4K vendor: 75 to 86 fps, worst frames 48 to 39 ms) (issue #28).
+- Fixed: with HUD position Corners, help prompts (vendor, ship pads, Infobots) are no longer torn or stretched across the screen, also in their first and last moments with Frame smoothing on, and the race bar and position panel sit whole in the top-left corner.
+- Fixed: the Galactic Map no longer ignores the keys or a controller while the mouse pointer rests over the planet list (the pointer kept pulling the selection back, issue #16). Pointing at a planet now picks the planet under the pointer (the list's real row size and scrolling are used), also in the Help, Goodies and Cinematics lists, and a bump of a hidden mouse no longer moves a menu selection.
+- Fixed: the water on Hoven (the river and the abyss) and the sea on Kalebo III no longer vanish at some camera angles after you arrive from another planet.
+- Fixed: with Enhanced water, calm patches from the previous planet's coast could stay on the open sea of the next planet with a sea; the shore marks are now cleared when you change planet.
+- Fixed: with Clouds High, the sky seen from under water showed the bare backdrop instead of the game's own sky layers.
+- Fixed: with Fog High, Hoven's chasms (under the bridges and between the cliffs) and some gaps in its sky no longer show flat blue fog sheets; you see the dark rock, the river and the distant mountains like on the PS2.
+- Fixed: on a wide screen, parts of Hoven's ice floor no longer disappear at the screen edge while the camera turns (the game only checks its own 4:3 view before it skips drawing them; the port now checks the whole wide view). Gaspar's second lava layer and the ship's shadow on the ground had the same fault and are fixed too (issue #40).
+- Thank you: to everyone who reported problems after v0.4.0 on GitHub and YouTube; most of the fixes above come from your reports.
+
 ## v0.4.0
 
 - Updating from v0.3.1 takes about 2 to 10 minutes (only the parts that changed are rebuilt). Your saves and settings are kept.

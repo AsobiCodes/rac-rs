@@ -1,8 +1,9 @@
 {
   "format": 2,
+  "update": { "github": "AsobiCodes/arsenal-mastery" },
   "id": "arsenal-mastery",
   "name": "Arsenal Mastery",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "author": "rac-rs",
   "description": "Ratchet & Clank 3 style weapon levels for Ratchet & Clank 1. Every weapon, and the wrench, earns XP from the damage it deals and grows from V1 to V5 (V8 in New Game+, V99 in Endless); enemies are rebalanced to match. XP is kept per save slot. Needs the rac-rs OmniLoader extension.",
   "license": "MIT",

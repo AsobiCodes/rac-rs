@@ -187,8 +187,11 @@ thread_local! {
 
 /// Reads RAC_FRAME_PROFILE once at start-up.
 pub(super) fn init_from_env() {
+	let csv = super::framecsv::init_from_env();
 	if std::env::var("RAC_FRAME_PROFILE").is_ok_and(|v| v == "1") {
 		enable(true);
+	} else if csv {
+		enable(false);
 	}
 }
 
@@ -341,6 +344,7 @@ pub(super) fn frame_end(ticks: u32) {
 		let mut cur = std::mem::take(&mut s.cur);
 		cur.ms = d.as_secs_f32() * 1000.0;
 		cur.ticks = ticks;
+		super::framecsv::frame(s.start, cur.ms, ticks, cur.phase[9].as_secs_f32() * 1000.0, cur.phase[10].as_secs_f32() * 1000.0, cur.phase[11].as_secs_f32() * 1000.0);
 		let w = &mut s.window;
 		w.frames += 1;
 		w.ticks += ticks;

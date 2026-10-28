@@ -76,7 +76,7 @@ impl Canvas {
 		let pen = &Pen { w: pen.w * rng.range(0.82, 1.2), ..*pen };
 		let (dense, arc) = densify(pts, 4.0);
 		let line: Vec<(P, f32)> = wobble(&dense, &arc, pen, seed);
-		let m = self.capsules(&line, pen, seed);
+		let m = self.capsules(&line);
 		self.lay(&m, pen, seed);
 	}
 
@@ -86,12 +86,12 @@ impl Canvas {
 		let p = Pen { w: r * 2.0, ..*pen };
 		let a = (c.0 - 0.3, c.1 - 0.2);
 		let b = (c.0 + 0.3, c.1 + 0.2);
-		let m = self.capsules(&[(a, p.w * 0.5), (b, p.w * 0.5)], &p, seed);
+		let m = self.capsules(&[(a, p.w * 0.5), (b, p.w * 0.5)]);
 		self.lay(&m, &p, seed);
 	}
 
 	/// Capsules (round-ended segments with a drifting radius) of the hand-drawn line, as a coverage mask.
-	fn capsules(&self, line: &[(P, f32)], pen: &Pen, seed: u32) -> Mask {
+	fn capsules(&self, line: &[(P, f32)]) -> Mask {
 		let ss = self.ss;
 		let rmax = line.iter().map(|l| l.1).fold(0.0, f32::max) * ss + 2.0;
 		let (mut lo, mut hi) = ((f32::MAX, f32::MAX), (f32::MIN, f32::MIN));
@@ -108,7 +108,6 @@ impl Canvas {
 		}
 		let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
 		let mut v = vec![0.0f32; w * h];
-		let _ = (pen, seed);
 		for pair in line.windows(2) {
 			let ((ax, ay), ar) = (pair[0].0, pair[0].1 * ss);
 			let ((bx, by), br) = (pair[1].0, pair[1].1 * ss);

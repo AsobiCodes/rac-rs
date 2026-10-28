@@ -29,12 +29,25 @@
 //! smoothing=on      on off           (Pause -> Options -> Graphics -> Frame smoothing; viewer/interp.rs)
 //! vegetation=moderate   off moderate lush   (Pause -> Options -> Graphics -> Vegetation: with Lighting Enhanced; viewer/vegfx.rs)
 //! culling=on        on off           (Pause -> Options -> Graphics -> Culling: Off draws what the renderer would leave out; viewer/gpu.rs)
+//! culling_off=kept  kept (absent)    (the marker of a Culling Off the player chose since v0.4.1: `culling=off` WITHOUT it is a v0.4.0 leftover and
+//!                   reads as On (the one-time reset), the next save writes On. `to_text` writes the marker exactly while Culling is Off, so the
+//!                   menu's Off (after its warning) keeps it, a preset or On drops it. The game writes the marker itself; the launcher
+//!                   never writes it (it keeps an existing line and drops it with `culling=off` when a preset is applied). The value is
+//!                   read case-insensitively. `parse` takes the marker out of the unknown keys; `culling_reset` tells `pcext::init` that
+//!                   it reset a v0.4.0 Off, so it writes the file once at start.)
 //! gi=off            off low medium high   (Pause -> Options -> Graphics -> Global illumination: with Lighting Enhanced; viewer/post.rs)
 //! waves=on          on off           (Pause -> Options -> Graphics -> Waves: the sea's geometric waves at Water Medium / High; viewer/waterfx.rs)
 //! draw=medium       low medium high   (Pause -> Options -> Graphics -> Draw distance, with either Lighting: low = retail's distances and
 //!                   PS2 far LODs, medium = 4x farther up to 720 m, high = up to 2 km; viewer/fardraw.rs)
 //! clouds=high       classic low medium high   (Pause -> Options -> Graphics -> Effects -> Volumetric clouds: dynamic 3D sky clouds, with Lighting Enhanced; viewer/volclouds.rs)
 //! fog=high          classic low medium high   (Pause -> Options -> Graphics -> Effects -> Fog: volumetric fog and light shafts, with Lighting Enhanced; viewer/volfog.rs)
+//! hudpos=corners   corners (4:3 = absent)   (Pause -> Options -> Graphics -> Display -> HUD position: Corners puts the top HUD boxes in the window's corners on
+//!                   wide screens, gameplay only; retail/pcdisp.rs, viewer/handler/hud_place.rs; only `corners` is written)
+//! hudscale=75      75..150 in steps of 5   (Display -> HUD scale in percent; absent = 100; the key is removed at 100)
+//! fps=60           30 60 120 144 off   (Display -> FPS limit: the frame cap with Mailbox / Immediate present, viewer/pace.rs; absent = the display's rate,
+//!                   at least 50, as before; RAC_FPS_CAP still wins)
+//! renderscale=150  50 75 125 150 200   (Display -> Render scale in percent of the window size; absent = 100; only the value is kept here,
+//!                   `pcdisp::render_scale_pct`)
 //! hud=sharp         sharp original   (the HUD and menus drawn again at the window's resolution, no new art; original = the 512-wide picture;
 //!                   gscap/draw/gpu.rs, gpu.wgsl k_hd; Pause -> Options -> Graphics -> Picture -> HUD, applied at once; only on windows at least
 //!                   896 px tall (gscap.rs HD_MIN_PX_PER_ROW); RAC_HUD=original forces Original)
@@ -42,6 +55,9 @@
 //!                   change applies after a restart; missing = vulkan; WGPU_BACKEND still overrides; an outside launcher writes the same key;
 //!                   viewer/gpu/renderer.rs)
 //! intro=play       play skip        (Pause -> Options -> Graphics -> System -> Skip intro: skip ends the boot logo movie at once; play = retail's, the default; pcintro.rs)
+//! skipcut=on       on off           (Pause -> Options -> Graphics -> System -> Start skips cutscenes: on (the default) = a plain Start (Enter / Esc, the
+//!                   controller's Start) ends a movie, a scene or a ship flight on both discs; off = retail's rule (Start alone only in Veldin, in
+//!                   the New Game intro, in New Game+ and after the game is beaten, otherwise with L1 + R1 + L2 + R2 held); pcskip.rs)
 //! gscap_gpu=auto   auto off         (the GPU capture of the HUD, gscap_guard.rs: auto = on where the GPU supports it, off = the CPU capture (Original HUD);
 //!                   a start that froze while the GPU capture opened writes `off` itself, with `gscap_gpu_note` (what happened) and `gscap_gpu_froze`
 //!                   (the game version): a newer game version tries `auto` again once; the player or an outside launcher sets it back to `auto`)
@@ -56,6 +72,36 @@
 //! Lighting Enhanced, global illumination off, display windowed, draw distance medium). The six quality rows hold a level 0..3 (off / classic, low, medium, high). Keys this build does not know are kept when the file is rewritten.
 //! The file is written to a temporary name and renamed, so a crash never leaves half a file.
 use std::path::{Path, PathBuf};
+
+/// The PC option globals (the pcdisp rows, the pcskip row) are process-wide atomics that `pcctl::build_gfx` copies into the menu bytes
+/// and `rscale` reads. A test that sets one, or reads one together with code that sets it, holds this guard for its whole body.
+#[cfg(test)]
+pub(crate) fn globals_guard() -> std::sync::MutexGuard<'static, ()> {
+	static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+	LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The language of a setup that wrote `lang=` into generated/play.cfg (`main::launch_args`, the no-argument start; today's setup writes
+/// none): the cold-boot language only while the player has not picked one. Set once, before any thread starts.
+static SETUP_LANG: std::sync::OnceLock<Lang> = std::sync::OnceLock::new();
+
+pub fn set_setup_lang(l: Lang) {
+	let _ = SETUP_LANG.set(l);
+}
+
+/// The language a cold boot starts in (`pcext::init`), with where it came from: the player's choice (`lang=` here: Options -> Language
+/// at the title, or the launcher), else the setup's, else None = the console default (English). None too when `free` is false: not a
+/// cold boot, or COLD_LANG forces one (tests and tools; `ee_oracle::cold` reads it).
+pub fn cold_lang(free: bool, remembered: Option<Lang>) -> Option<(Lang, &'static str)> {
+	cold_lang_from(free, remembered, SETUP_LANG.get().copied())
+}
+
+fn cold_lang_from(free: bool, remembered: Option<Lang>, setup: Option<Lang>) -> Option<(Lang, &'static str)> {
+	if !free {
+		return None;
+	}
+	remembered.map(|l| (l, "remembered")).or_else(|| setup.map(|l| (l, "setup")))
+}
 
 /// The five languages of the PAL disc.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -152,6 +198,8 @@ pub struct PcOptions {
 	pub renderer: Option<bool>,
 	/// `intro=play|skip` (Some(true) = skip the boot logo movie; pcintro.rs).
 	pub intro: Option<bool>,
+	/// `skipcut=on|off` (Some(true) = a plain Start skips cutscenes; pcskip.rs). None = on.
+	pub skipcut: Option<bool>,
 	/// The GPU capture of the HUD (`gscap_guard.rs`): Some(false) = off (the player's choice or the start-up guard's), Some(true) / None = auto.
 	pub gscap_gpu: Option<bool>,
 	/// `gscap_gpu_note`: what the guard saw ("(auto: start on <adapter> froze <date>)"); `gscap_gpu_froze`: the game version that froze.
@@ -159,6 +207,8 @@ pub struct PcOptions {
 	pub gscap_froze: Option<String>,
 	/// Debug mode (Controls -> Debug): Some(true) = On; None: Off. Only `debug=on` is written.
 	pub debug: Option<bool>,
+	/// `parse` read a v0.4.0 `culling=off` without the marker as On: the file still says Off until it is written (`pcext::init`).
+	pub culling_reset: bool,
 	/// Lines this build does not know, kept verbatim on rewrite.
 	extra: Vec<(String, String)>,
 }
@@ -251,7 +301,7 @@ fn flag(v: &str, yes: &str, no: &str) -> Option<bool> {
 
 impl PcOptions {
 	pub const fn new() -> PcOptions {
-		PcOptions { lang: None, camera: None, camfeel: None, strafe: None, buyall: None, lockon: None, camspeed: None, mousespeed: None, lighting: None, ao: None, shadows: None, fullscreen: None, water: None, particles: None, sun_rays: None, smoothing: None, vegetation: None, culling: None, gi: None, waves: None, draw: None, fog: None, clouds: None, texfilter: None, hud: None, renderer: None, intro: None, gscap_gpu: None, gscap_note: None, gscap_froze: None, debug: None, extra: Vec::new() }
+		PcOptions { lang: None, camera: None, camfeel: None, strafe: None, buyall: None, lockon: None, camspeed: None, mousespeed: None, lighting: None, ao: None, shadows: None, fullscreen: None, water: None, particles: None, sun_rays: None, smoothing: None, vegetation: None, culling: None, gi: None, waves: None, draw: None, fog: None, clouds: None, texfilter: None, hud: None, renderer: None, intro: None, skipcut: None, gscap_gpu: None, gscap_note: None, gscap_froze: None, debug: None, culling_reset: false, extra: Vec::new() }
 	}
 
 	/// Lock-on with the default: Auto (0).
@@ -268,6 +318,11 @@ impl PcOptions {
 	/// `intro=skip`: the boot logo movie ends at once (missing = play, retail's).
 	pub fn intro_skip(&self) -> bool {
 		self.intro.unwrap_or(false)
+	}
+
+	/// `skipcut=off`: retail's skip rule for movies, scenes and flights (missing = on: a plain Start skips them).
+	pub fn skipcut_on(&self) -> bool {
+		self.skipcut.unwrap_or(true)
 	}
 
 	pub fn renderer_dx12(&self) -> bool {
@@ -428,6 +483,7 @@ impl PcOptions {
 				"hud" => o.hud = flag(v, "sharp", "original"),
 				"renderer" => o.renderer = flag(v, "dx12", "vulkan"),
 				"intro" => o.intro = flag(v, "skip", "play"),
+				"skipcut" => o.skipcut = flag(v, "on", "off"),
 				"gscap_gpu" => o.gscap_gpu = flag(v, "auto", "off"),
 				"gscap_gpu_note" => o.gscap_note = Some(v.to_string()).filter(|v| !v.is_empty()),
 				"gscap_gpu_froze" => o.gscap_froze = Some(v.to_string()).filter(|v| !v.is_empty()),
@@ -438,6 +494,13 @@ impl PcOptions {
 				}
 				_ => {}
 			}
+		}
+		// The Culling reset of v0.4.1: an Off without the marker is a v0.4.0 file's, it reads On (the next save writes On).
+		let kept = o.extra_get("culling_off").is_some_and(|v| v.eq_ignore_ascii_case("kept"));
+		o.extra_set("culling_off", None);
+		if o.culling == Some(false) && !kept {
+			o.culling = Some(true);
+			o.culling_reset = true;
 		}
 		o
 	}
@@ -499,6 +562,9 @@ impl PcOptions {
 		}
 		if let Some(t) = self.culling {
 			s += &format!("culling={}\n", if t { "on" } else { "off" });
+			if !t {
+				s += "culling_off=kept\n";
+			}
 		}
 		if let Some(l) = self.gi {
 			s += &format!("gi={}\n", LEVELS[l.min(3) as usize]);
@@ -527,6 +593,9 @@ impl PcOptions {
 		if let Some(t) = self.intro {
 			s += &format!("intro={}\n", if t { "skip" } else { "play" });
 		}
+		if let Some(t) = self.skipcut {
+			s += &format!("skipcut={}\n", if t { "on" } else { "off" });
+		}
 		if let Some(t) = self.gscap_gpu {
 			s += &format!("gscap_gpu={}\n", if t { "auto" } else { "off" });
 		}
@@ -551,11 +620,16 @@ impl PcOptions {
 
 	/// Writes the file atomically (temporary file + rename).
 	pub fn store(&self, path: &Path) -> std::io::Result<()> {
+		self.store_via(path, ".tmp")
+	}
+
+	/// `store` through the temp file `<path><tmp_suffix>` (the crash path writes beside the game's own saver, rtss_crash.rs).
+	pub fn store_via(&self, path: &Path, tmp_suffix: &str) -> std::io::Result<()> {
 		if let Some(dir) = path.parent() {
 			std::fs::create_dir_all(dir)?;
 		}
 		let mut tmp = path.as_os_str().to_owned();
-		tmp.push(".tmp");
+		tmp.push(tmp_suffix);
 		let tmp = PathBuf::from(tmp);
 		std::fs::write(&tmp, self.to_text())?;
 		std::fs::rename(&tmp, path)
@@ -632,6 +706,17 @@ mod tests {
 		assert_eq!(PcOptions::parse("intro=never\n").intro, None);
 		assert_eq!(PcOptions { intro: Some(true), ..Default::default() }.to_text(), "version=1\nintro=skip\n");
 		assert_eq!(PcOptions { intro: Some(false), ..Default::default() }.to_text(), "version=1\nintro=play\n");
+	}
+
+	#[test]
+	fn the_skipcut_key() {
+		assert!(PcOptions::parse("").skipcut_on(), "a new player skips cutscenes with a plain Start");
+		assert_eq!(PcOptions::parse("skipcut=off\n").skipcut, Some(false));
+		assert!(!PcOptions::parse("skipcut=OFF\n").skipcut_on());
+		assert_eq!(PcOptions::parse("skipcut=on\n").skipcut, Some(true));
+		assert_eq!(PcOptions::parse("skipcut=maybe\n").skipcut, None);
+		assert_eq!(PcOptions { skipcut: Some(false), ..Default::default() }.to_text(), "version=1\nskipcut=off\n");
+		assert_eq!(PcOptions { skipcut: Some(true), ..Default::default() }.to_text(), "version=1\nskipcut=on\n");
 	}
 
 	#[test]
@@ -778,10 +863,32 @@ mod tests {
 		assert_eq!(o.to_text(), "version=1\nvegetation=lush\n");
 		assert_eq!(PcOptions::parse("vegetation=off\n").vegetation, Some(0));
 		assert_eq!(PcOptions::parse("vegetation=jungle\n").graphics_rows()[8], 1, "unreadable value: Moderate");
+		// Culling (v0.4.1 reset): a v0.4.0 file's Off reads On and is saved as On; an Off with the marker stays Off and keeps it.
 		let o = PcOptions::parse("culling=Off\n");
-		assert_eq!((o.culling, o.graphics_rows()[9]), (Some(false), 1));
-		assert_eq!(o.to_text(), "version=1\nculling=off\n");
+		assert_eq!((o.culling, o.graphics_rows()[9]), (Some(true), 0), "v0.4.0 culling=off reads On");
+		assert_eq!(o.to_text(), "version=1\nculling=on\n");
+		let o = PcOptions::parse("culling=Off\nculling_off=kept\nmods=x\n");
+		assert_eq!((o.culling, o.graphics_rows()[9]), (Some(false), 1), "Off with the marker stays Off");
+		assert_eq!(o.to_text(), "version=1\nculling=off\nculling_off=kept\nmods=x\n", "the marker is written once, unknown keys stay");
+		assert_eq!(PcOptions::parse(&o.to_text()).culling, Some(false), "Off survives a save / load round trip");
+		let mut c = PcOptions::new();
+		let mut g = c.graphics_rows();
+		g[9] = 1;
+		c.set_graphics_rows(g);
+		assert!(c.to_text().contains("culling=off\nculling_off=kept\n"), "the menu's Off writes the marker");
+		assert_eq!(PcOptions::parse(&c.to_text()).graphics_rows()[9], 1);
+		g[9] = 0;
+		c.set_graphics_rows(g);
+		assert!(c.to_text().contains("culling=on\n") && !c.to_text().contains("culling_off"), "On (a preset) drops the marker");
+		assert_eq!(PcOptions::parse("culling_off=kept\n").culling, None, "a marker alone changes nothing");
 		assert_eq!(PcOptions::new().graphics_rows()[9], 0, "default On");
+		assert_eq!(PcOptions::parse("culling=off\nculling_off=kept\nculling_off=kept\n").to_text(), "version=1\nculling=off\nculling_off=kept\n", "a doubled marker is written once");
+		assert_eq!(PcOptions::parse("culling=on\nculling_off=kept\n").to_text(), "version=1\nculling=on\n", "marker with On: dropped");
+		assert_eq!(PcOptions::parse("culling_off=kept\nculling=off\n").culling, Some(false), "the marker may come before the culling line");
+		assert_eq!(PcOptions::parse("culling=off\nculling_off=Kept\n").culling, Some(false), "the marker's value is not case sensitive");
+		assert_eq!(PcOptions::parse("culling=off\nculling_off=nope\n").culling, Some(true), "any other value is no marker");
+		assert!(PcOptions::parse("culling=off\n").culling_reset, "a reset v0.4.0 Off is reported");
+		assert!(!PcOptions::parse("culling=off\nculling_off=kept\n").culling_reset && !PcOptions::parse("culling=on\n").culling_reset && !PcOptions::new().culling_reset);
 		let o = PcOptions::parse("gi=Medium\n");
 		assert_eq!((o.gi, o.graphics_rows()[10]), (Some(2), 2));
 		assert_eq!(o.to_text(), "version=1\ngi=medium\n");
@@ -867,5 +974,25 @@ mod tests {
 		}
 		assert_eq!(Lang::from_word(1), None, "word 1 is not on the disc");
 		assert_eq!(Lang::from_word(6), None);
+	}
+
+	#[test]
+	fn a_cold_boot_starts_in_the_players_language_then_the_setups_then_english() {
+		use Lang::*;
+		assert_eq!(cold_lang_from(true, Some(De), Some(Es)), Some((De, "remembered")));
+		assert_eq!(cold_lang_from(true, None, Some(Es)), Some((Es, "setup")));
+		assert_eq!(cold_lang_from(true, None, None), None, "nothing chosen: the console default (English)");
+		assert_eq!(cold_lang_from(false, Some(De), Some(Es)), None, "COLD_LANG forces one, or not a cold boot");
+	}
+
+	/// The no-argument start (desktop shortcut, launcher, Setup's Play) must not force COLD_LANG: it beat the language the player picked
+	/// on every start (v0.4.0: the title came up in English after picking German).
+	#[test]
+	fn the_no_argument_start_does_not_force_a_language() {
+		let main = include_str!("../main.rs").replace("\r\n", "\n");
+		let launch = &main[main.find("fn launch_args()").expect("launch_args in main.rs")..];
+		let launch = &launch[..launch.find("\n}\n").expect("end of launch_args")];
+		assert!(!launch.contains("set_var(\"COLD_LANG\""), "launch_args sets COLD_LANG again");
+		assert!(launch.contains("set_setup_lang"), "play.cfg's lang= no longer reaches the cold boot");
 	}
 }

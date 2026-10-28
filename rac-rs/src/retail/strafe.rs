@@ -17,6 +17,7 @@
 //!   `Draw`: the legs' twist toward the path (at most 90 degrees: past that the legs face the path + 180 and the run clip
 //!   plays reversed), with hysteresis and smoothing. The renderer (viewer/handler.rs) applies it to the posed joint matrices
 //!   (`twist_mats`) and reverses the run clock (`reverse_clock`). Game logic is never touched by this part.
+use crate::fmath::Fm;
 use super::modcam;
 use ee_oracle::cpu::Cpu;
 use ee_oracle::rec::{register_hand, Hand};
@@ -30,6 +31,8 @@ mod pack_fx;
 pub use pack_fx::exhaust_shift;
 #[cfg(test)]
 mod clock_tests;
+#[cfg(test)]
+mod off_tests;
 
 /// RAC_MOVE_CLASSIC=1 keeps the classic (retail) movement. A later options row ("Controls: Classic / Modern") replaces the
 /// env read here; everything else asks `enabled()`.
@@ -351,6 +354,7 @@ fn start_flip(c: &mut Cpu, r: &Row, wish: f32, aim: f32, d: f32, class: u8) {
 /// flip speeds while aiming, written between two fields).
 pub fn pre_field(m: &mut ee_oracle::Machine, fin: &super::FieldIn) {
 	if !enabled() {
+		feel_off();
 		return;
 	}
 	let aiming = modcam::aim_yaw().is_some() && m.cpu.mem.rd8(BODY_FORM) == 0 && m.rd32(va(GAME_MODE)) == 0;
@@ -360,6 +364,14 @@ pub fn pre_field(m: &mut ee_oracle::Machine, fin: &super::FieldIn) {
 			let line = format!("{line} field {}", s.field);
 			log(&mut s, &line);
 		}
+	}
+}
+
+/// The strafe is off (the Strafe row, the camera or Controls changed, usually in the pause menu): the feel forgets a strafe flip
+/// that was in the air, or its speed would be written on a later run once the strafe is back on (strafe_feel.rs `flip_field`).
+fn feel_off() {
+	if let Ok(mut s) = ST.lock() {
+		s.feel = super::strafe_feel::Feel::new();
 	}
 }
 
@@ -432,7 +444,7 @@ pub fn post_field(m: &ee_oracle::Machine) {
 		s.dir = wrap(s.dir - dd);
 		s.twist = (s.twist - dd).clamp(-LIMIT, LIMIT);
 	}
-	let inst = raw[0].hypot(raw[1]);
+	let inst = raw[0].fhypot(raw[1]);
 	let ok = aim.is_some() && m.rd8(BODY_FORM) == 0 && m.rd32(va(GAME_MODE)) == 0;
 	let min = if state == 0 { MIN_STEP } else { MIN_WALK };
 	let moving = ok && TWIST_STATES.contains(&state) && inst > min && inst < 2.0;
@@ -446,7 +458,7 @@ pub fn post_field(m: &ee_oracle::Machine) {
 			mv = [mv[0] + h[0] / s.hn as f32, mv[1] + h[1] / s.hn as f32];
 		}
 	}
-	let speed = mv[0].hypot(mv[1]);
+	let speed = mv[0].fhypot(mv[1]);
 	let track = moving && speed > min;
 	// Hold: in the air, a stall in a run state, or the path mean passing through 0 at a reversal, once a direction is known.
 	let hold = !track && s.have_dir && ok && (AIR_STATES.contains(&state) || STALL_STATES.contains(&state) || moving);
@@ -454,7 +466,7 @@ pub fn post_field(m: &ee_oracle::Machine) {
 	let mode;
 	if track {
 		let wish_rel = wrap(m.rdf(HERO_WISH) - drawn);
-		let path = wrap(mv[1].atan2(mv[0]) - drawn);
+		let path = wrap(mv[1].fatan2(mv[0]) - drawn);
 		// The stick against the path: a reversal, which the feel turns round at once (strafe_feel.rs). The legs take the stick's
 		// heading now and the old path stops counting, instead of pointing back for the fields the average takes to turn.
 		let turn = s.have_dir && wrap(wish_rel - path).abs() > SNAP;
@@ -510,7 +522,7 @@ pub fn post_field(m: &ee_oracle::Machine) {
 	if s.log.is_some() || !s.log_tried {
 		let (seq, cur, nxt, old, ph) = if moby != 0 { (m.rd8(moby + 0x53), m.rd8(moby + 0x50), m.rd8(moby + 0x51), m.rd8(moby + 0x52), m.rdf(moby + 0x54)) } else { (0, 0, 0, 0, 0.0) };
 		// Leg direction against the path (0 = the legs point along the path, forward or reversed).
-		let err = if track { wrap(mv[1].atan2(mv[0]) - drawn - s.twist - if rev { std::f32::consts::PI } else { 0.0 }).to_degrees() } else { f32::NAN };
+		let err = if track { wrap(mv[1].fatan2(mv[0]) - drawn - s.twist - if rev { std::f32::consts::PI } else { 0.0 }).to_degrees() } else { f32::NAN };
 		// The hero +0x60 layer list (retail.rs `layer_list`): seq, frame, from seq / frame, t, weight, joints (count, min..max).
 		let mut lay = String::new();
 		let mut o = if moby != 0 { m.rd32(moby + 0x60) & 0x01ff_ffff } else { 0 };
@@ -573,7 +585,7 @@ fn part_turn(m: &ee_oracle::Machine) -> Option<(f32, [f32; 3])> {
 		return None;
 	}
 	let r0 = m.rdv3(hero + 0xc0);
-	(r0[0] != 0.0 || r0[1] != 0.0).then(|| (wrap(m.rdf(hero + 0x48) - r0[1].atan2(r0[0])), m.rdv3(hero + 0x10)))
+	(r0[0] != 0.0 || r0[1] != 0.0).then(|| (wrap(m.rdf(hero + 0x48) - r0[1].fatan2(r0[0])), m.rdv3(hero + 0x10)))
 }
 
 /// Hero-attached props drawn from RAM (modcam): retail places Clank (`*0x1404d4`, class 601), the back object (`*0x1404d0`,
@@ -600,7 +612,7 @@ pub fn turn_parts(m: &ee_oracle::Machine, hero: u32, held: u32, mobys: &mut [sup
 	if r0[0] == 0.0 && r0[1] == 0.0 {
 		return;
 	}
-	let rows = r0[1].atan2(r0[0]);
+	let rows = r0[1].fatan2(r0[0]);
 	let delta = wrap(drawn - rows);
 	let field = ST.lock().map_or(0, |s| s.field);
 	let hp = m.rdv3(hero + 0x10);
@@ -619,7 +631,7 @@ pub fn turn_parts(m: &ee_oracle::Machine, hero: u32, held: u32, mobys: &mut [sup
 	// Facing the drawn way already (e.g. strafing forward): nothing to turn, but the parts are still listed for the pose fix.
 	let turn = |p: &mut [f32; 3], a: f32| {
 		if a.abs() >= 1e-4 {
-			let ((sn, cs), x, y) = (a.sin_cos(), p[0] - hp[0], p[1] - hp[1]);
+			let ((sn, cs), x, y) = (a.fsin_cos(), p[0] - hp[0], p[1] - hp[1]);
 			p[0] = hp[0] + cs * x - sn * y;
 			p[1] = hp[1] + sn * x + cs * y;
 		}
@@ -630,7 +642,7 @@ pub fn turn_parts(m: &ee_oracle::Machine, hero: u32, held: u32, mobys: &mut [sup
 	let gun_at = (held != 0 && m.rd16(held + 0xa6) as u32 == crate::game::pyro::PYRO_CLASS).then(|| m.rdv3(held + 0x10));
 	let mut turned = Vec::new();
 	for mb in mobys.iter_mut() {
-		let near = (mb.pos[0] - hp[0]).hypot(mb.pos[1] - hp[1]) < ATTACH_REACH;
+		let near = (mb.pos[0] - hp[0]).fhypot(mb.pos[1] - hp[1]) < ATTACH_REACH;
 		let part = (mb.addr == d0 && d0 != 0)
 			|| (mb.addr == d4 && d4 != 0)
 			|| (mb.addr == pilot && pilot != 0)
@@ -700,7 +712,7 @@ pub fn twist_mats(mats: &mut [[f32; 12]], anim: &crate::anim::Animated, theta: f
 		if w == 0.0 {
 			continue;
 		}
-		let (s, c) = (theta * w).sin_cos();
+		let (s, c) = (theta * w).fsin_cos();
 		// Rotation of the rows x, y of the linear part and of the translation about the pivot.
 		for k in 0..4 {
 			let (x, y) = if k == 3 { (m[3] - p[0], m[7] - p[1]) } else { (m[k], m[4 + k]) };
@@ -873,6 +885,8 @@ pub fn draw_clock(c: &mut crate::anim::AnimClock, frames: usize, rev: bool) -> (
 	let mut jumped = false;
 	let changed = if !settled {
 		(k.k, k.last) = (0.0, None);
+		// A flip while a fade into the run / walk cycle runs swaps the fade's target frame (`reverse_target`): the legs swap, no pose to carry on from.
+		jumped = fading && rev != k.rev && frames >= 2 && RUN_SEQS.contains(&c.new_seq);
 		rev && fading && reverse_target(c, frames)
 	} else {
 		let n = frames as f32;

@@ -363,9 +363,11 @@ impl HeroGpu {
 			eprintln!("hero_gpu: model too big for this adapter's storage buffer limits -> CPU path");
 			return None;
 		}
-		// Any validation error while building the pipeline (a driver that rejects the shader) means the CPU path, not a panic.
+		// Any validation error while building the pipeline (a driver that rejects the shader), or an out-of-memory error from the buffers
+		// (an 8 GB iGPU), means the CPU path, not a panic (wgpu's default handler panics on an uncaptured error).
 		let scope_v = device.push_error_scope(wgpu::ErrorFilter::Validation);
 		let scope_i = device.push_error_scope(wgpu::ErrorFilter::Internal);
+		let scope_o = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
 		let make = |label, size: usize, usage| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: (size as u64).max(16), usage, mapped_at_creation: false });
 		let model_buf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("hero model"), size: ((n * std::mem::size_of::<Vertex>()) as u64).max(16), usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
 		queue.write_buffer(&model_buf, 0, bytemuck::cast_slice(model));
@@ -399,7 +401,9 @@ impl HeroGpu {
 				wgpu::BindGroupEntry { binding: 3, resource: vbuf.as_entire_binding() },
 			],
 		});
-		let err = pollster::block_on(scope_i.pop()).or_else(|| pollster::block_on(scope_v.pop()));
+		// Popped last in, first out, all three (a scope left on the stack would swallow a later error, and an out-of-order pop panics).
+		let (eo, ei, ev) = (pollster::block_on(scope_o.pop()), pollster::block_on(scope_i.pop()), pollster::block_on(scope_v.pop()));
+		let err = eo.or(ei).or(ev);
 		if let Some(e) = err {
 			eprintln!("hero_gpu: shader / pipeline rejected by the driver ({e}) -> CPU path");
 			return None;

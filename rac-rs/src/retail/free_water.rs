@@ -13,6 +13,7 @@
 use super::efx_draw;
 use super::efx_own::Own;
 use crate::particles::WorldStrip;
+use crate::retail::disc::{usa, va};
 use ee_oracle::Machine;
 
 const LEVEL: u32 = 12;
@@ -42,20 +43,31 @@ pub fn active() -> bool {
 	super::devtools::free_on() || veg_cam()
 }
 
+/// FUN_0030b6c0's table loads are the code `SIG` names. USA: the same instructions, but the addiu immediates are the USA
+/// table addresses, so only opcode and registers (the high half) are compared.
+fn sig_ok(m: &Machine) -> bool {
+	SIG.iter().all(|&(a, w)| {
+		let x = m.rd32(va(a));
+		if usa() { x >> 16 == w >> 16 } else { x == w }
+	})
+}
+
 /// The two wave-plane layers in world space for this field (empty unless the free camera is on and Hoven drew its water).
 pub fn capture(m: &Machine, level: u32, own: &[Own]) -> Vec<WorldStrip> {
-	if level != LEVEL || !active() || !own.iter().any(|o| o.fnp == OWNER) || SIG.iter().any(|&(a, w)| m.rd32(a) != w) {
+	if level != LEVEL || !active() || !own.iter().any(|o| o.fnp == va(OWNER)) || !sig_ok(m) {
 		return Vec::new();
 	}
+	// Every address below is a PAL overlay address of Hoven's: `va` gives the disc that runs its own.
+	let (counts, pos_t, col_t, uv_t, scroll, fix_add) = (va(COUNTS), va(POS), va(COL), va(UV), va(SCROLL), va(FIX_ADD));
 	let f = |a: u32| f32::from_bits(m.rd32(a));
 	(0..2u32)
 		.map(|layer| {
-			let sc = [f(SCROLL + 8 * layer), f(SCROLL + 8 * layer + 4)];
-			let (fix, add) = if layer == 0 { (0x7f, false) } else { (m.rd32(FIX_ADD) as u8, true) };
+			let sc = [f(scroll + 8 * layer), f(scroll + 8 * layer + 4)];
+			let (fix, add) = if layer == 0 { (0x7f, false) } else { (m.rd32(fix_add) as u8, true) };
 			let mut s = WorldStrip { pos: Vec::new(), uv: Vec::new(), colour: Vec::new(), tex: efx_draw::fog_off(TEX[layer as usize]), fix, add };
 			for p in 0..PASSES {
-				let n = m.rd32(COUNTS + 4 * p).min(MAX_VERTS);
-				let (pa, ca, ua) = (m.rd32(POS + 4 * p), m.rd32(COL + 4 * p), m.rd32(UV + 4 * p));
+				let n = m.rd32(counts + 4 * p).min(MAX_VERTS);
+				let (pa, ca, ua) = (m.rd32(pos_t + 4 * p), m.rd32(col_t + 4 * p), m.rd32(uv_t + 4 * p));
 				for j in 0..n {
 					let pos = [f(pa + 12 * j), f(pa + 12 * j + 4), f(pa + 12 * j + 8)];
 					let uv = [f(ua + 8 * j) + sc[0], f(ua + 8 * j + 4) + sc[1]];

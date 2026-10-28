@@ -84,6 +84,20 @@ pub(in crate::viewer) fn off_buffer(device: &wgpu::Device) -> wgpu::Buffer {
 	device.create_buffer(&wgpu::BufferDescriptor { label: Some("volfog soft off"), size: HEADER, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false })
 }
 
+/// Whether the buffer for a picture of `size` can be bound as a storage buffer on a device whose binding limit is `limit` bytes
+/// (a 5120x2880 window at Render scale 200 % is 8192x4608: 151 MB, over the 128 MiB default). When it cannot, there is no soft
+/// buffer, so neither a soft mark nor the volumetric fog (`Plan` is not made): the picture keeps retail's own fog.
+pub(in crate::viewer) fn fits(size: (u32, u32), limit: u64) -> bool {
+	HEADER + size.0.max(1) as u64 * size.1.max(1) as u64 * 4 <= limit
+}
+
+/// The largest soft buffer the device can make and bind: its storage binding limit, and also its `max_buffer_size` (the setup raises
+/// the first up to 512 MiB but leaves the second at the 256 MiB default, so an 8192x8192 picture, 268,435,472 bytes, would fail
+/// `create_buffer` validation).
+pub(in crate::viewer) fn buffer_limit(l: &wgpu::Limits) -> u64 {
+	(l.max_storage_buffer_binding_size as u64).min(l.max_buffer_size)
+}
+
 /// The level pass's buffer at the picture size, with the group-0 layout to rebind it.
 pub(in crate::viewer) struct Soft {
 	layout: wgpu::BindGroupLayout,
@@ -104,10 +118,14 @@ impl Soft {
 		self.buf.as_ref().map(|b| &b.0)
 	}
 
-	/// Every Enhanced frame before the level pass: the buffer for the picture size, emptied. True = a new buffer (the caller rebinds
-	/// group 0 with it: sunshadow.rs `entries_soft`).
+	/// Every Enhanced frame before the level pass: the buffer for the picture size, emptied. True = the buffer changed (the caller
+	/// rebinds group 0: with `buffer()` through sunshadow.rs `entries_soft`, or the off buffer when that is None). A picture too large
+	/// for the device's storage binding limit gets no buffer (`fits`).
 	pub(in crate::viewer) fn prepare(&mut self, device: &wgpu::Device, enc: &mut wgpu::CommandEncoder, size: (u32, u32)) -> bool {
 		let size = (size.0.max(1), size.1.max(1));
+		if !fits(size, buffer_limit(&device.limits())) {
+			return self.buf.take().is_some();
+		}
 		if let Some((b, s)) = &self.buf
 			&& *s == size
 		{
@@ -126,6 +144,23 @@ impl Soft {
 
 #[cfg(test)]
 mod tests {
+	/// The buffer is made only when it can be bound: the 128 MiB default limit holds 4K at 200 % but not 5K at 200 %.
+	#[test]
+	fn fits_the_binding_limit() {
+		let limit = 128 << 20;
+		assert!(super::fits((1280, 800), limit));
+		assert!(super::fits((7680, 4320), limit), "8K at 100 %: 132.7 MB is over, 128 MiB = 134.2 MB holds it");
+		assert!(!super::fits((8192, 4608), limit), "5K at 200 %: 151 MB");
+		assert!(super::fits((8192, 4608), 1 << 30), "a larger adapter limit keeps it");
+		assert!(super::fits((0, 0), limit), "a zero size counts as 1x1");
+		// The 8192x8192 picture needs 268,435,472 bytes: over a 256 MiB `max_buffer_size` even when the binding limit is 512 MiB.
+		let l = wgpu::Limits { max_storage_buffer_binding_size: 512 << 20, max_buffer_size: 256 << 20, ..Default::default() };
+		assert_eq!(super::buffer_limit(&l), 256 << 20);
+		assert!(!super::fits((8192, 8192), super::buffer_limit(&l)) && super::fits((8192, 4608), super::buffer_limit(&l)));
+		let exact = 16 + 1000 * 1000 * 4;
+		assert!(super::fits((1000, 1000), exact) && !super::fits((1000, 1000), exact - 1));
+	}
+
 	/// The level shader with the store parses and validates, plain and bindless, and every no-Z entry point stores its texel.
 	#[test]
 	fn level_source_validates() {

@@ -138,11 +138,16 @@ impl Bindless {
 	}
 }
 
+/// The views of `binds` in order; None when one has no view (the array then cannot be made).
+pub(super) fn array_views<'a, K: std::hash::Hash + Eq, V>(binds: &[K], views: &'a HashMap<K, V>) -> Option<Vec<&'a V>> {
+	binds.iter().map(|b| views.get(b)).collect()
+}
+
 pub(super) fn array_group(layout: &wgpu::BindGroupLayout, device: &wgpu::Device, binds: &[wgpu::BindGroup], views: &HashMap<wgpu::BindGroup, wgpu::TextureView>, sampler: &wgpu::Sampler, wrap: &[wgpu::Sampler; 3]) -> Option<wgpu::BindGroup> {
 	if binds.is_empty() || binds.len() > TEX_CAP as usize {
 		return None;
 	}
-	let mut list: Vec<&wgpu::TextureView> = binds.iter().map(|b| views.get(b)).collect::<Option<_>>()?;
+	let mut list: Vec<&wgpu::TextureView> = array_views(binds, views)?;
 	list.resize(TEX_CAP as usize, list[0]);
 	Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
 		label: Some("texture array"),

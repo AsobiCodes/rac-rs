@@ -13,7 +13,7 @@ mod tests {
 	fn movie_skip_rule_keyboard() {
 		use fmv_bridge::Skip;
 		use winit::keyboard::KeyCode as K;
-		let poll = |rule: Skip, prev: u16, keys: &[K]| movie_poll(rule, prev, |k| keys.contains(&k));
+		let poll = |rule: Skip, prev: u16, keys: &[K]| movie_poll(rule, prev, |k| keys.contains(&k), 0, false);
 		// Boot logos (mode -1): nothing skips.
 		assert!(!poll(Skip::Never, 0, &[K::Escape, K::Enter, K::Space]).0);
 		// Attract movie (mode 2): any new button, but not one already down at the last poll.
@@ -67,6 +67,36 @@ mod tests {
 		for mode in [0, 1, 3, 4, 5, 7] {
 			assert_eq!(skip_feed(mode, 0, true), 0, "mode {mode}");
 		}
+	}
+
+	/// GitHub #34 / #23: with the Start skips cutscenes row On a plain Start (Enter, or the controller's Start bit) ends a story movie
+	/// whose retail rule wants the four shoulder buttons too; Off is retail's rule; a controller skips movies at all (it was never read).
+	#[test]
+	fn plain_start_skips_every_movie_when_the_row_is_on() {
+		use fmv_bridge::Skip;
+		use winit::keyboard::KeyCode as K;
+		let none = |_: K| false;
+		let enter = |k: K| k == K::Enter;
+		// On: Enter ends a Combo movie once (a press held through the next poll skips nothing more); Off: nothing.
+		let (hit, prev) = movie_poll(Skip::Combo, 0, enter, 0, true);
+		assert!(hit && !movie_poll(Skip::Combo, prev, enter, 0, true).0, "a plain Start skips a combo movie once");
+		assert!(!movie_poll(Skip::Combo, 0, enter, 0, false).0, "Off: retail's rule, Start alone does nothing");
+		assert!(!movie_poll(Skip::Combo, 0x800, enter, 0, true).0, "Start held from before the movie skips nothing");
+		// The controller's Start (0x800), alone and with a stick or button: the same; its shoulder buttons make the retail combo.
+		assert!(movie_poll(Skip::Combo, 0, none, 0x800, true).0, "controller Start, row On");
+		assert!(!movie_poll(Skip::Combo, 0, none, 0x800, false).0, "controller Start, row Off: the combo is missing");
+		assert!(movie_poll(Skip::Combo, 0, none, 0x80f, false).0, "controller Start + L1 R1 L2 R2: retail's own combo");
+		assert!(movie_poll(Skip::Start, 0, none, 0x800, false).0, "a Veldin / intro movie: controller Start, row Off");
+		assert!(!movie_poll(Skip::Start, 0x800, none, 0x800, false).0, "controller Start held from before");
+		assert!(movie_poll(Skip::Any, 0, none, 0x40, false).0, "the attract movie: any controller button");
+		// The logos stay unskippable either way (the Skip intro row ends them).
+		assert!(!movie_poll(Skip::Never, 0, enter, 0x800, true).0);
+		// A button that is not Start feeds nothing, row On or not.
+		assert!(!movie_poll(Skip::Combo, 0, none, 0x40, true).0 && !movie_poll(Skip::Combo, 0, |k| k == K::KeyF, 0, true).0);
+		// Scenes and flights: `skip_feed` turns an already decided skip key into the retail buttons (`pcskip::start_pressed` decides it, row On
+		// and Start in the pad bits: tested in pcskip.rs, it reads the row's global).
+		assert_eq!(skip_feed(2, 0, true), 0x80f);
+		assert_eq!(skip_feed(2, 0, false), 0);
 	}
 
 	/// Mouse in retail play: left = Circle (0x20), middle = Triangle (0x10), neither Square (0x80); the keyboard keeps F =
@@ -321,7 +351,7 @@ mod tests {
 			r.tick_keys(|k| k == K::Enter, false, false);
 		}
 		assert!(until(&mut r, 600, |m| m.id == 2), "pause menu did not open: mode {} menu {:?}", r.snap.mode, r.snap.menu);
-		if let Some((w, rows, _)) = &r.snap.ov {
+		if let Some((w, rows, _, _)) = &r.snap.ov {
 			eprintln!("mouse: overlay {w}x{rows}");
 		}
 		pump(&mut r, 30);
@@ -661,7 +691,7 @@ mod tests {
 			let b = script.iter().filter(|s| (s.0..s.1).contains(&k)).fold(0u16, |b, s| b | s.2);
 			let st = script.iter().filter(|s| (s.0..s.1).contains(&k)).find_map(|s| s.3).unwrap_or([0x80; 4]);
 			r.tick(b, [st[2], st[3], st[0], st[1]]);
-			let ov = r.take_overlay().map(|(_, _, px)| px.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, p| (h ^ u32::from_le_bytes(*p) as u64).wrapping_mul(0x0100_0000_01b3)));
+			let ov = r.take_overlay().map(|(_, _, px, _)| px.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, p| (h ^ u32::from_le_bytes(*p) as u64).wrapping_mul(0x0100_0000_01b3)));
 			let note = match ov {
 				Some(h) if h != last => {
 					last = h;

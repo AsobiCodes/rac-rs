@@ -6,8 +6,11 @@
 //! Select), the four d-pad directions and the eight stick directions (the left stick: forward, back, left, right, which is
 //! movement; the right stick: camera up, down, left, right). A controller drives the first 16 (the sticks are analog and stay
 //! as they are). Every function has one key (Start starts with three: Esc, Enter, Numpad Enter) or one controller button;
-//! binding a key that another function holds takes it from that one, which then gets the old key (a swap), so no function is
-//! ever left unbound by the menu. The defaults are exactly the bindings the port had before the menu existed.
+//! a key or button may drive SEVERAL functions (v0.4.1, 2026-10-27: "binding one button moved two other actions"): binding
+//! changes only the function being bound, nothing else moves (no swap, no chain), so no function is ever left unbound by the
+//! menu, and e.g. Fire (Square) can sit on the trigger that is also the strafe aim (R2) or on a second key next to Circle. The
+//! Controls page shows a shared key or button on every row it drives (`shared`, `pad_shared`). The defaults are exactly the
+//! bindings the port had before the menu existed.
 //!
 //! What stays fixed: the menu keys (`menu_keys.rs`: arrows / WASD, Enter / Space, Esc / Backspace, Q / E, Tab), so a bad remap
 //! never locks the player out of a menu; Esc and Space skip scenes and movies; the mouse (left button = Circle, middle =
@@ -17,7 +20,8 @@
 //! File (`pc_options.txt`, see `pcopts.rs`): only what differs from the defaults is written, so a player who never opens the page has
 //! no line. `keys=cross:KeyK,start:Escape+Enter` (function:winit key names, `+` between the keys of one function) and
 //! `pad=cross:b,l2:lb` (function:controller button). Function names are `ID`, key names `KEYS`, button names `PHYS`; anything
-//! that cannot be read is skipped, and a clash is resolved as the menu does.
+//! that cannot be read is skipped; every entry binds its function alone, as the menu does (a file written before v0.4.1 lists the
+//! functions a swap had moved, so it reads as it did).
 use std::sync::Mutex;
 use winit::keyboard::KeyCode as K;
 
@@ -168,23 +172,14 @@ impl KbBinds {
 		(b, d.map(|d| (0x80 + d * 0x7f).clamp(0, 0xff) as u8))
 	}
 
-	/// Function `f` gets `new`: the keys leave every other function, and the first function left with none takes `f`'s old keys.
+	/// Function `f` gets `new`; every other function keeps what it has (a key may drive several functions, nothing else moves).
 	pub fn assign(&mut self, f: usize, new: [Option<K>; 3]) {
-		let new = norm(new);
-		let old = self.0[f];
-		let mut emptied = None;
-		for g in (0..NK).filter(|&g| g != f) {
-			let had = self.0[g].iter().flatten().count();
-			let kept = self.0[g].map(|k| k.filter(|k| !new.contains(&Some(*k))));
-			self.0[g] = norm(kept);
-			if had > 0 && self.0[g][0].is_none() && emptied.is_none() {
-				emptied = Some(g);
-			}
-		}
-		self.0[f] = new;
-		if let Some(g) = emptied {
-			self.0[g] = norm(old.map(|k| k.filter(|k| !new.contains(&Some(*k)))));
-		}
+		self.0[f] = norm(new);
+	}
+
+	/// The other functions that have a key `f` has (the rows the Controls page shows the key on besides `f`'s own).
+	pub fn shared(&self, f: usize) -> Vec<usize> {
+		(0..NK).filter(|&g| g != f && self.0[g].iter().flatten().any(|k| self.0[f].contains(&Some(*k)))).collect()
 	}
 
 	/// The options-file value: what differs from the defaults; None when nothing does.
@@ -263,13 +258,14 @@ pub fn pad_buttons(phys: u32, map: &[u8; NP]) -> u16 {
 	b
 }
 
-/// `map` with function `f` on button `p`: the function that had `p` gets `f`'s old button (a swap).
+/// `map` with function `f` on button `p`; every other function keeps its button (a button may drive several functions).
 pub fn pad_assign(map: &mut [u8; NP], f: usize, p: usize) {
-	let old = map[f];
-	if let Some(g) = (0..NP).find(|&g| g != f && map[g] as usize == p) {
-		map[g] = old;
-	}
 	map[f] = p as u8;
+}
+
+/// The other controller functions on the button `f` is on.
+pub fn pad_shared(map: &[u8; NP], f: usize) -> Vec<usize> {
+	(0..NP).filter(|&g| g != f && map[g] == map[f]).collect()
 }
 
 pub fn pad_to_text(map: &[u8; NP]) -> Option<String> {
@@ -579,52 +575,82 @@ mod tests {
 	}
 
 	#[test]
-	fn a_taken_key_swaps() {
-		// F (Square) onto Cross: Square gets Space.
+	fn a_taken_key_is_shared_and_nothing_else_moves() {
+		// F (Square's key) onto Cross: Cross and Square both have F; Square keeps F, nothing else changed.
 		let mut b = KbBinds::default();
 		b.assign(CROSS, [Some(K::KeyF), None, None]);
 		assert_eq!(b.0[CROSS], k1(K::KeyF));
-		assert_eq!(b.0[SQUARE], k1(K::Space));
+		assert_eq!(b.0[SQUARE], k1(K::KeyF));
+		for f in (0..NK).filter(|&f| f != CROSS) {
+			assert_eq!(b.0[f], DEFAULT_KEYS[f], "function {f} untouched");
+		}
+		assert_eq!(b.pad(|x| x == K::KeyF, false, false).0, 0x40 | 0x80, "one key, both functions");
+		assert_eq!(b.pad(|x| x == K::Space, false, false).0, 0, "Space drives nothing now");
+		assert_eq!(b.shared(CROSS), vec![SQUARE]);
+		assert_eq!(b.shared(SQUARE), vec![CROSS]);
+		assert!(b.shared(CIRCLE).is_empty());
 		assert_eq!(KbBinds::from_text(&b.to_text().unwrap()), b);
-		// Enter (one of Start's three keys) onto Cross: Start keeps its other two, nothing is left unbound.
+		// Enter (one of Start's three keys) onto Cross: Start keeps all three, Cross has Enter too.
 		let mut b = KbBinds::default();
 		b.assign(CROSS, [Some(K::Enter), None, None]);
 		assert_eq!(b.0[CROSS], k1(K::Enter));
-		assert_eq!(b.0[10], [Some(K::Escape), Some(K::NumpadEnter), None]);
-		assert!((0..NK).all(|f| b.0[f][0].is_some()));
-		assert_eq!(b.pad(|x| x == K::Enter, false, false).0, 0x40);
-		// Start onto the left stick's W: the stick function gets Start's keys? No: Forward gets Start's first key only through
-		// the swap rule (it is emptied, it takes the old keys of Start).
+		assert_eq!(b.0[10], DEFAULT_KEYS[10]);
+		assert_eq!(b.pad(|x| x == K::Enter, false, false).0, 0x40 | 0x800);
+		// Start onto the left stick's W: Forward is unchanged, Start has W only (the other keys left it).
 		let mut b = KbBinds::default();
 		b.assign(10, [Some(K::KeyW), None, None]);
-		assert_eq!(b.0[LSTICK], [Some(K::Escape), Some(K::Enter), Some(K::NumpadEnter)]);
-		// Every function stays bound and no key is on two functions after any sequence of binds.
+		assert_eq!(b.0[LSTICK], k1(K::KeyW));
+		assert_eq!(b.0[10], k1(K::KeyW));
+		// A chain of binds changes only the function bound each time; every function stays bound.
 		let mut b = KbBinds::default();
 		let ks: Vec<K> = KEYS.iter().map(|e| e.0).filter(|&k| bindable(k)).collect();
 		for i in 0..400usize {
-			b.assign((i * 7) % NK, [Some(ks[(i * 13) % ks.len()]), None, None]);
-			let all: Vec<K> = b.0.iter().flatten().flatten().copied().collect();
-			assert!((0..NK).all(|f| b.0[f][0].is_some()), "unbound after {i}");
-			for (a, k) in all.iter().enumerate() {
-				assert!(!all[..a].contains(k), "{k:?} twice after {i}");
+			let (f, k) = ((i * 7) % NK, ks[(i * 13) % ks.len()]);
+			let before = b;
+			b.assign(f, [Some(k), None, None]);
+			assert_eq!(b.0[f], k1(k));
+			for g in (0..NK).filter(|&g| g != f) {
+				assert_eq!(b.0[g], before.0[g], "function {g} moved by a bind of {f} at {i}");
 			}
+			assert!((0..NK).all(|f| b.0[f][0].is_some()), "unbound after {i}");
 		}
 	}
 
 	#[test]
-	fn controller_swaps_and_round_trips() {
+	fn controller_buttons_may_be_shared_and_round_trip() {
 		let mut m = DEFAULT_PAD;
-		pad_assign(&mut m, CROSS, 1); // B onto Cross: Circle gets A
+		pad_assign(&mut m, CROSS, 1); // B onto Cross: Circle keeps B
 		assert_eq!(m[CROSS], 1);
-		assert_eq!(m[CIRCLE], 0);
-		assert_eq!(pad_buttons(0x2000, &m), 0x40);
-		assert_eq!(pad_buttons(0x1000, &m), 0x20);
-		assert_eq!(pad_to_text(&m).as_deref(), Some("cross:b,circle:a"));
-		assert_eq!(pad_from_text("cross:b,circle:a"), m);
-		assert_eq!(pad_from_text("cross:b"), m, "a one-sided entry swaps the same way");
-		let mut seen = m.to_vec();
-		seen.sort();
-		assert_eq!(seen, (0..NP as u8).collect::<Vec<_>>());
+		assert_eq!(m[CIRCLE], 1);
+		for f in (0..NP).filter(|&f| f != CROSS) {
+			assert_eq!(m[f], DEFAULT_PAD[f], "function {f} untouched");
+		}
+		assert_eq!(pad_buttons(0x2000, &m), 0x40 | 0x20, "B is Cross and Circle");
+		assert_eq!(pad_buttons(0x1000, &m), 0, "A drives nothing now");
+		assert_eq!(pad_shared(&m, CROSS), vec![CIRCLE]);
+		assert_eq!(pad_shared(&m, CIRCLE), vec![CROSS]);
+		assert!(pad_shared(&m, SQUARE).is_empty());
+		assert_eq!(pad_to_text(&m).as_deref(), Some("cross:b"));
+		assert_eq!(pad_from_text("cross:b"), m);
+		// Fire (Square) onto the right trigger, which is also the strafe aim (R2): both bits on one trigger.
+		let mut m = DEFAULT_PAD;
+		pad_assign(&mut m, SQUARE, 15);
+		assert_eq!(pad_buttons(1 << 17, &m), 0x80 | 2);
+		assert_eq!(pad_buttons(0x4000, &m), 0, "X drives nothing now");
+		assert_eq!(pad_from_text(&pad_to_text(&m).unwrap()), m);
+		// The order of the entries of a file does not matter.
+		assert_eq!(pad_from_text("circle:a,cross:b"), pad_from_text("cross:b,circle:a"));
+		// A chain of binds changes only the function bound each time.
+		let mut m = DEFAULT_PAD;
+		for i in 0..200usize {
+			let (f, p) = ((i * 5) % NP, (i * 11) % NP);
+			let before = m;
+			pad_assign(&mut m, f, p);
+			assert_eq!(m[f] as usize, p);
+			for g in (0..NP).filter(|&g| g != f) {
+				assert_eq!(m[g], before[g], "function {g} moved by a bind of {f} at {i}");
+			}
+		}
 	}
 
 	#[test]
@@ -634,7 +660,7 @@ mod tests {
 		let b = KbBinds::from_text("Cross:keyk, forward:ArrowUp");
 		assert_eq!(b.0[CROSS], k1(K::KeyK));
 		assert_eq!(b.0[LSTICK], k1(K::ArrowUp));
-		assert_eq!(b.0[DPAD], k1(K::KeyW), "the d-pad up got W (swap)");
+		assert_eq!(b.0[DPAD], k1(K::ArrowUp), "the d-pad up keeps the Up arrow (shared with Forward)");
 	}
 
 	#[test]

@@ -75,7 +75,8 @@ use self::flows::*;
 use self::dry_tiles::{DryGroups, DryTiles};
 
 struct Targets {
-	key: (u32, u32, u64),
+	/// (width, height, post generation, the sky map's real targets exist).
+	key: (u32, u32, u64, bool),
 	wpos: wgpu::TextureView,
 	wdepth: wgpu::TextureView,
 	copy: wgpu::Texture,
@@ -138,6 +139,8 @@ pub(super) struct WaterFx {
 	sheet_mem: SheetMem,
 	/// The level `sheet_mem` was filled in.
 	sheet_level: usize,
+	/// The level the shore map's kept quarters (`shore_map.rs` `cs_shore_keep`) belong to: they are cleared when it changes.
+	shore_game: usize,
 	/// [PC] Geometric sea waves: the mask, grid and shore map pipelines, the shore map's layout, buffer and uniforms, the grid's
 	/// index buffer (and its columns, rows), and this frame's grid draw (planes, indices) for `sea_waves`.
 	p_mask: wgpu::RenderPipeline,

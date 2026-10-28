@@ -24,10 +24,13 @@
 //! - `pose_follow.rs` (ABI 1.6 `pose_follow`: `omni.pose.follow`): picture-only "draw this moby where that one is relative to a hero joint, mirrored" records (host store, auto-clear, callback); they reach the renderer as `HeroParts.follow` and viewer/follow.rs places the item prop.
 //! - `pose.rs` + `pose_host.rs` + `pose_read.rs` (ABI 1.4 `pose_set` / `pose_info` / `pose_read`: `omni.pose`): render-only pose overrides of the hero (store, auto-clear rules, callbacks, game-pose reads); the ops reach the renderer as `HeroParts.pose_ops` (retail/snapshot.rs).
 //! - `lock.rs`: one re-entrant lock around every call into the DLL.
+//! - `logq.rs`: the log queue: `log_cb` only appends a line, the thread `omnilog` writes the pending lines to stderr in one call (about 1 ms per line before);
+//!   `flush_log` / `drain_log_raw` write what is pending on the way out (panic hook, exits, crash filter).
 //! - `cabi.rs`: the C ABI structs and the DLL's functions. `binding.rs` + `json.rs`: the game binding (rac1.json, mod interface 1.3).
 //!
 //! Threads: `init` runs on the main thread (inside `Retail::load`, before the recompiled table is built); `tick`, `pad` and the hooks
-//! on the retail worker thread (it runs the EE too), the first two between two fields, the hooks inside a field. Never concurrent;
+//! on the retail worker thread between two fields; the hooks inside a field on the oracle game thread "ee" (bridge.rs `on_game_thread`:
+//! it is the thread that catches the oracle's `RecRebuilt` unwind). Never concurrent: the worker waits in `Machine::frame` while "ee" runs;
 //! `lock.rs` makes that true by construction (a hook may re-enter the DLL: `original` runs retail code that reaches another hook).
 
 mod binding;
@@ -35,6 +38,7 @@ mod bridge;
 mod cabi;
 mod card;
 pub mod clash;
+mod codeguard;
 mod counts;
 mod data_map;
 pub mod draw;
@@ -57,7 +61,10 @@ mod layer;
 mod layout;
 pub(crate) mod live_settings;
 mod load;
+#[cfg(target_os = "linux")]
+pub(crate) use load::loader_present;
 mod lock;
+mod logq;
 mod mobys;
 pub(crate) mod modset;
 mod native_host;
@@ -93,6 +100,22 @@ pub use pose_follow::FollowRec;
 /// A recompiled-function table was (re)built: the cache of the built-in hands under the hook entries is void (layer.rs).
 pub fn layer_rebuilt() {
 	layer::rebuilt();
+}
+
+/// The layer cache's generation (tests: it moves with table builds only).
+#[cfg(test)]
+pub fn layer_epoch() -> u64 {
+	layer::epoch()
+}
+
+/// Writes the mods' log lines still queued (logq.rs) now, on the calling thread: the panic hook and every normal way out of the process.
+pub fn flush_log() {
+	logq::flush();
+}
+
+/// The queued log lines to `write` from the Windows crash filter (runlog.rs); never waits for a lock.
+pub fn drain_log_raw(write: fn(&str)) {
+	logq::drain_raw(write);
 }
 
 /// `retail/worker/field_front.rs`, once per field: whether the title screen / front end is running (events.rs `mode`).
@@ -156,12 +179,13 @@ pub fn tick(c: &mut Cpu) {
 	}
 	draw_demo::tick(c);
 	if n == 1 || n % 1000 == 0 {
-		eprintln!("omni: tick {n}");
+		// Queued, not written here: this runs on the retail worker thread, between two fields (logq.rs).
+		logq::line(&format!("omni: tick {n}"));
 		if let Some(l) = hooks::counts_line() {
-			eprintln!("omni: hook calls at tick {n}: {l}");
+			logq::line(&format!("omni: hook calls at tick {n}: {l}"));
 		}
 		if let Some(l) = counts::line() {
-			eprintln!("omni: native calls at tick {n}: {l}");
+			logq::line(&format!("omni: native calls at tick {n}: {l}"));
 		}
 	}
 }

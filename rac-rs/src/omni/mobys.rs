@@ -202,7 +202,7 @@ pub fn run_valid(def: &MobysDef, ram: &[u8], tr: Translate, addr: u32) -> i32 {
 }
 
 fn translator(user: *mut c_void, ram: &[u8]) -> impl Fn(u32, u32) -> Option<u32> {
-	let level_word = ram.get(LEVEL_WORD..LEVEL_WORD + 4).map_or(-1, |b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+	let level_word = super::native_host::level_word_in(ram);
 	let usa = state(user).ntsc;
 	move |addr, len| super::window::translate(usa, level_word, addr, len)
 }
@@ -210,7 +210,7 @@ fn translator(user: *mut c_void, ram: &[u8]) -> impl Fn(u32, u32) -> Option<u32>
 /// A lookup `addr -> class id` for the live mobys of the pool now (None for anything else, or without a pool): for stores that must notice a slot
 /// being reused (pose_follow.rs). Walks the pool once to build, then each lookup is O(1).
 pub(super) fn class_lookup<'a>(st: &'a super::host::HostState, ram: &'a [u8]) -> impl Fn(u32) -> Option<u16> + 'a {
-	let level_word = ram.get(LEVEL_WORD..LEVEL_WORD + 4).map_or(-1, |b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+	let level_word = super::native_host::level_word_in(ram);
 	let def = st.binding.mobys.as_ref();
 	let pool = def.and_then(|d| pool(d, ram, &|a, l| super::window::translate(st.ntsc, level_word, a, l)).ok());
 	move |a| {
@@ -223,12 +223,13 @@ pub(super) fn class_lookup<'a>(st: &'a super::host::HostState, ram: &'a [u8]) ->
 	}
 }
 
-/// The level number word of the machine (`oracle LEVEL`), the same as native_host.rs reads.
-pub const LEVEL_WORD: usize = 0x15_ED84;
-
 /// `OmniHost::moby_query`.
 pub unsafe extern "C" fn moby_query_cb(user: *mut c_void, q: *const OmniMobyQuery, out: *mut u32, cap: u32) -> i32 {
 	let (Some(c), Some(def)) = (cpu(), state(user).binding.mobys.as_ref()) else { return -1 };
+	// Like every entry that reads the level's data: no level (title screen, the level loop ending) = -1, whatever the level word names.
+	if super::events::live_level(c).is_none() {
+		return -1;
+	}
 	if q.is_null() || out.is_null() || cap == 0 {
 		return 0;
 	}
@@ -240,6 +241,9 @@ pub unsafe extern "C" fn moby_query_cb(user: *mut c_void, q: *const OmniMobyQuer
 /// `OmniHost::moby_valid`.
 pub unsafe extern "C" fn moby_valid_cb(user: *mut c_void, addr: u32) -> i32 {
 	let (Some(c), Some(def)) = (cpu(), state(user).binding.mobys.as_ref()) else { return 0 };
+	if super::events::live_level(c).is_none() {
+		return 0;
+	}
 	run_valid(def, &c.mem.ram, &translator(user, &c.mem.ram), addr)
 }
 

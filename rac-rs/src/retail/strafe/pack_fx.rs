@@ -5,6 +5,7 @@
 //! the hero and keeps the offset for its life, so the trail stays where it was left in the world; the flame cones the exhaust
 //! mobys draw are moved with the pack every field (`exhaust_shift`). Draw only; RAM is not written.
 
+use crate::fmath::Fm;
 use std::sync::Mutex;
 
 /// The Thruster-Pack (back object `*0x1404d0`, class at +0xa6; 607 is the Heli-Pack).
@@ -94,7 +95,7 @@ pub fn exhaust_shift(m: &ee_oracle::Machine, moby: u32) -> Option<[f32; 3]> {
 		return None;
 	}
 	let (delta, hp) = super::part_turn(m)?;
-	let (f, (sn, cs)) = (m.rdv3(a + 0x10), delta.sin_cos());
+	let (f, (sn, cs)) = (m.rdv3(a + 0x10), delta.fsin_cos());
 	let (x, y) = (f[0] - hp[0], f[1] - hp[1]);
 	Some([cs * x - sn * y - x, sn * x + cs * y - y, 0.0])
 }
@@ -112,7 +113,29 @@ pub(super) fn carry(m: &ee_oracle::Machine, hp: [f32; 3], delta: f32, fx: &mut c
 		return;
 	}
 	let segs = spawn_segments(m, pack, &mut st.smoke);
-	let (sn, cs) = delta.sin_cos();
+	// None: idle, every offset is 0 (no vector made).
+	let offs = (!idle(&st.seen, delta)).then(|| turn_offsets(&st.seen, &segs, hp, delta, fx, turned));
+	// This field's record replaces the last one in the same buffer (all empty, then this field's slots; no allocation per field).
+	st.seen.clear();
+	st.seen.resize(SLOTS, None);
+	for (n, (s, &slot)) in fx.sprites.iter_mut().zip(&fx.sprite_slots).enumerate() {
+		let off = offs.as_ref().map_or([0.0; 3], |o| o[n]);
+		let p = s.pos;
+		st.seen[slot as usize % SLOTS] = Some((p, off));
+		s.pos = [p[0] + off[0], p[1] + off[1], p[2]];
+	}
+}
+
+/// Nothing to move: no turn (`delta` under the 1e-4 below, which gives a new particle offset 0) and no earlier particle with an
+/// offset to keep. Every offset `turn_offsets` would give is 0 then, so the field's work is skipped (not aiming, or facing the drawn
+/// way, with no old trail turned).
+fn idle(seen: &[Option<([f32; 3], [f32; 3])>], delta: f32) -> bool {
+	delta.abs() < 1e-4 && seen.iter().flatten().all(|e| e.1 == [0.0; 3])
+}
+
+/// The offset of every sprite of the pool this field (see `carry`).
+fn turn_offsets(seen: &[Option<([f32; 3], [f32; 3])>], segs: &[([f32; 3], [f32; 3])], hp: [f32; 3], delta: f32, fx: &crate::retail::RetailFx, turned: &[u32]) -> Vec<[f32; 3]> {
+	let (sn, cs) = delta.fsin_cos();
 	let kind = |n: usize| fx.sprite_types.get(n).copied().unwrap_or(0);
 	// Seen before, spawned by an exhaust moby, or None: new elsewhere (a child flame, or not the pack's).
 	let offs: Vec<Option<[f32; 3]>> = fx
@@ -122,7 +145,7 @@ pub(super) fn carry(m: &ee_oracle::Machine, hp: [f32; 3], delta: f32, fx: &mut c
 		.enumerate()
 		.map(|(n, (s, &slot))| {
 			let p = s.pos;
-			let old = st.seen.get(slot as usize % SLOTS).copied().flatten().filter(|e| dist(e.0, p) < SAME_REACH).map(|e| e.1);
+			let old = seen.get(slot as usize % SLOTS).copied().flatten().filter(|e| dist(e.0, p) < SAME_REACH).map(|e| e.1);
 			old.or_else(|| {
 				let exhaust = matches!(kind(n), FLAME | SMOKE) && segs.iter().any(|&(a, b)| seg_dist(p, a, b) < SPAWN_REACH);
 				let mine = !fx.sprite_owners.get(n).is_some_and(|o| turned.contains(o));
@@ -137,12 +160,49 @@ pub(super) fn carry(m: &ee_oracle::Machine, hp: [f32; 3], delta: f32, fx: &mut c
 		let near = fx.sprites.iter().zip(&offs).filter_map(|(q, o)| o.map(|o| (dist(q.pos, p), o))).filter(|x| x.0 < CHILD_REACH);
 		near.min_by(|a, b| a.0.total_cmp(&b.0)).map_or([0.0; 3], |x| x.1)
 	};
-	let offs: Vec<[f32; 3]> = offs.iter().enumerate().map(|(n, o)| o.unwrap_or_else(|| if kind(n) == FLAME { parent(fx.sprites[n].pos) } else { [0.0; 3] })).collect();
-	let mut next = vec![None; SLOTS];
-	for ((s, &slot), off) in fx.sprites.iter_mut().zip(&fx.sprite_slots).zip(offs) {
-		let p = s.pos;
-		next[slot as usize % SLOTS] = Some((p, off));
-		s.pos = [p[0] + off[0], p[1] + off[1], p[2]];
+	offs.iter().enumerate().map(|(n, o)| o.unwrap_or_else(|| if kind(n) == FLAME { parent(fx.sprites[n].pos) } else { [0.0; 3] })).collect()
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::particles::Sprite;
+
+	fn fx_with(sprites: &[([f32; 3], u8)]) -> crate::retail::RetailFx {
+		let sp = |pos| Sprite { pos, size: 1.0, rot: 0.0, colour: [1.0; 4], tex: 0, additive: true, pool: None, flat: false };
+		crate::retail::RetailFx {
+			sprites: sprites.iter().map(|s| sp(s.0)).collect(),
+			sprite_slots: (0..sprites.len() as u16).collect(),
+			sprite_types: sprites.iter().map(|s| s.1).collect(),
+			..Default::default()
+		}
 	}
-	st.seen = next;
+
+	/// The gate is exact: wherever `idle` says so, the full computation gives offset 0 for every sprite; and a turn, or an old trail
+	/// that keeps its offset, is not idle and does move.
+	#[test]
+	fn idle_is_exactly_when_nothing_moves() {
+		let hp = [0.0; 3];
+		let segs = [([1.0, 0.0, 0.0], [1.5, 0.0, 0.0])];
+		// A new flame on the spawn segment, a child flame right by it, smoke on it, a stray one: not turned without a turn.
+		let fx = fx_with(&[([1.2, 0.0, 0.0], FLAME), ([1.25, 0.0, 0.0], FLAME), ([1.3, 0.0, 0.0], SMOKE), ([9.0, 9.0, 0.0], FLAME)]);
+		let mut seen = vec![None; SLOTS];
+		assert!(idle(&seen, 0.0) && idle(&seen, 0.99e-4));
+		assert!(turn_offsets(&seen, &segs, hp, 0.0, &fx, &[]).iter().all(|o| *o == [0.0; 3]));
+		// Earlier particles recorded with offset 0 (the not-aiming fields) keep it.
+		for (n, s) in fx.sprites.iter().enumerate() {
+			seen[n] = Some((s.pos, [0.0; 3]));
+		}
+		assert!(idle(&seen, 0.0));
+		assert!(turn_offsets(&seen, &segs, hp, 0.0, &fx, &[]).iter().all(|o| *o == [0.0; 3]));
+		// A turn: not idle; the new particle on the segment is moved by it.
+		assert!(!idle(&seen, 0.5) && !idle(&seen, -1e-3));
+		let new = fx_with(&[([1.2, 0.0, 0.0], FLAME)]);
+		let moved = turn_offsets(&vec![None; SLOTS], &segs, hp, 0.5, &new, &[]);
+		assert!(moved[0] != [0.0; 3], "{moved:?}");
+		// An old trail with an offset (aiming ended): not idle at delta 0, and it keeps that offset.
+		seen[0] = Some((fx.sprites[0].pos, [0.1, -0.2, 0.0]));
+		assert!(!idle(&seen, 0.0));
+		assert_eq!(turn_offsets(&seen, &segs, hp, 0.0, &fx, &[])[0], [0.1, -0.2, 0.0]);
+	}
 }

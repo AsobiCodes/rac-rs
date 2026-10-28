@@ -40,7 +40,9 @@
 //! - Preset row (Graphics -> Picture, `presets.rs`): Low / Medium / High / Custom from ONE data file, `assets/gfx_presets.txt`
 //!   (the RAC-RS Launcher shows the same table). `sync` calls `presets::choose` before the rows are stepped (a chosen preset writes its
 //!   values into the rows and the HUD row) and `presets::show` at its end (the row shows the preset that matches the rows now, else
-//!   Custom). A preset never touches camera, controls, language, display mode, culling or the renderer; High is today's default picture.
+//!   Custom). A preset never touches camera, controls, language, display mode or the renderer, and it sets Culling On (v0.4.1);
+//!   High is today's default picture.
+//!   Culling Off shows a warning in the page's title bar (`pcext/cullwarn.rs`, called at the end of `sync`).
 //! - Mods page (`pcmods.rs`): Pause -> Options -> Mods = the 10th row, only while a mod is on in `active.txt` (`pcmods::load_store`);
 //!   packs On/Off + running script mods' settings. Title -> Options -> Mods (`build_title`): mod On/Off + settings + packs.
 //! - Title screen: Options -> Graphics (`title_options`, a hand on the front end's Options list set-up) shows the same rows on
@@ -64,9 +66,10 @@ use std::sync::{Mutex, OnceLock};
 mod cloudopt;
 pub mod texfilter;
 pub mod fogopt;
+pub mod cullwarn;
 mod presets;
 mod texts;
-use texts::{NEW_IDS, TEXTS};
+use texts::{lang_of, pool_slot, text_for, NEW_IDS, TEXTS};
 /// Reserved RAM: all zero in every savestate scanned, below the ELF image (0x100000) and outside the rec/hand range.
 pub const BASE: u32 = 0xB0000;
 /// "PCX1": the region has been set up (fresh RAM after a start, a savestate load or a cold boot reads 0 here).
@@ -519,18 +522,16 @@ pub fn init(cold: bool) {
 		pcopts::LEVELS[opts.ao_level() as usize],
 		pcopts::LEVELS[opts.shadows_level() as usize]
 	);
-	if cold && std::env::var_os("COLD_LANG").is_none() {
-		if let Some(l) = opts.lang {
-			ee_oracle::cold::set_language(l.osd());
-			eprintln!("retail: PC options: cold boot in the remembered language ({})", l.code());
-		}
+	if let Some((l, from)) = pcopts::cold_lang(cold && std::env::var_os("COLD_LANG").is_none(), opts.lang) {
+		ee_oracle::cold::set_language(l.osd());
+		eprintln!("retail: PC options: cold boot in the {from} language ({})", l.code());
 	}
 	super::binds::init(opts.extra_get("keys"), opts.extra_get("pad"));
 	CAM_MODERN.store(opts.camera_modern(), Ordering::Relaxed);
 	STRAFE_ON.store(opts.strafe_on(), Ordering::Relaxed);
 	BUYALL_ON.store(opts.buyall_on(), Ordering::Relaxed);
 	HUD_SHARP.store(opts.hud_sharp(), Ordering::Relaxed);
-	super::pcrender::init(&opts); super::pcintro::init(&opts);
+	super::pcrender::init(&opts); super::pcintro::init(&opts); super::pcskip::init(&opts); super::pcdisp::init(&opts);
 	GFX.store(pack_gfx(swap_rows(opts.graphics_rows())), Ordering::Relaxed);
 	fogopt::set(opts.graphics_rows()[13]);
 	cloudopt::set(opts.graphics_rows()[14]);
@@ -542,7 +543,13 @@ pub fn init(cold: bool) {
 	super::devtools::set_menu(opts.debug_on(), false);
 	camopts_init(&opts);
 	if let Ok(mut s) = ST.lock() {
+		let reset = opts.culling_reset;
 		*s = St { opts, path: Some(path), last: None, glast: None, lang_seen: None, warned: false };
+		// A v0.4.0 file's Culling Off was read as On: write it, so the file (and the launcher, and an older exe) say On too.
+		if reset {
+			eprintln!("retail: PC options: Culling reset to On (v0.4.0 file without the culling_off=kept marker), file rewritten");
+			s.save();
+		}
 	}
 }
 
@@ -565,6 +572,7 @@ pub fn pre_field(m: &mut ee_oracle::Machine, fin: &FieldIn) -> FieldIn {
 		camopts_field(&mut m.cpu.mem, level, fin.buttons, &mut s);
 	}
 	super::pcctl::field(&mut m.cpu.mem, level, fin.buttons, &ROWS, GTAB);
+	cullwarn::sync(&mut m.cpu.mem); // a section change of this field shows the right title at once
 	super::pcmods::field(&mut m.cpu.mem, level, fin.buttons);
 	out
 }
@@ -646,7 +654,7 @@ fn sync(mem: &mut Mem, level: u32, toggle: bool, s: &mut St) -> bool {
 		s.opts.hud = Some(sharp);
 		s.save();
 	}
-	if super::pcrender::sync(mem, &mut s.opts) | super::pcintro::sync(mem, &mut s.opts) { s.save(); } // Renderer row (pcrender.rs), Skip intro row (pcintro.rs); no short circuit
+	if super::pcrender::sync(mem, &mut s.opts) | super::pcintro::sync(mem, &mut s.opts) | super::pcskip::sync(mem, &mut s.opts) | super::pcdisp::sync(mem, &mut s.opts) { s.save(); } // Renderer (pcrender.rs), Skip intro (pcintro.rs), Start skips cutscenes (pcskip.rs), Display rows (pcdisp.rs); no short circuit
 	// Debug mode (Controls -> Debug): the row's byte opens / closes the dev tools and debug keys at once and is remembered (`debug=on`).
 	if let Some(on) = super::pcctl::debug_on(mem) {
 		if super::devtools::set_menu(on, true) {
@@ -662,6 +670,7 @@ fn sync(mem: &mut Mem, level: u32, toggle: bool, s: &mut St) -> bool {
 		s.save();
 	}
 	presets::show(mem, s);
+	cullwarn::sync(mem);
 	toggle
 }
 
@@ -1006,7 +1015,7 @@ pub fn title_rows() -> Vec<(u32, u32)> {
 
 /// The new texts in `lang` (0 En .. 4 It) as the mirror's strings (font bytes as chars, like the disc's texts).
 pub fn texts(lang: usize) -> impl Iterator<Item = (u32, String)> {
-	NEW_IDS.iter().enumerate().map(move |(k, &id)| (id, TEXTS[k][lang.min(4)].iter().map(|&b| b as char).collect()))
+	NEW_IDS.iter().enumerate().map(move |(k, &id)| (id, TEXTS[k][lang.min(4)].iter().map(|&b| b as char).collect())).chain(std::iter::once(cullwarn::text_item(lang)))
 }
 
 /// The text lookup hand: the three new ids get their string for the game's language; every other id goes to `prompts::lookup`
@@ -1017,19 +1026,21 @@ fn text_hook(c: &mut Cpu) -> bool {
 	if (ID_LOCKON..=ID_MPCT).contains(&id) {
 		return camopt_text(c, id);
 	}
+	let lang = lang_of(&mut c.mem);
 	// The Controls page's texts (pcctl.rs): they follow the bindings at every look; the Debug section's ids have a pool of their own.
-	if (0x7f40..super::pcctl::ID_LAST).contains(&id) || (super::pcctl::ID_DBG0..super::pcctl::ID_DBG_END).contains(&id) {
-		let lang = Lang::from_word(c.mem.rd32(LANG_WORD)).map_or(0, |l| l as usize);
+	if (0x7f40..super::pcctl::ID_LAST).contains(&id) || (super::pcctl::ID_DBG0..super::pcctl::ID_DBG_END).contains(&id) || (super::pcdisp::ID0..super::pcdisp::ID_END).contains(&id) {
 		return super::pcctl::text_hook(c, id, lang);
+	}
+	// The Culling warning in the Graphics title bar (cullwarn.rs).
+	if id == cullwarn::ID {
+		return cullwarn::text_hook(c, lang);
 	}
 	// The Mods page's texts (pcmods.rs).
 	if (super::pcmods::ID_FIRST..super::pcmods::ID_END).contains(&id) {
-		let lang = Lang::from_word(c.mem.rd32(LANG_WORD)).map_or(0, |l| l as usize);
 		return super::pcmods::text_hook(c, id, lang);
 	}
 	// Not one of ours: the keyboard's button prompts (prompts.rs) or retail's own lookup.
 	let Some(k) = NEW_IDS.iter().position(|&n| n == id) else { return super::prompts::lookup(c) };
-	let lang = Lang::from_word(c.mem.rd32(LANG_WORD)).map_or(0, |l| l as usize);
 	let at = pool_slot(k);
 	let s = text_for(k, lang);
 	// Keyboard: key names for the glyphs (slot is 0x40 bytes with the terminator).
@@ -1040,19 +1051,6 @@ fn text_hook(c: &mut Cpu) -> bool {
 	c.mem.wr8(at + s.len() as u32, 0);
 	c.s(2, at as u64);
 	true
-}
-
-/// The string pool slot of new text `k` (`NEW_IDS` order): `POOL`, `POOL2`, then `POOL3`.
-fn pool_slot(k: usize) -> u32 {
-	match k {
-		_ if k < POOL_SLOTS => POOL + 0x40 * k as u32,
-		_ if k < POOL_SLOTS + POOL2_SLOTS => POOL2 + 0x40 * (k - POOL_SLOTS) as u32,
-		_ => POOL3 + 0x40 * (k - POOL_SLOTS - POOL2_SLOTS) as u32,
-	}
-}
-
-fn text_for(k: usize, lang: usize) -> Vec<u8> {
-	TEXTS[k][lang].to_vec()
 }
 
 /// Cold boots only: remembers Options -> Language. Called each field while the front end runs: the game sets its language word
@@ -1080,6 +1078,7 @@ pub fn watch_language(m: &ee_oracle::Machine, field: u32, in_front: bool) {
 
 mod camopts;
 mod mousespeed;
+pub mod renderer_switch;
 pub use camopts::*;
 pub use mousespeed::*;
 
@@ -1088,6 +1087,9 @@ mod camopts_tests;
 
 #[cfg(test)]
 mod gfx_word_tests;
+
+#[cfg(test)]
+mod gate_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1104,26 +1106,6 @@ mod tests {
 	}
 
 	pub(super) static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-	#[test]
-	fn strafe_gate_truth_table() {
-		// Extension on: the Strafe aiming row decides, with either camera.
-		assert!(gate(true, true));
-		assert!(!gate(true, false));
-		// Extension off: the old switches decide, the menu does not restrict.
-		assert!(gate(false, false));
-	}
-
-	#[test]
-	fn texts_fit_the_font_and_are_nonempty() {
-		for row in TEXTS {
-			for s in row {
-				assert!(!s.is_empty() && s.len() < 0x3f);
-				// Printable ASCII, the game's accent bytes (0x80..0xb0, see TEXTS) or the plate's newline (1) and button glyphs (0x10, 0x13).
-				assert!(s.iter().all(|&b| (0x20..0x7f).contains(&b) || (0x80..=0xb0).contains(&b) || [1, 0x10, 0x13].contains(&b)));
-			}
-		}
-	}
 
 	/// The hashes and table addresses against the extracted overlays: the text lookup of every level and the Camera Options row table.
 	#[test]
@@ -1158,21 +1140,12 @@ mod tests {
 		}
 	}
 
-	/// No other hand sits on one of the text lookups (the PC hand would replace it; its decline path runs the retail code).
-	#[test]
-	fn no_other_hand_on_a_text_lookup() {
-		ee_game::register();
-		let n: Vec<_> = ee_oracle::rec::hands().into_iter().filter(|h| HANDS.iter().any(|p| p.entry == h.entry && !std::ptr::eq(*h, p))).map(|h| h.entry).collect();
-		eprintln!("hands on a text lookup entry besides ours: {n:x?}");
-		assert!(n.is_empty(), "another hand sits on a text lookup: {n:x?}");
-	}
-
 	/// On a loaded Eudora state: the lookup answers the new ids in all five languages, declines the retail ones, the row table is
 	/// patched once, and a byte change is applied and remembered.
 	#[test]
 	fn eudora_text_rows_and_persistence() {
 		// The renderer flags (GFX, FULLSCREEN) are global: the tests that sync take turns.
-		let _turn = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+		let (_turn, _g) = (SERIAL.lock().unwrap_or_else(|e| e.into_inner()), crate::retail::pcopts::globals_guard()); // lock order: SERIAL, then the globals
 		let Some(dir) = state_dir("fg1/4_0159") else { return };
 		let mut m = ee_oracle::Machine::load(&dir);
 		ee_game::register();
@@ -1281,7 +1254,7 @@ mod tests {
 	fn eudora_debug_mode_row() {
 		use super::super::{debugkeys, devtools, pcctl};
 		use winit::keyboard::KeyCode as K;
-		let _turn = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+		let (_turn, _g) = (SERIAL.lock().unwrap_or_else(|e| e.into_inner()), crate::retail::pcopts::globals_guard()); // lock order: SERIAL, then the globals
 		let Some(dir) = state_dir("fg1/4_0159") else { return };
 		let env = ["RAC_DEV_TOOLS", "RAC_DEBUG_KEYS"].iter().any(|n| std::env::var(n).is_ok_and(|v| v == "1"));
 		let quads = || {
@@ -1353,7 +1326,7 @@ mod tests {
 	#[test]
 	fn eudora_graphics_page() {
 		// The renderer flags (GFX, FULLSCREEN) are global: the tests that sync take turns.
-		let _turn = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+		let (_turn, _g) = (SERIAL.lock().unwrap_or_else(|e| e.into_inner()), crate::retail::pcopts::globals_guard()); // lock order: SERIAL, then the globals
 		let Some(dir) = state_dir("fg1/4_0159") else { return };
 		let mut m = ee_oracle::Machine::load(&dir);
 		let mem = &mut m.cpu.mem;

@@ -19,7 +19,7 @@ pub const fn quality(level: u8) -> Option<Quality> {
 		0 => None,
 		1 => Some(Quality { steps: 32.0, light: 4.0, mid: 3.0, div: 8 }),
 		2 => Some(Quality { steps: 48.0, light: 5.0, mid: 4.0, div: 6 }),
-		_ => Some(Quality { steps: 64.0, light: 6.0, mid: 6.0, div: 4 }),
+		_ => Some(Quality { steps: 64.0, light: 6.0, mid: 6.0, div: 6 }), // High marches more steps on Medium's grid (user OK 2026-10-26); RAC_CLOUD_DIV overrides (gfxq.rs)
 	}
 }
 

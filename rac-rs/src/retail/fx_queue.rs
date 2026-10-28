@@ -1,6 +1,7 @@
 //! The effects layer read from RAM each field (`RetailFx`, `queue_fx`): the effect pool, the draw-queue callbacks (orbs,
 //! blobs, arcs, glows, reticles, ribbons), the vendor glows and the swap words.
 
+use crate::fmath::Fm;
 use super::*;
 
 /// The level overlay's first draw-callback queue (FUN_001ebc48 on Eudora; Novalis draw_queue_add 0x21aee0): count
@@ -232,7 +233,7 @@ fn vendor_glows(m: &ee_oracle::Machine, level: u32) -> Vec<VendorGlow> {
 			let rows = [0, 1, 2].map(|r| m.rdv3(v + 0xc0 + 0x10 * r));
 			let nodes = std::array::from_fn(|k| {
 				let a = k as f32 * std::f32::consts::PI * 0.5 - std::f32::consts::PI;
-				let l = [a.cos() * 1.1, a.sin() * 1.1, 0.59];
+				let l = [a.fcos() * 1.1, a.fsin() * 1.1, 0.59];
 				std::array::from_fn(|c| pos[c] + l[0] * rows[0][c] + l[1] * rows[1][c] + l[2] * rows[2][c])
 			});
 			Some(VendorGlow { pos, ramp: m.rdf(pv + 0x90), scroll, nodes, word: m.rd32(v + 0x90) & 0xffff_0000 })

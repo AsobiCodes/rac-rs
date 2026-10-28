@@ -27,8 +27,10 @@ impl Gpu {
 		}
 	}
 
-	/// Retail mode: replaces the GS overlay image (`w` x `rows` RGBA8).
-	pub(in crate::viewer) fn set_retail_overlay(&mut self, w: u32, rows: u32, px: &[[u8; 4]]) {
+	/// Retail mode: replaces the GS overlay image (`w` x `rows` RGBA8) and takes the guard measured on it (`retail_ov_guard`). `live` =
+	/// the picture is gameplay's (`hud_place::live`); any other picture (menus, shop, cutscenes, front end) holds no guard (hud_hold.rs).
+	pub(in crate::viewer) fn set_retail_overlay(&mut self, w: u32, rows: u32, px: &[[u8; 4]], guard: crate::retail::HudGuard, live: bool) {
+		self.retail_ov_guard.next(guard, crate::retail::disc::usa(), live);
 		if !self.retail_ov.as_ref().is_some_and(|o| o.2 == w && o.3 == rows) {
 			let tex = self.device.create_texture(&wgpu::TextureDescriptor {
 				label: Some("retail overlay"),

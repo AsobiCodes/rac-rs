@@ -67,10 +67,19 @@ struct SkyUniform {
 	c: [f32; 4],
 }
 
-pub(in crate::viewer) struct SkyMap {
+/// The map's MSAA targets (about 28 MB with a 32-bit depth and stencil): made on the first frame water is in view, not for everyone.
+pub(super) struct SkyTargets {
 	colour: wgpu::TextureView,
 	depth: wgpu::TextureView,
 	depth_only: wgpu::TextureView,
+}
+
+pub(in crate::viewer) struct SkyMap {
+	/// A 1x1 stand-in depth (same layout) for the water groups made before the real targets: they are rebuilt when `made` turns true
+	/// (waterfx `Targets::key`), and the map is not read before then (its uniform is still zero).
+	stub: wgpu::TextureView,
+	formats: (wgpu::TextureFormat, wgpu::TextureFormat),
+	real: std::cell::OnceCell<SkyTargets>,
 	ubuf: wgpu::Buffer,
 	/// The top-down pass's level uniforms (buffer and group 0).
 	level: std::cell::OnceCell<(wgpu::Buffer, wgpu::BindGroup)>,
@@ -80,26 +89,42 @@ pub(in crate::viewer) struct SkyMap {
 
 impl SkyMap {
 	pub(super) fn new(device: &wgpu::Device, format: wgpu::TextureFormat, depth_format: wgpu::TextureFormat) -> SkyMap {
-		let make = |label, format, samples, usage| {
-			device
-				.create_texture(&wgpu::TextureDescriptor { label: Some(label), size: wgpu::Extent3d { width: N, height: N, depth_or_array_layers: 1 }, mip_level_count: 1, sample_count: samples, dimension: wgpu::TextureDimension::D2, format, usage, view_formats: &[] })
-				.create_view(&Default::default())
-		};
-		let colour = make("sky map colour", format, MSAA, wgpu::TextureUsages::RENDER_ATTACHMENT);
-		let depth = make("sky map depth", depth_format, MSAA, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING);
-		let depth_only = depth.texture().create_view(&wgpu::TextureViewDescriptor { aspect: wgpu::TextureAspect::DepthOnly, ..Default::default() });
+		let stub = make_target(device, "sky map stand-in", depth_format, 1, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT);
+		let stub = stub.texture().create_view(&wgpu::TextureViewDescriptor { aspect: wgpu::TextureAspect::DepthOnly, ..Default::default() });
 		let ubuf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("sky map window"), size: std::mem::size_of::<SkyUniform>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-		SkyMap { colour, depth, depth_only, ubuf, level: std::cell::OnceCell::new(), built: Cell::new(None) }
+		SkyMap { stub, formats: (format, depth_format), real: std::cell::OnceCell::new(), ubuf, level: std::cell::OnceCell::new(), built: Cell::new(None) }
+	}
+
+	/// The real targets, made on the first call.
+	pub(super) fn ensure(&self, device: &wgpu::Device) -> &SkyTargets {
+		self.real.get_or_init(|| {
+			let colour = make_target(device, "sky map colour", self.formats.0, N, wgpu::TextureUsages::RENDER_ATTACHMENT);
+			let depth = make_target(device, "sky map depth", self.formats.1, N, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING);
+			let depth_only = depth.texture().create_view(&wgpu::TextureViewDescriptor { aspect: wgpu::TextureAspect::DepthOnly, ..Default::default() });
+			SkyTargets { colour, depth, depth_only }
+		})
+	}
+
+	/// The real targets exist (the water groups hold their view from then on).
+	pub(super) fn made(&self) -> bool {
+		self.real.get().is_some()
 	}
 
 	/// The map's depth as the shaders read it (binding of `wgsl`'s SKYD) and its window uniform (SKYU).
 	pub(in crate::viewer) fn depth_view(&self) -> &wgpu::TextureView {
-		&self.depth_only
+		self.real.get().map_or(&self.stub, |r| &r.depth_only)
 	}
 
 	pub(in crate::viewer) fn uniform(&self) -> &wgpu::Buffer {
 		&self.ubuf
 	}
+}
+
+/// One `side` x `side` MSAA target of the sky map (`N` for the real ones, 1 for the stand-in).
+fn make_target(device: &wgpu::Device, label: &str, format: wgpu::TextureFormat, side: u32, usage: wgpu::TextureUsages) -> wgpu::TextureView {
+	device
+		.create_texture(&wgpu::TextureDescriptor { label: Some(label), size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 }, mip_level_count: 1, sample_count: MSAA, dimension: wgpu::TextureDimension::D2, format, usage, view_formats: &[] })
+		.create_view(&Default::default())
 }
 
 impl WaterFx {
@@ -151,6 +176,7 @@ impl Gpu {
 	/// The top-down pass: world, ties and tfrags, both faces, into the sky map's depth.
 	fn sky_draw(&self, enc: &mut wgpu::CommandEncoder, scene: &Scene, u: &Uniforms, cx: f32, cy: f32, zmax: f32) {
 		let sm = self.waterfx.sky();
+		let real = sm.ensure(&self.device);
 		let (ubuf, bind) = sm.level.get_or_init(|| {
 			let ubuf = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("sky map level uniforms"), size: std::mem::size_of::<Uniforms>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
 			let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("sky map level uniforms"), layout: &self.pipeline.get_bind_group_layout(0), entries: &self.sun.entries(&ubuf) });
@@ -162,9 +188,9 @@ impl Gpu {
 		self.queue.write_buffer(ubuf, 0, bytemuck::bytes_of(&mu));
 		let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
 			label: Some("sky map"),
-			color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &sm.colour, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(scene.clear), store: wgpu::StoreOp::Discard } })],
+			color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &real.colour, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(scene.clear), store: wgpu::StoreOp::Discard } })],
 			depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-				view: &sm.depth,
+				view: &real.depth,
 				depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
 				stencil_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(super::shadowvol::STENCIL_CLEAR), store: wgpu::StoreOp::Discard }),
 			}),

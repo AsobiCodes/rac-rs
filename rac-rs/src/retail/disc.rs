@@ -1,14 +1,20 @@
 //! Which retail disc runs (PAL SCES-50916 or USA SCUS-97199, both v1.00; ee_oracle::ver) and what differs for rac-rs.
-//! The USA disc is the same program with its level code and data moved (tools/vermap.py writes the PAL -> USA maps) and the
+//! The USA disc is the same program with its level code and data moved (tools/addr/vermap.py writes the PAL -> USA maps) and the
 //! game itself runs in NTSC mode (60 fields a second) when SYSTEM.CNF says so. PAL keeps every value it had.
 //! Port extras that read or write retail RAM at PAL addresses (modern camera, aim, strafe, vendor screen, prompts, PC
 //! options, widescreen hands, the front-end mirror) stay off on USA until their addresses go through the address tables.
+use super::disc_trace;
 use super::fmv_bridge::{Player, BOOT, FRONT};
+use std::panic::Location;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 /// The USA disc runs.
 #[inline]
 pub fn usa() -> bool {
+	#[cfg(test)]
+	if tests::FORCE_USA.get() {
+		return true;
+	}
 	ee_oracle::ver::disc() == ee_oracle::ver::Disc::Usa
 }
 
@@ -25,6 +31,12 @@ pub fn field_dt() -> f32 {
 	if ee_oracle::ver::ntsc() { 1001.0 / 60000.0 } else { 0.02 }
 }
 
+/// Retail fields a second (50 PAL; NTSC 60000 / 1001). PAL stays the exact 50.0 for code that divides by it.
+#[inline]
+pub fn field_rate() -> f32 {
+	if ee_oracle::ver::ntsc() { 60000.0 / 1001.0 } else { 50.0 }
+}
+
 /// Two fields (the catch-up cap of the viewer's step loops).
 #[inline]
 pub fn field_dt2() -> f32 {
@@ -36,17 +48,25 @@ pub fn announce() {
 	eprintln!("retail: disc {} ({}), {} fields a second", ee_oracle::ver::disc().serial(), if ee_oracle::ver::ntsc() { "NTSC" } else { "PAL" }, if ee_oracle::ver::ntsc() { "59.94" } else { "50" });
 }
 
+/// The only addresses `g` maps (the guard test `g_maps_only_its_window` flags a `g(..)` argument outside it).
+pub(super) const G_LO: u32 = 0x15f5a0;
+pub(super) const G_HI: u32 = 0x15f5e7;
 /// The retail globals rac-rs reads in the boot / front-end flow, USA address of the PAL one. They sit at the head of the
 /// overlay's small data (0x15ef00..), where every level and the front end have the same layout (vermap segments: one shift
-/// for all scopes). Others are returned unchanged.
+/// for all scopes). Others are returned unchanged: `g` is NOT a general mapper (only `G_LO..=G_HI`); use `va` for any other address.
+#[track_caller]
 pub fn g(pal: u32) -> u32 {
 	if !usa() {
 		return pal;
 	}
-	match pal {
-		0x15f5a0..=0x15f5e7 => pal + 0x20,
+	let u = match pal {
+		G_LO..=G_HI => pal + 0x20,
 		_ => pal,
+	};
+	if disc_trace::on() {
+		disc_trace::seen(scope(), pal, u, disc_trace::K_G, Location::caller());
 	}
+	u
 }
 
 /// The overlay in RAM (0..18 a level, `SCOPE_FRONT` the front end, `SCOPE_BOOT` the boot ELF's own overlay part); kept
@@ -63,8 +83,6 @@ pub fn scope() -> u8 {
 /// Finds the overlay in RAM by its code signature (disc_hands::SCOPE_SIG: 8 code words at one address inside the code of
 /// every overlay); keeps the last one while none matches (an overlay being loaded). USA only; cheap (one hash per scope).
 pub fn rescope(ram: &[u8]) {
-	// Every table build: the built-in hands under the omni hook entries may be another level's (omni/layer.rs).
-	crate::omni::layer_rebuilt();
 	if !usa() {
 		return;
 	}
@@ -81,6 +99,13 @@ pub fn rescope(ram: &[u8]) {
 			return;
 		}
 	}
+}
+
+/// The oracle's callback at every recompiled-table build (`ver::on_rebuild`): the built-in hands under the omni hook entries may be another
+/// level's now (omni/layer.rs), and the overlay in RAM is found again. `rescope` alone (every field) leaves the hook layer's cache alone.
+pub fn rebuilt(ram: &[u8]) {
+	crate::omni::layer_rebuilt();
+	rescope(ram);
 }
 
 /// An integer type `va` maps (the literal's own type stays).
@@ -105,32 +130,49 @@ macro_rules! addr_impl {
 addr_impl!(u32, usize, u64, i32, i64);
 
 /// The address of PAL retail address `pal` on the disc that runs: PAL returns it unchanged; USA maps it in the overlay in
-/// RAM (`scope`) with the vermap address map (disc_map.rs). Core addresses (below 0x15ef00) are the same on both discs;
-/// an address outside every mapped segment stays as it is.
+/// RAM (`scope`) with the vermap address map (disc_map.rs). Core addresses (below 0x15ef00) are the same on both discs.
+/// An address outside every segment stays as it is and is noted in the run log; it panics only when a unit test runs this
+/// exact `va` call on the USA disc (disc_trace.rs). The unit tests do not drive the feature code on USA: what they catch is
+/// a raw PAL literal, a wrong `_USA` twin pairing and a wrong proven row (disc_guard_tests.rs); a hole is caught by the
+/// USA smoke traces (tools/addr/gen_disc_map.py --check-trace).
+/// RAC_VA_TRACE=<file> writes every distinct mapping with its caller (`#[track_caller]`).
 #[inline]
+#[track_caller]
 pub fn va<T: Addr>(pal: T) -> T {
 	if !usa() {
 		return pal;
 	}
-	T::from_u32(va_usa(pal.to_u32()), pal)
+	let sc = scope();
+	T::from_u32(traced(sc, segs_of(sc), pal.to_u32(), Location::caller()), pal)
 }
 
-fn va_usa(pal: u32) -> u32 {
-	let segs: &[super::disc_map::Seg] = match scope() {
+/// The segment table of scope `sc` (a level 0..18, `SCOPE_FRONT`, else the boot ELF's overlay part).
+pub(super) fn segs_of(sc: u8) -> &'static [super::disc_map::Seg] {
+	match sc {
 		SCOPE_FRONT => super::disc_map::FRONT,
 		SCOPE_BOOT => super::disc_map::BOOTOV,
 		n => super::disc_map::LEVELS.get(n as usize).copied().unwrap_or(super::disc_map::BOOTOV),
-	};
-	map_in(segs, pal)
+	}
+}
+
+#[inline]
+pub(super) fn traced(sc: u8, segs: &[super::disc_map::Seg], pal: u32, at: &'static Location<'static>) -> u32 {
+	let (u, kind) = map_kind(segs, pal);
+	if kind > 2 || disc_trace::on() {
+		disc_trace::seen(sc, pal, u, kind, at);
+	}
+	u
 }
 
 /// PAL retail address `pal` in level `level`'s overlay on the disc that runs, whatever overlay is in RAM now (for the
 /// native readers of a level's overlay image, `Level::sections[0]`). PAL returns it unchanged.
+#[track_caller]
 pub fn va_level(level: usize, pal: u32) -> u32 {
 	if !usa() {
 		return pal;
 	}
-	map_in(super::disc_map::LEVELS.get(level).copied().unwrap_or(super::disc_map::BOOTOV), pal)
+	let sc = if level < 19 { level as u8 } else { SCOPE_BOOT };
+	traced(sc, segs_of(sc), pal, Location::caller())
 }
 
 /// USA: the `len` bytes at overlay address `va` (an address on the disc that runs) of a level overlay image
@@ -149,16 +191,18 @@ pub fn ov_bytes(img: &[u8], va: usize, len: usize) -> Option<&[u8]> {
 	None
 }
 
-fn map_in(segs: &[super::disc_map::Seg], pal: u32) -> u32 {
+/// `pal` mapped in `segs` and the kind of segment it fell in (disc_trace.rs: 0..4 as in disc_map.rs, `K_CORE` below the
+/// overlay part, `K_NONE` outside every segment).
+pub(super) fn map_kind(segs: &[super::disc_map::Seg], pal: u32) -> (u32, u8) {
 	let a = pal & 0x01ff_ffff;
 	if !(0x15_ef00..0x200_0000).contains(&a) {
-		return pal;
+		return (pal, disc_trace::K_CORE);
 	}
 	let i = segs.partition_point(|s| s.lo <= a);
 	if i == 0 || a >= segs[i - 1].hi {
-		return pal;
+		return (pal, disc_trace::K_NONE);
 	}
-	(pal & !0x01ff_ffff) | (a as i64 + segs[i - 1].d as i64) as u32
+	((pal & !0x01ff_ffff) | (a as i64 + segs[i - 1].d as i64) as u32, segs[i - 1].kind)
 }
 
 /// The PAL address of `a`, an address on the disc that runs (the inverse of `va`; for matching RAM pointers against PAL
@@ -168,11 +212,7 @@ pub fn unva(a: u32) -> u32 {
 		return a;
 	}
 	let x = a & 0x01ff_ffff;
-	let segs: &[super::disc_map::Seg] = match scope() {
-		SCOPE_FRONT => super::disc_map::FRONT,
-		SCOPE_BOOT => super::disc_map::BOOTOV,
-		n => super::disc_map::LEVELS.get(n as usize).copied().unwrap_or(super::disc_map::BOOTOV),
-	};
+	let segs = segs_of(scope());
 	for s in segs {
 		let (lo, hi) = ((s.lo as i64 + s.d as i64) as u32, (s.hi as i64 + s.d as i64) as u32);
 		if (lo..hi).contains(&x) {
@@ -182,7 +222,7 @@ pub fn unva(a: u32) -> u32 {
 	a
 }
 
-/// The table of the disc that runs: `pal` (PAL) or its USA twin (tools/racrs_va.py writes the twins).
+/// The table of the disc that runs: `pal` (PAL) or its USA twin (the generating script was not kept; tools/addr/twins.py verifies every twin).
 #[inline]
 pub fn pick<T: ?Sized>(pal: &'static T, usa_twin: &'static T) -> &'static T {
 	if usa() { usa_twin } else { pal }
@@ -230,8 +270,8 @@ pub fn movie_fps(lba: u32) -> f32 {
 }
 
 /// fmv_bridge::PLAYERS of the USA disc: the same 42-word PSS player per level overlay, frontbin and boot ELF, at its USA
-/// address with the hash of its USA code words. Generated by tools/players_usa.py (vermap function map; each PAL hash
-/// re-checked against the PAL disc first).
+/// address with the hash of its USA code words. Generated once from the vermap function map (tools/addr/vermap.py; the generating script was not kept); each PAL hash
+/// was re-checked against the PAL disc first.
 pub const PLAYERS_USA: [Player; 21] = [
 	Player { level: 0, name: "veldin_tutorial", entry: 0x2edd28, end: 0x2eddd0, hash: 0x9c1c_6907_3511_5802 },
 	Player { level: 1, name: "novalis", entry: 0x31a260, end: 0x31a308, hash: 0xd6a4_14ca_fc97_5bb0 },
@@ -269,14 +309,44 @@ pub static HOOKS_USA: [ee_oracle::rec::Hand; PLAYERS_USA.len()] = {
 };
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
 	use super::*;
+
+	std::thread_local! {
+		/// USA for this test's thread only: the tests run in parallel, so they never flip the global `ee_oracle::ver` disc
+		/// (two tests doing that raced: `usa_globals` once saw PAL values).
+		pub(super) static FORCE_USA: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+	}
+
+	/// Runs `f` with this thread on the USA disc.
+	pub(crate) fn as_usa<R>(f: impl FnOnce() -> R) -> R {
+		struct Reset;
+		impl Drop for Reset {
+			fn drop(&mut self) {
+				FORCE_USA.set(false);
+			}
+		}
+		FORCE_USA.set(true);
+		let _reset = Reset;
+		f()
+	}
+
+	/// The omni layer's cache is voided by a table build, not by the per-field `rescope` (G3 of the review).
+	#[test]
+	fn only_a_table_build_voids_the_omni_layer_cache() {
+		let ram = vec![0u8; 32 << 20];
+		let before = crate::omni::layer_epoch();
+		rescope(&ram);
+		rescope(&ram);
+		assert_eq!(crate::omni::layer_epoch(), before, "a field's rescope must not void the cache");
+		rebuilt(&ram);
+		assert_eq!(crate::omni::layer_epoch(), before + 1, "a table build voids it once");
+	}
 
 	/// PAL values are the ones rac-rs always used.
 	#[test]
 	fn pal_unchanged() {
-		ee_oracle::ver::set_disc(ee_oracle::ver::Disc::Pal);
-		ee_oracle::ver::set_ntsc(false);
+		assert!(!usa(), "the test process runs the PAL disc unless a test forces USA on its own thread");
 		assert_eq!(field_dt().to_bits(), 0.02f32.to_bits());
 		assert_eq!(field_dt2().to_bits(), 0.04f32.to_bits());
 		assert_eq!(g(0x15f5e4), 0x15f5e4);
@@ -286,8 +356,10 @@ mod tests {
 	/// The USA globals of the front-end flow (vermap: +0x20 in every scope).
 	#[test]
 	fn usa_globals() {
-		ee_oracle::ver::set_disc(ee_oracle::ver::Disc::Usa);
-		assert_eq!((g(0x15f5e4), g(0x15f5a0), g(0x15f5b8), g(0x15f5a4)), (0x15f604, 0x15f5c0, 0x15f5d8, 0x15f5c4));
-		ee_oracle::ver::set_disc(ee_oracle::ver::Disc::Pal);
+		as_usa(|| {
+			assert!(usa());
+			assert_eq!((g(0x15f5e4), g(0x15f5a0), g(0x15f5b8), g(0x15f5a4)), (0x15f604, 0x15f5c0, 0x15f5d8, 0x15f5c4));
+		});
+		assert!(!usa());
 	}
 }

@@ -86,13 +86,20 @@ impl Store {
 				}
 				let read = |f: &str| std::fs::read(e.path().join(f)).ok().map(|b| String::from_utf8_lossy(&b).into_owned());
 				let script = || crate::omni::modset::manifest_file(&e.path()).and_then(|p| std::fs::read_to_string(p).ok());
+				let bare = || super::layout::textures_dir(&e.path()).map(|_| (Installed { id: id.clone(), folder: id.clone(), name: id.clone(), kind: "textures".to_string() }, true));
 				let info = read("mod.json").and_then(|t| read_info(&t, &id)).or_else(|| script().and_then(|t| read_omni_manifest(&t, &id)));
+				// No mod.json and no manifest: a PCSX2 pack copied in by hand is still a texture pack (`mods.rs` loads it the same way).
+				let info = info.or_else(|| if read("mod.json").is_none() { bare() } else { None });
 				let Some((m, listed)) = info else { continue };
 				kinds.push((m.id.clone(), m.kind.clone()));
 				if listed {
 					mods.push(m);
 				}
 			}
+		}
+		let loose = super::layout::loose_files(root);
+		if loose > 0 {
+			eprintln!("mods: {loose} texture files lie loose in {}: put them into a folder of their own: <pack name>/textures/", root.display());
 		}
 		// Two folders with one manifest id (a copy next to the original): the first folder in name order is the mod, one line says so.
 		mods.sort_by(|a: &Installed, b: &Installed| a.folder.cmp(&b.folder));

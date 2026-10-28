@@ -65,8 +65,10 @@ fn solid_of(x: f32, y: f32, w: f32, h: f32, colour: [f32; 4]) -> Option<Solid> {
 }
 
 /// The list as runs, `hud` layer first (as draw_quads::build).
-pub fn build(f: &Frame, l: &Layout, art: Option<&Art>) -> Vec<Run> {
+pub fn build(f: &Frame, l: &Layout, art: Option<&Art>, max_quads: usize) -> Vec<Run> {
 	let mut runs: Vec<Run> = Vec::new();
+	// Text and icon quads so far, against the frame's budget (draw_quads::build).
+	let spent = std::cell::Cell::new(0usize);
 	let push_solid = |runs: &mut Vec<Run>, s: Option<Solid>| {
 		let Some(s) = s else { return };
 		match runs.last_mut() {
@@ -76,14 +78,18 @@ pub fn build(f: &Frame, l: &Layout, art: Option<&Art>) -> Vec<Run> {
 	};
 	let art_quads = |runs: &mut Vec<Run>, c: &OmniDrawCmd| {
 		let mut q = Vec::new();
+		if spent.get() >= max_quads {
+			return;
+		}
 		if c.kind == KIND_TEXT {
-			dq::text(&mut q, l, art, f, c);
+			dq::text(&mut q, l, art, f, c, max_quads - spent.get());
 		} else {
 			dq::icon(&mut q, l, art, c);
 		}
 		if q.is_empty() {
 			return;
 		}
+		spent.set(spent.get() + q.len());
 		match runs.last_mut() {
 			Some(Run::Quads(v)) => v.extend(q),
 			_ => runs.push(Run::Quads(q)),
@@ -371,7 +377,7 @@ mod tests {
 		let mut txt = cmd(KIND_TEXT, 0, 0.0, 1.0);
 		txt.text_len = 2;
 		let list = [cmd(KIND_RECT, 1, 100.0, 4.0), bar, txt, cmd(KIND_RECT, 0, 50.0, 4.0), cmd(99, 0, 0.0, 0.0)];
-		let runs = build(&frame(&list, b"AB"), &l, None);
+		let runs = build(&frame(&list, b"AB"), &l, None, usize::MAX);
 		// hud layer: bar (two solids), text, rect; then the menu layer rect.
 		let shape: Vec<(char, usize)> = runs.iter().map(|r| match r { Run::Solids(v) => ('S', v.len()), Run::Quads(v) => ('Q', v.len()) }).collect();
 		assert_eq!(shape, vec![('S', 2), ('Q', 2), ('S', 2)], "{shape:?}");
@@ -380,7 +386,7 @@ mod tests {
 		// An invisible or empty rect adds nothing; consecutive solids with only an empty text between them stay one run.
 		let mut z = cmd(KIND_RECT, 0, 0.0, 0.0);
 		z.color = 0;
-		let runs = build(&frame(&[cmd(KIND_RECT, 0, 1.0, 2.0), z, cmd(KIND_TEXT, 0, 0.0, 1.0), cmd(KIND_RECT, 0, 5.0, 2.0)], &[]), &l, None);
+		let runs = build(&frame(&[cmd(KIND_RECT, 0, 1.0, 2.0), z, cmd(KIND_TEXT, 0, 0.0, 1.0), cmd(KIND_RECT, 0, 5.0, 2.0)], &[]), &l, None, usize::MAX);
 		assert!(matches!(&runs[..], [Run::Solids(v)] if v.len() == 2));
 	}
 

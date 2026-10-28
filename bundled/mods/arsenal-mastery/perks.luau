@@ -43,6 +43,8 @@ local NOTE_LIMIT = 3 -- log lines per perk key
 
 local api, levels = nil, nil
 local omni = omni
+local mcache = nil -- mcache.luau
+local dirty = true -- a level, setting or save change: refresh() on the next tick
 local perks = {} -- every registered perk
 local by_key = {} -- hook key -> list of perks (slot order) that have a handler for it
 local installed = {} -- hook key -> true
@@ -60,7 +62,10 @@ local function wanted(e)
 	return levels.is_mega(e.weapon)
 end
 
+local active = {} -- hook key -> list of the perks that are on and have a handler for it (slot order); rebuilt by refresh()
+
 local function refresh()
+	dirty = false
 	local on = false
 	for _, e in ipairs(perks) do
 		local w = (not e.failed) and e.usable and wanted(e)
@@ -68,6 +73,13 @@ local function refresh()
 		if e.on then on = true end
 	end
 	any_on = on
+	for key, list in pairs(by_key) do
+		local act = {}
+		for _, e in ipairs(list) do
+			if e.on then act[#act + 1] = e end
+		end
+		active[key] = act
+	end
 end
 
 -- ---------------------------------------------------------------------------------------- dispatch
@@ -91,7 +103,9 @@ end
 local function make_dispatcher(key)
 	local list = by_key[key]
 	return function(original, ...)
-		if not any_on then return original() end
+		-- nothing on for this key (the usual case below V3): straight to the game, no closure, no pcall
+		local act = active[key]
+		if act == nil or act[1] == nil then return original() end
 		return run(key, list, 1, original, ...)
 	end
 end
@@ -236,7 +250,8 @@ function fw.radius_perk(def)
 		weapon = def.weapon, slot = def.slot, name = def.name,
 		hooks = {
 			["collide.sphere_mobys"] = function(nxt, radius, pos, mask, self, filter)
-				if self ~= 0 then
+				local c = (self ~= 0) and (mcache ~= nil and mcache.class(self) or nil) or nil
+				if self ~= 0 and (c == cls or (mcache == nil and c == nil)) then
 					local m = omni.struct("moby", self)
 					if m ~= nil and m.class == cls and (when == nil or when(m)) then
 						fw.note(key, string.format("radius %.2f -> %.2f (state %d)", radius, radius * mult, m.state))
@@ -254,6 +269,11 @@ function M.setup(a)
 	api = a
 	levels = a.levels
 	fw.api = a
+	local okc, mc = pcall(require, "mcache")
+	if okc and type(mc) == "table" then
+		mcache = mc
+		mc.setup()
+	end
 	local need = { "omni.struct", "omni.struct_set", "omni.mobys" }
 	for _, n in ipairs(need) do
 		if not omni.has(n) then
@@ -281,12 +301,14 @@ function M.setup(a)
 			for _, e in ipairs(list) do e.usable = false end
 		end
 	end
+	if levels.on_level ~= nil then levels.on_level(function() dirty = true end) end
 	refresh()
 end
 
 function M.on_frame(t)
 	tick = t
-	refresh()
+	-- the answer only changes with a level, a setting or a save; the 30-tick check covers anything else (Mega bought at the cap)
+	if dirty or t % 30 == 0 then refresh() end
 	for _, e in ipairs(perks) do
 		if e.was_on and not e.on and e.on_disable ~= nil then
 			local ok, err = pcall(e.on_disable)
@@ -308,7 +330,7 @@ function M.on_frame(t)
 end
 
 function M.on_event(name, a, b)
-	if name == "setting" or name == "save_loaded" or name == "new_game" or name == "level_loaded" then refresh() end
+	if name == "setting" or name == "save_loaded" or name == "new_game" or name == "level_loaded" then dirty = true end
 	for _, e in ipairs(perks) do
 		if e.on_event ~= nil and not e.failed then pcall(e.on_event, name, a, b) end
 	end

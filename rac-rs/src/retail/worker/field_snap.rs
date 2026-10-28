@@ -155,7 +155,7 @@ impl Worker {
 			let (h, f) = (c.handle(), field as u64);
 			s.ov_late = Some(OvLate(Box::new(move || h.take(f, ov_delay).map(|mut o| {
 				let (w, rows) = ov_dims(&o);
-				(w, rows, ov_px(&mut o), o.disp)
+				(w, rows, ov_px(&mut o), o.disp, o.guard)
 			}))));
 		}
 		let taken = if late { None } else { cap.as_ref().and_then(|c| c.take(field as u64, ov_delay)) };
@@ -181,7 +181,7 @@ impl Worker {
 				}
 				let _ = std::fs::write(&path, f);
 			}
-			s.ov = Some((ow, orows, px));
+			s.ov = Some((ow, orows, px, o.guard));
 			s.ov_disp = o.disp;
 		}
 	}
@@ -227,6 +227,7 @@ impl Worker {
 				if field >= ll_ctl_field + n {
 					crate::loadlog::say(|| format!("field {field}: STOP ram {:016x}", rec::hash_ram(&m.cpu.mem.ram[..])));
 					crate::gscap_guard::quit();
+					crate::omni::flush_log();
 					std::process::exit(0);
 				}
 			}

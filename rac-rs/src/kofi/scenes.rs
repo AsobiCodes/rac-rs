@@ -168,8 +168,7 @@ fn tape(f: &mut [[f32; 4]], tw: usize, c: P, ang: f32) {
 		for x in (c.0 - 110.0) as usize..(c.0 + 110.0) as usize {
 			let (dx, dy) = (x as f32 - c.0, y as f32 - c.1);
 			let (u, v) = (dx * ca + dy * sa, -dx * sa + dy * ca);
-			let zig = if (v > 0.0) == (u > 0.0) { 0.0 } else { 0.0 };
-			let cu = (hl - u.abs() + zig).clamp(0.0, 1.0);
+			let cu = (hl - u.abs()).clamp(0.0, 1.0);
 			let cv = (hw - v.abs()).clamp(0.0, 1.0);
 			let cov = cu * cv;
 			if cov <= 0.0 {

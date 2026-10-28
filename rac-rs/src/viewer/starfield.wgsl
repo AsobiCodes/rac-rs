@@ -42,8 +42,10 @@ fn tint(t: f32) -> vec3<f32> {
 
 // Cumulative normal (tanh form): the pixel-integrated Gaussian is Phi((x + 0.5) / s) - Phi((x - 0.5) / s), so a point that moves
 // over the pixel grid keeps its energy (no crawl or shimmer when the camera turns).
+// The tanh argument is clamped to +-10: from about 9.1 on tanh is exactly +-1.0 in f32 (a test checks it), and an expanded tanh
+// ((e^2x - 1) / (e^2x + 1), FXC on DX12) turns the huge arguments of a star far away on screen into inf / inf = NaN.
 fn phi(x: f32) -> f32 {
-	return 0.5 + 0.5 * tanh(0.7978846 * (x + 0.044715 * x * x * x));
+	return 0.5 + 0.5 * tanh(clamp(0.7978846 * (x + 0.044715 * x * x * x), -10.0, 10.0));
 }
 
 fn box_gauss(x: f32, s: f32) -> f32 {

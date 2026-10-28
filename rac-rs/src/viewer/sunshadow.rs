@@ -162,14 +162,38 @@ fn norm3(v: [f32; 3]) -> [f32; 3] {
 	[v[0] / l, v[1] / l, v[2] / l]
 }
 
+/// Bounding sphere of the view slice `near..far`: (distance of its centre from the camera along the view axis, radius). The centre is
+/// where the near and far corners are equally far (k = corner spread^2).
+fn slice_sphere(tan_half: f32, aspect: f32, near: f32, far: f32) -> (f32, f32) {
+	let k = tan_half * tan_half * (1.0 + aspect * aspect);
+	let t = ((far + near) * (1.0 + k) / 2.0).min(far);
+	let r = ((far - t) * (far - t) + far * far * k).sqrt().max(((t - near) * (t - near) + near * near * k).sqrt());
+	(t, r)
+}
+
+/// How far from the camera the centre of a caster sphere of radius `rho` can still be and have geometry that enters a cascade box of
+/// quality `q` (the props batch goes into every cascade whole and the GPU clips it to the box; `Cascade::touches` is the exact test of
+/// that box), whatever the light's direction: the cascade box is the slice sphere's square (+- `r` plus a texel's snap sideways) and reaches `REACH`
+/// towards the light, so its points lie within `sqrt(2 (r + texel)^2 + (r + REACH)^2)` of the sphere's centre, which is `t` from the camera;
+/// a sphere reaches `rho` further. Used to skip posing casters that no cascade can take (viewer/handler/frame_props.rs).
+pub(super) fn cast_reach(q: Quality, tan_half: f32, aspect: f32, rho: f32) -> f32 {
+	let mut near = RETAIL_NEAR;
+	let mut reach = 0.0f32;
+	for &far in &q.splits[..q.cascades.min(CASCADES)] {
+		let (t, r) = slice_sphere(tan_half, aspect, near, far);
+		let texel = 2.0 * r / q.res as f32;
+		let (side, depth) = (r + texel + rho, r + REACH + rho);
+		reach = reach.max(t + (2.0 * side * side + depth * depth).sqrt());
+		near = far;
+	}
+	reach
+}
+
 impl Cascade {
 	/// The cascade for the view slice `near..far` of a camera at `pos` looking along `fwd` (vertical half-angle tangent
 	/// `tan_half`, `aspect` width / height), lit along `dir` (the light's travel direction), on a `res`-texel map.
 	pub(super) fn fit(pos: [f32; 3], fwd: [f32; 3], tan_half: f32, aspect: f32, near: f32, far: f32, dir: [f32; 3], res: u32) -> Cascade {
-		// Bounding sphere of the slice: on the view axis where the near and far corners are equally far (k = corner spread^2).
-		let k = tan_half * tan_half * (1.0 + aspect * aspect);
-		let t = ((far + near) * (1.0 + k) / 2.0).min(far);
-		let r = ((far - t) * (far - t) + far * far * k).sqrt().max(((t - near) * (t - near) + near * near * k).sqrt());
+		let (t, r) = slice_sphere(tan_half, aspect, near, far);
 		let centre = [pos[0] + fwd[0] * t, pos[1] + fwd[1] * t, pos[2] + fwd[2] * t];
 		let d = norm3(dir);
 		let up_ref = if d[2].abs() < 0.99 { [0.0, 0.0, 1.0] } else { [1.0, 0.0, 0.0] };
@@ -198,6 +222,23 @@ impl Cascade {
 			z >= self.z[0] - radius && z <= self.z[1] + radius
 		}
 	}
+}
+
+/// Whether the sun shadow pass runs: `post_on` = the Enhanced passes of this frame (`splitview::fx(enhanced && modern_ok)`), Dynamic
+/// shadows on, no warp, no ship fight. The one test of `Gpu::prepare` and of the props phase (handler/sun_gate.rs).
+pub(super) fn casts(post_on: bool, shadows: bool, warp_shown: bool, ship_fight: bool) -> bool {
+	post_on && shadows && !warp_shown && !ship_fight && !crate::viewer::pipe_guard::off(crate::viewer::pipe_guard::Effect::SunShadow) // [PC] pipe_guard.rs: a refused shadow map draws no cascades
+}
+
+/// The cascades of quality `q` for `cam` (`aspect` = width / height), lit along `dir`.
+pub(super) fn fit_all(cam: &Camera, aspect: f32, dir: [f32; 3], q: Quality) -> [Cascade; CASCADES] {
+	let fwd = forward(cam);
+	let mut near = RETAIL_NEAR;
+	q.splits.map(|far| {
+		let c = Cascade::fit(cam.pos, fwd, cam.tan_half, aspect, near, far, dir, q.res);
+		near = far;
+		c
+	})
 }
 
 /// This frame's light: travel direction, strength (0..STRENGTH) and the cascades.
@@ -314,16 +355,29 @@ impl SunShadow {
 	/// `skin_layout`: the GPU-posed props' storage group (None: CPU posing); `array_layout`: the bindless texture array's
 	/// layout when draws can carry their slot in the first instance (None: shrubs cast nothing, terrain and ties cast whole).
 	pub(super) fn new(device: &wgpu::Device, skin_layout: Option<&wgpu::BindGroupLayout>, array_layout: Option<&wgpu::BindGroupLayout>) -> SunShadow {
-		let tex = device.create_texture(&wgpu::TextureDescriptor {
-			label: Some("sun shadow map"),
-			size: wgpu::Extent3d { width: RES, height: RES, depth_or_array_layers: CASCADES as u32 },
-			mip_level_count: 1,
-			sample_count: 1,
-			dimension: wgpu::TextureDimension::D2,
-			format: wgpu::TextureFormat::Depth32Float,
-			usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-			view_formats: &[],
-		});
+		// [PC] The map's out-of-memory is caught here (pipe_guard.rs): the effect goes off and a 1 x 1 map stands in, so the views the
+		// uniform bind groups and the mirrors take stay valid (nothing draws into it while the effect is off).
+		let make_map = |res: u32| {
+			device.create_texture(&wgpu::TextureDescriptor {
+				label: Some("sun shadow map"),
+				size: wgpu::Extent3d { width: res, height: res, depth_or_array_layers: CASCADES as u32 },
+				mip_level_count: 1,
+				sample_count: 1,
+				dimension: wgpu::TextureDimension::D2,
+				format: wgpu::TextureFormat::Depth32Float,
+				usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+				view_formats: &[],
+			})
+		};
+		let scope = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+		let tex = make_map(RES);
+		let tex = match pollster::block_on(scope.pop()) {
+			None => tex,
+			Some(e) => {
+				super::pipe_guard::refuse(super::pipe_guard::Effect::SunShadow, &e.to_string());
+				make_map(1)
+			}
+		};
 		let layers = std::array::from_fn(|k| tex.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2), base_array_layer: k as u32, array_layer_count: Some(1), ..Default::default() }));
 		let array = tex.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() });
 		let cmp = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -441,14 +495,16 @@ impl SunShadow {
 		if s <= 0.0 {
 			return None;
 		}
-		let fwd = forward(cam);
-		let mut near = RETAIL_NEAR;
-		let cascades = q.splits.map(|far| {
-			let c = Cascade::fit(cam.pos, fwd, cam.tan_half, aspect, near, far, dir, q.res);
-			near = far;
-			c
-		});
-		Some(SunFrame { dir, strength: s, cascades, q })
+		Some(SunFrame { dir, strength: s, cascades: fit_all(cam, aspect, dir, q), q })
+	}
+
+	/// The cascades `frame` fits for `cam` while the light holds still (the eased key light of this level already is its target, so
+	/// `frame` takes it as it is), else None. Changes nothing: viewer/handler/frame_props.rs asks before the draw which casters the
+	/// maps will take.
+	pub(super) fn settled_cascades(&self, cam: &Camera, aspect: f32, rows: &[[[f32; 4]; 4]; 16], scene_id: usize, q: Quality) -> Option<[Cascade; CASCADES]> {
+		let (target, _) = key_light(rows, 0, 0, 0.0)?;
+		let (key, _) = self.dir.filter(|_| self.scene_id == scene_id)?;
+		(key == target).then(|| fit_all(cam, aspect, raise(key), q))
 	}
 
 	/// Renders the three cascades of `f` from the scene's casters.
@@ -622,6 +678,36 @@ mod tests {
 		let behind = [0, 1, 2].map(|k| pos[k] + fwd[k] * 6.0 + dir[k] * 150.0);
 		assert!(c.touches(towards, 1.0));
 		assert!(!c.touches(behind, 1.0));
+	}
+
+	/// `cast_reach` bounds every caster sphere a cascade of any light direction takes: sampled spheres on the box faces' far corners and
+	/// the camera views of a wide window never touch beyond it.
+	#[test]
+	fn cast_reach_bounds_what_a_cascade_touches() {
+		let (pos, th, asp) = ([10.0f32, -4.0, 3.0], 0.62, 21.0 / 9.0);
+		for qi in [0u8, 1, 2, 3] {
+			let q = quality(qi);
+			for dir in [[0.3, 0.2, -0.93], [0.0, 0.0, -1.0], [0.9, 0.1, -0.42], [-0.5, 0.6, -0.62]] {
+				for fwd in [[1.0, 0.0, 0.0], norm3([0.4, 0.8, -0.3]), norm3([-1.0, 0.2, 0.5])] {
+					let mut near = RETAIL_NEAR;
+					for &far in &q.splits[..q.cascades] {
+						let c = Cascade::fit(pos, fwd, th, asp, near, far, norm3(dir), q.res);
+						near = far;
+						for rho in [0.0, 3.0, 40.0] {
+							let reach = cast_reach(q, th, asp, rho);
+							// The touched region's farthest corner from the camera: box corners (eight) pushed out by rho.
+							for (sx, sy, sz) in [(-1.0f32, -1.0f32, -1.0f32), (1.0, 1.0, 1.0), (1.0, -1.0, -1.0), (-1.0, 1.0, -1.0), (1.0, 1.0, -1.0), (-1.0, -1.0, 1.0), (1.0, -1.0, 1.0), (-1.0, 1.0, 1.0)] {
+								let [right, up, d] = c.basis;
+								let (zc, ext) = (0.5 * (c.z[0] + c.z[1]), 0.5 * (c.z[1] - c.z[0]));
+								let p: [f32; 3] = std::array::from_fn(|k| right[k] * (c.c[0] + sx * (c.r + rho)) + up[k] * (c.c[1] + sy * (c.r + rho)) + d[k] * (zc + sz * (ext + rho)));
+								let dist = (0..3).map(|k| (p[k] - pos[k]) * (p[k] - pos[k])).sum::<f32>().sqrt();
+								assert!(dist <= reach, "q {qi} rho {rho}: corner {dist} > reach {reach}");
+							}
+						}
+					}
+				}
+			}
+		}
 	}
 
 	#[test]

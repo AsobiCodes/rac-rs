@@ -21,6 +21,7 @@
 //!
 //! Keys: README in deliver/REPORT.md of the scratch_devtools lane, and `HELP_*` below (drawn on screen).
 
+use crate::fmath::Fm;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -404,8 +405,8 @@ fn step(fc: &mut FreeCam, dt: f32, held: &impl Fn(K) -> bool, mouse: (f32, f32),
 	if pb & PAD_L2 != 0 {
 		v *= SLOW;
 	}
-	let (sy, cy) = fc.yaw.sin_cos();
-	let (sp, cp) = fc.pitch.sin_cos();
+	let (sy, cy) = fc.yaw.fsin_cos();
+	let (sp, cp) = fc.pitch.fsin_cos();
 	let f = [cy * cp, sy * cp, sp];
 	let r = [sy, -cy, 0.0];
 	for i in 0..3 {
@@ -536,8 +537,8 @@ pub fn feed_field(field: u32) {
 			}
 			"o" if nums.len() == 3 => {
 				if let Some(fc) = u.fc.as_mut() {
-					let (sy, cy) = fc.yaw.sin_cos();
-					let (sp, cp) = fc.pitch.sin_cos();
+					let (sy, cy) = fc.yaw.fsin_cos();
+					let (sp, cp) = fc.pitch.fsin_cos();
 					let (f, r) = ([cy * cp, sy * cp, sp], [sy, -cy, 0.0]);
 					for i in 0..3 {
 						fc.pos[i] += f[i] * nums[0] + r[i] * nums[1];

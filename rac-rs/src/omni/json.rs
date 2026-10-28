@@ -103,7 +103,7 @@ fn write_str(out: &mut String, s: &str) {
 }
 
 pub fn parse(text: &str) -> Result<Json, String> {
-	let mut p = P { b: text.trim_start_matches('\u{feff}').as_bytes(), i: 0 };
+	let mut p = P { b: text.trim_start_matches('\u{feff}').as_bytes(), i: 0, depth: 0 };
 	let v = p.value()?;
 	p.ws();
 	if p.i != p.b.len() {
@@ -112,9 +112,14 @@ pub fn parse(text: &str) -> Result<Json, String> {
 	Ok(v)
 }
 
+/// How deep arrays and objects may nest: a file with thousands of `[` must be refused, not overflow the stack (the mods' manifests are read
+/// at every start); real files nest a handful of levels.
+const MAX_DEPTH: u32 = 128;
+
 struct P<'a> {
 	b: &'a [u8],
 	i: usize,
+	depth: u32,
 }
 
 impl P<'_> {
@@ -141,6 +146,15 @@ impl P<'_> {
 		}
 	}
 	fn value(&mut self) -> Result<Json, String> {
+		if self.depth >= MAX_DEPTH {
+			return Err(format!("json: nested deeper than {MAX_DEPTH} at byte {}", self.i));
+		}
+		self.depth += 1;
+		let v = self.value_at();
+		self.depth -= 1;
+		v
+	}
+	fn value_at(&mut self) -> Result<Json, String> {
 		self.ws();
 		match self.b.get(self.i).copied() {
 			None => Err("json: unexpected end".into()),
@@ -198,7 +212,7 @@ impl P<'_> {
 				while self.i < self.b.len() && matches!(self.b[self.i], b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9') {
 					self.i += 1;
 				}
-				std::str::from_utf8(&self.b[s..self.i]).ok().and_then(|t| t.parse::<f64>().ok()).map(Json::Num).ok_or(format!("json: bad number at byte {s}"))
+				std::str::from_utf8(&self.b[s..self.i]).ok().and_then(|t| t.parse::<f64>().ok()).filter(|n| n.is_finite()).map(Json::Num).ok_or(format!("json: bad number at byte {s}"))
 			}
 		}
 	}

@@ -19,12 +19,23 @@ wgpu = "30.0.1"
 winit = "0.30.13"
 libloading = "0.8.9"
 ee-oracle = { path = "../oracle" }
+# Pure-Rust maths for the PC code that writes game memory (src/fmath.rs): the same bits on Windows and Linux. Pinned: a new
+# version can change bits (re-take the fmath GOLDEN and the fullcheck replay hashes first).
+libm = "=0.2.16"
 # PCSX2 texture pack names (src/texpack): XXH3_64 of the texture bytes.
 xxhash-rust = { version = "0.8.18", default-features = false, features = ["xxh3"] }
 
 # Same version as wgpu-hal's (Cargo.lock): the D3D12 descriptor types for the ReShade add-on (viewer/gpu/reshade/native.rs).
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", default-features = false, features = ["Win32_Graphics_Direct3D12", "Win32_Graphics_Dxgi_Common"] }
+
+# Linux: the gamepads (an Xbox controller, a DualSense, ...) as evdev devices, read with gilrs (retail/lxpad.rs); libc for the run log
+# (runlog_linux.rs). The Windows build has its own paths (xinput for an Xbox controller, pspad for a PlayStation one) and does not need these.
+# The default features of gilrs (`wgi`) are kept: gilrs-core insists on one of `wgi` / `xinput` being enabled on every platform, and
+# the `windows` crate behind `wgi` is an empty stub outside Windows, so it costs nothing here.
+[target.'cfg(target_os = "linux")'.dependencies]
+gilrs = { version = "0.11.2" }
+libc = "0.2.190"
 
 [features]
 # Public build: the exe uses the Windows GUI subsystem (no console window) and logs panics to <player dir>/crash.log. Off for dev builds and test tools.

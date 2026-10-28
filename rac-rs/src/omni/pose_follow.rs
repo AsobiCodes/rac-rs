@@ -10,6 +10,7 @@
 //! (the game reuses deleted slots). A mod that unloads removes its records through the loader (flag `REMOVE`).
 
 use super::host::{cpu, state, HostState};
+use super::pose::MASK;
 use super::{events, mobys, pose};
 use std::ffi::c_void;
 use std::sync::Mutex;
@@ -23,8 +24,6 @@ pub const FLAG_REMOVE: u32 = 2;
 pub const ERR_BAD_JOINT: i32 = -3;
 pub const ERR_NOT_A_MOBY: i32 = -7;
 pub const ERR_CAP: i32 = -8;
-
-const MASK: u32 = 0x01ff_ffff;
 
 /// One follow pose for the renderer (`HeroParts.follow`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

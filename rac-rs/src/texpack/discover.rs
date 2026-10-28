@@ -128,6 +128,12 @@ pub fn probe(origin: Origin, epoch: u32, d: Draw) -> Option<Probe> {
 	Some(Probe { origin, epoch, d })
 }
 
+/// The RAC_TEXNAMES_RAW file (read once; DEV only, see ENV.md).
+fn raw_dir() -> Option<&'static std::ffi::OsString> {
+	static DIR: OnceLock<Option<std::ffi::OsString>> = OnceLock::new();
+	DIR.get_or_init(|| std::env::var_os("RAC_TEXNAMES_RAW")).as_ref()
+}
+
 /// Names the texture from the local memory `vram` (4 MB, uploads flushed) and logs it.
 pub fn record(p: Probe, vram: &[u8]) {
 	let Ok(mut st) = state().lock() else { return };
@@ -138,7 +144,7 @@ pub fn record(p: Probe, vram: &[u8]) {
 		return;
 	};
 	let stem = n.name.stem(n.palette);
-	if let Some(dir) = std::env::var_os("RAC_TEXNAMES_RAW") {
+	if let Some(dir) = raw_dir() {
 		// DEV diagnostic (never keep the output): the raw block stream of the first distinct T8 names with a dynamic slot, for the table comparison.
 		if !st.recs.contains_key(&stem) && n.psm == 0x13 && st.raw_n < 600 {
 			let t = gsname::Tex::from_tex0(d.tex0);
@@ -217,6 +223,9 @@ fn write_if_due(st: &mut State, force: bool) {
 
 /// Final write (the shot ends the process right after); logs the counters.
 pub fn finish() {
+	if let Some(l) = super::hudrepl::report() {
+		eprintln!("{l}");
+	}
 	if on().is_none() {
 		return;
 	}

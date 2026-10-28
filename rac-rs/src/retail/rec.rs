@@ -10,7 +10,7 @@
 //!   bytes in decimal, 0..255, 128 = centred;
 //!   Modern-camera runs add columns after RY, only when nonzero: 5 more (mouse x, mouse y, right mouse button, wheel, F7 toggle;
 //!   11 columns in all) and, since 2026-10-23, 2 more (13 columns: the camera keys' share of the right stick, Q/E and Z/X, offset
-//!   from 0x80; modcam_turn.rs `stick_axes` needs it to tell the keys from the controller's stick). Readers take 6, 11 or 13;
+//!   from 0x80; modcam_turn.rs `camera_sticks` needs it to tell the keys from the controller's stick). Readers take 6, 11 or 13;
 //!   an older file without the key columns replays Q/E/Z/X as the physical stick (the view then turns the other way);
 //! - `FIELD<TAB>!EVENT<TAB>ARGS`: anything that is not a pad read but changes the run. It applies before that field's
 //!   pad is set. `!TRAVEL<TAB>LEVEL` pokes the level-travel request (0x15f5a0 = level, 0x15f5b8 = 1, 0x15f550 = 1);

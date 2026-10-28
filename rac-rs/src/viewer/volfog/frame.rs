@@ -7,9 +7,14 @@ use super::*;
 /// The Fog level of the frame (Graphics -> Fog: 0 Classic, 1 Low, 2 Medium, 3 High), only with Lighting Enhanced like the other
 /// effects. RAC_TUNE=fog_q=N (0..3) overrides the row for tuning.
 pub(in crate::viewer) fn level(gfx: &crate::retail::pcext::Graphics) -> u8 {
+	level_if(gfx, crate::viewer::pipe_guard::off(crate::viewer::pipe_guard::Effect::VolFog))
+}
+
+/// `level` with the refusal given: tests check the gate without the process-wide mask, which the fog tests read in parallel.
+pub(in crate::viewer) fn level_if(gfx: &crate::retail::pcext::Graphics, refused: bool) -> u8 {
 	let tuned = crate::devtune::f32("fog_q", -1.0);
-	if !gfx.enhanced() {
-		return 0;
+	if !gfx.enhanced() || refused {
+		return 0; // [PC] a refused fog shader (pipe_guard.rs): retail's own fog stays unfaded
 	}
 	if tuned >= 0.0 { (tuned as u8).min(3) } else { gfx.fog_q.min(3) }
 }
@@ -28,12 +33,69 @@ pub(in crate::viewer) fn fade_retail_fog(mut u: Uniforms) -> Uniforms {
 	u
 }
 
-/// The water level the thin mist lies on: the lowest water height that carries a good share of the water vertices (a high pond or
-/// a stray vertex does not lift the mist off the main water). None without water.
-fn water_level(zs: &[f32]) -> Option<f32> {
-	let mut v: Vec<f32> = zs.iter().copied().filter(|z| z.is_finite()).collect();
-	v.sort_by(f32::total_cmp);
-	v.get(v.len() / 4).copied()
+/// Whether `Plan::new` reads the ocean's heights on this level (the fog sheet of Kerwan, the water mist of the levels without air haze).
+pub(in crate::viewer) fn wants_ocean_heights(level: usize) -> bool {
+	super::super::waterfx::fog_sheet_ocean(level) || density::air(level) == 0.0
+}
+
+/// The height of the level's fog sheet: the mean over every patch of the whole ocean (`Ocean::heights`: (height, patches) per
+/// descriptor, whatever the camera's distance), so it does not depend on which patches are near. None without an ocean.
+fn sheet_level(h: &[(f32, usize)]) -> Option<f32> {
+	let n: usize = h.iter().filter(|p| p.0.is_finite()).map(|p| p.1).sum();
+	(n > 0).then(|| (h.iter().filter(|p| p.0.is_finite()).map(|p| p.0 as f64 * p.1 as f64).sum::<f64>() / n as f64) as f32)
+}
+
+/// The water level the thin mist lies on: the lowest water height that carries a good share of the water patches (a high pond or
+/// a stray patch does not lift the mist off the main water): the patch at a quarter of the heights sorted. None without water.
+fn water_level(h: &[(f32, usize)]) -> Option<f32> {
+	let mut v: Vec<(f32, usize)> = h.iter().copied().filter(|p| p.0.is_finite() && p.1 > 0).collect();
+	v.sort_by(|a, b| a.0.total_cmp(&b.0));
+	let mut skip = v.iter().map(|p| p.1).sum::<usize>() / 4;
+	for p in &v {
+		if skip < p.1 {
+			return Some(p.0);
+		}
+		skip -= p.1;
+	}
+	None
+}
+
+/// What the frame decides about the volumetric fog pass, before anything is drawn: the Fog level, and the heights of the water the
+/// fog sheet / mist lie on. `Plan::new` is Some exactly when the pass draws (given its targets): the world uniforms
+/// (viewer/gpu/draw/prepare.rs) and `Input::new` take the same plan, so retail's own fog is faded only while the pass runs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(in crate::viewer) struct Plan {
+	pub quality: u8,
+	pub sheet_z: Option<f32>,
+	pub mist_z: Option<f32>,
+}
+
+impl Plan {
+	/// `fog` = the level's retail fog words of the frame (`Uniforms::fog`), `active` = Lighting Enhanced and not under water /
+	/// warping / in a ship fight, `ocean` = `Ocean::heights` (empty without an ocean).
+	pub(in crate::viewer) fn new(gfx: &crate::retail::pcext::Graphics, level_id: usize, fog: [f32; 4], active: bool, ocean: &[(f32, usize)]) -> Option<Plan> {
+		let quality = level(gfx);
+		if quality == 0 || !active {
+			return None;
+		}
+		let is_sheet = super::super::waterfx::fog_sheet_ocean(level_id);
+		let (sheet_z, mist_z) = if is_sheet {
+			(sheet_level(ocean), None)
+		} else if density::air(level_id) == 0.0 {
+			(None, water_level(ocean))
+		} else {
+			(None, None)
+		};
+		// A level with no volume at all (the space levels: no air haze, sheet or water mist; or a retail fog that ends at nothing) keeps retail's fog exactly.
+		density::level_params(level_id, fog, sheet_z, mist_z, 1.0)?;
+		Some(Plan { quality, sheet_z, mist_z })
+	}
+}
+
+/// The share of retail's own fog that stays this frame (`fogopt::gs_scale`): faded (not removed) while the volumetric fog draws, 1.0
+/// (the retail picture) otherwise. Decided with the plan, before the world uniforms are written.
+pub(in crate::viewer) fn retail_fog_scale(plan: Option<Plan>) -> f32 {
+	plan.map_or(1.0, |_| crate::devtune::f32("fog_gs", 0.35))
 }
 
 /// RAC_FOG_LOG=1 prints one line per frame about the fog pass (inputs, level parameters).
@@ -56,45 +118,25 @@ pub(in crate::viewer) fn clock() -> f32 {
 }
 
 impl<'a> Input<'a> {
-	/// The frame's inputs, or None when Fog is Classic, the post targets are not up, or `active` is false (under water).
-	/// `sheet_z`: the heights of the level's fog sheet (its "ocean" mesh) on levels that have one (`fog_sheet_ocean`);
-	/// `at` = (level, picture width, height); `view` = (camera, aspect, far plane); `rows`: the level light rows.
+	/// The frame's inputs, or None when the post targets are not up. `plan`: what `Plan::new` decided for the frame (Fog level,
+	/// the fog sheet / mist heights); `at` = (level, picture width, height); `view` = (camera, aspect, far plane); `rows`: the level light rows.
 	#[allow(clippy::too_many_arguments)]
 	pub(in crate::viewer) fn new(
 		post: &'a super::super::post::Post,
 		sun_shadow: &'a SunShadow,
 		sun: Option<&'a SunFrame>,
-		ocean_z: impl Iterator<Item = f32>,
-		gfx: &crate::retail::pcext::Graphics,
+		plan: Option<Plan>,
 		u: &Uniforms,
 		at: (usize, u32, u32),
 		view: (&'a Camera, f32, f32),
-		active: bool,
 		rows: &[[[f32; 4]; 4]; 16],
 	) -> Option<Input<'a>> {
-		let quality = level(gfx);
+		let Plan { quality, sheet_z, mist_z } = plan?;
 		if fog_log() {
-			eprintln!("volfog: level {} quality {quality} active {active} water_inputs {} fog {:?} colour {:?}", at.0, post.water_inputs().is_some(), u.fog, u.fog_colour);
-		}
-		// Retail's own GS fog is faded (not removed) while the volumetric fog draws; 1.0 otherwise = the retail picture.
-		crate::retail::pcext::fogopt::set_gs_scale(if quality == 0 || !active { 1.0 } else { crate::devtune::f32("fog_gs", 0.35) });
-		if quality == 0 || !active {
-			return None;
+			eprintln!("volfog: level {} plan {plan:?} water_inputs {} fog {:?} colour {:?}", at.0, post.water_inputs().is_some(), u.fog, u.fog_colour);
 		}
 		let (scene, lin, _, generation) = post.water_inputs()?;
 		let cover = post.fog_cover()?;
-		let is_sheet = super::super::waterfx::fog_sheet_ocean(at.0);
-		let zs: Vec<f32> = if is_sheet || density::air(at.0) == 0.0 { ocean_z.collect() } else { Vec::new() };
-		let mean_z = (!zs.is_empty()).then(|| zs.iter().sum::<f32>() / zs.len() as f32);
-		let (sheet_z, mist_z) = if is_sheet { (mean_z, None) } else { (None, water_level(&zs)) };
-		// A level with no volume at all (the space levels: no air haze, sheet or water mist) keeps retail's fog exactly.
-		if density::air(at.0) == 0.0 && sheet_z.is_none() && mist_z.is_none() {
-			crate::retail::pcext::fogopt::set_gs_scale(1.0);
-			return None;
-		}
-		if fog_log() {
-			eprintln!("volfog: sheet_z {sheet_z:?} mist_z {mist_z:?} ({} water vertices)", zs.len());
-		}
 		Some(Input {
 			cam: view.0,
 			aspect: view.1,

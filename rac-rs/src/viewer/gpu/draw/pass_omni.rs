@@ -38,6 +38,23 @@ struct Cached {
 /// Pictures of the mods' solids by run number (MAIN only; see STATE.md).
 static MASKS: Mutex<Vec<Cached>> = Mutex::new(Vec::new());
 
+/// The vertex and index buffers of the layer, kept between frames and grown when a frame needs more (MAIN only, like `MASKS`; the Gpu is created
+/// once per process). Every frame uploads into the front of them with `write_buffer` before the pass's submit, and a split-view pass submits on
+/// its own before the main one, so the uploads never overlap a draw that is still waiting.
+static BUFFERS: Mutex<(Option<wgpu::Buffer>, Option<wgpu::Buffer>)> = Mutex::new((None, None));
+
+/// A buffer of at least `need` bytes for `usage`: the kept one while it is big enough, else a new one of the next power of two (at least 64 KiB,
+/// at most the device's largest buffer).
+fn kept_buffer(device: &wgpu::Device, slot: &mut Option<wgpu::Buffer>, label: &str, need: u64, usage: wgpu::BufferUsages) -> wgpu::Buffer {
+	if let Some(b) = slot.as_ref().filter(|b| b.size() >= need) {
+		return b.clone();
+	}
+	let size = need.max(1).next_power_of_two().max(1 << 16).min(device.limits().max_buffer_size).max(need);
+	let b = device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage: usage | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+	*slot = Some(b.clone());
+	b
+}
+
 /// What one draw call binds.
 #[derive(Clone, Copy)]
 enum Src {
@@ -131,16 +148,20 @@ impl Gpu {
 		let Some(frame) = crate::omni::draw::current() else { return };
 		let Some((_, _, layout)) = crate::omni::draw::view() else { return };
 		let art = crate::omni::draw_art::get();
-		let sharp = crate::retail::ui_sharp(sh as u32);
+		// [PC] a refused sharp HUD shader (pipe_guard.rs) = the plain layer: no sharp vertex data is written or drawn.
+		let sharp_pipe = crate::retail::ui_sharp(sh as u32).then(|| super::hudsharp::pipelines(&self.device, &self.pipeline, &self.tex_layout, self.config.format, self.depth_format).map(|p| &p[0])).flatten();
+		let sharp = sharp_pipe.is_some();
+		// A fixed budget (64K quads, a few MB of buffers that stay allocated), and never more than the device's largest buffer holds.
+		let max_quads = crate::omni::draw_quads::quad_budget(self.device.limits().max_buffer_size, std::mem::size_of::<Vertex>() as u64);
 		let mut cache = MASKS.lock().unwrap_or_else(|e| e.into_inner());
-		let (quads, items) = if sharp {
+		let (mut quads, items) = if sharp {
 			let [gx0, gy0] = layout.to_game(0.0, 0.0);
 			let [gx1, gy1] = layout.to_game(sw, sh);
 			let clip = [gx0.min(gx1).floor() as i32, gy0.min(gy1).floor() as i32, gx0.max(gx1).ceil() as i32, gy0.max(gy1).ceil() as i32];
-			self.omni_sharp(draw_mask::build(&frame, &layout, art.as_deref()), &layout, clip, &mut cache)
+			self.omni_sharp(draw_mask::build(&frame, &layout, art.as_deref(), max_quads), &layout, clip, &mut cache)
 		} else {
 			cache.clear();
-			let quads = plain_build(&frame, &layout, art.as_deref());
+			let quads = plain_build(&frame, &layout, art.as_deref(), max_quads);
 			let mut items = Vec::new();
 			for i in 0..quads.len() {
 				add_item(&mut items, &quads[..=i], Src::Slot(quads[i].tex));
@@ -150,6 +171,16 @@ impl Gpu {
 		if quads.is_empty() {
 			return;
 		}
+		// [PC] HUD position / scale (Display rows, handler/hud_place.rs): a mod's HUD in a top corner moves with the retail HUD there.
+		if let Some(p) = self.hud_place {
+			for q in &mut quads {
+				q.rect = crate::viewer::handler::hud_place::map_rect(q.rect, sw, sh, p);
+			}
+		}
+		// Solids pieces come on top of the glyph budget: the draw calls keep to the quads that fit.
+		let (mut quads, items) = (quads, items);
+		quads.truncate(max_quads);
+		let items: Vec<Item> = items.into_iter().map(|it| Item { to: it.to.min(quads.len()), src: it.src }).collect();
 		let mut verts = Vec::with_capacity(quads.len() * 4);
 		let mut idx = Vec::with_capacity(quads.len() * 6);
 		for q in &quads {
@@ -160,17 +191,19 @@ impl Gpu {
 			}
 			idx.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
 		}
-		let vb = buffer(&self.device, "omni vertices", bytemuck::cast_slice(&verts), wgpu::BufferUsages::VERTEX);
-		self.queue.write_buffer(&vb, 0, bytemuck::cast_slice(&verts));
-		let ib = buffer(&self.device, "omni indices", bytemuck::cast_slice(&idx), wgpu::BufferUsages::INDEX);
-		self.queue.write_buffer(&ib, 0, bytemuck::cast_slice(&idx));
+		let (vdata, idata): (&[u8], &[u8]) = (bytemuck::cast_slice(&verts), bytemuck::cast_slice(&idx));
+		let (vb, ib) = {
+			let mut kept = BUFFERS.lock().unwrap_or_else(|e| e.into_inner());
+			(kept_buffer(&self.device, &mut kept.0, "omni vertices", vdata.len() as u64, wgpu::BufferUsages::VERTEX), kept_buffer(&self.device, &mut kept.1, "omni indices", idata.len() as u64, wgpu::BufferUsages::INDEX))
+		};
+		self.queue.write_buffer(&vb, 0, vdata);
+		self.queue.write_buffer(&ib, 0, idata);
 		// The previews left their own viewport, scissor and uniforms bound.
 		pass.set_viewport(0.0, 0.0, sw, sh, 0.0, 1.0);
 		pass.set_scissor_rect(0, 0, sw as u32, sh as u32);
 		pass.set_bind_group(0, &self.ubind, &[]);
-		let sharp_pipe = sharp.then(|| &super::hudsharp::pipelines(&self.device, &self.pipeline, &self.tex_layout, self.config.format, self.depth_format)[0]);
-		pass.set_vertex_buffer(0, vb.slice(..));
-		pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+		pass.set_vertex_buffer(0, vb.slice(0..vdata.len() as u64));
+		pass.set_index_buffer(ib.slice(0..idata.len() as u64), wgpu::IndexFormat::Uint32);
 		// One draw per run of quads that share a texture (the built-in font, the game font, icons, a solids picture), in list order.
 		let mut from = 0;
 		for it in &items {

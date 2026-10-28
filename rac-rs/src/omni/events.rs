@@ -32,7 +32,7 @@ pub fn note_front(front: bool) {
 	FRONT.store(front, Ordering::Relaxed);
 }
 
-const LEVEL_WORD: u32 = 0x15_ED84;
+const LEVEL_WORD: u32 = super::native_host::LEVEL_WORD as u32;
 const EXIT_WORD: u32 = 0x15_F550;
 const MODE_WORD: u32 = 0x15_F5A4;
 const MASK: u32 = 0x01ff_ffff;
@@ -226,9 +226,9 @@ pub fn send(o: &Omni, c: &mut Cpu, tick: u64) {
 		let level_word = rd(&c.mem.ram, LEVEL_WORD) as i32;
 		let from_title = w.front.step(FRONT.load(Ordering::Relaxed), level_word, loaded);
 		let mut v: Vec<Event> = match (super::newgame::take(), from_title) {
-			(Some(plus), _) => vec![Event::NewGame(plus)],
-			(None, true) => vec![Event::NewGame(false)],
-			(None, false) => Vec::new(),
+			(true, _) => vec![Event::NewGame(true)],
+			(false, true) => vec![Event::NewGame(false)],
+			(false, false) => Vec::new(),
 		};
 		v.extend(card);
 		v.extend(w.step(&snapshot(&c.mem.ram, FRONT.load(Ordering::Relaxed))));
@@ -252,7 +252,7 @@ pub fn send(o: &Omni, c: &mut Cpu, tick: u64) {
 			native_host::say_once(&format!("event-{name}"), &format!("omni_event {name} failed"));
 		}
 		super::trace::event(tick, name, a, text);
-		eprintln!("omni: event {name} {a} {text}");
+		super::logq::line(&format!("omni: event {name} {a} {text}"));
 	}
 }
 

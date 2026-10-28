@@ -49,6 +49,13 @@ struct Job {
 /// [PC] ReShade add-on (gpu/reshade.rs): runs on the submitting thread between the two halves of a frame's submit.
 pub(super) type Hook = Box<dyn FnOnce() + Send>;
 
+/// `queue.present` on the calling thread, with its start and length in the RAC_FRAME_CSV file.
+fn present_timed(q: &wgpu::Queue, frame: wgpu::SurfaceTexture) {
+	let t = Instant::now();
+	q.present(frame);
+	super::framecsv::present(t, t.elapsed().as_secs_f32() * 1000.0);
+}
+
 /// Submits `cmds`; with `mid` = (n, hook): the first n, then the hook, then the rest (the hook's work lands between them on the queue).
 fn submit_parts(q: &wgpu::Queue, mut cmds: Vec<wgpu::CommandBuffer>, mid: Option<(usize, Hook)>) {
 	let Some((n, hook)) = mid else {
@@ -57,8 +64,53 @@ fn submit_parts(q: &wgpu::Queue, mut cmds: Vec<wgpu::CommandBuffer>, mid: Option
 	};
 	let rest = cmds.split_off(n.min(cmds.len()));
 	q.submit(cmds);
-	hook();
+	run_hook(hook);
 	q.submit(rest);
+}
+
+/// Runs the ReShade hook under the GS capture's submit lock. The add-on's `flush_immediate` is a raw vkQueueSubmit on the window's queue
+/// with no lock of its own, and ReShade's hooked vkQueueSubmit (the capture's submit, when it shares the window's device) flushes the same
+/// immediate list: held across the hook, neither the capture's submit nor `configure_surface` can run inside it. The lock is the outermost
+/// one on every path (the hook takes no other lock of ours; ReShade's own callbacks `on_init` / `on_destroy` take none).
+fn run_hook(hook: Hook) {
+	let _no_capture_submit = crate::retail::gpu_capture_submit_lock();
+	hook();
+}
+
+#[cfg(test)]
+mod tests {
+	use std::sync::atomic::{AtomicBool, Ordering};
+	use std::sync::Arc;
+
+	/// While the hook runs, a second holder of the capture's submit lock (the capture thread's `submit`) waits for it to return.
+	#[test]
+	fn the_reshade_hook_runs_under_the_capture_submit_lock() {
+		let other_in = Arc::new(AtomicBool::new(false));
+		let (flag, seen) = (other_in.clone(), Arc::new(AtomicBool::new(true)));
+		let seen2 = seen.clone();
+		let (started_tx, started_rx) = std::sync::mpsc::channel();
+		let hook: super::Hook = Box::new(move || {
+			let f = flag.clone();
+			let h = std::thread::spawn(move || {
+				started_tx.send(()).unwrap();
+				let _g = crate::retail::gpu_capture_submit_lock();
+				f.store(true, Ordering::SeqCst);
+			});
+			started_rx.recv().unwrap();
+			std::thread::sleep(std::time::Duration::from_millis(100));
+			seen2.store(flag.load(Ordering::SeqCst), Ordering::SeqCst); // the other holder must not have got in yet
+			drop(h);
+		});
+		super::run_hook(hook);
+		assert!(!seen.load(Ordering::SeqCst), "the capture's submit entered while the ReShade hook ran");
+		for _ in 0..200 {
+			if other_in.load(Ordering::SeqCst) {
+				return;
+			}
+			std::thread::sleep(std::time::Duration::from_millis(10));
+		}
+		panic!("the lock was not released after the hook");
+	}
 }
 
 /// True while a frame's command buffers are handed over but not yet submitted.
@@ -153,6 +205,7 @@ impl Presenter {
 						let t = Instant::now();
 						q.present(frame);
 						let d = t.elapsed().as_nanos() as u64;
+						super::framecsv::present(t, d as f32 / 1e6);
 						(n, ns) = (n + 1, ns + d);
 						if log && n == 300 {
 							eprintln!("present-thread: {:.2} ms inside present, {:.2} ms waiting for the parts, {:.2} ms in submit (avg of {n})", ns as f64 / n as f64 / 1e6, sub.0 as f64 / n as f64 / 1e6, sub.1 as f64 / n as f64 / 1e6);
@@ -185,7 +238,7 @@ impl Presenter {
 	/// Presents `frame` (inline, or on the worker once the previous present has returned).
 	pub(super) fn present(&self, frame: wgpu::SurfaceTexture) {
 		let Some((tx, _)) = &self.worker else {
-			self.queue.present(frame);
+			present_timed(&self.queue, frame);
 			return;
 		};
 		{
@@ -195,7 +248,7 @@ impl Presenter {
 		*self.busy.0.lock().unwrap() = true;
 		if let Err(mpsc::SendError(job)) = tx.send(Job { parts: Vec::new(), last: None, frame, mid: None }) {
 			*self.busy.0.lock().unwrap() = false;
-			self.queue.present(job.frame);
+			present_timed(&self.queue, job.frame);
 		}
 	}
 
@@ -215,13 +268,13 @@ impl Presenter {
 		*self.busy.0.lock().unwrap() = true;
 		self.gate.set();
 		let job = Job { parts: cuts.parts, last: Some(last), frame, mid: cuts.mid };
-		if let Err(mpsc::SendError(Job { parts, last, frame, mid })) = tx.send(job) {
+		if let Err(mpsc::SendError(Job { parts, last, frame, mid, .. })) = tx.send(job) {
 			let mut cmds: Vec<wgpu::CommandBuffer> = parts.into_iter().filter_map(|rx| rx.recv().ok()).collect();
 			cmds.extend(last);
 			submit_parts(&self.queue, cmds, mid);
 			self.gate.clear();
 			*self.busy.0.lock().unwrap() = false;
-			self.queue.present(frame);
+			present_timed(&self.queue, frame);
 		}
 	}
 }

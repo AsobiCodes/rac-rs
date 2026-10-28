@@ -211,12 +211,11 @@ impl App {
 					g.strip_draws.extend(fx.strips.iter().cloned());
 					g.pool_draws.extend(fx.pools.iter().cloned());
 				}
-				// ARI-49b / BRIDGE-63: Aridia ocean patches (pure), texture re-blended once per game frame (50 Hz tick).
-				// KER-30: the Kerwan ocean is absent while `frames` < 2 (its moby's init tick).
-				// Retail mode: Batalia / Oltanis come from RAM while their wrapper is queued (queue_q1::ocean, descriptor fog); the others
-				// below. The level frame counter is `game.frames` (= RAM 0x15f5ac, set from `RetailFx.frames` each tick in the retail branch).
+				// ARI-49b / BRIDGE-63 / KER-30 (Gpu::set_oceans): Aridia ocean patches (pure), texture re-blended once per game frame (50 Hz tick).
+				// Retail mode: Batalia / Oltanis come from RAM while their wrapper is queued (queue_q1::ocean, descriptor fog); the others below.
+				// The level frame counter is `game.frames` (= RAM 0x15f5ac, set from `RetailFx.frames` each tick in the retail branch).
 				let ram_ocean = self.retail.as_ref().and_then(|r| r.fx()).and_then(|f| f.ocean.as_deref());
-				g.set_ocean(ram_ocean.or(self.ocean.as_ref().filter(|o| o.shown(game.frames))), self.cam.pos, &self.cuboids, game.vis_render.occ_mode != 0, game.frames, game.visibomb.is_some());
+				g.set_oceans(ram_ocean, self.ocean.as_ref(), self.cam.pos, &self.cuboids, game.vis_render.occ_mode != 0, game.frames, game.visibomb.is_some(), self.level);
 				// Retail mode: the oceans of Rilgar / Umbris / Gaspar from RAM (retail/oldsim.rs `oceans`; never the levels of `queue_q1::ocean`).
 				if !hold_oceans {
 					g.set_ocean_ram(self.retail.as_ref().and_then(|r| r.fx()).map_or(&[][..], |fx| &fx.oceans[..]), self.cam.pos);

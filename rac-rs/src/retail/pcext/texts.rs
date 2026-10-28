@@ -87,3 +87,21 @@ pub(super) static TEXTS: [[&[u8]; 5]; 33] = [
 	[b"Volumetric fog", b"Brouillard volumique", b"Volumetrischer Nebel", b"Niebla volum\x8ctrica", b"Nebbia volumetrica"],
 	[b"Volumetric clouds", b"Nuages volumiques", b"Volumetrische Wolken", b"Nubes volum\x8ctricas", b"Nuvole volumetriche"],
 ];
+
+/// The string pool slot of new text `k` (`NEW_IDS` order): `POOL`, `POOL2`, then `POOL3`.
+pub(super) fn pool_slot(k: usize) -> u32 {
+	match k {
+		_ if k < POOL_SLOTS => POOL + 0x40 * k as u32,
+		_ if k < POOL_SLOTS + POOL2_SLOTS => POOL2 + 0x40 * (k - POOL_SLOTS) as u32,
+		_ => POOL3 + 0x40 * (k - POOL_SLOTS - POOL2_SLOTS) as u32,
+	}
+}
+
+pub(super) fn text_for(k: usize, lang: usize) -> Vec<u8> {
+	TEXTS[k][lang].to_vec()
+}
+
+/// The game's language as an index into the text arrays (0 En .. 4 It).
+pub(super) fn lang_of(mem: &mut Mem) -> usize {
+	Lang::from_word(mem.rd32(LANG_WORD)).map_or(0, |l| l as usize)
+}

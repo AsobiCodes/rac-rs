@@ -9,6 +9,7 @@
 //!   back button, the wheel steps up / down (left / right over values, L1 / R1 over the ring), and the button-hint lines
 //!   press their button. See <dev>/scratch_play/handoff/mouse_lean.md for the RAM layout [C].
 
+use crate::fmath::Fm;
 use crate::retail::disc::va;
 pub const UP: u16 = 0x1000;
 pub const RIGHT: u16 = 0x2000;
@@ -29,9 +30,20 @@ pub(super) const SCREEN: (f32, f32) = (512.0, 448.0);
 /// instead of 5 when the game takes the press at once, the full 5 when it does not.
 const PRESS: u8 = 2;
 const RELEASE: u8 = 3;
-/// Presses spent steering to one goal before giving up.
+/// Presses spent steering to one goal before giving up; also the budget of one hovered target over all its goals (`State::spent`).
 const MAX_PRESSES: u32 = 24;
 const MASK: u32 = 0x01ff_ffff;
+/// Overlay pixels the pointer must travel from where it last aimed before a hover aims again: a resting hand's jitter (or a
+/// list scrolling under a still pointer) is no new aim. After a keyboard / pad menu input the hover waits for `KEY_MOVE_PX`.
+const JITTER_PX: f32 = 4.0;
+const KEY_MOVE_PX: f32 = 8.0;
+/// Fields a click / right click / wheel notch waits while the keyboard holds a menu button, then it is dropped.
+const PEND_FIELDS: u8 = 25;
+/// The generic list draw (Eudora FUN_0026dd30, Novalis FUN_002907c8, Veldin FUN_0027aa80: the same code on all 19 levels,
+/// relocated): its scroll step `lw v0,0x44(s1); b +3; addu v0,v0,v1; lw v0,0x44(s1); addiu v0,v0,4; sw v0,0x44(s1)` at
+/// entry + 0x418 has no relocated word, so the draw is recognised by its code (`list_draw`).
+const LIST_DRAW_SIG: [u32; 6] = [0x8e22_0044, 0x1000_0003, 0x0043_1021, 0x8e22_0044, 0x2442_0004, 0xae22_0044];
+const LIST_DRAW_SIG_AT: u32 = 0x418;
 
 /// Page-menu mode word 0x15f5a4.
 pub const MODE: u32 = 3;
@@ -208,8 +220,9 @@ fn classify(rd: &dyn Fn(u32) -> u32, rd16: &dyn Fn(u32) -> u32, id: u32, slot: u
 		return Kind::Other;
 	}
 	// 12-byte records {text id, type, arg, text2, pulse} up to a zero text id.
+	let list = list_draw(rd, it);
 	let mut recs = Vec::new();
-	for k in 0..14 {
+	for k in 0..if list { 256 } else { 14 } {
 		let a = data + 12 * k;
 		let text = rd16(a);
 		if text == 0 {
@@ -223,6 +236,9 @@ fn classify(rd: &dyn Fn(u32) -> u32, rd16: &dyn Fn(u32) -> u32, id: u32, slot: u
 	}
 	if rd(it) == 0 && recs.len() == 1 {
 		return hint_button(first as u16).map_or(Kind::Other, Kind::Hint);
+	}
+	if list && recs.len() > 1 {
+		return list_rows(&recs, flags, h, rd(it + 0x44) as i32, rd(it + 0x40));
 	}
 	let n = recs.len() as f32;
 	let fh = if flags & 4 != 0 {
@@ -243,6 +259,44 @@ fn classify(rd: &dyn Fn(u32) -> u32, rd16: &dyn Fn(u32) -> u32, id: u32, slot: u
 		})
 		.collect();
 	Kind::Label { rows, rowh, cursor: rd(it + 0x40) }
+}
+
+/// Is the item drawn by the generic list draw (`LIST_DRAW_SIG`)? Its rows follow `list_rows`.
+fn list_draw(rd: &dyn Fn(u32) -> u32, it: u32) -> bool {
+	let draw = rd(it + 4);
+	ram(draw) && draw & 3 == 0 && LIST_DRAW_SIG.iter().zip(0u32..).all(|(&w, k)| rd(draw + LIST_DRAW_SIG_AT + 4 * k) == w)
+}
+
+/// The rows as the generic list draw lays them out [C: Eudora FUN_0026dd30, asm 0x26dd30..0x26e1a0]: font height fh = 12, 14
+/// with flags 4, 10 with flags 8 (8 wins); line height fh + 2; gap = fh + 3 with flags 0x10, else h / (records + 1); the first
+/// row's text starts at gap - fh / 2 - scroll (+0x44, moved 4 px per field until the current row is in view), each record takes
+/// its text's lines (fh + 2 each), then gap more when it has a second text (+8), then 8. One line per text is assumed. [C,
+/// measured 2026-10-28] Texts wider than the list wrap (German Help Log from row 1, Skill Points from row 3): from the first
+/// wrapped row on, the model is fh + 2 px per extra line too high; exact for single-line lists (Help, Goodies, Cinematics, Galactic
+/// Map). Known limit (porting the wrap count of FUN_001ee4e0 would fix it). A row's band runs from 4 px above
+/// its text to 4 px above the next row's, so rows scrolled out of the item fall outside its rect and are never hit.
+fn list_rows(recs: &[(u32, u32, u32)], flags: u32, h: i32, scroll: i32, cursor: u32) -> Kind {
+	let fh: i32 = if flags & 8 != 0 {
+		10
+	} else if flags & 4 != 0 {
+		14
+	} else {
+		12
+	};
+	let gap = if flags & 0x10 != 0 { fh + 3 } else { h / (recs.len() as i32 + 1) };
+	let mut y = gap - fh / 2 - scroll;
+	let mut least = i32::MAX;
+	let rows = recs
+		.iter()
+		.map(|&(_, ty, t2)| {
+			let pitch = fh + 2 + if t2 != 0 { gap } else { 0 } + 8;
+			let row = ((y - 4) as f32 + pitch as f32 * 0.5, ty != 0);
+			least = least.min(pitch);
+			y += pitch;
+			row
+		})
+		.collect();
+	Kind::Label { rows, rowh: least as f32, cursor }
 }
 
 /// Window position (fractions 0..1 of the client area) -> overlay pixels. The overlay quad covers the whole window with
@@ -279,7 +333,7 @@ pub fn ring_slot(r: [i32; 4], i: u32) -> (f32, f32) {
 	let (cx, cy) = (r[0] as f32 + r[2] as f32 * 0.5, r[1] as f32 + r[3] as f32 * 0.5);
 	let rad = (r[2].min(r[3]) as f32) * 0.5 - 40.0;
 	let a = i as f32 * std::f32::consts::FRAC_PI_4 - std::f32::consts::FRAC_PI_2;
-	(cx + a.cos() * rad, cy + a.sin() * rad)
+	(cx + a.fcos() * rad, cy + a.fsin() * rad)
 }
 
 impl MenuSnap {
@@ -312,7 +366,7 @@ impl MenuSnap {
 				}
 				Kind::Ring { .. } => (0..8u32)
 					.map(|i| (i, ring_slot(it.rect, i)))
-					.map(|(i, (sx, sy))| (i, (sx - x).hypot(sy - y)))
+					.map(|(i, (sx, sy))| (i, (sx - x).fhypot(sy - y)))
 					.filter(|&(_, d)| d <= 28.0)
 					.min_by(|a, b| a.1.total_cmp(&b.1))
 					.map(|(i, _)| Target::Sub { item: it.addr, sub: i }),
@@ -351,6 +405,13 @@ impl MenuSnap {
 			Kind::Ring { cursor } => cursor == sub,
 			_ => self.cur == item && Self::cursor_of(it) == Some(sub),
 		}
+	}
+
+	/// Does a press toward `t` move the cursor inside the target's own item (it holds the selection, or it is the ring)? Only then
+	/// is the opposite press next an overshoot: stepping from item to item lands the new item's cursor anywhere.
+	fn inside(&self, t: Target) -> bool {
+		let Target::Sub { item, .. } = t else { return false };
+		self.cur == item || self.item(item).is_some_and(|i| matches!(i.kind, Kind::Ring { .. }))
 	}
 
 	/// The pad button that moves the game's selection one step toward `t`.
@@ -413,6 +474,40 @@ struct Goal {
 	/// The selection (current item, its cursor) when the last press went out, and how many presses in a row left it there.
 	sig: (u32, u32),
 	stuck: u8,
+	/// The last steering button: the opposite one next means the selection passed the goal or something else moves it.
+	last: u16,
+}
+
+impl Goal {
+	fn new(target: Target, page: u32, confirm: bool) -> Goal {
+		Goal { target, page, confirm, presses: 0, sig: (0, 0), stuck: 0, last: 0 }
+	}
+}
+
+/// The button that undoes `b` (0 for buttons without one).
+fn opposite(b: u16) -> u16 {
+	match b {
+		UP => DOWN,
+		DOWN => UP,
+		LEFT => RIGHT,
+		RIGHT => LEFT,
+		L1 => R1,
+		R1 => L1,
+		_ => 0,
+	}
+}
+
+/// The left stick as menu directions (a gamepad's stick, or WASD on the screens whose keys drive the stick: `menu_keys`
+/// `sticks`, the Galactic Map). For `State::step`'s "the player works the menu" test only; the game gets the stick as it was.
+pub fn stick_bits(s: [u8; 4]) -> u16 {
+	// Retail's pad writer (boot FUN_00216e20) turns a stick into D-pad bits at |byte - 0x7f| > 0x2f; the same threshold here, so the
+	// game never steps a menu on a push this test calls idle.
+	let pick = |v: u8, lo: u16, hi: u16| match v as i32 - 0x7f {
+		d if d < -0x2f => lo,
+		d if d > 0x2f => hi,
+		_ => 0,
+	};
+	pick(s[3], UP, DOWN) | pick(s[2], LEFT, RIGHT)
 }
 
 /// The mouse as the menu sees it, plus the pulse sequencer.
@@ -428,6 +523,19 @@ pub struct State {
 	left: u8,
 	/// A steering pulse in flight: the page and the selection when it went out.
 	steer: Option<(u32, (u32, u32))>,
+	/// Where the pointer was when the hover last aimed (`JITTER_PX`), and whether the keyboard / pad took the menu since
+	/// (`KEY_MOVE_PX`).
+	anchor: Option<(f32, f32)>,
+	quiet: bool,
+	/// The target under the pointer when it last aimed, presses spent on it over all its goals, and whether steering gave it up
+	/// (unreachable, overshot or fought): no new goal for it until the pointer aims at something else.
+	hover: Option<Target>,
+	spent: u32,
+	gave_up: bool,
+	/// Fields a click / right click / wheel notch has waited for the keyboard's menu buttons to go up.
+	pend: u8,
+	/// The page the hover bookkeeping belongs to (None: no page seen yet).
+	page: Option<u32>,
 }
 
 impl State {
@@ -436,6 +544,12 @@ impl State {
 		if self.pos != Some((x, y)) {
 			self.moved = true;
 		}
+		self.pos = Some((x, y));
+	}
+
+	/// The cursor moved to overlay pixels (x, y) while it is hidden (a pad / keyboard player bumped the desk): the place is kept (a
+	/// click that shows the cursor lands there) but the move is no aim.
+	pub fn track(&mut self, x: f32, y: f32) {
 		self.pos = Some((x, y));
 	}
 
@@ -465,14 +579,158 @@ impl State {
 		out
 	}
 
+	/// A menu button is down on the keyboard or pad (`kbd` of `step`): the player works the menu by hand and the mouse gives way. A
+	/// steering pulse in flight is cut at once, the goal is dropped and the pointer's place becomes the anchor the next hover must
+	/// leave by `KEY_MOVE_PX` (a pointer resting where it is, jittering or under a scrolling list, no longer re-aims over the key
+	/// presses). A click / right click / wheel notch waits (`PEND_FIELDS`) and goes out once the keys are up. A pulse the mouse fired
+	/// for a click or wheel notch is let finish; the result is what it still presses.
+	fn keys_held(&mut self) -> u16 {
+		if self.steer.take().is_some() {
+			self.left = 0;
+		}
+		self.goal = None;
+		self.quiet = true;
+		self.anchor = self.pos;
+		self.moved = false;
+		// The keys start a new episode: presses the mouse spent on the hovered row before do not count against it.
+		self.spent = 0;
+		if self.click || self.back || self.wheel != 0 {
+			self.pend += 1;
+			if self.pend > PEND_FIELDS {
+				(self.click, self.back, self.wheel, self.pend) = (false, false, 0, 0);
+			}
+		} else {
+			self.pend = 0;
+		}
+		if self.left > 0 { self.advance() } else { 0 }
+	}
 
-	/// One field: the pad bits the mouse adds. `menu` is the last snapshot (None = no menu: everything is dropped),
-	/// `kbd` the keyboard's buttons this field (a menu button from the keyboard cancels the mouse goal).
+	/// The hover bookkeeping belongs to one page: another page starts over, and a click / right click / wheel notch still waiting
+	/// for the keys (`keys_held`) was meant for the page that is gone: it must not fire on the new one.
+	fn new_page(&mut self, id: u32) {
+		if self.page != Some(id) {
+			if self.page.is_some() {
+				(self.click, self.back, self.wheel, self.pend) = (false, false, 0, 0);
+			}
+			(self.page, self.hover, self.spent, self.gave_up) = (Some(id), None, 0, false);
+		}
+	}
+
+	/// The pointer aims at `under`: it becomes the anchor, the keys no longer hold the menu, and a new target starts with a fresh
+	/// press budget.
+	fn aim_at(&mut self, under: Option<Target>) {
+		self.anchor = self.pos;
+		self.quiet = false;
+		if under != self.hover {
+			(self.hover, self.spent, self.gave_up) = (under, 0, false);
+		}
+	}
+
+	/// The pointer moved: when it left the anchor by `JITTER_PX` (`KEY_MOVE_PX` after a key press) it aims at what is under it, and
+	/// the selection is steered there unless steering already gave that target up. The same target again keeps its goal.
+	fn hover_aim(&mut self, m: &MenuSnap, under: Option<Target>) {
+		let Some((x, y)) = self.pos else { return };
+		if let Some((ax, ay)) = self.anchor {
+			if (x - ax).fhypot(y - ay) < if self.quiet { KEY_MOVE_PX } else { JITTER_PX } {
+				return;
+			}
+		}
+		let keep = under == self.hover && self.goal.is_some();
+		self.aim_at(under);
+		if keep {
+			return;
+		}
+		self.goal = match under {
+			// Hovering something already selected, a hint line or nothing: the mouse has no say.
+			Some(t) if !matches!(t, Target::Hint(_)) && !m.selected(t) && !self.gave_up => Some(Goal::new(t, m.id, false)),
+			_ => None,
+		};
+	}
+
+	/// A left click: a hint line presses its button, an item becomes a goal that ends with Cross, and a click on no item confirms
+	/// the highlighted one (the screen's confirm button, the one Enter / Space press: `menu_keys::screen`, Cross on most pages).
+	/// A click is a fresh aim: whatever steering gave up before is tried again.
+	fn click_at(&mut self, m: &MenuSnap, under: Option<Target>) -> Option<u16> {
+		self.aim_at(under);
+		(self.spent, self.gave_up) = (0, false);
+		match under {
+			Some(Target::Hint(b)) => {
+				self.goal = None;
+				Some(self.fire(b))
+			}
+			Some(t) => {
+				self.goal = Some(Goal::new(t, m.id, true));
+				None
+			}
+			None => {
+				self.goal = None;
+				Some(self.fire(super::menu_keys::screen(m).confirm))
+			}
+		}
+	}
+
+	/// A wheel notch: left / right over a value row, L1 / R1 over the ring, else up / down.
+	fn wheel_press(&mut self, m: &MenuSnap, under: Option<Target>, wheel: i32) -> u16 {
+		// The notch moves the selection off the pointer's row on purpose, like a key: the pointer's place becomes the anchor (a click's
+		// nudge of a pixel or two must not aim back at the old row).
+		(self.goal, self.anchor, self.quiet) = (None, self.pos, true);
+		let kind_of = |addr: u32| m.items.iter().find(|i| i.addr == addr).map(|i| i.kind.clone());
+		let on = match under {
+			Some(Target::Sub { item, .. }) => kind_of(item),
+			_ => None,
+		};
+		let up = wheel > 0;
+		let b = match on.or_else(|| kind_of(m.cur)) {
+			Some(Kind::Value { .. }) => if up { RIGHT } else { LEFT },
+			Some(Kind::Ring { .. }) => if up { L1 } else { R1 },
+			_ => if up { UP } else { DOWN },
+		};
+		self.fire(b)
+	}
+
+	/// One steering step toward the goal: the button that moves the selection a step, or the goal is reached (a click then presses
+	/// Cross), or it is given up: a button the game does not follow three presses in a row, the budget `MAX_PRESSES` of the hovered
+	/// target spent, or the selection passed the goal (the next step would be the opposite of the last, inside the goal's own item).
+	fn steer_goal(&mut self, m: &MenuSnap) -> u16 {
+		let Some(mut g) = self.goal else { return 0 };
+		if m.selected(g.target) {
+			self.goal = None;
+			return if g.confirm { self.fire(CROSS) } else { 0 };
+		}
+		let sig = m.sig();
+		g.stuck = if g.presses > 0 && sig == g.sig { g.stuck + 1 } else { 0 };
+		g.sig = sig;
+		match m.toward(g.target) {
+			Some(b) if self.spent < MAX_PRESSES && g.stuck < 3 && b != opposite(g.last) => {
+				(g.presses, g.last) = (g.presses + 1, if m.inside(g.target) { b } else { 0 });
+				self.spent += 1;
+				self.goal = Some(g);
+				let out = self.fire(b);
+				self.steer = Some((m.id, sig));
+				out
+			}
+			_ => {
+				(self.goal, self.gave_up) = (None, true);
+				0
+			}
+		}
+	}
+
+	/// One field: the pad bits the mouse adds. `menu` is the last snapshot (None = no menu: everything is dropped), `kbd` the pad
+	/// buttons the player holds this field, keyboard or controller (`keys_held`): a menu button, or the left stick pushed to a
+	/// direction (`stick_bits`), takes the menu away from the mouse.
 	pub fn step(&mut self, menu: Option<&MenuSnap>, kbd: u16) -> u16 {
 		let Some(m) = menu else {
-			*self = State { pos: self.pos, ..State::default() };
+			// The pointer's place stays the anchor: a 1 px jitter of a pointer resting over the next menu does not aim (the jitter
+			// rule only works against an anchor).
+			*self = State { pos: self.pos, anchor: self.pos, ..State::default() };
 			return 0;
 		};
+		self.new_page(m.id);
+		if kbd & MENU_BTNS != 0 {
+			return self.keys_held();
+		}
+		self.pend = 0;
 		if self.left > 0 {
 			// A steering pulse whose press the game already took (the selection moved, or the page changed) ends after its first
 			// released field: the next step goes out at once instead of after the full release.
@@ -491,10 +749,6 @@ impl State {
 			return 0;
 		}
 		let (moved, click, back, wheel) = (std::mem::take(&mut self.moved), std::mem::take(&mut self.click), std::mem::take(&mut self.back), std::mem::take(&mut self.wheel));
-		if kbd & MENU_BTNS != 0 {
-			self.goal = None;
-			return 0;
-		}
 		if self.goal.is_some_and(|g| g.page != m.id) {
 			self.goal = None;
 		}
@@ -504,62 +758,16 @@ impl State {
 			return self.fire(m.back_button());
 		}
 		if click {
-			match under {
-				Some(Target::Hint(b)) => {
-					self.goal = None;
-					return self.fire(b);
-				}
-				Some(t) => self.goal = Some(Goal { target: t, page: m.id, confirm: true, presses: 0, sig: (0, 0), stuck: 0 }),
-				// A click on no item confirms the highlighted one: the screen's confirm button, the one Enter / Space press
-				// (`menu_keys::screen`: Cross on most pages).
-				None => {
-					self.goal = None;
-					return self.fire(super::menu_keys::screen(m).confirm);
-				}
+			if let Some(b) = self.click_at(m, under) {
+				return b;
 			}
 		} else if moved {
-			match under {
-				Some(t) if !matches!(t, Target::Hint(_)) && !m.selected(t) => self.goal = Some(Goal { target: t, page: m.id, confirm: false, presses: 0, sig: (0, 0), stuck: 0 }),
-				// Hovering something already selected, a hint line or nothing: the mouse has no say.
-				_ => self.goal = None,
-			}
+			self.hover_aim(m, under);
 		}
 		if wheel != 0 {
-			self.goal = None;
-			let on_value = |t: Option<Target>| match t {
-				Some(Target::Sub { item, .. }) => m.items.iter().find(|i| i.addr == item).map(|i| i.kind.clone()),
-				_ => None,
-			};
-			let kind = on_value(under).or_else(|| m.items.iter().find(|i| i.addr == m.cur).map(|i| i.kind.clone()));
-			let up = wheel > 0;
-			let b = match kind {
-				Some(Kind::Value { .. }) => if up { RIGHT } else { LEFT },
-				Some(Kind::Ring { .. }) => if up { L1 } else { R1 },
-				_ => if up { UP } else { DOWN },
-			};
-			return self.fire(b);
+			return self.wheel_press(m, under, wheel);
 		}
-		let Some(mut g) = self.goal else { return 0 };
-		if m.selected(g.target) {
-			self.goal = None;
-			return if g.confirm { self.fire(CROSS) } else { 0 };
-		}
-		let sig = m.sig();
-		g.stuck = if g.presses > 0 && sig == g.sig { g.stuck + 1 } else { 0 };
-		g.sig = sig;
-		match m.toward(g.target) {
-			Some(b) if g.presses < MAX_PRESSES && g.stuck < 3 => {
-				g.presses += 1;
-				self.goal = Some(g);
-				let out = self.fire(b);
-				self.steer = Some((m.id, sig));
-				out
-			}
-			_ => {
-				self.goal = None;
-				0
-			}
-		}
+		self.steer_goal(m)
 	}
 }
 
@@ -851,5 +1059,425 @@ mod tests {
 		assert!(near(frac(0.0, 0.0, 4.0 / 3.0, None), [0.0, 0.0]) && near(frac(1.0, 1.0, 4.0 / 3.0, None), [1.0, 1.0]));
 		// GS-full (picture aspect given): letterboxed at the largest centred size.
 		assert!(near(frac(l, 0.0, wide, Some(4.0 / 3.0)), [0.0, 0.0]) && near(frac(r, 1.0, wide, Some(4.0 / 3.0)), [1.0, 1.0]));
+	}
+
+	/// A list item for the toy games below: `n` rows 33 px apart (the Galactic Map's pitch) in an item at (20, 20).
+	fn rows33(n: u32, cursor: u32) -> MenuSnap {
+		let rows = (0..n).map(|i| (20.5 + 33.0 * i as f32, true)).collect();
+		let kind = Kind::Label { rows, rowh: 33.0, cursor };
+		MenuSnap { page: 1, id: crate::retail::menu_keys::GALAXY, state: 2, cur: 0x10, front: false, items: vec![Item { addr: 0x10, slot: 0, rect: [20, 20, 144, 33 * n as i32 + 8], kind, texts: Vec::new() }] }
+	}
+
+	fn row_y(i: u32) -> f32 {
+		20.0 + 20.5 + 33.0 * i as f32
+	}
+
+	fn list_cursor(m: &MenuSnap) -> u32 {
+		MenuSnap::cursor_of(&m.items[0]).unwrap()
+	}
+
+	/// The toy list game: a press moves the cursor `step` rows (1 = as retail), clamped to the list.
+	fn list_play(m: &mut MenuSnap, b: u16, step: u32) {
+		let n = match &m.items[0].kind {
+			Kind::Label { rows, .. } => rows.len() as u32,
+			_ => unreachable!(),
+		};
+		if let Kind::Label { cursor, .. } = &mut m.items[0].kind {
+			if b & DOWN != 0 {
+				*cursor = (*cursor + step).min(n - 1);
+			}
+			if b & UP != 0 {
+				*cursor = cursor.saturating_sub(step);
+			}
+		}
+	}
+
+	/// Runs `fields` fields with no keys: the pointer shakes `shake` px sideways every field, presses are collected on their rising edge.
+	fn run_list(st: &mut State, m: &mut MenuSnap, fields: u32, at_row: u32, shake: f32, step: u32, takes: bool) -> Vec<u16> {
+		let (mut prev, mut presses) = (0u16, Vec::new());
+		for f in 0..fields {
+			st.cursor(100.0 + (f % 2) as f32 * shake, row_y(at_row));
+			let b = st.step(Some(&*m), 0);
+			if b & !prev != 0 {
+				presses.push(b & !prev);
+				if takes {
+					list_play(m, b & !prev, step);
+				}
+			}
+			prev = b;
+		}
+		presses
+	}
+
+	/// GitHub #16: the pointer rests on a row and shakes by a pixel or two; the player presses Down on the keyboard. The keys win:
+	/// the mouse adds nothing while they work, a shake under `KEY_MOVE_PX` after the last key aims nowhere, and a real move steers.
+	#[test]
+	fn keys_win_over_a_shaking_pointer() {
+		let mut m = rows33(12, 7);
+		let mut st = State::default();
+		st.cursor(100.0, row_y(7));
+		let (mut mouse, mut last_kbd) = (0u16, 0u16);
+		for f in 0..80u32 {
+			st.cursor(100.0 + (f % 2) as f32 * 1.5, row_y(7));
+			// Three Down taps of two fields each; the game takes a key in the field it goes down.
+			let kbd = if [10u32, 20, 30].iter().any(|&t| (t..t + 2).contains(&f)) { DOWN } else { 0 };
+			if kbd & !last_kbd != 0 {
+				list_play(&mut m, kbd, 1);
+			}
+			last_kbd = kbd;
+			mouse |= st.step(Some(&m), kbd);
+		}
+		assert_eq!((mouse, list_cursor(&m)), (0, 10), "every key press stays");
+		// The pointer leaves the anchor by less than KEY_MOVE_PX: still the keyboard's menu.
+		st.cursor(100.0, row_y(7) + 5.0);
+		assert!((0..30).all(|_| st.step(Some(&m), 0) == 0));
+		assert_eq!(list_cursor(&m), 10);
+		// A real move to row 4: the mouse steers there (Up x6) and stops.
+		let presses = run_list(&mut st, &mut m, 120, 4, 0.0, 1, true);
+		assert_eq!((list_cursor(&m), presses.len()), (4, 6), "{presses:?}");
+	}
+
+	/// A game that moves two rows a press passes an odd goal: the next step would reverse, so the mouse gives up there instead of
+	/// swinging over it, and a pointer that shakes 6 px every field (a new aim each field) does not start it again.
+	#[test]
+	fn an_overshooting_game_gives_up_after_the_reversal() {
+		let mut m = rows33(12, 0);
+		let mut st = State::default();
+		let presses = run_list(&mut st, &mut m, 300, 3, 6.0, 2, true);
+		assert_eq!((presses.clone(), list_cursor(&m)), (vec![DOWN, DOWN], 4), "{presses:?}");
+		assert!(st.gave_up && st.goal.is_none());
+		// Another page starts over.
+		let other = MenuSnap { id: 0xc, ..m.clone() };
+		st.step(Some(&other), 0);
+		assert!(!st.gave_up && st.hover.is_none() && st.spent == 0);
+	}
+
+	/// A game that ignores the presses is pressed three times, not for as long as the pointer shakes.
+	#[test]
+	fn a_deaf_game_is_pressed_three_times_only() {
+		let mut m = rows33(12, 0);
+		let mut st = State::default();
+		let presses = run_list(&mut st, &mut m, 400, 5, 6.0, 1, false);
+		assert_eq!(presses.len(), 3, "{presses:?}");
+		assert!(st.gave_up);
+		// A click is a new try.
+		st.click();
+		let presses = run_list(&mut st, &mut m, 100, 5, 0.0, 1, false);
+		assert_eq!(presses.len(), 3, "{presses:?}");
+	}
+
+	/// A click made while a key is down waits for the key (and goes out then); one that waits longer than PEND_FIELDS is dropped.
+	#[test]
+	fn a_click_waits_for_the_keys() {
+		for (down_fields, crossed_end, cursor_end) in [(10u32, 1u32, 3u32), (40, 0, 7)] {
+			let mut m = rows33(12, 7);
+			let mut st = State::default();
+			st.cursor(100.0, row_y(3));
+			st.click();
+			let (mut crossed, mut prev) = (0u32, 0u16);
+			for f in 0..150u32 {
+				let kbd = if f < down_fields { DOWN } else { 0 };
+				let b = st.step(Some(&m), kbd);
+				assert!(kbd == 0 || b == 0, "the mouse presses nothing while a key is down");
+				if b & !prev != 0 {
+					if b & CROSS != 0 {
+						crossed += 1;
+					} else {
+						list_play(&mut m, b & !prev, 1);
+					}
+				}
+				prev = b;
+			}
+			assert_eq!((crossed, list_cursor(&m)), (crossed_end, cursor_end), "keys down for {down_fields} fields");
+		}
+	}
+
+	/// A key cuts a steering pulse in flight at once; the pulse of a click is let finish.
+	#[test]
+	fn a_key_cuts_a_steering_pulse_but_not_a_click() {
+		let m = rows33(12, 0);
+		let mut st = State::default();
+		st.cursor(100.0, row_y(5));
+		assert_eq!(st.step(Some(&m), 0), DOWN);
+		assert_eq!(st.step(Some(&m), 0), DOWN);
+		assert_eq!(st.step(Some(&m), UP), 0, "the steering pulse is cut");
+		assert!((0..30).all(|_| st.step(Some(&m), 0) == 0), "and nothing aims again without a move");
+		// A click off every item presses Cross for the highlighted one; a key then does not cancel that press.
+		st.cursor(5.0, 5.0);
+		st.click();
+		assert_eq!(st.step(Some(&m), 0), CROSS);
+		assert_eq!(st.step(Some(&m), DOWN), CROSS);
+	}
+
+	#[test]
+	fn the_left_stick_is_a_menu_direction() {
+		assert_eq!(stick_bits([0x80; 4]), 0);
+		assert_eq!(stick_bits([0, 0, 0x80, 0x80]), 0, "the right stick is not a menu input");
+		assert_eq!(stick_bits([0x80, 0x80, 0x80, 0x00]), UP);
+		assert_eq!(stick_bits([0x80, 0x80, 0x80, 0xff]), DOWN);
+		assert_eq!(stick_bits([0x80, 0x80, 0x00, 0x80]), LEFT);
+		assert_eq!(stick_bits([0x80, 0x80, 0xff, 0x80]), RIGHT);
+		assert_eq!(stick_bits([0x80, 0x80, 0x00, 0xff]), LEFT | DOWN);
+		// Retail's pad writer: a direction when |byte - 0x7f| > 0x2f, i.e. byte <= 0x4f or >= 0xaf.
+		assert_eq!(stick_bits([0x80, 0x80, 0x50, 0xae]), 0, "0x50 and 0xae are still idle");
+		assert_eq!(stick_bits([0x80, 0x80, 0x4f, 0xaf]), LEFT | DOWN, "0x4f and 0xaf are directions");
+		assert_eq!(stick_bits([0x80, 0x80, 0x40, 0xc0]), LEFT | DOWN, "a half push is one");
+		assert_ne!(stick_bits([0x80, 0x80, 0x80, 0x00]) & MENU_BTNS, 0);
+	}
+
+	/// The stick alone (WASD on the maps, a gamepad) works the menu through `step` like a key: a steering pulse is cut, the goal
+	/// dropped, nothing aims again without a real move.
+	#[test]
+	fn the_stick_alone_takes_the_menu_from_the_mouse() {
+		let m = rows33(12, 0);
+		let mut st = State::default();
+		st.cursor(100.0, row_y(5));
+		assert_eq!(st.step(Some(&m), 0), DOWN);
+		let down = stick_bits([0x80, 0x80, 0x80, 0xff]);
+		assert_eq!(down, DOWN);
+		assert_eq!(st.step(Some(&m), down), 0, "the pulse is cut by the pushed stick");
+		assert!((0..30).all(|_| st.step(Some(&m), down) == 0), "and nothing is pressed while it is pushed");
+		assert!((0..30).all(|_| st.step(Some(&m), stick_bits([0x80; 4])) == 0), "nor after it is released");
+		// A stick on the edge of retail's threshold (0xaf-1 = 0xae, still idle) does not hold the menu: the pointer's move steers again.
+		st.cursor(100.0, row_y(8));
+		assert_eq!(st.step(Some(&m), stick_bits([0x80, 0x80, 0x80, 0xae])), DOWN);
+	}
+
+	/// A right click or wheel notch made while a key is down waits for the key and goes out after it; one that waits longer than
+	/// `PEND_FIELDS` is dropped.
+	#[test]
+	fn right_click_and_wheel_wait_for_the_keys_and_are_dropped_after_pend_fields() {
+		for (down_fields, fires) in [(10u32, true), (40, false)] {
+			let m = rows33(12, 4);
+			let mut st = State::default();
+			st.cursor(5.0, 5.0);
+			st.back();
+			let out: Vec<u16> = (0..120).map(|f| st.step(Some(&m), if f < down_fields { DOWN } else { 0 })).collect();
+			assert!(out[..down_fields as usize].iter().all(|&b| b == 0), "the mouse presses nothing while a key is down");
+			assert_eq!(out.iter().any(|&b| b == m.back_button()), fires, "right click after {down_fields} key fields: {out:?}");
+			st.wheel(-1.0);
+			let out: Vec<u16> = (0..120).map(|f| st.step(Some(&m), if f < down_fields { DOWN } else { 0 })).collect();
+			assert!(out[..down_fields as usize].iter().all(|&b| b == 0));
+			assert_eq!(out.iter().any(|&b| b == DOWN), fires, "wheel after {down_fields} key fields: {out:?}");
+		}
+	}
+
+	/// A click, right click or wheel notch waiting for the keys is dropped when the keys change the page: it was meant for the page
+	/// that is gone.
+	#[test]
+	fn a_pending_click_does_not_survive_a_page_change() {
+		let (m, other) = (rows33(12, 4), MenuSnap { id: 0xc, ..rows33(12, 4) });
+		for what in 0..3 {
+			let mut st = State::default();
+			st.cursor(100.0, row_y(4));
+			assert_eq!(st.step(Some(&m), 0), 0);
+			match what {
+				0 => st.click(),
+				1 => st.back(),
+				_ => st.wheel(1.0),
+			}
+			assert_eq!(st.step(Some(&m), DOWN), 0);
+			// The key moved the game to another page; the key is still down, then up.
+			assert_eq!(st.step(Some(&other), DOWN), 0);
+			let out: Vec<u16> = (0..60).map(|_| st.step(Some(&other), 0)).collect();
+			assert!(out.iter().all(|&b| b == 0), "pending {what} fired on the new page: {out:?}");
+		}
+	}
+
+	/// Keys start a new episode: presses the mouse spent on the hovered row before do not use up its `MAX_PRESSES`.
+	#[test]
+	fn keys_reset_the_press_budget_of_the_hovered_row() {
+		let (m, mut st) = (rows33(12, 0), State::default());
+		st.cursor(100.0, row_y(5));
+		st.step(Some(&m), 0);
+		assert!(st.spent > 0);
+		st.step(Some(&m), DOWN);
+		assert_eq!(st.spent, 0);
+	}
+
+	/// The wheel moves the selection off the pointer's row on purpose; the click of the notch nudges the pointer by a pixel or two,
+	/// which must not aim back at the old row (the #16 "jumps back", wheel flavour).
+	#[test]
+	fn a_wheel_notch_and_a_nudged_pointer_do_not_aim_back() {
+		let mut m = rows33(12, 3);
+		let mut st = State::default();
+		st.cursor(100.0, row_y(5));
+		let mut prev = 0u16;
+		let mut run = |st: &mut State, m: &mut MenuSnap, fields: u32, presses: &mut Vec<u16>| {
+			for _ in 0..fields {
+				let b = st.step(Some(&*m), 0);
+				if b & !prev != 0 {
+					presses.push(b & !prev);
+					list_play(m, b & !prev, 1);
+				}
+				prev = b;
+			}
+		};
+		let mut presses = Vec::new();
+		run(&mut st, &mut m, 40, &mut presses);
+		assert_eq!((list_cursor(&m), presses.len()), (5, 2), "the pointer steered to row 5: {presses:?}");
+		// The pointer drifts 3 px (under JITTER_PX: no aim), the wheel goes down one row, the pointer drifts 2 px more.
+		st.cursor(103.0, row_y(5));
+		run(&mut st, &mut m, 4, &mut presses);
+		st.wheel(-1.0);
+		run(&mut st, &mut m, 12, &mut presses);
+		assert_eq!(list_cursor(&m), 6, "the wheel moved down one row: {presses:?}");
+		st.cursor(105.0, row_y(5));
+		presses.clear();
+		run(&mut st, &mut m, 60, &mut presses);
+		assert_eq!((list_cursor(&m), presses.len()), (6, 0), "nothing steers back: {presses:?}");
+	}
+
+	/// Two items: the first holds the selection, the goal is a row of the second. The first press (Down) lands the second item's
+	/// cursor anywhere (row 4 here, below the goal), so the Up that follows is no overshoot and steering does not give up.
+	#[test]
+	fn steering_from_item_to_item_does_not_give_up_on_the_reversal() {
+		let rect = |y, h| [20, y, 144, h];
+		let two = |cur: u32, cursor: u32| {
+			let a = Item { addr: 0x10, slot: 0, rect: rect(20, 40), kind: Kind::Label { rows: vec![(20.5, true)], rowh: 33.0, cursor: 0 }, texts: Vec::new() };
+			let rows = (0..6).map(|i| (20.5 + 33.0 * i as f32, true)).collect();
+			let b = Item { addr: 0x20, slot: 1, rect: rect(100, 210), kind: Kind::Label { rows, rowh: 33.0, cursor }, texts: Vec::new() };
+			MenuSnap { page: 1, id: crate::retail::menu_keys::GALAXY, state: 2, cur, items: vec![a, b], front: false }
+		};
+		let mut m = two(0x10, 0);
+		let mut st = State::default();
+		st.cursor(100.0, 100.0 + 20.5 + 33.0);
+		let (mut prev, mut presses) = (0u16, Vec::new());
+		for _ in 0..200 {
+			let b = st.step(Some(&m), 0);
+			if b & !prev != 0 {
+				presses.push(b & !prev);
+				if b & DOWN != 0 && m.cur == 0x10 {
+					m = two(0x20, 4);
+				} else if b & UP != 0 && m.cur == 0x20 {
+					if let Kind::Label { cursor, .. } = &mut m.items[1].kind {
+						*cursor = cursor.saturating_sub(1);
+					}
+				}
+			}
+			prev = b;
+		}
+		assert_eq!((presses.clone(), MenuSnap::cursor_of(&m.items[1]), m.cur), (vec![DOWN, UP, UP, UP], Some(1), 0x20));
+		assert!(!st.gave_up, "{presses:?}");
+	}
+
+	/// The Galactic Map's planet list (GitHub #16) as the generic list draw lays it out: 18 records {text 0x4eb9 + p, type 1, text2
+	/// 0x4ecc + p}, flags 0x138, rect (20, 86, 144, 251), scroll `scroll`; `sig` = the item's draw function is the generic one.
+	fn galaxy(scroll: u32, sig: bool) -> MenuSnap {
+		galaxy_n(18, scroll, sig)
+	}
+
+	fn galaxy_n(n: u32, scroll: u32, sig: bool) -> MenuSnap {
+		let mut w = std::collections::HashMap::<u32, u32>::new();
+		let (pp, page, list, data, draw) = (0x1ba0f4u32, 0x1b3d98u32, 0x1b3f98u32, 0x1b5000u32, 0x28_df18u32);
+		w.extend([(pp, page), (pp - 4, 2), (page + 0x3c, crate::retail::menu_keys::GALAXY), (page + 0x40, list), (page + 0x44, list)]);
+		for (k, v) in [20, 86, 144, 251].into_iter().enumerate() {
+			w.insert(list + 0x18 + 4 * k as u32, v);
+		}
+		w.extend([(list, 0x28_dc00), (list + 4, draw), (list + 0x30, 0x138), (list + 0x34, data), (list + 0x40, 3), (list + 0x44, scroll)]);
+		if sig {
+			for (k, v) in LIST_DRAW_SIG.into_iter().enumerate() {
+				w.insert(draw + LIST_DRAW_SIG_AT + 4 * k as u32, v);
+			}
+		}
+		for p in 0..n {
+			w.insert(data + 12 * p, (0x4eb9 + p) | 1 << 16);
+			w.insert(data + 12 * p + 8, 0x4ecc + p);
+		}
+		let rd = |a: u32| w.get(&a).copied().unwrap_or(0);
+		read_ptr(&rd, pp).unwrap()
+	}
+
+	/// Retail's list rows are 33 px apart (font 10, gap 13, a second text) and the list scrolls: the old model (26 px, no scroll)
+	/// put the hover on the wrong planet.
+	#[test]
+	fn galactic_map_rows_are_33_px_apart_and_scroll() {
+		let row = |i| Some(Target::Sub { item: 0x1b3f98, sub: i });
+		let at = |m: &MenuSnap, local_y: f32| m.hit(80.0, 86.0 + local_y);
+		let m = galaxy(0, true);
+		assert!(matches!(&m.items[0].kind, Kind::Label { rows, rowh, cursor: 3 } if rows.len() == 18 && *rowh == 33.0));
+		assert_eq!((at(&m, 8.0 + 33.0 * 5.0 + 12.0), at(&m, 8.0 + 33.0 * 6.0 + 12.0)), (row(5), row(6)));
+		assert_eq!(at(&m, 245.0), row(7), "the last visible row; rows 8 and up lie below the item");
+		// Scrolled by 104 px (the cursor on a low planet): row 10 is under local y 244, rows 0..2 are above the item.
+		let m = galaxy(104, true);
+		assert_eq!(at(&m, 244.0), row(10));
+		assert_eq!(at(&m, 15.5), row(3));
+		assert_eq!(at(&m, 1.0), row(3), "row 2 has scrolled above the item and is never hit");
+		// Without the generic draw's code the old row model stays (this is the row it would have picked).
+		assert_eq!(at(&galaxy(104, false), 244.0), row(9));
+	}
+
+	/// The mouse steers the Galactic Map's list by the retail rows, to the row under the pointer, and a key press undoes nothing.
+	#[test]
+	fn the_pointer_on_the_galactic_map_list_steers_to_the_retail_row() {
+		let mut m = galaxy(104, true);
+		let mut st = State::default();
+		st.cursor(80.0, 86.0 + 244.0);
+		let (mut prev, mut presses) = (0u16, 0u32);
+		for _ in 0..200 {
+			let b = st.step(Some(&m), 0);
+			if b & !prev & DOWN != 0 {
+				presses += 1;
+				if let Kind::Label { cursor, .. } = &mut m.items[0].kind {
+					*cursor += 1;
+				}
+			}
+			prev = b;
+		}
+		assert_eq!((presses, list_cursor(&m)), (7, 10));
+	}
+
+	/// The menu closes with the pointer resting over the place of the next one's row: its anchor survives, so a 1.5 px jitter right
+	/// after the next menu opens does not aim (and steer) there; a real move (6 px) does.
+	#[test]
+	fn a_jitter_right_after_a_menu_opens_does_not_move_the_selection() {
+		let (m, mut st) = (rows33(12, 0), State::default());
+		let mut out = Vec::new();
+		st.cursor(100.0, row_y(5));
+		assert_eq!(st.step(None, 0), 0, "no menu");
+		st.cursor(100.0, row_y(5) + 1.5);
+		out.extend((0..30).map(|_| st.step(Some(&m), 0)));
+		assert!(out.iter().all(|&b| b == 0) && st.goal.is_none(), "the jitter aimed: {out:?}");
+		st.cursor(100.0, row_y(5) + 6.0);
+		out.clear();
+		out.extend((0..30).map(|_| st.step(Some(&m), 0)));
+		assert!(out.iter().any(|&b| b & DOWN != 0), "a 6 px move aims at row 5: {out:?}");
+	}
+
+	/// A pad / keyboard player's desk bump with the cursor hidden is tracked, not aimed (`State::track`); a click that follows lands
+	/// where the pointer is.
+	#[test]
+	fn a_hidden_cursor_bump_does_not_aim_but_a_click_lands_there() {
+		let (m, mut st) = (rows33(12, 0), State::default());
+		st.track(100.0, row_y(5));
+		let out: Vec<u16> = (0..30).map(|_| st.step(Some(&m), 0)).collect();
+		assert!(out.iter().all(|&b| b == 0) && st.goal.is_none(), "the bump aimed: {out:?}");
+		st.click();
+		let out: Vec<u16> = (0..30).map(|_| st.step(Some(&m), 0)).collect();
+		assert!(out.iter().any(|&b| b & DOWN != 0), "the click steers to row 5: {out:?}");
+	}
+
+	/// The other generic lists (Help Log, Skill Points, Cinematics ...): without a second text a record takes fh + 2 + 8 = 22 px
+	/// (font 12), with flag 0x10 the gap is fh + 3, without it h / (records + 1); a one-record list stays one button.
+	#[test]
+	fn list_rows_follow_the_flags_and_the_second_text() {
+		let rows = |recs: &[(u32, u32, u32)], flags, h, scroll| match list_rows(recs, flags, h, scroll, 0) {
+			Kind::Label { rows, rowh, .. } => (rows.iter().map(|r| r.0).collect::<Vec<f32>>(), rowh),
+			k => panic!("{k:?}"),
+		};
+		let one = [(0x4fd5u32, 1u32, 0u32); 3];
+		// Help Log (0x410): gap 15, first text y = 15 - 6 = 9, band from 5, pitch 22.
+		assert_eq!(rows(&one, 0x410, 100, 0), (vec![16.0, 38.0, 60.0], 22.0));
+		// Skill Points (0x200, no 0x10): gap = 240 / 4 = 60, first text y = 54; font 12, no text2.
+		assert_eq!(rows(&one, 0x200, 240, 0), (vec![61.0, 83.0, 105.0], 22.0));
+		// A second text adds the gap (60) to every record; scrolled by 20 the first band starts 20 px higher.
+		let two = [(0x4fd5u32, 1u32, 0x5000u32); 3];
+		assert_eq!(rows(&two, 0x200, 240, 20), (vec![71.0, 153.0, 235.0], 82.0));
+		// Font 14 (flags 4): pitch 16 + 8; font 10 (flags 8, wins over 4): 12 + 8.
+		assert_eq!(rows(&one, 0x410 | 4, 100, 0).1, 24.0);
+		assert_eq!(rows(&one, 0x410 | 4 | 8, 100, 0).1, 20.0);
+		// A list of one record is a single button: the old model (flags 0x138: font 10, row height 13) stays.
+		let m = galaxy_n(1, 0, true);
+		assert!(matches!(&m.items[0].kind, Kind::Label { rows, rowh, .. } if rows.len() == 1 && *rowh == 13.0), "{:?}", m.items[0].kind);
 	}
 }

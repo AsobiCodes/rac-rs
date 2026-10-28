@@ -11,6 +11,7 @@ use std::sync::OnceLock;
 
 /// The WGSL source of shader module `label`: `src`, unless RAC_WGSL_DIR holds an override file for it.
 pub fn wgsl<'a>(label: &str, src: Cow<'a, str>) -> Cow<'a, str> {
+	dump(label, &src);
 	let Some(dir) = std::env::var_os("RAC_WGSL_DIR") else {
 		return src;
 	};
@@ -30,6 +31,18 @@ pub fn wgsl<'a>(label: &str, src: Cow<'a, str>) -> Cow<'a, str> {
 			src
 		}
 	}
+}
+
+/// RAC_WGSL_DUMP=DIR: writes every shader module's source (each variant the game builds) to DIR/<label>_<hash>.wgsl, for the
+/// FXC check (tools/fxc_check.py). Costs one env lookup per shader build, nothing per frame.
+pub fn dump(label: &str, src: &str) {
+	let Some(dir) = std::env::var_os("RAC_WGSL_DUMP") else {
+		return;
+	};
+	let name: String = label.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+	let h = src.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3));
+	let _ = std::fs::create_dir_all(&dir);
+	let _ = std::fs::write(std::path::Path::new(&dir).join(format!("{name}_{h:016x}.wgsl")), src.as_bytes());
 }
 
 /// A lane tuning number: NAME's value in RAC_TUNE, else `default`.

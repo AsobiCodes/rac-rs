@@ -5,7 +5,7 @@
 //! ABI 1.3 (`moby_query`, `moby_valid`) is in mobys.rs; ABI 1.4 (`pose_*`) in pose_host.rs. `pvars` is in pvars.rs; the overlay window (fields in level data) is in window.rs.
 //!
 //! Memory: the callbacks work on the machine's CPU through `CPU`, a raw pointer that `scope` sets for the span of one call into
-//! the DLL (`tick`, `pad` between two fields; `dispatch` inside a hook; all on the retail worker thread). Nothing else touches the
+//! the DLL (`tick`, `pad` between two fields; `dispatch` inside a hook; `tick` and `pad` on the retail worker thread between two fields, `dispatch` on the oracle game thread "ee" inside a field; never concurrent: the worker waits in `Machine::frame` while "ee" runs). Nothing else touches the
 //! machine while the DLL runs.
 
 use super::binding::Binding;
@@ -67,7 +67,7 @@ unsafe extern "C" fn log_cb(_user: *mut c_void, level: i32, mod_id: *const c_cha
 	let n = LOGGED.fetch_add(1, Ordering::Relaxed);
 	if n >= LOG_CAP {
 		if n == LOG_CAP {
-			eprintln!("omni: {LOG_CAP} log lines written, the rest is dropped");
+			super::logq::line(&format!("omni: {LOG_CAP} log lines written, the rest is dropped"));
 		}
 		return;
 	}
@@ -76,11 +76,9 @@ unsafe extern "C" fn log_cb(_user: *mut c_void, level: i32, mod_id: *const c_cha
 		2 => " error",
 		_ => "",
 	};
-	if id.is_empty() {
-		eprintln!("omni:{lvl} {msg}");
-	} else {
-		eprintln!("omni:{lvl} [{id}] {msg}");
-	}
+	// Queued, not written here: this runs on the worker thread inside a tick, or on the game thread "ee" inside a hook (logq.rs).
+	let line = if id.is_empty() { format!("omni:{lvl} {msg}") } else { format!("omni:{lvl} [{id}] {msg}") };
+	super::logq::line(&line);
 }
 
 /// The real address behind `addr`: the overlay window (window.rs) is mapped to the level loaded now, every other address is itself.
@@ -108,6 +106,10 @@ unsafe extern "C" fn write_cb(user: *mut c_void, addr: u32, data: *const u8, len
 	let Some(addr) = real_addr(user, c, addr, len) else { return 0 };
 	let (a, n) = (addr as usize, len as usize);
 	if a.checked_add(n).is_none_or(|e| e > c.mem.ram.len()) {
+		return 0;
+	}
+	if super::codeguard::is_code(c, addr, len) {
+		super::codeguard::refused(addr, len);
 		return 0;
 	}
 	// SAFETY: bounds checked above; `data` has `len` bytes.

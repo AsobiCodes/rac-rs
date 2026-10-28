@@ -95,8 +95,9 @@ impl Retail {
 		self.kb_rs = [s[0], s[1]].map(|v| (v as i16 - 0x80) as i8);
 		prompts::poll_pad(&mut b, &mut s);
 		let (mode, front) = (self.snap.mode, self.snap.front);
-		// Esc / Space skip a scene or ship flight through retail's own skip test (`skip_feed`).
-		let skip_key = [winit::keyboard::KeyCode::Escape, winit::keyboard::KeyCode::Space].iter().any(|&k| held(k) || taps.contains_key(&k));
+		// Esc / Space skip a scene or ship flight through retail's own skip test (`skip_feed`); so does a plain Start (keyboard or
+		// controller: `b` holds both) while the Start skips cutscenes row is On (pcskip.rs; GitHub #34 / #23).
+		let skip_key = [winit::keyboard::KeyCode::Escape, winit::keyboard::KeyCode::Space].iter().any(|&k| held(k) || taps.contains_key(&k)) || pcskip::start_pressed(b);
 		if !front {
 			b |= skip_feed(mode, self.snap.ship, skip_key);
 		}
@@ -105,7 +106,8 @@ impl Retail {
 			b = tb.step(self.snap.menu.as_ref(), mode, front);
 			s = [0x80; 4];
 		} else {
-			b |= self.mm.step(self.snap.menu.as_ref(), b);
+			// The left stick counts as a menu button too (WASD on the Galactic Map, a controller's stick): `b` has no stick bits.
+			b |= self.mm.step(self.snap.menu.as_ref(), b | mouse_menu::stick_bits(s));
 			if let Some(tb) = self.tb.as_mut() {
 				b |= tb.pilot(self.snap.menu.as_ref(), mode, front, &mut self.mm);
 			}
@@ -154,6 +156,13 @@ impl Retail {
 	pub fn mouse_cursor(&mut self, fx: f32, fy: f32) {
 		let (x, y) = self.ps2_point(fx, fy);
 		self.mm.cursor(x, y);
+	}
+
+	/// The cursor moved while it is hidden (a pad / keyboard player's desk bump, `cursor_vis.rs`): the place is kept for a click,
+	/// nothing aims at it.
+	pub fn mouse_track(&mut self, fx: f32, fy: f32) {
+		let (x, y) = self.ps2_point(fx, fy);
+		self.mm.track(x, y);
 	}
 
 	/// The cursor (fractions of the client area) in the overlay's pixels (`mouse_menu::SCREEN`).
@@ -243,13 +252,16 @@ pub(super) fn keytap_script() -> Vec<KeyTap> {
 		.collect()
 }
 
-/// One poll of the skip test of a playing movie: (the rule ends it now, the pad to remember for the next poll).
-pub(super) fn movie_poll(rule: fmv_bridge::Skip, prev: u16, held: impl Fn(winit::keyboard::KeyCode) -> bool) -> (bool, u16) {
+/// One poll of the skip test of a playing movie: (the rule ends it now, the pad to remember for the next poll). `pad`: the controller's
+/// buttons now (PS2 bits, `prompts::pad_buttons`); `start_skips`: the Start skips cutscenes row is On (pcskip.rs).
+pub(super) fn movie_poll(rule: fmv_bridge::Skip, prev: u16, held: impl Fn(winit::keyboard::KeyCode) -> bool, pad: u16, start_skips: bool) -> (bool, u16) {
 	let skip_key = held(winit::keyboard::KeyCode::Escape) || held(winit::keyboard::KeyCode::Space);
-	let mut now = pad_from_keys(held, false, false).0;
+	let mut now = pad_from_keys(held, false, false).0 | pad;
 	// Esc and Space are the player's skip keys (user request 2026-10-13): they feed the pad the player's own skip test wants
-	// (`Skip::feed`), so retail's rule decides and a button held from before the movie still counts for nothing.
-	if skip_key {
+	// (`Skip::feed`), so retail's rule decides and a button held from before the movie still counts for nothing. With the Start
+	// skips cutscenes row On a plain Start (Enter, the controller's Start) feeds it too (the logos and the attract movie: no change,
+	// `feed` is 0 there).
+	if skip_key || (start_skips && now & pcskip::START != 0) {
 		now |= rule.feed();
 	}
 	(rule.pressed(prev, now), now)

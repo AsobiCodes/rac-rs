@@ -14,7 +14,7 @@
 use super::Omni;
 use ee_oracle::cpu::Cpu;
 use ee_oracle::hs_reloc::{Reloc, RelocHand};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 const NG_PLUS_SPEC: &str = "reloc omni_ngplus entry 0x272ee0 len 0x2fc\nmhash 0x40e1fbca3f867b95\nmask 0x50 0x3ffffff\nmask 0x6c 0x3ffffff\n\
@@ -22,20 +22,16 @@ mask 0x80 0x3ffffff\nmask 0x94 0x3ffffff\nmask 0xb0 0x3ffffff\nmask 0xc8 0x3ffff
 mask 0x130 0xffff\nmask 0x138 0xffff\nmask 0x174 0x3ffffff\nmask 0x190 0x3ffffff\nmask 0x1e4 0x3ffffff\nmask 0x1fc 0x3ffffff\nmask 0x298 0xffff\n\
 mask 0x2a4 0x3ffffff\n";
 
-/// 0 none, 1 New Game, 2 New Game+ (set by the hands, taken once per field by `take`).
-static PENDING: AtomicU8 = AtomicU8::new(0);
+/// New Game+ was entered (set by the hand, taken once per field by `take`). New Game from the title never sets it: `FrontWatcher` tells.
+static PENDING: AtomicBool = AtomicBool::new(false);
 
-/// New Game was entered since the last `take`: Some(false) New Game, Some(true) New Game+ (the latter wins when both happened).
-pub fn take() -> Option<bool> {
-	match PENDING.swap(0, Ordering::Relaxed) {
-		0 => None,
-		1 => Some(false),
-		_ => Some(true),
-	}
+/// New Game+ was entered since the last `take`.
+pub fn take() -> bool {
+	PENDING.swap(false, Ordering::Relaxed)
 }
 
 fn on_ng_plus(_c: &mut Cpu) -> bool {
-	PENDING.fetch_max(2, Ordering::Relaxed);
+	PENDING.store(true, Ordering::Relaxed);
 	false
 }
 
@@ -44,7 +40,7 @@ fn ng_plus_reloc() -> &'static Reloc {
 	R.get_or_init(|| Reloc::parse(NG_PLUS_SPEC).expect("the New Game+ spec parses"))
 }
 
-/// Registers the two hands (before the recompiled table is built, i.e. from `omni::init`) when events can reach a loaded mod.
+/// Registers the hand (before the recompiled table is built, i.e. from `omni::init`) when events can reach a loaded mod.
 pub fn install(o: &Omni) {
 	if !super::events::should_send(o.mods, o.loader.has_events()) {
 		return;
@@ -86,12 +82,12 @@ mod tests {
 
 	#[test]
 	fn take_returns_the_flag_once() {
-		PENDING.store(0, Ordering::Relaxed);
-		assert_eq!(take(), None);
+		PENDING.store(false, Ordering::Relaxed);
+		assert!(!take());
 		let mut c = Cpu::new(ee_oracle::mem::Mem::new());
 		assert!(!on_ng_plus(&mut c));
-		assert_eq!(take(), Some(true));
-		assert_eq!(take(), None);
+		assert!(take());
+		assert!(!take());
 	}
 
 	#[test]

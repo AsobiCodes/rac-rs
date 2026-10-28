@@ -21,8 +21,8 @@ impl Gpu {
 		// passes grade it and the HUD pass draws over the result. Dynamic shadows On adds the cascades (sunshadow.rs) from the
 		// level's key light. Classic: the frame below is drawn exactly as before (the shadow uniforms stay zero).
 		let gfx = crate::retail::pcext::graphics();
-		let post_on = crate::retail::splitview::fx(gfx.enhanced() && self.modern_ok); // [PC] split view: the one gate of every Enhanced pass below
-		let sun = match post_on && gfx.shadows && !scene.warp_shown && !self.ship_fight {
+		let post_on = crate::retail::splitview::fx(gfx.enhanced() && self.modern_ok && !super::super::pipe_guard::off(super::super::pipe_guard::Effect::Post)); // [PC] split view: the one gate of every Enhanced pass below (pipe_guard.rs: off when the driver refused the post shaders)
+		let sun = match super::sunshadow::casts(post_on, gfx.shadows, scene.warp_shown, self.ship_fight) {
 			true => {
 				let rows = self.sun_rows();
 				let id = scene.world_verts.len() ^ (scene.radius.to_bits() as usize) << 20;
@@ -34,19 +34,28 @@ impl Gpu {
 		// [PC] Enhanced flag for the shaders (`crisp_leaf`).
 		u.sun_texel[3] = if post_on { 1.0 } else { 0.0 };
 		u.sun_q[3] = crate::retail::pcext::texfilter::enabled(post_on) as u8 as f32;
+		// [PC] Volumetric fog (volfog/frame.rs `Plan`): decided here, from the inputs the pass is drawn with, so retail's own fog is faded
+		// exactly while the pass draws (Classic, under water, a level without a volume: 1.0 = the retail picture, the same frame).
+		let fog_active = post_on && !scene.warp_shown && !self.ship_fight && !(gfx.water && self.under_flag) && !self.under.active()
+			&& super::super::volfog::soft::fits((self.config.width, self.config.height), super::super::volfog::soft::buffer_limit(&self.device.limits()));
+		let fog = super::super::volfog::Plan::new(&gfx, self.level, u.fog, fog_active, &self.volfog.ocean_heights);
+		if fog.is_none() {
+			self.volfog.idle();
+		}
+		crate::retail::pcext::fogopt::set_gs_scale(super::super::volfog::retail_fog_scale(fog));
 		self.queue.write_buffer(&self.ubuf, 0, bytemuck::bytes_of(&super::super::volfog::fade_retail_fog(u)));
 		// [PC] PREVIEW (vegfx.rs, RAC_VEG): more vegetation with Lighting Enhanced.
 		let sp_veg = super::profile::span("d_veg");
-		self.veg.prepare(&self.queue, scene, post_on && !scene.warp_shown && !self.ship_fight, cam.pos, &u.view_proj);
+		self.veg.prepare(&self.queue, scene, post_on && !super::super::pipe_guard::off(super::super::pipe_guard::Effect::Veg) && !scene.warp_shown && !self.ship_fight, cam.pos, &u.view_proj);
 		drop(sp_veg);
-		Some(DrawFrame { aspect, eye, wfar, u, gfx, post_on, sun })
+		Some(DrawFrame { aspect, eye, wfar, u, gfx, post_on, sun, fog })
 	}
 
 	pub(super) fn frame_effects(&mut self, cam: &Camera, dc: &DrawFrame) -> Option<DrawFx> {
 		let scene = self.scene.as_ref()?;
 		let (aspect, wfar, post_on, gfx, u) = (dc.aspect, dc.wfar, dc.post_on, dc.gfx, &dc.u);
 		// [PC] Graphics -> Water Enhanced (waterfx.rs): the level pass records its water draws for the water pass.
-		let water_on = post_on && gfx.water && !scene.warp_shown && !self.ship_fight;
+		let water_on = post_on && gfx.water && !super::super::pipe_guard::off(super::super::pipe_guard::Effect::Water) && !scene.warp_shown && !self.ship_fight;
 		let mut wrec: Vec<super::waterfx::WaterDraw> = Vec::new();
 		let strips_water = water_on && super::waterfx::strips_are_water(self.level);
 		self.waterfx.clear_falls();
@@ -100,7 +109,8 @@ impl Gpu {
 			false => Some(self.acquire_frame()?),
 		};
 		let view = match &frame {
-			Some(f) => f.texture.create_view(&Default::default()),
+			// [PC] Render scale (rscale.rs): below / above 100 % the frame is drawn into the offscreen picture and copied to `frame` in frame_finish.
+			Some(f) => self.rscale_view().unwrap_or_else(|| f.texture.create_view(&Default::default())),
 			None => super::split::view()?,
 		};
 		let mut enc = self.device.create_command_encoder(&Default::default());
@@ -116,10 +126,12 @@ impl Gpu {
 		if post_on {
 			self.post.prepare(&self.device, self.config.width, self.config.height, &self.depth, gi_level);
 			// [PC] Volumetric fog (volfog/soft.rs): the no-Z texel buffer emptied for this frame; a new one is rebound in group 0.
-			if self.volfog.soft.prepare(&self.device, &mut enc, (self.config.width, self.config.height))
-				&& let Some(soft) = self.volfog.soft.buffer()
-			{
-				self.ubind = self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("uniforms"), layout: self.volfog.soft.layout(), entries: &self.sun.entries_soft(&self.ubuf, soft) });
+			if self.volfog.soft.prepare(&self.device, &mut enc, (self.config.width, self.config.height)) {
+				// (None = too large for a storage binding: the off buffer, as at start-up.)
+				self.ubind = match self.volfog.soft.buffer() {
+					Some(soft) => self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("uniforms"), layout: self.volfog.soft.layout(), entries: &self.sun.entries_soft(&self.ubuf, soft) }),
+					None => self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("uniforms"), layout: self.volfog.soft.layout(), entries: &self.sun.entries(&self.ubuf) }),
+				};
 			}
 		}
 		if let Some(f) = &sun {
@@ -129,7 +141,7 @@ impl Gpu {
 		}
 		self.draw_item_panel(&mut enc, cam, scene);
 		cuts.cut(&self.device, &mut enc, "f_pre");
-		let rs = !crate::retail::splitview::classic() && self.reshade_begin();
+		let rs = !crate::retail::splitview::classic() && !self.rscale.scaled() && self.reshade_begin(); // ReShade only at render scale 100 %
 		Some((DrawTarget { frame, view, enc, cuts, gi_level, rs }, warp_hud))
 	}
 
@@ -143,7 +155,7 @@ impl Gpu {
 			wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
 			wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
 				self.presenter.flush();
-				configure_surface(&self.surface, &self.device, &self.config);
+				self.reconfigure_surface();
 				return None;
 			}
 			_ => return None,
@@ -209,7 +221,7 @@ impl Gpu {
 			_ => None,
 		};
 		drop(sp_args);
-		let sharp_pipes = hd.iter().any(|(d, _)| d.inst != 0).then(|| super::hudsharp::pipelines(&self.device, &self.pipeline, &self.tex_layout, self.config.format, self.depth_format));
+		let sharp_pipes = hd.iter().any(|(d, _)| d.inst != 0).then(|| super::hudsharp::pipelines(&self.device, &self.pipeline, &self.tex_layout, self.config.format, self.depth_format)).flatten();
 		let hud_buffers = (!hv.is_empty()).then(|| {
 			let vb = buffer(&self.device, "hud vertices", bytemuck::cast_slice(&hv), wgpu::BufferUsages::VERTEX);
 			self.queue.write_buffer(&vb, 0, bytemuck::cast_slice(&hv));

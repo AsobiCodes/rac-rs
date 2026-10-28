@@ -76,10 +76,15 @@ fn mv(a: &M3, v: [f32; 3]) -> [f32; 3] {
 	[0, 1, 2].map(|r| a[r][0] * v[0] + a[r][1] * v[1] + a[r][2] * v[2])
 }
 
-fn inverse(a: &M3) -> M3 {
+/// The inverse, or None for a (nearly) singular matrix (a parent chain with a zero scale, e.g. a hidden joint: dividing by the
+/// determinant would put infinity or NaN into the pose).
+fn inverse(a: &M3) -> Option<M3> {
 	let c = |r: usize, k: usize| a[(r + 1) % 3][(k + 1) % 3] * a[(r + 2) % 3][(k + 2) % 3] - a[(r + 1) % 3][(k + 2) % 3] * a[(r + 2) % 3][(k + 1) % 3];
 	let det = a[0][0] * c(0, 0) + a[0][1] * c(0, 1) + a[0][2] * c(0, 2);
-	[0, 1, 2].map(|r| [0, 1, 2].map(|k| c(k, r) / det))
+	if !(det.abs() >= 1e-8) {
+		return None;
+	}
+	Some([0, 1, 2].map(|r| [0, 1, 2].map(|k| c(k, r) / det)))
 }
 
 /// Rotation matrix -> unit quaternion (x, y, z, w).
@@ -134,7 +139,8 @@ fn world_of(parts: &[Part], parents: &[Option<usize>], j: Option<usize>) -> (M3,
 /// local(dest) = world(parent dest)^-1 B world(parent src) local(src) M. The rotation goes through the parents' rotation-only frames
 /// (G_d^T B G_s M is a rotation, times the plain mirror `mirrored(q)`), the origin through the full placements. With both parents on
 /// a symmetric pose this is `mirrored`; a twisted chest (the one-handed firing pose turns it) no longer swings the arm out sideways
-/// (2026-10-25: Dual Blasters, the left gun pointed to the left while standing and shooting).
+/// (2026-10-25: Dual Blasters, the left gun pointed to the left while standing and shooting). A singular destination parent
+/// chain (zero scale) has no inverse: the joint keeps its own pose (the op is skipped).
 fn mirrored_body(parts: &[Part], parents: &[Option<usize>], dest: usize, src: usize) -> Part {
 	let (ls, os, gs) = world_of(parts, parents, parents.get(src).copied().flatten());
 	let (ld, od, gd) = world_of(parts, parents, parents.get(dest).copied().flatten());
@@ -145,7 +151,8 @@ fn mirrored_body(parts: &[Part], parents: &[Option<usize>], dest: usize, src: us
 	let (q, s, _) = mirrored(&parts[src]);
 	let x = mv(&ls, parts[src].2);
 	let x = [os[0] + x[0], -(os[1] + x[1]), os[2] + x[2]];
-	let t2 = mv(&inverse(&ld), [x[0] - od[0], x[1] - od[1], x[2] - od[2]]);
+	let Some(inv) = inverse(&ld) else { return parts[dest] };
+	let t2 = mv(&inv, [x[0] - od[0], x[1] - od[1], x[2] - od[2]]);
 	(qmul(mat_quat(&n), q), s, t2)
 }
 
@@ -250,6 +257,26 @@ mod tests {
 	use super::*;
 	use crate::anim::{animation, AnimClock, LayerPose};
 	use crate::level::Level;
+
+	#[test]
+	fn a_zero_scale_parent_skips_the_mirror_op() {
+		let id = [0.0, 0.0, 0.0, 1.0];
+		let parts: Vec<Part> = vec![
+			(id, [0.0, 0.0, 0.0], [0.0; 3]), // 0: zero-scale root, parent of the destination
+			(id, [1.0; 3], [1.0, 2.0, 3.0]), // 1: destination
+			(id, [1.0; 3], [0.0; 3]),        // 2: source root
+			(id, [1.0; 3], [4.0, 5.0, 6.0]), // 3: source
+		];
+		let parents = [None, Some(0), None, Some(2)];
+		let m = mirrored_body(&parts, &parents, 1, 3);
+		assert_eq!(m, parts[1]);
+		let mut p = parts.clone();
+		let fx = [JointFx { joint: 1, rot: id, scale: [1.0; 3], off: [0.0; 3], blend: None, reg: 0, mirror: Some(3) }];
+		apply_mirrors(&mut p, &fx, &parents);
+		assert_eq!(p[1], parts[1]);
+		assert!(p.iter().all(|x| x.0.iter().chain(&x.1).chain(&x.2).all(|v| v.is_finite())));
+		assert!(inverse(&[[2.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 2.0]]).is_some());
+	}
 
 	/// The 42 mirror pairs of the hero (class 0, 111 joints), POSE_OVERRIDE.md section 1.1; every other joint is on the centre line.
 	const PAIRS: [(usize, usize); 42] = [

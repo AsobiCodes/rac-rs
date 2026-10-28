@@ -42,8 +42,10 @@ fn floor_tau(a: vec3<f32>, b: vec3<f32>, t: vec2<f32>) -> f32 {
 
 // The floor over the ground point `xy` (the ground map, bilinear): x = clear top, y = solid top; outside the map or without one
 // the level's lowest clear top with the solid top the level's soft height under it.
-fn floor_at(xy: vec2<f32>) -> vec2<f32> {
-	let gd = vec2<i32>(textureDimensions(gmap));
+// `floor_at_d` takes the ground map's size so a loop can read it once: FXC (DX12 without dxcompiler.dll) aborts ("internal error:
+// compilation aborted unexpectedly") on a `textureDimensions` inside the `floor_ray` loops.
+fn floor_at(xy: vec2<f32>) -> vec2<f32> { return floor_at_d(xy, vec2<i32>(textureDimensions(gmap))); }
+fn floor_at_d(xy: vec2<f32>, gd: vec2<i32>) -> vec2<f32> {
 	let out = vec2<f32>(f.cam[3].w, f.cam[3].w - f.amb_col.w);
 	if (gd.x < 2) { return out; }
 	let g = (xy - vec2<f32>(f.cam[1].w, f.cam[2].w)) * (1.0 / 8.0) - vec2<f32>(0.5);
@@ -60,6 +62,7 @@ fn floor_at(xy: vec2<f32>) -> vec2<f32> {
 }
 
 fn floor_clear_at(xy: vec2<f32>) -> f32 { return floor_at(xy).x; }
+fn floor_clear_at_d(xy: vec2<f32>, gd: vec2<i32>) -> f32 { return floor_at_d(xy, gd).x; }
 
 // The floor for a surface point `p`: its solid top (x) and the height of the soft top over it (y), from the map over it. It
 // belongs to the world (the map is made at the level load from the collision and the render geometry), never to the camera.
@@ -78,9 +81,10 @@ fn floor_ray(d: vec3<f32>) -> vec3<f32> {
 	var lo = 0.0;
 	var hi = 4.0;
 	var found = false;
+	let gd = vec2<i32>(textureDimensions(gmap));
 	for (var i = 0; i < 34; i = i + 1) {
 		let p = o + d * hi;
-		if (p.z < floor_clear_at(p.xy)) { found = true; break; }
+		if (p.z < floor_clear_at_d(p.xy, gd)) { found = true; break; }
 		lo = hi;
 		hi = hi * 1.22;
 	}
@@ -88,7 +92,7 @@ fn floor_ray(d: vec3<f32>) -> vec3<f32> {
 	for (var i = 0; i < 6; i = i + 1) {
 		let m = 0.5 * (lo + hi);
 		let p = o + d * m;
-		if (p.z < floor_clear_at(p.xy)) { hi = m; } else { lo = m; }
+		if (p.z < floor_clear_at_d(p.xy, gd)) { hi = m; } else { lo = m; }
 	}
 	return vec3<f32>(hi, floor_top(o + d * hi));
 }
@@ -493,8 +497,11 @@ impl LevelFloor {
 /// bluer than dev s117's (the march stop made most of the change). Orxon (10): its toxic sea is terrain (`terrain_liquid`, z 27-62)
 /// under the floor's clear top 29, which flattened it to the fog colour. Oltanis (14) has the floor again (agent 5, 2026-10-25:
 /// fullgame1 14_0692 game and raised views vs dev s117: tower feet fade a little more, the ground and sea round them are unchanged).
+/// Hoven (12): its chasms end at the river and the abyss sheet (z 25-29) between rock walls; the floor's clear top (24.08) laid a
+/// flat fog-coloured deck over that rock where retail and Fog Classic show dark rock (user 2026-10-28 bridge screenshot, "there
+/// shouldnt be any fog there"; PCSX2 fullgame1 0564 under the bridge).
 fn liquid_bottom(level: usize) -> bool {
-	matches!(level, 10 | 11)
+	matches!(level, 10 | 11 | 12)
 }
 
 /// The floor of `level` from its geometry `at` (top, soft height), or None: space levels, the levels without air haze
@@ -539,8 +546,8 @@ mod tests {
 		assert!(top + soft < 10.2 && top >= 6.0, "{top} {soft}");
 		// No floor in space (Gemlik Base) or without terrain / collision.
 		assert!(floor(16, Some((top, soft))).is_none());
-		// None where a liquid is the bottom (Orxon, Pokitaru).
-		assert!([10, 11].iter().all(|&l| floor(l, Some((top, soft))).is_none()));
+		// None where a liquid is the bottom (Orxon, Pokitaru, Hoven).
+		assert!([10, 11, 12].iter().all(|&l| floor(l, Some((top, soft))).is_none()));
 		assert!(floor(4, None).is_none());
 		assert!(from_level(std::iter::empty(), [1.0].into_iter()).is_none());
 		// The floor set at a load belongs to that level only (a prefetch during travel leaves the old level without one).

@@ -212,3 +212,33 @@ fn a_script_mod_is_listed_and_switched_by_its_manifest_id_not_its_folder() {
 	assert!(text.lines().any(|l| l == "arsenal-mastery") && !text.contains("-main"), "{text}");
 	assert!(Store::load(&root).is_on("arsenal-mastery"));
 }
+
+#[test]
+fn a_pcsx2_pack_copied_in_by_hand_without_mod_json_is_listed_switched_and_loaded() {
+	use super::{layout, mods};
+	let root = dir("by_hand");
+	let img = "1-2-00005dd3.dds";
+	// The shapes players copy in: PCSX2's `<serial>/replacements`, `replacements` alone, loose images, the documented `textures`.
+	for rel in [format!("SCES-50916/replacements/{img}"), format!("replacements/{img}"), format!("loose/{img}"), format!("documented/textures/{img}")] {
+		let p = root.join(&rel);
+		std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+		std::fs::write(p, b"x").unwrap();
+	}
+	std::fs::create_dir_all(root.join("notapack")).unwrap();
+	std::fs::write(root.join("notapack").join("readme.txt"), "x").unwrap();
+	let mut s = Store::load(&root);
+	assert_eq!(s.mods.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["documented", "loose", "replacements", "SCES-50916"], "{:?}", s.mods);
+	assert!(s.mods.iter().all(|m| m.kind == "textures" && s.master_of(&m.id) == Some(Master::Textures)));
+	// Installed, nothing in active.txt: listed and off (the title's Mods row wants exactly this).
+	assert!(s.ids.is_empty());
+	s.set_mod("SCES-50916", true);
+	s.set_mod("replacements", true);
+	s.save().unwrap();
+	let act = mods::load_active(&root);
+	let got: Vec<_> = act.mods.iter().map(|m| (m.id.as_str(), m.textures.clone())).collect();
+	assert_eq!(got, [("replacements", root.join("replacements")), ("SCES-50916", root.join("SCES-50916"))], "{:?}", act.notes);
+	// The index finds the images through the folder (it scans recursively).
+	let mut ix = super::index::PackIndex::new();
+	assert_eq!(ix.scan_dir(&act.mods[1].textures, 1).added, 1);
+	assert_eq!(layout::textures_dir(&root.join("documented")), Some(root.join("documented").join("textures")));
+}

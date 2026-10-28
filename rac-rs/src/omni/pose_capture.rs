@@ -20,7 +20,7 @@
 //! Cost with no mod using any of it: three atomic loads per frame (`pending`, `debug_on`, `reads_on`).
 
 use super::cabi::OmniDrawCmd;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
@@ -46,9 +46,11 @@ struct Slot {
 	/// World frames of the GAME pose's joints (three basis rows then the position, game world), and the hero position of the same frame.
 	world: Vec<[f32; 12]>,
 	hero_pos: [f32; 3],
+	/// Snapshot ids a live `hold` op uses: the 256 limit never evicts these (the store sets them, pose.rs `Store::step`).
+	pinned: BTreeSet<u32>,
 }
 
-static SLOT: Mutex<Slot> = Mutex::new(Slot { next: 0, snaps: BTreeMap::new(), joints: Vec::new(), world: Vec::new(), hero_pos: [0.0; 3] });
+static SLOT: Mutex<Slot> = Mutex::new(Slot { next: 0, snaps: BTreeMap::new(), joints: Vec::new(), world: Vec::new(), hero_pos: [0.0; 3], pinned: BTreeSet::new() });
 /// A snapshot waits for the renderer.
 static PENDING: AtomicBool = AtomicBool::new(false);
 static DEBUG: AtomicBool = AtomicBool::new(false);
@@ -65,12 +67,23 @@ pub fn request(first: u32, last: u32) -> u32 {
 	s.next = s.next.wrapping_add(1).max(1);
 	let id = s.next;
 	s.snaps.insert(id, Snap { first, last, q: None });
+	// The oldest snapshot no live hold uses goes (a hold keeps its capture however many newer snapshots come).
 	while s.snaps.len() > MAX_SNAPSHOTS {
-		let oldest = *s.snaps.keys().next().unwrap_or(&id);
+		let Some(oldest) = s.snaps.keys().copied().find(|k| *k != id && !s.pinned.contains(k)) else { break };
 		s.snaps.remove(&oldest);
 	}
 	PENDING.store(true, Ordering::Release);
 	id
+}
+
+/// A `hold` op uses snapshot `id` from now on: it is not evicted by newer snapshots (until the next `set_pinned`).
+pub fn pin(id: u32) {
+	lock().pinned.insert(id);
+}
+
+/// The snapshot ids the live hold ops use now (the store, once per tick): everything else may be evicted again.
+pub fn set_pinned(ids: impl IntoIterator<Item = u32>) {
+	lock().pinned = ids.into_iter().collect();
 }
 
 /// Checks that snapshot `id` exists and covers `joint` (a `hold` naming it): Err(ERR_RANGE) unknown, Err(ERR_BAD_JOINT) outside.
@@ -111,13 +124,24 @@ pub fn service(local: &[[f32; 4]]) -> usize {
 
 /// Forgets every snapshot and the debug state (a load, a new game, a level change, the mods replaced).
 pub fn clear() {
+	forget_snapshots();
 	let mut s = lock();
-	s.snaps.clear();
 	s.joints.clear();
 	s.world.clear();
-	PENDING.store(false, Ordering::Release);
-	DEBUG.store(false, Ordering::Release);
+	drop(s);
 	READS.store(false, Ordering::Release);
+	// The dots go at once (not frozen for the 1 s the draw list stays fresh); the mod calls `pose_debug(true)` again.
+	if DEBUG.swap(false, Ordering::AcqRel) {
+		super::draw::submit_debug(&[], &[]);
+	}
+}
+
+/// Forgets every snapshot (a scene tick: the holds are cleared with them) and keeps the debug dots and reads as they are.
+pub fn forget_snapshots() {
+	let mut s = lock();
+	s.snaps.clear();
+	s.pinned.clear();
+	PENDING.store(false, Ordering::Release);
 }
 
 pub fn set_debug(on: bool) {

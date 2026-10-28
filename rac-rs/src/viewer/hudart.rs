@@ -6,6 +6,8 @@ use super::*;
 /// default font; returns the textures in slot order. Missing pieces fall back to plain shapes.
 pub(super) fn hud_art(l: &Level, disc: &mut iso::Disc) -> (Vec<Texture>, HudArt) {
 	let (mut tex, mut a) = (Vec::new(), HudArt::default());
+	// Pack names of the textures pushed below, by index in `tex` (only the title level with a texture pack: texpack/front_hd.rs).
+	let mut names: Vec<(usize, crate::texpack::name::TexName)> = Vec::new();
 	match art::hud_sprites(l) {
 		Ok(mut h) => {
 			eprintln!("hud icons: {:x?}", h.icons.iter().map(|i| i.id).collect::<Vec<_>>());
@@ -14,7 +16,7 @@ pub(super) fn hud_art(l: &Level, disc: &mut iso::Disc) -> (Vec<Texture>, HudArt)
 				for k in 0..n.min(i.count) {
 					if let Some(sp) = h.frames.get_mut(i.first + k).and_then(|f| f.take()) {
 						out.push((1 + tex.len(), sp.tex.w as f32, sp.tex.h as f32));
-						tex.push(sp.tex);
+						push_sprite(&mut tex, &mut names, sp);
 					}
 				}
 			}
@@ -26,7 +28,7 @@ pub(super) fn hud_art(l: &Level, disc: &mut iso::Disc) -> (Vec<Texture>, HudArt)
 	let mut underlay = crate::hud::global_hud_sprites(disc).map_err(|e| eprintln!("global hud: {e}")).ok().and_then(|mut g| {
 		let i = g.icons.iter().find(|i| i.id == 0xe99e).copied().filter(|i| 7 < i.count)?;
 		let sp = g.frames.get_mut(i.first + 7).and_then(|f| f.take())?;
-		tex.push(sp.tex);
+		push_sprite(&mut tex, &mut names, sp);
 		let t = &tex[tex.len() - 1];
 		Some((tex.len(), t.w as f32, t.h as f32))
 	});
@@ -34,7 +36,7 @@ pub(super) fn hud_art(l: &Level, disc: &mut iso::Disc) -> (Vec<Texture>, HudArt)
 		let mut take = |id: u16, k: usize| {
 			let i = h.icons.iter().find(|i| i.id == id).copied().filter(|i| k < i.count)?;
 			let sp = h.frames.get_mut(i.first + k).and_then(|f| f.take())?;
-			tex.push(sp.tex);
+			push_sprite(&mut tex, &mut names, sp);
 			let t = &tex[tex.len() - 1];
 			Some((tex.len(), t.w as f32, t.h as f32))
 		};
@@ -92,13 +94,14 @@ pub(super) fn hud_art(l: &Level, disc: &mut iso::Disc) -> (Vec<Texture>, HudArt)
 		if let Some(i) = h.icons.iter().find(|i| i.id == 0xe935).copied() {
 			if let Some(sp) = h.frames.get_mut(i.first).and_then(|f| f.take()) {
 				a.led = Some((1 + tex.len(), sp.tex.w as f32, sp.tex.h as f32));
-				tex.push(sp.tex);
+				push_sprite(&mut tex, &mut names, sp);
 			}
 		}
 	}
 	let mut fx = |k: usize| {
 		let t = frontend::fx_texture(l, k).map_err(|e| eprintln!("menu frame fx {k:#x}: {e}")).ok()?;
 		let (w, h) = (t.w as f32, t.h as f32);
+		names.extend(crate::texpack::front_hd::fx_name(l, k).map(|n| (tex.len(), n)));
 		tex.push(t);
 		Some((tex.len(), w, h))
 	};
@@ -119,23 +122,23 @@ pub(super) fn hud_art(l: &Level, disc: &mut iso::Disc) -> (Vec<Texture>, HudArt)
 			let Some(i) = h.icons.iter().find(|i| i.id == 0xea60 + id as u16).copied() else { continue };
 			if let Some(sp) = h.frames.get_mut(i.first).and_then(|f| f.take()) {
 				a.items.insert(id, (1 + tex.len(), sp.tex.w as f32, sp.tex.h as f32));
-				tex.push(sp.tex);
+				push_sprite(&mut tex, &mut names, sp);
 			}
 			if let Some(sp) = h.frames.get_mut(i.first + 1).filter(|_| i.count > 1 && frontend::GADGET_GRID_IDS.contains(&id)).and_then(|f| f.take()) {
 				a.pics.worn.insert(id, (1 + tex.len(), sp.tex.w as f32, sp.tex.h as f32));
-				tex.push(sp.tex);
+				push_sprite(&mut tex, &mut names, sp);
 			}
 			if let Some(sp) = h.frames.get_mut(i.first + 4).filter(|_| i.count > 4).and_then(|f| f.take()) {
 				a.pics.gold.insert(id, (1 + tex.len(), sp.tex.w as f32, sp.tex.h as f32));
-				tex.push(sp.tex);
+				push_sprite(&mut tex, &mut names, sp);
 			}
 			if let Some(sp) = h.frames.get_mut(i.first + 2).filter(|_| i.count > 2).and_then(|f| f.take()) {
 				a.ammo_items.insert(id, (1 + tex.len(), sp.tex.w as f32, sp.tex.h as f32));
-				tex.push(sp.tex);
+				push_sprite(&mut tex, &mut names, sp);
 			}
 			if let Some(sp) = h.frames.get_mut(i.first + 3).filter(|_| i.count > 3).and_then(|f| f.take()) {
 				a.weapon_icons.insert(id, (1 + tex.len(), sp.tex.w as f32, sp.tex.h as f32));
-				tex.push(sp.tex);
+				push_sprite(&mut tex, &mut names, sp);
 			}
 		}
 	}
@@ -145,7 +148,7 @@ pub(super) fn hud_art(l: &Level, disc: &mut iso::Disc) -> (Vec<Texture>, HudArt)
 			let Some(i) = h.icons.iter().find(|i| i.id == icon).copied().filter(|i| (frame as usize) < i.count) else { continue };
 			if let Some(sp) = h.frames.get_mut(i.first + frame as usize).and_then(|f| f.take()) {
 				a.pics.items_grid[j] = Some((1 + tex.len(), sp.tex.w as f32, sp.tex.h as f32));
-				tex.push(sp.tex);
+				push_sprite(&mut tex, &mut names, sp);
 			}
 		}
 	}
@@ -154,6 +157,13 @@ pub(super) fn hud_art(l: &Level, disc: &mut iso::Disc) -> (Vec<Texture>, HudArt)
 	if let Some(&g) = a.glove.first() {
 		a.items.insert(crate::inventory::BOMB_GLOVE, g);
 	}
+	load_fonts(l, disc, &mut tex, &mut a);
+	finish_names(l, &mut tex, names);
+	(tex, a)
+}
+
+/// The level's fonts (default, font 3, the shop panels' font 2) into `tex` and the slot table.
+fn load_fonts(l: &Level, disc: &mut iso::Disc, tex: &mut Vec<Texture>, a: &mut HudArt) {
 	match art::font_glyph_tables(disc).and_then(|g| art::level_fonts(l, &g)) {
 		Ok(mut fonts) if !fonts.is_empty() => {
 			let f = fonts.remove(0);
@@ -172,7 +182,28 @@ pub(super) fn hud_art(l: &Level, disc: &mut iso::Disc) -> (Vec<Texture>, HudArt)
 		}
 		r => eprintln!("hud font: {:?}", r.err()),
 	}
-	(tex, a)
+}
+
+/// The title level's art (menu panel frame, icons) takes the pack's pictures (the logo and Press Start follow in app.rs); any other
+/// level's HUD pictures start decoding now, so the GPU capture finds them ready on its first frames (texpack/hudprefetch.rs).
+fn finish_names(l: &Level, tex: &mut [Texture], names: Vec<(usize, crate::texpack::name::TexName)>) {
+	// Decoded images no capture took (an earlier level's prefetch, names never drawn) go first: the prefetch below counts this level's only.
+	crate::texpack::hudrepl::drop_unused();
+	if l.title {
+		crate::texpack::front_hd::apply(tex, &names);
+	} else {
+		// the three text font pages (fx records 1..=3) go first: they are the biggest and every text prim samples them
+		let fonts = (1..=3).filter_map(|k| crate::texpack::front_hd::fx_name(l, k));
+		crate::texpack::hudprefetch::start(fonts.chain(names.into_iter().map(|(_, n)| n)).collect());
+	}
+}
+
+/// Pushes a HUD sprite's texture, remembering its pack name (the title level with a texture pack only).
+fn push_sprite(tex: &mut Vec<Texture>, names: &mut Vec<(usize, crate::texpack::name::TexName)>, sp: crate::hud::Sprite) {
+	if let Some(n) = sp.name {
+		names.push((tex.len(), n));
+	}
+	tex.push(sp.tex);
 }
 
 /// Hands the mods' draw pass (omni/draw_art.rs) this level's default font and icon slots; called right after `set_hud_art` uploads the slots.

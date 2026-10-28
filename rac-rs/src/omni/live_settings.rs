@@ -48,8 +48,8 @@ pub(super) fn apply(o: &Omni, c: &mut Cpu) {
 	for (id, key, value) in list {
 		let _held = lock::enter();
 		match host::scope(c, || o.loader.set_setting(&id, &key, &value)) {
-			Ok(()) => eprintln!("omni: setting {id}.{key} = {value}"),
-			Err(e) => eprintln!("omni: setting {id}.{key} = {value} refused: {e}"),
+			Ok(()) => super::logq::line(&format!("omni: setting {id}.{key} = {value}")),
+			Err(e) => super::logq::line(&format!("omni: setting {id}.{key} = {value} refused: {e}")),
 		}
 	}
 }

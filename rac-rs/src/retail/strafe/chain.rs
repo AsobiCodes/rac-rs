@@ -4,6 +4,7 @@
 //! goes to the running jump 9, or the plain jump 7, OV:39924-39937), so this hand wraps SetState: that jump becomes the next
 //! strafe flip while RMB aims with the stick sideways or back. Everything else is the retail function.
 
+use crate::fmath::Fm;
 use super::*;
 
 /// SetState(state, flag) of each level (`Row::set_state`, the chooser's last call). Hashes: rec::hash over its first 16
@@ -99,7 +100,7 @@ fn land_jump(c: &mut Cpu, r: &'static Row) -> bool {
 
 /// The stick's heading from the camera's forward (radians, positive = left): x right, y down, as the hero's wish yaw turns.
 fn stick_heading(x: f32, y: f32) -> f32 {
-	(-x).atan2(-y)
+	(-x).fatan2(-y)
 }
 
 #[cfg(test)]

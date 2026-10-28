@@ -34,6 +34,16 @@ fn dll_path() -> Option<PathBuf> {
 	Some(exe_dir()?.join(name))
 }
 
+/// Linux: whether a mod loader can run: not switched off (`RAC_OMNI=0`) and its library next to the exe (or `RAC_OMNI_DLL`). The Mods
+/// pages offer script / native mods only then; texture packs never need it. (Upstream publishes the loader for Windows only.)
+#[cfg(target_os = "linux")]
+pub fn loader_present() -> bool {
+	if std::env::var("RAC_OMNI").is_ok_and(|v| v == "0") {
+		return false;
+	}
+	dll_path().is_some_and(|p| p.is_file())
+}
+
 fn binding_text() -> String {
 	exe_dir().map(|d| d.join("omni").join("rac1.json")).and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_else(|| BUILTIN_BINDING.to_string())
 }
@@ -120,6 +130,9 @@ pub fn start(ntsc: bool, c: &mut ee_oracle::cpu::Cpu) -> Option<Omni> {
 		eprintln!("omni: folder {} has the mod id {} of an earlier folder: ignored", d.folder, d.id);
 	}
 	let plan = super::plugins::plan(&dir, &found);
+	if plan.explicit {
+		eprintln!("omni: {} is used as it is: it overrides mods/active.txt and the Load mods tick", dir.join("plugins.json").display());
+	}
 	if plan.enabled.is_empty() && !plan.explicit {
 		eprintln!("omni: {} mod folder(s) in {}, none switched on (mods/active.txt): mods are off", found.len(), dir.display());
 		return None;
@@ -147,7 +160,13 @@ pub fn start(ntsc: bool, c: &mut ee_oracle::cpu::Cpu) -> Option<Omni> {
 		super::input::begin_load();
 		let loaded = super::host::scope(c, || loader.load(&dir, &plan.text));
 		super::input::end_load(loaded.is_ok());
-		loaded?;
+		if let Err(e) = loaded {
+			// `omni_load` may have installed hook points and started native plugins before it failed: nothing of the DLL is unloaded under
+			// them. The loader stays (like a loaded one) and its hooks go back to the game's code.
+			super::hooks::deactivate_all();
+			std::mem::forget(loader);
+			return Err(e);
+		}
 		let mods = loaded_count(&loader.status());
 		Ok(Omni { loader, state, ticks: AtomicU64::new(0), native, mods, events: Default::default() })
 	})();

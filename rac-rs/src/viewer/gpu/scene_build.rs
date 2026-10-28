@@ -249,8 +249,8 @@ impl SceneCtx {
 		// (Before the prop slots: the prefetch thread has them done when the final order comes.)
 		let tie_qdep: Vec<bool> = tie_slots.iter().zip(&tie_morph).map(|(s, d)| s.1 || *d != [0.0; 3]).collect();
 		let (tie_tri, tie_tris) = tie_triples(&tie_slots, &tie_vranges);
-		let tie_gpu = super::tiegpu::TieGpu::new(&self.device, &self.queue, &ties.vbuf, &tie_base, &tie_morph, &tie_slots, &tie_qdep, &tie_vranges, &tie_cols);
-		let (bind0, slots0) = (bind.len(), slots.clone());
+		let tie_gpu = super::pipe_guard::guard(&self.device, super::pipe_guard::Effect::TieGpu, || super::tiegpu::TieGpu::new(&self.device, &self.queue, &ties.vbuf, &tie_base, &tie_morph, &tie_slots, &tie_qdep, &tie_vranges, &tie_cols)).flatten(); // [PC] pipe_guard.rs: refused = the CPU path
+		let (bind0, slots0, cap0) = (bind.len(), slots.clone(), self.repl_cap.get());
 		let mut order_p = props_fn(None)?;
 		let (ranges, prompt_slot, props, props_model, slot_runs, prop_faces, props_sj, props_rad, props_class, class_faces, prompt, portrait, portrait_model, clip_cap, clip_batch, previews, preview_models, previews_gold) = loop {
 		let PropSlots { ranges, prompt_slot, batch: props, model: props_model, slot_runs, faces: prop_faces, sj: props_sj, rad: props_rad, classes: props_class, class_faces } = self.prop_slots(&order_p, prop_meshes, textures, &mut bind, &mut slots);
@@ -300,7 +300,7 @@ impl SceneCtx {
 			break (ranges, prompt_slot, props, props_model, slot_runs, prop_faces, props_sj, props_rad, props_class, class_faces, prompt, portrait, portrait_model, clip_cap, clip_batch, previews, preview_models, previews_gold);
 		}
 		crate::loadlog::say(|| "gpu: prop slots rebuilt for a newer order".into());
-		bind.truncate(bind0);
+		bind.truncate(bind0); self.repl_cap.set(self.repl_cap.get().with_slots_of(cap0)); // the dropped pass's binds are gone: so are the slots they took from the build cap (their uploads stay spent)
 		slots = slots0.clone();
 		order_p = keep;
 		};

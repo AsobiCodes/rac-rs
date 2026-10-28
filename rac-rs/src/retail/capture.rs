@@ -36,9 +36,23 @@ pub(super) fn ov_dims(o: &gscap::Overlay) -> (u32, u32) {
 	o.hd.as_ref().map_or((o.w, o.rows), |h| (h.w, h.rows))
 }
 
-/// Rows (flags 1 = right, 2 = left) of the last overlay where a GS primitive crosses the scissor edge (widescreen presenter).
-pub fn edge_cut_rows() -> Option<[u8; 448]> {
+/// Rows (flags 1 = right, 2 = left; one entry per row of the overlay, 448 in play) of the last overlay where a GS primitive crosses the scissor edge (widescreen presenter).
+pub fn edge_cut_rows() -> Option<Vec<u8>> {
 	super::gscap::edge_cut::published()
+}
+
+/// What the HUD position's top corner cells must know about an overlay picture (a top help prompt, the hoverboard race's bars, the Gadgetron
+/// title letters; `gscap::edge_cut::guard`). It is measured with each picture and travels with it (`Retail::take_overlay`).
+pub use super::gscap::edge_cut::guard::Guard as HudGuard;
+/// A corner widget's reach inside a `HudGuard` (hud_place.rs tests build guards with it).
+#[cfg(test)]
+pub use super::gscap::edge_cut::guard::Reach as HudReach;
+
+/// The inner edge of a corner cell and the rows the cells reach at most, as the capture's guard measures them (hud_place.rs keeps `CELL_W` and
+/// `CELL_H` equal; tests).
+#[cfg(test)]
+pub fn gscap_guard_cells() -> (f32, f32) {
+	(super::gscap::edge_cut::guard::GUARD_COL, super::gscap::edge_cut::guard::CELL_ROWS)
 }
 
 /// The sharp HUD for the window the viewer draws in (`window_h` pixels high), every frame from the render thread: on while the
@@ -218,6 +232,7 @@ impl Capture {
 			}
 			std::thread::sleep(std::time::Duration::from_micros(300));
 		}
+		crate::viewer::framecsv::wait('G', t);
 	}
 
 	/// The overlay for snap `field`: waits until field `field - delay` is drawn, then hands out the newest overlay
@@ -246,6 +261,7 @@ impl CapTake {
 		while self.ends.load(Ordering::SeqCst) < want && !self.dead.load(Ordering::SeqCst) && t.elapsed().as_millis() <= GS_WAIT_MS {
 			std::thread::sleep(std::time::Duration::from_micros(100));
 		}
+		crate::viewer::framecsv::wait('T', t);
 		let mut q = self.slot.lock().ok()?;
 		let mut last = None;
 		while q.front().is_some_and(|(f, _)| *f <= want) {

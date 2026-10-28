@@ -236,7 +236,8 @@ impl Gpu {
 	/// True when this frame takes the ReShade path. With no ReShade (the normal case) this is one atomic load.
 	pub(in crate::viewer) fn reshade_begin(&mut self) -> bool {
 		let mode = LINK.mode.load(Relaxed);
-		if mode == OFF || (mode == LIVE && LINK.runtime.load(Acquire) == 0) {
+		let runtime = LINK.runtime.load(Acquire); // read once: `reshade_build` uses this value, never a second load that could see 0
+		if mode == OFF || (mode == LIVE && runtime == 0) {
 			return false;
 		}
 		let key = (self.config.width, self.config.height, self.config.format);
@@ -247,7 +248,7 @@ impl Gpu {
 			return false;
 		}
 		self.reshade.state = None;
-		match self.reshade_build(key, mode == DRY) {
+		match self.reshade_build(key, mode == DRY, runtime) {
 			Ok(state) => {
 				self.reshade.state = Some(state);
 				true
@@ -260,14 +261,17 @@ impl Gpu {
 		}
 	}
 
-	fn reshade_build(&mut self, key: (u32, u32, wgpu::TextureFormat), dry: bool) -> Result<State, String> {
-		let pipes = self.reshade.pipes.get_or_insert_with(|| Pipes::new(&self.device, key.2, self.depth_format));
+	fn reshade_build(&mut self, key: (u32, u32, wgpu::TextureFormat), dry: bool, runtime: usize) -> Result<State, String> {
+		// [PC] pipe_guard.rs: a driver that refuses the pass shaders (DX12 FXC) leaves ReShade unusable (the `failed` path below), no crash.
+		if self.reshade.pipes.is_none() {
+			self.reshade.pipes = crate::viewer::pipe_guard::guard(&self.device, crate::viewer::pipe_guard::Effect::Reshade, || Pipes::new(&self.device, key.2, self.depth_format));
+		}
+		let pipes = self.reshade.pipes.as_ref().ok_or("the driver refused the pass shaders")?;
 		let targets = Targets::new(&self.device, pipes, key.0, key.1, key.2, &self.depth).ok_or("the swapchain format has no 8-bit sRGB pair")?;
 		let native = match dry {
 			true => None,
 			false => {
-				let runtime = LINK.runtime.load(Acquire);
-				let under = Under { device: unsafe { Runtime(runtime as *mut c_void).device() }, runtime, epoch: LINK.epoch.load(Acquire) };
+				let under = Under { device: unsafe { Runtime(runtime as *mut c_void).device() } };
 				Some(Arc::new(native::create(backend_of(LINK.backend.load(Relaxed)), &targets, key.2, Some(under))?))
 			}
 		};

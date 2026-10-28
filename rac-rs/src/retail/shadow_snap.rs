@@ -37,7 +37,8 @@ fn sphere_fade(m: &ee_oracle::Machine, level: u32, buf: [f32; 4], lim: f32) -> O
 	let f6 = [v[0].abs() - f8[0], v[1].abs() - f8[1]];
 	let f7 = [f5[0] - f6[0], f5[1] - f6[1]];
 	let _ = v21;
-	if f7[1].is_sign_negative() || f7[0].is_sign_negative() {
+	// [PC] A side reject the wider window still shows is kept (`wide_side::keep`; never in a 4:3 window).
+	if (f7[1].is_sign_negative() || f7[0].is_sign_negative()) && !super::wide_side::keep(v, r, v20[0]) {
 		return None;
 	}
 	// vf4 / vf8 only choose the return 0 or 1 (both drawn).
@@ -81,6 +82,9 @@ pub struct SmoothDraw {
 	pub fx: Option<RetailFx>,
 	pub shadows: Option<RetailShadows>,
 	pub orbs: Option<Vec<crate::particles::OrbDraw>>,
+	/// The hero's position at the field before and at the newest one, in game view (the camera follows him): `Retail::camera` blends
+	/// the eye on the arc round him (`camera_arc`). None = the straight blend.
+	pub cam_hero: Option<([f32; 3], [f32; 3])>,
 }
 
 impl RetailShadows {

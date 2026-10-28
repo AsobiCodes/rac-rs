@@ -480,7 +480,26 @@ fn read_store() -> Option<Store> {
 	if let Some(root) = TEST_ROOT.with(|r| r.borrow().clone()) {
 		return Some(Store::load(&root));
 	}
-	crate::texpack::mods::mods_root().map(|r| Store::load(&r))
+	#[cfg(not(target_os = "linux"))]
+	{
+		crate::texpack::mods::mods_root().map(|r| Store::load(&r))
+	}
+	// Linux without a mod loader: a script / native mod cannot run, so the pages do not offer it (texture packs never need one). A loader
+	// appearing next to the exe brings the rows back on the next planet load; nothing is removed from the mods folder.
+	#[cfg(target_os = "linux")]
+	{
+		let store = crate::texpack::mods::mods_root().map(|r| Store::load(&r))?;
+		Some(without_loader(store, crate::omni::loader_present()))
+	}
+}
+
+/// The store as the pages see it: with no mod loader only the texture packs (`loader` false), else everything.
+#[cfg(any(test, target_os = "linux"))]
+fn without_loader(mut store: Store, loader: bool) -> Store {
+	if !loader {
+		store.mods.retain(|m| crate::texpack::active::Master::of_kind(&m.kind) != crate::texpack::active::Master::Mods);
+	}
+	store
 }
 
 fn row_wanted(s: &Store) -> bool {

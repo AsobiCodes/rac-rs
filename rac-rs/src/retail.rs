@@ -42,7 +42,7 @@
 //! - `disc`, `disc_hands`, `disc_map`: which retail disc runs (PAL or USA) and what differs; the hand and address maps are generated
 //! - `hot`: [PC] the busy threads at above-normal priority, out of Windows power throttling
 //! - PC options and controls: `pcext` (options in the pause menu), `pcopts` (the options file), `pcctl` (Controls page), `binds` (button
-//!   remap), `prompts` (button prompts, gamepad), `pspad` (DualShock / DualSense over HID), `mouse_menu` and `menu_keys` (mouse and keys
+//!   remap), `prompts` (button prompts, gamepad), `pspad` (DualShock / DualSense over HID; `lxpad` on Linux: gamepads over evdev), `mouse_menu` and `menu_keys` (mouse and keys
 //!   in the menus), `vendor` ("buy all ammo")
 //! - PC extras: `modcam` (modern camera, RMB aim), `aim` (crosshair and aimed shots), `strafe` ("Controls: Modern" movement),
 //!   `shipmouse` (mouse steering in ship fights)
@@ -83,10 +83,20 @@ pub mod pcctl;
 pub mod pcmods;
 pub mod prompts;
 pub mod pspad;
+#[cfg(any(test, target_os = "linux"))]
+pub mod lxpad;
+/// The gamepad reader of this platform for PlayStation / evdev controllers: pspad (HID) on Windows, lxpad (evdev through gilrs) on
+/// Linux. Both give `state()` and `connected()`, an XInput report each.
+#[cfg(target_os = "linux")]
+pub(crate) use lxpad as hidpad;
+#[cfg(not(target_os = "linux"))]
+pub(crate) use pspad as hidpad;
 pub mod vendor;
 pub mod pcopts;
+pub mod pcdisp;
 pub mod pcintro;
 pub mod pcrender;
+pub mod pcskip;
 pub mod strafe;
 pub mod strafe_feel;
 pub mod shipmouse;
@@ -100,10 +110,16 @@ pub mod title_boot;
 pub mod disc;
 pub mod disc_hands;
 pub mod disc_map;
+pub mod disc_trace;
+#[cfg(test)]
+mod disc_proven;
+#[cfg(test)]
+pub(crate) mod disc_guard_tests;
 
 mod session;
 mod ram_globals;
 pub(crate) mod camera;
+mod camera_arc;
 mod prop_pools;
 mod moby_state;
 mod snapshot;
@@ -113,6 +129,7 @@ mod fx_queue;
 mod lights_water;
 mod shadow_snap;
 mod shop_snap;
+mod wide_side;
 mod worker;
 mod tick;
 mod input;
@@ -122,9 +139,12 @@ mod props_sync;
 mod debug_aids;
 #[cfg(test)]
 mod test_suite;
+#[cfg(test)]
+mod mouse_lists_test;
 pub use self::session::*;
 pub use self::ram_globals::*;
 pub use self::camera::*;
+pub use self::camera_arc::{boom_turn, orbits, MAX_TURN as ARC_MAX_TURN};
 pub use self::prop_pools::*;
 pub use self::moby_state::*;
 pub use self::snapshot::*;
@@ -160,9 +180,9 @@ pub type Cam = ([f32; 3], f32, f32, f32);
 pub mod warp;
 
 /// The deferred `Capture::take` of one field: waits for the capture thread to finish the field's jobs, then gives the overlay as
-/// (width, rows, RGBA8, `disp`). The overlays are tagged by the capture thread's field-end count, so taking later (on the main
+/// (width, rows, RGBA8, `disp`, `HudGuard`). The overlays are tagged by the capture thread's field-end count, so taking later (on the main
 /// thread, after the worker already runs the next field) gives the same overlay as taking at the field's end.
-pub struct OvLate(Box<dyn FnOnce() -> Option<(u32, u32, Vec<[u8; 4]>, bool)> + Send>);
+pub struct OvLate(Box<dyn FnOnce() -> Option<(u32, u32, Vec<[u8; 4]>, bool, HudGuard)> + Send>);
 
 /// The click latch of the left (0, Circle) and middle (1, Triangle) mouse buttons: fields each still counts as held.
 #[derive(Default)]

@@ -19,6 +19,9 @@ mod flow;
 mod fmv;
 mod game;
 mod frontend;
+mod frontend_lang;
+mod frontend_lines;
+mod awake;
 mod gsfull;
 mod gadgets;
 mod gameplay;
@@ -28,8 +31,11 @@ mod inventory;
 mod iso;
 mod kofi;
 mod level;
+mod fmath;
 mod loadlog;
 mod runlog;
+#[cfg(any(test, target_os = "linux"))]
+mod runlog_linux;
 mod map;
 mod mesh;
 mod mobies;
@@ -109,13 +115,28 @@ fn message_box(text: &str) {
 	eprintln!("{text}");
 }
 
+/// The setup script the messages name: Setup.cmd on Windows, setup.sh on Linux. A macro (not a const) so that `concat!` makes it one
+/// literal with the rest of the message: on Windows the strings in the exe are exactly the ones from before the Linux port.
+#[cfg(target_os = "linux")]
+macro_rules! setup_name {
+	() => {
+		"setup.sh"
+	};
+}
+#[cfg(not(target_os = "linux"))]
+macro_rules! setup_name {
+	() => {
+		"Setup.cmd"
+	};
+}
+
 /// The install root: the first folder from the exe's folder upwards that holds `generated/play.cfg`. Err is the text for a message box.
 fn install_root() -> Result<std::path::PathBuf, String> {
-	let exe = std::env::current_exe().map_err(|e| format!("Cannot find the game folder ({e}). Run Setup.cmd first."))?;
+	let exe = std::env::current_exe().map_err(|e| format!(concat!("Cannot find the game folder ({}). Run ", setup_name!(), " first."), e))?;
 	exe.parent()
 		.and_then(|d| d.ancestors().find(|d| d.join("generated").join("play.cfg").is_file()))
 		.map(|d| d.to_path_buf())
-		.ok_or_else(|| "Run Setup.cmd first: the game has not been set up yet (generated/play.cfg not found).".to_string())
+		.ok_or_else(|| concat!("Run ", setup_name!(), " first: the game has not been set up yet (generated/play.cfg not found).").to_string())
 }
 
 /// [PC] The window title: "rac-rs v0.2.1" from the install root's `generated/built_version.txt` (setup.ps1 writes it after building
@@ -188,13 +209,35 @@ fn update_check() -> bool {
 	}
 }
 
+/// [PC] Linux: the disc path of play.cfg made absolute: a relative one is taken from the install root, an absolute one stays.
+#[cfg(any(test, target_os = "linux"))]
+fn disc_path(root: &std::path::Path, iso: &str) -> String {
+	let p = std::path::Path::new(iso);
+	if p.is_absolute() { iso.to_string() } else { root.join(p).to_string_lossy().into_owned() }
+}
+
+#[cfg(test)]
+mod tests {
+	use super::disc_path;
+
+	/// A relative disc path (setup.sh: rom/x.iso) is resolved against the install root; an absolute one is left alone.
+	#[test]
+	fn a_relative_disc_path_is_taken_from_the_install_root() {
+		let root = std::env::temp_dir().join("rac_root");
+		assert_eq!(disc_path(&root, "rom/x.iso"), root.join("rom/x.iso").to_string_lossy());
+		let abs = std::env::temp_dir().join("elsewhere").join("y.iso");
+		assert_eq!(disc_path(&root, &abs.to_string_lossy()), abs.to_string_lossy());
+	}
+}
+
 /// The no-argument start (what Play.cmd did): find the install root (the first folder from the exe's folder upwards that holds
-/// `generated/play.cfg`), read `iso=<path>` and optional `lang=en|fr|de|es|it` from it, set the environment Play.cmd set, rotate the
-/// card safety copies and return the arguments of `view <iso> 0 --retail-cold --modern-cam`. Err is the text for a message box.
+/// `generated/play.cfg`), read `iso=<path>` and optional `lang=en|fr|de|es|it` from it (only the start language while the player has
+/// not picked one: `pcopts::cold_lang`), set the environment Play.cmd set, rotate the card safety copies and return the arguments of
+/// `view <iso> 0 --retail-cold --modern-cam`. Err is the text for a message box.
 /// Runs first thing in `main`, before any thread starts (`set_var` is only sound then).
 fn launch_args() -> Result<Vec<String>, String> {
 	let root = install_root()?;
-	let cfg = std::fs::read(root.join("generated").join("play.cfg")).map_err(|e| format!("Cannot read generated/play.cfg ({e}). Run Setup.cmd again."))?;
+	let cfg = std::fs::read(root.join("generated").join("play.cfg")).map_err(|e| format!(concat!("Cannot read generated/play.cfg ({}). Run ", setup_name!(), " again."), e))?;
 	let cfg = String::from_utf8_lossy(&cfg);
 	let (mut iso, mut lang) = (None, None);
 	for line in cfg.trim_start_matches('\u{feff}').lines() {
@@ -206,9 +249,13 @@ fn launch_args() -> Result<Vec<String>, String> {
 			}
 		}
 	}
-	let iso = iso.filter(|i| !i.is_empty()).ok_or("Run Setup.cmd again: generated/play.cfg has no disc image path.")?;
+	let iso = iso.filter(|i| !i.is_empty()).ok_or(concat!("Run ", setup_name!(), " again: generated/play.cfg has no disc image path."))?;
+	// [PC] Linux: setup.sh writes a relative path (rom/<name>.iso); it is relative to the install root, not to the folder the exe was
+	// started from (Steam's "Start In", a file manager). Windows keeps the path as it is (setup.ps1 writes an absolute one).
+	#[cfg(target_os = "linux")]
+	let iso = disc_path(&root, &iso);
 	if !std::path::Path::new(&iso).is_file() {
-		return Err(format!("Your disc image moved or is gone:\n{iso}\n\nRun Setup.cmd again."));
+		return Err(format!(concat!("Your disc image moved or is gone:\n{}\n\nRun ", setup_name!(), " again."), iso));
 	}
 	let player = root.join("player");
 	let _ = std::fs::create_dir_all(&player);
@@ -217,10 +264,11 @@ fn launch_args() -> Result<Vec<String>, String> {
 		std::env::set_var("ORACLE_ISO", &iso);
 		std::env::set_var("ORACLE_STUBS", root.join("oracle").join("stubs.txt"));
 		std::env::set_var("RAC_PLAYER_DIR", &player);
-		if std::env::var_os("COLD_LANG").is_none() {
-			let lang = lang.filter(|l| ["en", "fr", "de", "es", "it"].contains(&l.as_str())).unwrap_or_else(|| "en".to_string());
-			std::env::set_var("COLD_LANG", lang);
-		}
+	}
+	// Not COLD_LANG: that forces a language and would beat the one the player picked (Options -> Language or the launcher, kept in
+	// pc_options.txt) on every start; English when neither is set.
+	if let Some(l) = lang.as_deref().and_then(retail::pcopts::Lang::from_code) {
+		retail::pcopts::set_setup_lang(l);
 	}
 	// Safety copies of the save card before each start (the newest two starts).
 	let (card, c1, c2) = (player.join("card.bin"), player.join("card.start1.bin"), player.join("card.start2.bin"));
@@ -240,7 +288,14 @@ pub fn main() -> ExitCode {
 	#[cfg(feature = "windows_gui")]
 	std::panic::set_hook(Box::new(|info| {
 		let thread = std::thread::current();
+		// [PC] A texture-pack decoder panic that is caught on the spot (texpack/guard.rs): one log line, no crash.log, no call trace.
+		if crate::texpack::guard::panic_expected() {
+			eprintln!("texpack: a pack file made the decoder panic (caught, the original texture stays): {info}");
+			return;
+		}
 		let text = format!("panic in thread {}: {info}", thread.name().unwrap_or("?"));
+		// The mods' queued log lines first, so they stay in front of the panic line (omni/logq.rs).
+		crate::omni::flush_log();
 		// Also into the run log (runlog.rs), next to what led up to it.
 		eprintln!("{text}");
 		// With the calls that led to it (the first few panics: reading the exe's function names takes a moment).
@@ -287,10 +342,12 @@ pub fn main() -> ExitCode {
 	match result {
 		Ok(()) => {
 			gscap_guard::quit();
+			omni::flush_log();
 			runlog::end();
 			ExitCode::SUCCESS
 		}
 		Err(e) => {
+			omni::flush_log();
 			eprintln!("error: {e}");
 			#[cfg(feature = "windows_gui")]
 			{

@@ -55,11 +55,13 @@ local levels = nil
 local wrench = nil -- the wrench module (its active() says a swing is running)
 local nanotech = nil -- the nanotech module (its enabled() says the health pool is on)
 local omni = omni
+local mcache = nil -- mcache.luau (class of a moby, cached)
 local enemy_class = {} -- class -> true/false (known)
 local unseen = {} -- attacker classes already logged as unattributed
 local stats = {} -- weapon -> { hits, xp, kills }
 local logged = {}
 local failed = false
+local errors = 0 -- scored hits that raised an error (one odd hit must not switch XP and scaling off for good)
 local slow_logged = 0
 local hero_hits = 0
 local extra_orbs = 0
@@ -96,14 +98,20 @@ M.T = rebalance_T
 -- ---------------------------------------------------------------------------------------- attribution
 local function read_class(addr)
 	if addr == nil or addr == 0 then return nil end
+	if mcache ~= nil then return mcache.class(addr) end
 	local ok, m = pcall(omni.struct, "moby", addr)
 	if ok and m then return m.class, m end
 	return nil
 end
 
+local hero_cache, hero_cache_tick = 0, -1
 local function hero_moby()
+	if hero_cache_tick == tick and hero_cache ~= 0 then return hero_cache end
 	local ok, v = pcall(function() return omni.fields.omni.hero.moby end)
-	if ok then return v end
+	if ok then
+		hero_cache, hero_cache_tick = v, tick
+		return v
+	end
 	return 0
 end
 
@@ -128,13 +136,20 @@ local function attribute(attacker)
 	end
 	-- A mini bomb (class 121) thrown by a Visibomb split has the Visibomb gun (class 163) as its owner: credit the Visibomb.
 	if cls == 121 then
-		local ok, oc = pcall(function()
-			local m = omni.struct("moby", attacker)
-			local b = omni.struct("bomb", m.pvar)
-			if b == nil or b.owner == 0 then return 0 end
-			return omni.struct("moby", b.owner).class
-		end)
-		if ok and oc == 163 then
+		-- the owner of a mini bomb never changes: looked up once per bomb (kept in its mcache record)
+		local rec = mcache ~= nil and mcache.rec(attacker) or nil
+		local oc = rec and rec.owner_class or nil
+		if oc == nil then
+			local ok, v = pcall(function()
+				local m = omni.struct("moby", attacker)
+				local b = omni.struct("bomb", m.pvar)
+				if b == nil or b.owner == 0 then return 0 end
+				return mcache ~= nil and mcache.class(b.owner) or omni.struct("moby", b.owner).class
+			end)
+			oc = ok and v or false
+			if rec ~= nil and ok and oc ~= 0 then rec.owner_class = oc end
+		end
+		if oc == 163 then
 			if not unseen.split then
 				unseen.split = true
 				log("mini bomb of a Visibomb split (owner class 163): kills and XP credited to visibomb")
@@ -217,7 +232,12 @@ local function score(victim, entry, comp, sptr)
 	local hp = c.health
 	if hp <= 0 then return end -- already dead
 	local vclass, vm = read_class(victim)
-	if vclass == nil or not is_enemy(victim, vclass, vm) then return end
+	if vclass == nil then return end
+	if enemy_class[vclass] == nil and vm == nil then
+		local okm, m = pcall(omni.struct, "moby", victim)
+		vm = okm and m or nil
+	end
+	if not is_enemy(victim, vclass, vm) then return end
 	local hit = omni.struct("hit", entry)
 	local attacker = hit and hit.attacker or 0
 	local weapon, why, acls = attribute(attacker)
@@ -280,8 +300,12 @@ local function on_resolve(original, victim, entry, comp, a3, status, sptr, out2,
 		log(string.format("power: one scored hit took %.2f ms of script time", ms))
 	end
 	if not ok then
-		failed = true
-		log("power: scoring failed, XP and scaling off (" .. string.sub(tostring(err), 1, 160) .. ")")
+		errors += 1
+		if errors <= 3 then log("power: scoring one hit failed (" .. string.sub(tostring(err), 1, 160) .. ")") end
+		if errors >= 20 then
+			failed = true
+			log("power: scoring failed 20 times, XP and scaling off (" .. string.sub(tostring(err), 1, 160) .. ")")
+		end
 	end
 	return ret
 end
@@ -312,6 +336,11 @@ end
 function M.setup(a)
 	api = a
 	levels = a.levels
+	local okc, mc = pcall(require, "mcache")
+	if okc and type(mc) == "table" then
+		mcache = mc
+		mc.setup()
+	end
 	have_struct = omni.has("omni.struct") and omni.has("omni.struct_set")
 	have_mobys = omni.has("omni.mobys")
 	have_out = omni.has("omni.out_f32")

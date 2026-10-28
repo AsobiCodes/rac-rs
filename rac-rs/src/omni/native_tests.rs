@@ -188,3 +188,26 @@ fn start_candidates_follow_a_return_with_up_to_three_padding_words() {
 	assert!(!strict.contains(&0x100), "the first word has nothing before it");
 	assert_eq!(candidates(&words, 0x100, false).len(), words.len());
 }
+
+#[test]
+fn a_call_between_fields_gives_the_field_timer_back_armed() {
+	use super::native_host::run_at;
+	const ENTRY: u32 = 0x10_0000;
+	let mut c = ee_oracle::cpu::Cpu::new(ee_oracle::mem::Mem::new());
+	c.mem.wr32(ENTRY, 0x03e0_0008); // jr ra
+	c.mem.wr32(ENTRY + 4, 0);
+	c.mem.tick = 5000;
+	c.mem.set_due(5000);
+	// A VIF1 stop matures while the timer is held off (tick = MAX): the oracle sets `due` from that tick.
+	let r = run_at(&mut c, ENTRY, |c| c.mem.mature(0), |_| ());
+	assert!(r.is_ok(), "{r:?}");
+	assert_eq!(c.mem.tick, 5000, "the timer value comes back");
+	assert_eq!(c.mem.due, 5000, "and the forced vblank is due at it again, not never");
+	assert!(c.mem.limit_ok());
+	// A pending VIF1 stop keeps its earlier deadline.
+	c.mem.vif1_pend = Some([0; 5]);
+	c.mem.dma_due = 3000;
+	let r = run_at(&mut c, ENTRY, |_| (), |_| ());
+	assert!(r.is_ok(), "{r:?}");
+	assert_eq!(c.mem.due, 3000);
+}

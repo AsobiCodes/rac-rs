@@ -89,6 +89,12 @@ impl CursorVis {
 	pub fn why(&self) -> Why {
 		self.why
 	}
+
+	/// The mouse is the device in use (its cursor is shown unless the game holds it): the page menus aim at the row under it
+	/// only then. A pad / keyboard player's desk bump below `MOVE_COUNTS` moves a hidden cursor the player cannot see.
+	pub fn mouse_in_use(&self) -> bool {
+		self.mouse
+	}
 }
 
 static LIVE: Mutex<CursorVis> = Mutex::new(CursorVis::new());
@@ -106,6 +112,11 @@ pub fn raw_motion(dx: f64, dy: f64) {
 	if let Ok(mut c) = LIVE.lock() {
 		c.motion(now_ms(), (dx.abs() + dy.abs()) as f32);
 	}
+}
+
+/// Is the mouse the device in use right now (the OS cursor is shown, or only held by the game)? See `CursorVis::mouse_in_use`.
+pub fn mouse_in_use() -> bool {
+	LIVE.lock().map_or(true, |c| c.mouse_in_use())
 }
 
 /// Window events: key presses, mouse button presses and the wheel. `captured` = the cursor is captured right now.
@@ -157,6 +168,8 @@ pub fn apply(window: &Window, captured: bool, retail: bool) {
 		}
 		if crate::retail::prompts::take_pad_pulse() {
 			c.pad();
+			// Real pad input also resets the OS idle timers (a pad plays without the window focus; awake.rs).
+			crate::awake::pad_input();
 		}
 		(c.visible(captured), c.why())
 	} else {
@@ -241,6 +254,23 @@ mod tests {
 		assert!(!c.visible(false));
 		c.motion(5000, 50.0);
 		assert!(c.visible(false));
+	}
+
+	#[test]
+	fn a_hidden_cursor_is_not_the_mouse_in_use() {
+		let mut c = CursorVis::new();
+		assert!(!c.mouse_in_use(), "nothing used yet");
+		c.motion(1000, 2.0);
+		assert!(!c.mouse_in_use(), "a desk bump");
+		c.motion(1100, 5.0);
+		assert!(c.mouse_in_use());
+		c.pad();
+		assert!(!c.mouse_in_use());
+		c.click();
+		c.key(true);
+		assert!(c.mouse_in_use(), "WASD while the mouse holds the cursor");
+		c.key(false);
+		assert!(!c.mouse_in_use());
 	}
 
 	#[test]

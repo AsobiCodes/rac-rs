@@ -14,6 +14,7 @@
 //! Hooks: `build_scene` (`starfield::build`, field `Scene::stars`), `Gpu::pass_sky` (`star_draw` per shell draw).
 
 use super::*;
+use std::cell::OnceCell;
 use std::sync::OnceLock;
 
 /// The star texels of a texture: the texture without them and the per-star mask.
@@ -35,8 +36,17 @@ pub(in crate::viewer) struct StarMaps {
 	gpu: OnceLock<StarGpu>,
 }
 
-struct StarGpu {
+/// The starfield pipeline and its bind group layout: made once per `Gpu` (`SkyModel::starfield`), not per level.
+#[derive(Default)]
+pub(in crate::viewer) struct StarPipe(OnceCell<Shared>);
+
+struct Shared {
 	pipeline: wgpu::RenderPipeline,
+	layout2: wgpu::BindGroupLayout,
+}
+
+/// One scene's star textures and bind groups.
+struct StarGpu {
 	ubuf: wgpu::Buffer,
 	groups: Vec<(wgpu::BindGroup, wgpu::BindGroup)>,
 }
@@ -222,8 +232,8 @@ fn star_list(mask: &Texture) -> Vec<[u16; 4]> {
 	best.into_iter().map(|b| [b[0].1, b[0].2, b[1].1, b[1].2]).collect()
 }
 
-impl StarGpu {
-	fn new(gpu: &Gpu, maps: &StarMaps) -> StarGpu {
+impl Shared {
+	fn new(gpu: &Gpu) -> Shared {
 		let device = &gpu.device;
 		let entry = |binding: u32, ty: wgpu::BindingType| wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::FRAGMENT, ty, count: None };
 		let layout2 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -254,6 +264,13 @@ impl StarGpu {
 			multiview_mask: None,
 			cache: None,
 		});
+		Shared { pipeline, layout2 }
+	}
+}
+
+impl StarGpu {
+	fn new(gpu: &Gpu, maps: &StarMaps, layout2: &wgpu::BindGroupLayout) -> StarGpu {
+		let device = &gpu.device;
 		let ubuf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("starfield"), size: 32, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
 		let upload = |t: &Texture| {
 			let size = wgpu::Extent3d { width: t.w as u32, height: t.h as u32, depth_or_array_layers: 1 };
@@ -280,13 +297,13 @@ impl StarGpu {
 				});
 				let mask = device.create_bind_group(&wgpu::BindGroupDescriptor {
 					label: Some("starfield mask"),
-					layout: &layout2,
+					layout: layout2,
 					entries: &[wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() }, wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&upload(&it.set.mask)) }, wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&upload_list(&it.set.mask)) }],
 				});
 				(dead, mask)
 			})
 			.collect();
-		StarGpu { pipeline, ubuf, groups }
+		StarGpu { ubuf, groups }
 	}
 }
 
@@ -294,9 +311,14 @@ impl Gpu {
 	/// Draws the sky shell draw `d` with the starfield look when its texture is a star texture and Enhanced is on; true = drawn
 	/// (the sky pipeline is set again for the next draw).
 	pub(in crate::viewer) fn star_draw(&self, pass: &mut wgpu::RenderPass<'_>, scene: &Scene, d: &Draw) -> bool {
-		let Some(maps) = scene.stars.as_ref().filter(|_| crate::retail::splitview::fx(crate::retail::pcext::graphics().enhanced())) else { return false };
+		let Some(maps) = scene.stars.as_ref().filter(|_| crate::retail::splitview::fx(crate::retail::pcext::graphics().enhanced() && !crate::viewer::pipe_guard::off(crate::viewer::pipe_guard::Effect::Post))) else { return false };
 		let Some(k) = maps.items.iter().position(|it| it.slot == d.texture) else { return false };
-		let st = maps.gpu.get_or_init(|| StarGpu::new(self, maps));
+		// [PC] pipe_guard.rs: a driver that refuses the starfield shader (DX12 FXC) keeps retail's sky texture, it does not crash the game.
+		let pipe = &self.volclouds.sky.starfield.0;
+		let shared_built = || crate::viewer::pipe_guard::guard(&self.device, crate::viewer::pipe_guard::Effect::Starfield, || Shared::new(self)).map(|s| pipe.get_or_init(|| s));
+		let Some(shared) = pipe.get().or_else(shared_built) else { return false };
+		let built = || crate::viewer::pipe_guard::guard(&self.device, crate::viewer::pipe_guard::Effect::Starfield, || StarGpu::new(self, maps, &shared.layout2)).map(|g| maps.gpu.get_or_init(|| g));
+		let Some(st) = maps.gpu.get().or_else(built) else { return false };
 		let t = super::test_clock::secs(|| {
 			static T0: OnceLock<std::time::Instant> = OnceLock::new();
 			T0.get_or_init(std::time::Instant::now).elapsed().as_secs_f32()
@@ -305,7 +327,7 @@ impl Gpu {
 		let vals: [f32; 8] = [t, twinkle(self.level) * tune("star_twinkle", 1.0), (self.config.height as f32 / 1080.0).max(0.5), tune("star_gain", 1.0), tune("star_halo", 1.0), 0.0, 0.0, 0.0];
 		self.queue.write_buffer(&st.ubuf, 0, bytemuck::cast_slice(&vals));
 		let (dead, mask) = &st.groups[k];
-		pass.set_pipeline(&st.pipeline);
+		pass.set_pipeline(&shared.pipeline);
 		pass.set_bind_group(1, dead, &[]);
 		pass.set_bind_group(2, mask, &[]);
 		pass.draw_indexed(d.start..d.start + d.count, 0, d.inst..d.inst + 1);
@@ -349,6 +371,46 @@ mod tests {
 		let mut sparse = vec![[0u8, 0, 0, 0]; w * h];
 		sparse[1000] = [255, 255, 255, 255];
 		assert!(detect(&Texture { w, h, rgba: sparse }).is_none(), "one point is no star field");
+	}
+
+	/// `phi` clamps the tanh argument to +-10. The clamp changes no picture because tanh is already exactly +-1.0 in f32 from an
+	/// argument of 9.011 on: 1 - tanh(a) = 2 / (e^2a + 1) is below half an f32 ulp under 1 (2^-25) there. That bound is checked in f64
+	/// (no host `tanhf` needed); the host f32 tanh is checked from 9.1 on (0.09 of margin: it must be faithfully rounded, which every
+	/// libm is), and the expanded form ((e^2x - 1) / (e^2x + 1), FXC) is finite and exactly 1.0 at the clamp.
+	#[test]
+	fn the_tanh_clamp_changes_nothing() {
+		assert!(WGSL.contains("tanh(clamp(0.7978846 * (x + 0.044715 * x * x * x), -10.0, 10.0))"));
+		let half_ulp_below_one = (-25.0f64).exp2();
+		assert!(2.0 / ((2.0f64 * 9.1).exp() + 1.0) < half_ulp_below_one, "tanh(9.1) rounds to 1.0 in f32");
+		assert!(2.0 / ((2.0f64 * 9.011).exp() + 1.0) < half_ulp_below_one, "and so does 9.011");
+		assert!(2.0 / ((2.0f64 * 9.0).exp() + 1.0) > half_ulp_below_one, "the bound is tight: 9.0 does not yet");
+		let mut a = 9.1f32;
+		while a <= 10.0 {
+			assert_eq!(a.tanh(), 1.0, "tanh({a})");
+			assert_eq!((-a).tanh(), -1.0, "tanh(-{a})");
+			a += 0.001;
+		}
+		let e = (2.0f32 * 10.0).exp();
+		assert!(e.is_finite());
+		assert_eq!((e - 1.0) / (e + 1.0), 1.0);
+		// Below the clamp the argument is untouched; the old and the new `phi` agree for every x, swept densely through the band where
+		// the clamp starts to reach (arg 9..10 is x of about 5.1..5.6) and out to where the cubic is huge.
+		let arg = |x: f32| 0.7978846 * (x + 0.044715 * x * x * x);
+		let phi = |x: f32, clamp: bool| 0.5 + 0.5 * (if clamp { arg(x).clamp(-10.0, 10.0) } else { arg(x) }).tanh();
+		let (mut n, mut clamped, mut band) = (0u32, 0u32, 0u32);
+		let mut x = -12.0f32;
+		while x <= 12.0 {
+			assert_eq!(phi(x, true), phi(x, false), "x = {x}");
+			n += 1;
+			clamped += (arg(x).abs() > 10.0) as u32;
+			band += (9.0..=10.0).contains(&arg(x).abs()) as u32;
+			x += 0.0005;
+		}
+		assert!(n > 40_000 && clamped > 5_000 && band > 400, "the sweep reaches the band: {n} {clamped} {band}");
+		for x in [1.0e3f32, 1.0e6, 1.0e12, 1.0e19, f32::MAX] {
+			assert_eq!(phi(x, true), phi(x, false), "x = {x}");
+			assert_eq!(phi(-x, true), phi(-x, false), "x = -{x}");
+		}
 	}
 
 	#[test]

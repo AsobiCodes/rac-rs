@@ -45,6 +45,7 @@ impl Smoke {
 				let _ = std::fs::write(p, ram);
 			}
 			crate::gscap_guard::quit();
+			crate::omni::flush_log();
 			std::process::exit(0);
 		}
 	}

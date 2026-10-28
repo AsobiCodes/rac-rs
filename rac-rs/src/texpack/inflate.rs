@@ -147,7 +147,10 @@ fn fixed() -> (Huff, Huff) {
 /// Raw deflate data; `limit` bounds the output (a PNG knows its size).
 pub fn inflate(data: &[u8], limit: usize) -> Result<Vec<u8>, String> {
 	let mut b = Bits { data, pos: 0, buf: 0, cnt: 0 };
-	let mut out = Vec::with_capacity(limit.min(1 << 26));
+	let mut out = Vec::new();
+	// The whole output at once and fallible (a 8192x8192 RGBA PNG is ~268 MB; growing by doubling aborts the process when it fails). The
+	// slack covers what `codes` / a stored block add before the `limit` check (258 bytes of match, 64 KB of stored data).
+	out.try_reserve_exact(limit.saturating_add(1 << 17)).map_err(|_| "inflate: out of memory".to_string())?;
 	loop {
 		let last = b.need(1)?;
 		match b.need(2)? {

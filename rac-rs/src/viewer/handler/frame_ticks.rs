@@ -60,7 +60,7 @@ impl App {
 						self.movie = Some(fmv::player::Player::start(&self.iso_path, &m, lang, self.audio.as_mut()));
 					}
 					if let Some(g) = &self.gpu {
-						r.aspect = g.config.width as f32 / g.config.height.max(1) as f32;
+						r.set_aspect(g.config.width as f32 / g.config.height.max(1) as f32);
 					}
 					r.sync(game);
 					// [PC] TEST ONLY: RAC_TEST_CLOCK counts the retail fields shown (viewer/test_clock.rs).
