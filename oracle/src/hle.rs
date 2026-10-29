@@ -296,6 +296,20 @@ impl Cpu {
             self.mem.wr32(recv, h);
             return;
         }
+        // The CDVD S-command client's clock read (boot 0x121780 sceCdReadClock): the IOP answers status 0 and the
+        // 8-byte BCD time at recv + 4 (sceCdCLOCK: sec, min, hour, pad, day, month, year), which the wrapper copies
+        // into the caller's sceCdCLOCK. The reply is the host's local time, shifted forward by the nine hours the
+        // game subtracts (clock.rs).
+        if client == 0x132d08 && fno == 1 && recv != 0 {
+            self.mem.wr32(recv, 0);
+            if rsize >= 0xc {
+                for (k, b) in crate::clock::local_rtc().iter().enumerate() {
+                    self.mem.wr8(recv + 4 + k as u32, *b);
+                }
+                self.mem.wr32(recv + 0xc, 0);
+            }
+            return;
+        }
         if client == 0x132d08 && fno == 4 {
             self.mem.wr32(recv, 0);
             return;

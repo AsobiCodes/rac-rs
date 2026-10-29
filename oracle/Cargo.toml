@@ -6,6 +6,10 @@ edition = "2021"
 [dependencies]
 ee-core = { path = "core" }
 
+# The host's local time on Unix (clock.rs); Windows uses GetLocalTime instead.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.190"
+
 [features]
 # Speed-hand gate builds only (lane scratch_perf_hs, `--example hsregion --features hs_deny`): `hs_fast::deny_set` lets the
 # region gate refuse every N-th plain-memory access of a hand to test its fallback paths. Never enabled in a game build.

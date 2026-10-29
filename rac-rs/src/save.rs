@@ -469,4 +469,11 @@ mod tests {
 		assert_eq!(find_or_claim(&mut t, 9), 62);
 		assert_eq!(find_or_claim(&mut t, -1), -1);
 	}
+
+	/// The slot row prints the clock record's month, day and year, two digits each.
+	#[test]
+	fn the_slot_row_shows_month_day_year() {
+		let s = Summary { level: 0, bolts: 0, play_frames: 0, date: [0x10, 0x23, 0x26] };
+		assert_eq!(s.date_text(), "10/23/26");
+	}
 }
