@@ -104,8 +104,9 @@ pub struct Ctx {
 	pub menu: Option<super::menu_keys::Screen>,
 }
 
-/// The binding function (`binds::CROSS` ..) of a button glyph code (Cross .. R2); None for the sticks and other bytes.
-fn bound_function(code: u8) -> Option<usize> {
+/// The binding function (`binds::CROSS` ..) of a button glyph code (Cross .. R2, the stick buttons); None for the sticks'
+/// directions and other bytes.
+pub(crate) fn bound_function(code: u8) -> Option<usize> {
 	use super::binds as b;
 	Some(match code {
 		CROSS => b::CROSS,
@@ -116,6 +117,8 @@ fn bound_function(code: u8) -> Option<usize> {
 		R1 => b::R1,
 		L2 => b::L2,
 		R2 => b::R2,
+		LSTICK => b::L3,
+		RSTICK => b::R3,
 		_ => return None,
 	})
 }

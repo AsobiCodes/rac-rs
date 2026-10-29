@@ -58,6 +58,8 @@
 //! skipcut=on       on off           (Pause -> Options -> Graphics -> System -> Start skips cutscenes: on (the default) = a plain Start (Enter / Esc, the
 //!                   controller's Start) ends a movie, a scene or a ship flight on both discs; off = retail's rule (Start alone only in Veldin, in
 //!                   the New Game intro, in New Game+ and after the game is beaten, otherwise with L1 + R1 + L2 + R2 held); pcskip.rs)
+//! glyphs=xbox      playstation xbox switch  (Pause -> Options -> Graphics -> System -> Button glyphs: the artwork in the font sheet's ten button
+//!                   cells, PlayStation being the retail's own glyphs; missing = xbox; xglyphs.rs)
 //! gscap_gpu=auto   auto off         (the GPU capture of the HUD, gscap_guard.rs: auto = on where the GPU supports it, off = the CPU capture (Original HUD);
 //!                   a start that froze while the GPU capture opened writes `off` itself, with `gscap_gpu_note` (what happened) and `gscap_gpu_froze`
 //!                   (the game version): a newer game version tries `auto` again once; the player or an outside launcher sets it back to `auto`)
@@ -196,6 +198,8 @@ pub struct PcOptions {
 	pub hud: Option<bool>,
 	/// Graphics -> Screen -> Renderer: Some(true) = DirectX 12, Some(false) = Vulkan; None: Vulkan (the key says `vulkan` or `dx12`).
 	pub renderer: Option<bool>,
+	/// Graphics -> System -> Button glyphs: Some(0 PlayStation, 1 Xbox, 2 Switch); None: never changed (Xbox).
+	pub glyphs: Option<u8>,
 	/// `intro=play|skip` (Some(true) = skip the boot logo movie; pcintro.rs).
 	pub intro: Option<bool>,
 	/// `skipcut=on|off` (Some(true) = a plain Start skips cutscenes; pcskip.rs). None = on.
@@ -215,6 +219,14 @@ pub struct PcOptions {
 
 /// The Lighting values as the file writes them (index = the Graphics page's value byte).
 pub const LIGHTING: [&str; 2] = ["classic", "enhanced"];
+
+/// The Button glyphs styles as the file writes them (index = the Graphics page's value byte).
+pub const GLYPHS: [&str; 3] = ["playstation", "xbox", "switch"];
+
+/// A stored Button glyphs style: the names above.
+fn glyphs_value(v: &str) -> Option<u8> {
+	GLYPHS.iter().position(|g| *g == v.trim().to_ascii_lowercase()).map(|i| i as u8)
+}
 
 /// A stored Lighting value: the names above, plus the first test build's (original = classic, modern / experimental = enhanced).
 fn lighting_value(v: &str) -> Option<u8> {
@@ -301,7 +313,7 @@ fn flag(v: &str, yes: &str, no: &str) -> Option<bool> {
 
 impl PcOptions {
 	pub const fn new() -> PcOptions {
-		PcOptions { lang: None, camera: None, camfeel: None, strafe: None, buyall: None, lockon: None, camspeed: None, mousespeed: None, lighting: None, ao: None, shadows: None, fullscreen: None, water: None, particles: None, sun_rays: None, smoothing: None, vegetation: None, culling: None, gi: None, waves: None, draw: None, fog: None, clouds: None, texfilter: None, hud: None, renderer: None, intro: None, skipcut: None, gscap_gpu: None, gscap_note: None, gscap_froze: None, debug: None, culling_reset: false, extra: Vec::new() }
+		PcOptions { lang: None, camera: None, camfeel: None, strafe: None, buyall: None, lockon: None, camspeed: None, mousespeed: None, lighting: None, ao: None, shadows: None, fullscreen: None, water: None, particles: None, sun_rays: None, smoothing: None, vegetation: None, culling: None, gi: None, waves: None, draw: None, fog: None, clouds: None, texfilter: None, hud: None, renderer: None, glyphs: None, intro: None, skipcut: None, gscap_gpu: None, gscap_note: None, gscap_froze: None, debug: None, culling_reset: false, extra: Vec::new() }
 	}
 
 	/// Lock-on with the default: Auto (0).
@@ -332,6 +344,11 @@ impl PcOptions {
 	/// The HUD row with the default: Sharp.
 	pub fn hud_sharp(&self) -> bool {
 		self.hud.unwrap_or(true)
+	}
+
+	/// The Button glyphs row with the default: Xbox (1).
+	pub fn glyph_style(&self) -> u8 {
+		self.glyphs.unwrap_or(1).min(2)
 	}
 
 	/// Lighting with the default: Classic (0).
@@ -481,6 +498,7 @@ impl PcOptions {
 				"clouds" => o.clouds = level_value(v),
 				"texfilter" => o.texfilter = flag(v, "smooth", "classic"),
 				"hud" => o.hud = flag(v, "sharp", "original"),
+				"glyphs" => o.glyphs = glyphs_value(v),
 				"renderer" => o.renderer = flag(v, "dx12", "vulkan"),
 				"intro" => o.intro = flag(v, "skip", "play"),
 				"skipcut" => o.skipcut = flag(v, "on", "off"),
@@ -586,6 +604,9 @@ impl PcOptions {
 		}
 		if let Some(t) = self.hud {
 			s += &format!("hud={}\n", if t { "sharp" } else { "original" });
+		}
+		if let Some(g) = self.glyphs {
+			s += &format!("glyphs={}\n", GLYPHS[g.min(2) as usize]);
 		}
 		if let Some(t) = self.renderer {
 			s += &format!("renderer={}\n", if t { "dx12" } else { "vulkan" });
@@ -695,6 +716,19 @@ mod tests {
 		let t = o.to_text();
 		assert!(t.contains("gscap_gpu=off\n") && t.contains("gscap_gpu_note=(auto: start on X froze 2026-10-23)\n") && t.contains("future=1\n") && t.contains("camera=modern\n"), "{t}");
 		assert_eq!(PcOptions::parse(&t), o);
+	}
+
+	/// The Button glyphs key: the three names, the default (Xbox) and what a missing or unreadable key does.
+	#[test]
+	fn the_button_glyphs_style_is_read_and_written() {
+		assert_eq!(PcOptions::parse("").glyph_style(), 1, "a new player gets the Xbox pictures");
+		for (i, name) in GLYPHS.iter().enumerate() {
+			let o = PcOptions::parse(&format!("glyphs={name}\n"));
+			assert_eq!(o.glyph_style(), i as u8);
+			assert_eq!(o.to_text(), format!("version=1\nglyphs={name}\n"));
+		}
+		assert_eq!(PcOptions::parse("glyphs=never\n").glyphs, None);
+		assert_eq!(PcOptions::parse("glyphs=SWITCH\n").glyph_style(), 2);
 	}
 
 	#[test]

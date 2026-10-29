@@ -322,6 +322,12 @@ pub fn main() -> ExitCode {
 			}
 		}
 	}
+	// The button bindings from the options file, read before any thread starts: the prompts name the buttons the functions are
+	// bound to, and the font sheet (with the artwork in its cells) is built on the host thread, which can run before the
+	// retail's own thread has read the file. (The extension's own switch is not asked here: it caches the disc it sees, and
+	// the disc is not known yet. `pcext::init` puts the defaults back when the extension is off.)
+	let opts = retail::pcopts::PcOptions::load(&retail::memcard::player_dir().join("pc_options.txt"));
+	retail::binds::init(opts.extra_get("keys"), opts.extra_get("pad"));
 	// [PC] The player's run log (runlog.rs): stderr into <player dir>/log.txt when it goes nowhere (the double-clicked game).
 	// After `launch_args` (it sets RAC_PLAYER_DIR while the process is still single-threaded).
 	runlog::start(&retail::memcard::player_dir());

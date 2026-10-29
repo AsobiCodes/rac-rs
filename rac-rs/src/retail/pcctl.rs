@@ -103,6 +103,11 @@ const ID_SELG: u32 = 0x7f75;
 const ID_HUD: u32 = 0x7f76;
 const ID_SHARP: u32 = 0x7f77;
 const ID_ORIGINAL: u32 = 0x7f78;
+/// The Button glyphs row: its label and its three values. Ids 0x7f68..0x7f6b are free in the pool range.
+const ID_GLYPHS: u32 = 0x7f68;
+const ID_PLAYSTATION: u32 = 0x7f69;
+const ID_XBOX: u32 = 0x7f6a;
+const ID_SWITCH: u32 = 0x7f6b;
 /// The Renderer row: its label and its two values (pcrender.rs words them: a value that differs from the running API says restart).
 const ID_RENDERER: u32 = 0x7f79;
 const ID_VULKAN: u32 = 0x7f7a;
@@ -136,9 +141,11 @@ const SEC_DISPLAY: usize = 3;
 const HUD_ROW: usize = 15;
 const RENDER_ROW: usize = 16;
 const PRESET_ROW: usize = 17;
-/// The Skip intro row and the Start skips cutscenes row, the System section (the other three are full at six rows).
+/// The Skip intro row, the Start skips cutscenes row and the Button glyphs row, the System section (the other three are full
+/// at six rows).
 const INTRO_ROW: usize = 18;
 const SKIPCUT_ROW: usize = 19;
+const GLYPH_ROW: usize = 24;
 /// The Display section's rows (pcdisp.rs).
 const HUDPOS_ROW: usize = 20;
 const HUDSCALE_ROW: usize = 21;
@@ -155,7 +162,7 @@ const GSCREEN: &[usize] = &[3, 7, 12, 9, HUD_ROW];
 /// Picture: Preset, Lighting, Ambient occlusion, Dynamic shadows, Global illumination, Sun rays. Effects: Water, Waves, Particles,
 /// Vegetation, Volumetric fog, Volumetric clouds. Screen: Display mode, Frame smoothing, Draw distance, Culling, Renderer, HUD. Each section is at most six rows (the
 /// panel holds the stepper and six).
-const GSECS: [&[usize]; NGSEC] = [&[PRESET_ROW, 0, 1, 2, 10, 6], &[4, 11, 5, 8, 13, 14], GSCREEN, &[HUDPOS_ROW, HUDSCALE_ROW, FPS_ROW, RSCALE_ROW], &[INTRO_ROW, SKIPCUT_ROW]];
+const GSECS: [&[usize]; NGSEC] = [&[PRESET_ROW, 0, 1, 2, 10, 6], &[4, 11, 5, 8, 13, 14], GSCREEN, &[HUDPOS_ROW, HUDSCALE_ROW, FPS_ROW, RSCALE_ROW], &[INTRO_ROW, SKIPCUT_ROW, GLYPH_ROW]];
 
 /// What a row does in a Controls section.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -243,6 +250,11 @@ static SHARP: T5 = [b"Sharp", b"Net", b"Scharf", b"N\x94tido", b"Nitido"];
 static RENDERER: T5 = [b"Renderer", b"Rendu", b"Renderer", b"Motor gr\x84fico", b"Renderer"];
 static INTRO: T5 = [b"Skip intro", b"Passer intro", b"Intro \xa7berspringen", b"Saltar intro", b"Salta intro"];
 static SKIPCUT: T5 = [b"Start skips cutscenes", b"Passer avec Start", b"Mit Start \xa7berspringen", b"Saltar con Start", b"Salta con Start"];
+/// The Button glyphs row: its label and its three styles.
+static GLYPHS: T5 = [b"Button glyphs", b"Touches de manette", b"Tastensymbole", b"Botones del mando", b"Tasti del gamepad"];
+static PLAYSTATION: T5 = [b"PlayStation", b"PlayStation", b"PlayStation", b"PlayStation", b"PlayStation"];
+static XBOX: T5 = [b"Xbox", b"Xbox", b"Xbox", b"Xbox", b"Xbox"];
+static SWITCH: T5 = [b"Switch", b"Switch", b"Switch", b"Switch", b"Switch"];
 static PRESET: T5 = [b"Preset", b"Pr\x8cr\x8cglage", b"Voreinst.", b"Preajuste", b"Preset"];
 static CUSTOM: T5 = [b"Custom", b"Perso.", b"Eigene", b"Personal", b"Person."];
 static ORIGINAL: T5 = [b"Original", b"Original", b"Original", b"Original", b"Originale"];
@@ -331,6 +343,10 @@ pub fn text(id: u32, lang: usize, csec: usize, gsec: usize, playstation: bool) -
 		ID_RENDERER => fixed(&RENDERER),
 		ID_INTRO => fixed(&INTRO),
 		ID_SKIPCUT => fixed(&SKIPCUT),
+		ID_GLYPHS => fixed(&GLYPHS),
+		ID_PLAYSTATION => fixed(&PLAYSTATION),
+		ID_XBOX => fixed(&XBOX),
+		ID_SWITCH => fixed(&SWITCH),
 		ID_VULKAN | ID_DX12 => super::pcrender::value_text(id == ID_DX12, l),
 		ID_DBG0 => fixed(&DBG_MODE),
 		_ if (ID_DBG_KEY..ID_DBG_KEY + NDKEYS as u32).contains(&id) => fixed(&DBG_KEYS[(id - ID_DBG_KEY) as usize]),
@@ -426,6 +442,7 @@ fn gfx_table(rows: &[[u32; 6]], sec: usize, custom: bool) -> Vec<u32> {
 			RENDER_ROW => [ID_RENDERER, RENDB, ID_VULKAN, ID_DX12, 0, 0],
 			INTRO_ROW => [ID_INTRO, INTROB, ID_OFF, ID_ON, 0, 0],
 			SKIPCUT_ROW => [ID_SKIPCUT, SKIPB, ID_ON, ID_OFF, 0, 0],
+			GLYPH_ROW => [ID_GLYPHS, super::pcext::GLYPHS, ID_PLAYSTATION, ID_XBOX, ID_SWITCH, 0],
 			HUDPOS_ROW => [pcdisp::ID_HUDPOS, pcdisp::POS_B, pcdisp::ID_P43, pcdisp::ID_CORNERS, 0, 0],
 			HUDSCALE_ROW => [pcdisp::ID_HUDSCALE, pcdisp::POS_B + 1, pcdisp::ID_VSCALE, pcdisp::ID_VSCALE, 0, 0],
 			FPS_ROW => [pcdisp::ID_FPS, pcdisp::POS_B + 2, pcdisp::ID_VFPS, pcdisp::ID_VFPS, 0, 0],
@@ -486,6 +503,7 @@ pub fn build_gfx(mem: &mut Mem, gtab: u32, rows: &[[u32; 6]], hud_sharp: bool, d
 		mem.wr8(RENDB, dx12 as u8);
 		mem.wr8(INTROB, super::pcintro::skip() as u8);
 		mem.wr8(SKIPB, !super::pcskip::skip() as u8);
+		mem.wr8(super::pcext::GLYPHS, super::xglyphs::style());
 		pcdisp::build(mem);
 		mem.wr32(G_MAGIC_AT, MAGIC);
 	}
@@ -924,12 +942,13 @@ mod tests {
 		assert!((5..8).all(|s| rows(s).iter().all(|t| matches!(t, Target::Func(Cap::Pad(_))))));
 	}
 
-	/// Every Graphics row (the 13 of pcext's `ROWS`, the HUD, Renderer and Preset rows) is on exactly one page of at most six rows.
+	/// Every Graphics row (the 15 of pcext's `ROWS`, the HUD, Renderer, Preset, Skip intro, Start skips cutscenes, Button
+	/// glyphs and the Display rows) is on exactly one page of at most six rows.
 	#[test]
 	fn graphics_sections_cover_the_rows() {
 		let mut all: Vec<usize> = GSECS.iter().flat_map(|s| s.iter().copied()).collect();
 		all.sort();
-		let want: Vec<usize> = (0..=RSCALE_ROW).filter(|&r| !cfg!(target_os = "linux") || r != RENDER_ROW).collect();
+		let want: Vec<usize> = (0..=GLYPH_ROW).filter(|&r| !cfg!(target_os = "linux") || r != RENDER_ROW).collect();
 		assert_eq!(all, want);
 		assert!(GSECS.iter().all(|s| (1..=ROWS - 1).contains(&s.len())));
 		assert!(GSECS[SEC_SCREEN].contains(&9), "SEC_SCREEN is the section of the Culling row (pcext GROWS index 9): cullwarn.rs shows its warning there");
@@ -957,7 +976,23 @@ mod tests {
 		assert_eq!(disp.len(), 6 * 5);
 		let sys = gfx_table(&rows, NGSEC - 1, false);
 		assert_eq!(&sys[6..12], &[ID_INTRO, INTROB, ID_OFF, ID_ON, 0, 0], "System starts with the Skip intro row, Off / On");
-		assert_eq!(&sys[12..], &[ID_SKIPCUT, SKIPB, ID_ON, ID_OFF, 0, 0], "then Start skips cutscenes, On / Off (the byte is inverted)");
+		assert_eq!(&sys[12..18], &[ID_SKIPCUT, SKIPB, ID_ON, ID_OFF, 0, 0], "then Start skips cutscenes, On / Off (the byte is inverted)");
+		assert_eq!(
+			&sys[18..],
+			&[ID_GLYPHS, super::super::pcext::GLYPHS, ID_PLAYSTATION, ID_XBOX, ID_SWITCH, 0],
+			"then Button glyphs, PlayStation / Xbox / Switch"
+		);
+	}
+
+	/// Every Graphics row's byte is its own: two rows that share one turn a change on one row into a change on the other.
+	#[test]
+	fn the_graphics_rows_have_distinct_bytes() {
+		let mut v: Vec<u32> = super::super::pcext::GROWS.to_vec();
+		v.extend([HUDB, RENDB, PRESETB, INTROB, SKIPB, super::super::pcext::GLYPHS]);
+		let n = v.len();
+		v.sort_unstable();
+		v.dedup();
+		assert_eq!(v.len(), n, "two Graphics rows share a byte ({v:?})");
 	}
 
 	/// The Graphics table is rewritten for the section; a shorter section leaves no stale record behind its zero record.

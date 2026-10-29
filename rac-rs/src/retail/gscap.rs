@@ -11,6 +11,7 @@
 //! is drawn into VRAM so later prims can sample it.
 
 mod draw;
+mod font;
 pub(crate) mod edge_cut;
 mod texname;
 mod texrepl;
@@ -253,6 +254,17 @@ pub struct Gs {
     p1_nd: u32,
     /// RAC_GSCAP_GPU: the pixel work runs on the GPU (draw/gpu.rs), which then holds local memory and the overlay pictures.
     gpu: Option<Box<draw::gpu::Gpu>>,
+    /// The font sheet's place in the graphics memory (the block, its width, the position) and which of the game's three
+    /// fonts it is, once its upload was seen.
+    font_at: Option<(u32, u32, u32, u32, usize)>,
+    /// The button glyphs style the sheet was last patched with.
+    font_style: u8,
+    /// The button bindings the sheet was last patched with (a rebound function is shown as the button it was bound to).
+    font_map: [u8; crate::retail::binds::NP],
+    /// The "the font sheet was found" line was printed (once).
+    font_said: bool,
+    /// The uploads the debug switch has logged (the first 500).
+    font_log: u32,
     /// GPU capture: qwords of the current host -> local transfer so far (`trx` of the CPU path).
     gq: u32,
     /// GPU capture: IMAGE qwords of the current transfer not yet recorded (`gx_flush`), the first one's qword index `gx_q0`.
@@ -419,6 +431,11 @@ impl Gs {
             p1_only: false,
             p1_nd: 0,
             gpu,
+            font_at: None,
+            font_style: u8::MAX,
+            font_map: [u8::MAX; crate::retail::binds::NP],
+            font_said: false,
+            font_log: 0,
             gq: 0,
             gx: Vec::new(),
             gx_q0: 0,
@@ -459,6 +476,9 @@ impl Gs {
         let t0 = self.prof.is_some().then(std::time::Instant::now);
         let kind = match &job { Job::Vif1(..) => "job vif1", Job::Gif(q, _) if q.is_empty() => "job marker", _ => "job gif" };
         let end = matches!(&job, Job::Gif(q, u64::MAX) if q.is_empty());
+        // The button glyphs style or the bindings changed: the sheet in the graphics memory gets the other artwork (the check is
+        // a load and a compare; the work only happens on a change).
+        self.repatch_font();
         self.run_job(job);
         self.gx_flush();
         if end && self.gpu_wait != 0 && self.fields >= self.gpu_wait {
@@ -1361,7 +1381,8 @@ impl Gs {
         for p in &self.pend {
             Self::pb_set(&mut self.pbits, p.lo, p.hi);
         }
-        for p in &run {
+        for p in &mut run {
+            self.patch_font(p);
             if self.gpu.is_some() {
                 self.gpu_xfer(p.bb, p.pos, p.rr, 0, &p.data);
                 self.repl_shadow(p.bb, p.pos, p.rr, 0, &p.data);

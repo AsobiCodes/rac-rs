@@ -82,6 +82,7 @@ pub mod binds;
 pub mod pcctl;
 pub mod pcmods;
 pub mod prompts;
+pub mod xglyphs;
 pub mod pspad;
 #[cfg(any(test, target_os = "linux"))]
 pub mod lxpad;
