@@ -8,11 +8,12 @@
 //! and retail's free look (L1 + L2) is inverted on the vertical axis only. With the Modern camera, Normal means the same for the
 //! physical right stick and the mouse (right = look right, up = look up) in EVERY phase, also the ones retail's own camera runs
 //! (cutscene hand-back, slide, free look, the blend after them): `camera_sticks` flips the controller's share of the
-//! stick before the game reads it, so retail's camera and modcam see the same bytes. Reversed flips both, per axis (retail's two
-//! option bytes: modcam's `lr` / `ud`, retail's follow camera reads them itself). The keyboard camera keys (Q/E turn, Z/X tilt: they
-//! feed the same right-stick bytes, binds.rs) keep EXACTLY their old direction at both settings: the keys' share of the stick
-//! travels in `Input::keys` and `camera_sticks` leaves an axis they drive alone. With the Classic camera nothing is flipped (the
-//! strafe aim that borrows modcam then turns as retail's follow camera does).
+//! stick before the game reads it, so retail's camera and modcam see the same bytes. Reversed flips the stick, per axis (retail's
+//! two option bytes: modcam's `lr` / `ud`, retail's follow camera reads them itself), and with it the keyboard camera keys (Q/E
+//! turn, Z/X tilt: they feed the same right-stick bytes, binds.rs). The mouse is not retail's: it always turns the view the way
+//! it moves, whatever the option says. The keys' share of the stick travels in `Input::keys` and `camera_sticks` leaves an axis
+//! they drive alone. With the Classic camera nothing is flipped (the strafe aim that borrows modcam then turns as retail's
+//! follow camera does).
 
 /// Flips one stick byte around the centre 0x80 (0x01 <-> 0xff; 0x00 -> 0xff, the PS2 range has no 0x100).
 fn flip(b: u8) -> u8 {
@@ -56,7 +57,8 @@ pub fn stick_axes(merged: [u8; 2]) -> [f32; 2] {
 }
 
 /// The per-field gains of the turn: the mouse (counts -> radians, `RAC_MODCAM_SENS`, the Mouse speed row's factor), the stick (yaw
-/// rate, pitch step, the Camera speed row's factor) and retail's Reversed options (-1.0 Reversed, 1.0 Normal) per axis.
+/// rate, pitch step, the Camera speed row's factor) and retail's Reversed options (-1.0 Reversed, 1.0 Normal) per axis, which
+/// reverse the stick (and the keys) only.
 pub struct Gains {
 	pub mouse: f32,
 	pub sens: f32,
@@ -69,10 +71,11 @@ pub struct Gains {
 }
 
 /// The field's turn (yaw, pitch) in radians from the mouse counts `look` and the stick `s` (`stick_axes`, after the deadzone and the
-/// Smooth ramp). With the same factor for both and keys only, the numbers are those of the one-factor formula before the change.
+/// Smooth ramp). The mouse stays direct; retail's Reversed options reverse the stick's share only. With the same factor for both
+/// and keys only, the numbers are those of the one-factor formula before the change.
 pub fn turn(look: [i16; 2], s: [f32; 2], g: &Gains) -> (f32, f32) {
-	let dyaw = (-(look[0] as f32) * g.mouse * g.sens * g.mouse_k + s[0] * g.rot * g.stick_k) * g.lr;
-	let dpitch = (look[1] as f32 * g.mouse * g.sens * g.mouse_k - s[1] * g.tilt * g.stick_k) * g.ud;
+	let dyaw = -(look[0] as f32) * g.mouse * g.sens * g.mouse_k + s[0] * g.rot * g.stick_k * g.lr;
+	let dpitch = look[1] as f32 * g.mouse * g.sens * g.mouse_k - s[1] * g.tilt * g.stick_k * g.ud;
 	(dyaw, dpitch)
 }
 
@@ -144,18 +147,25 @@ mod tests {
 		assert_eq!(camera_sticks([0xff, 0x00], [0, 0], true, true), [0x01, 0xff]);
 	}
 
+	/// Reversed flips the stick (and the keyboard keys, which are the stick) per axis; the mouse always turns the view the way
+	/// it moves, whatever the option says (the option is retail's camera one, and the mouse is not retail's).
 	#[test]
-	fn reversed_flips_stick_and_mouse_per_axis() {
+	fn reversed_flips_the_stick_and_leaves_the_mouse_alone() {
 		for (lr, ud) in [(-1.0f32, 1.0f32), (1.0, -1.0), (-1.0, -1.0)] {
 			let (n, r) = (gains(1.0, 1.0, 1.0, 1.0), gains(1.0, 1.0, lr, ud));
 			for (look, merged) in [([10, -10], [0xff, 0x01]), ([-7, 4], [0x20, 0xc0])] {
+				assert_eq!(turn(look, [0.0; 2], &r), turn(look, [0.0; 2], &n), "the mouse is direct at Reversed");
 				let s = pad_axes(merged);
-				let (a, b) = (turn(look, [0.0; 2], &n), turn(look, [0.0; 2], &r));
-				assert_eq!((b.0, b.1), (a.0 * lr, a.1 * ud), "mouse");
 				let (a, b) = (turn([0, 0], s, &n), turn([0, 0], s, &r));
-				assert_eq!((b.0, b.1), (a.0 * lr, a.1 * ud), "stick");
+				assert_eq!((b.0, b.1), (a.0 * lr, a.1 * ud), "the stick reverses");
+				let k = [0.7f32, -0.4];
+				let (a, b) = (turn([0, 0], k, &n), turn([0, 0], k, &r));
+				assert_eq!((b.0, b.1), (a.0 * lr, a.1 * ud), "the keys follow the stick");
 			}
 		}
+		// Mouse right and up with both axes Reversed still look right and up.
+		let (yaw, pitch) = turn([10, -10], [0.0; 2], &gains(1.0, 1.0, -1.0, -1.0));
+		assert!(yaw < 0.0 && pitch < 0.0, "{yaw} {pitch}");
 	}
 
 	#[test]
@@ -171,8 +181,8 @@ mod tests {
 						let s = stick_axes(bytes);
 						let v = [(merged[0] as f32 - 128.0) / 127.0, (merged[1] as f32 - 128.0) / 127.0];
 						assert_eq!(s, v, "a key axis is the old value");
-						let look = [3, -5];
-						assert_eq!(turn(look, s, &g), old_turn(look, v, &g, k), "keys {keys:?} k {k}");
+						// The keys are the stick: the same numbers the pre-change formula gave the stick's share (the mouse is not in it).
+						assert_eq!(turn([0, 0], s, &g), old_turn([0, 0], v, &g, k), "keys {keys:?} k {k}");
 					}
 				}
 			}

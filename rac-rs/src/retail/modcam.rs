@@ -369,8 +369,8 @@ const AIM_CAP_STEP: f32 = 0.15;
 /// Hero states that keep the retail camera (camera.md CAM-7, CAM-1): script freeze, grind, swing, slides, and the
 /// death states (death_respawn.md section 2: 0x3d/0x47/0x7a-0x7d/0x7f/0x80/0x82, pit tumble 0x77).
 const GATE_STATES: [u32; 16] = [0x72, 0x74, 0x2d, 0x29, 0x2a, 0x31, 0x3d, 0x47, 0x77, 0x7a, 0x7b, 0x7c, 0x7d, 0x7f, 0x80, 0x82];
-/// Retail options (savegame.md A25/A26): 0 = Up/Down resp. Left/Right camera reversed; the modern camera's mouse and
-/// right stick follow them.
+/// Retail options (savegame.md A25/A26): 0 = Up/Down resp. Left/Right camera reversed; the modern camera's right stick follows
+/// them (the mouse is direct).
 const OPT_UD: u32 = 0x15eddc;
 const OPT_LR: u32 = 0x15ede0;
 /// A hero jump longer than this in one field (respawn, teleport) re-seeds the camera from retail's pose.
