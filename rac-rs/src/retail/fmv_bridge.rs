@@ -83,7 +83,8 @@ pub fn players() -> &'static [Player] {
 /// run) and the level word `0x15ed84`; `0x13cae4` is the buttons newly pressed this field, `0x13cae0` the held ones.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Skip {
-	/// The boot logo movies: nothing skips them.
+	/// The boot logo movies: retail skips nothing here; the port's skip press (Esc / Enter / Space or the controller's Start)
+	/// ends one, and the Skip intro row cuts them before they play.
 	Never,
 	/// The attract movie: any newly pressed button.
 	Any,
