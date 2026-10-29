@@ -33,10 +33,12 @@
 //!   the byte order puts the default Medium at 0 and still cycles Low -> Medium -> High); a new player sees the retail lighting
 //!   (Original) with today's Medium draw distance. The picture of the row is help_ss 5 (the lit planet), from the same ToC.
 //! - Paged Graphics / Controls (pcctl.rs): in a level the pause pages show at most 7 rows, row 0 is a "Page" selector (Left / Right
-//!   or Cross steps and wraps): Graphics has 3 sections (Picture: Preset, Lighting, Ambient occlusion, Dynamic shadows, Global
-//!   illumination, Sun rays; Effects: Water, Waves, Particles, Vegetation; Screen: Display mode, Frame smoothing, Draw
-//!   distance, Culling, Renderer, HUD), Controls 9 (pcctl.rs). `HUD: Sharp / Original` is a byte of the pcctl block that `sync` applies
-//!   to `hud_sharp_now()` and `hud=` in the file. The title's Graphics page keeps its 13 rows and has no HUD and no Preset row.
+//!   or Cross steps and wraps): Graphics has 5 sections (Picture: Preset, Lighting, Ambient occlusion, Dynamic shadows, Global
+//!   illumination, Sun rays; Effects: Water, Waves, Particles, Vegetation, Volumetric fog, Volumetric clouds; Screen: Display mode,
+//!   Frame smoothing, Draw distance, Culling, Renderer, HUD; Display: HUD position, HUD scale, FPS limit, Render scale; System:
+//!   Skip intro, Start skips cutscenes, Button glyphs), Controls 9 (pcctl.rs). `HUD: Sharp / Original` is a byte of the pcctl block
+//!   that `sync` applies to `hud_sharp_now()` and `hud=` in the file. The title's Graphics page shows the same sections and rows
+//!   (`pcext/titlegfx.rs`).
 //! - Preset row (Graphics -> Picture, `presets.rs`): Low / Medium / High / Custom from ONE data file, `assets/gfx_presets.txt`
 //!   (the RAC-RS Launcher shows the same table). `sync` calls `presets::choose` before the rows are stepped (a chosen preset writes its
 //!   values into the rows and the HUD row) and `presets::show` at its end (the row shows the preset that matches the rows now, else
@@ -45,9 +47,9 @@
 //!   Culling Off shows a warning in the page's title bar (`pcext/cullwarn.rs`, called at the end of `sync`).
 //! - Mods page (`pcmods.rs`): Pause -> Options -> Mods = the 10th row, only while a mod is on in `active.txt` (`pcmods::load_store`);
 //!   packs On/Off + running script mods' settings. Title -> Options -> Mods (`build_title`): mod On/Off + settings + packs.
-//! - Title screen: Options -> Graphics (`title_options`, a hand on the front end's Options list set-up) shows the same rows on
-//!   a copy of the Video Options page; `front_field` applies and remembers them, the mirror draws them (viewer/front_mirror.rs,
-//!   frontend.rs `Page::Graphics`). The Options rows themselves are retail's of the disc's region (USA: no Video row).
+//! - Title screen: Options -> Graphics (`title_options`, a hand on the front end's Options list set-up) shows the same sections
+//!   and rows as the pause page (`titlegfx.rs`); `front_field` applies and remembers them, the mirror draws them
+//!   (viewer/front_mirror.rs, frontend.rs `Page::Graphics`). The Options rows themselves are retail's of the disc's region (USA: no Video row).
 //!
 //! - Debug mode (Controls -> Debug, pcctl.rs; `debug=on` in the file, default Off): `sync` hands the row's byte to `devtools::set_menu`, so the
 //!   dev tools (F1 planet list / warp, F2 free camera) and the debug keys (F3 draw distance A/B, F5 immortality, F6 infinite ammo, F8
@@ -68,6 +70,7 @@ pub mod texfilter;
 pub mod fogopt;
 pub mod cullwarn;
 mod presets;
+pub(super) mod titlegfx;
 mod texts;
 use texts::{lang_of, pool_slot, text_for, NEW_IDS, TEXTS};
 /// Reserved RAM: all zero in every savestate scanned, below the ELF image (0x100000) and outside the rec/hand range.
@@ -152,7 +155,7 @@ const TGTAB: u32 = BASE + 0xde0;
 /// record holds four choices). The pause page's multi-choice item cycles a row through its values; the title's value item only
 /// flips a byte, so `sync` steps the rows with more than two values on.
 #[rustfmt::skip]
-const ROWS: [[u32; 6]; 15] = [
+pub(super) const ROWS: [[u32; 6]; 15] = [
 	[ID_LIGHTING, LIGHT, ID_LIGHT_CLASSIC, ID_ENHANCED, 0, 0],
 	[ID_AO, AO, ID_OFF, ID_HIGH, ID_MEDIUM, ID_LOW],
 	[ID_SHADOWS, SHADOWS, ID_OFF, ID_HIGH, ID_MEDIUM, ID_LOW],
@@ -630,8 +633,17 @@ fn sync(mem: &mut Mem, level: u32, toggle: bool, s: &mut St) -> bool {
 		s.last = Some((c, t, b));
 		apply(s, c, t, b, true);
 	}
-	// The Preset row (presets.rs): a preset the player chose becomes the rows' bytes before they are read.
-	presets::choose(mem, s);
+	// The title Graphics page (the front end: `front_field` passes u32::MAX) is the one being pressed: its Preset row steps on
+	// from the preset the rows match (its item only flips the byte). In a level the pause page's item sets the value itself.
+	let in_level = level != u32::MAX;
+	if !in_level && titlegfx::active() {
+		presets::choose_title(mem, s);
+	}
+	// The Preset row (presets.rs): a preset the player chose becomes the rows' bytes before they are read. The pause page's
+	// multi-choice item sets that byte; the title page has its own stepper (`choose_title`), so only a level runs this.
+	if in_level {
+		presets::choose(mem, s);
+	}
 	let mut g = GROWS.map(|a| mem.rd8(a));
 	g[0] = g[0].min(1);
 	// Ambient occlusion, shadows, water, particles, sun rays and global illumination have four values, vegetation and draw
@@ -651,9 +663,20 @@ fn sync(mem: &mut Mem, level: u32, toggle: bool, s: &mut St) -> bool {
 	}
 	patch_rows(mem, level);
 	patch_graphics(mem, level);
-	// The Controls page (pcctl.rs): the rows the player pressed, and a changed binding goes into the file.
-	super::pcctl::sync(mem);
-	super::pcmods::sync(mem, level);
+	// The title Graphics page's stepper (titlegfx.rs): a press advances the section and rewrites its table. Its Display rows'
+	// steppers are the pause page's toggle bytes: `pcdisp::field` reads a flip here too (there is no cursor on the title page).
+	if !in_level {
+		titlegfx::sync(mem);
+		if titlegfx::active() {
+			super::pcdisp::field(mem, level, [false, false]);
+		}
+	}
+	// The Controls page (pcctl.rs): the rows the player pressed, and a changed binding goes into the file. Its state is the
+	// pause menu's (the page magic outlives a level in the reserved RAM), so the title screen does not run it.
+	if in_level {
+		super::pcctl::sync(mem);
+		super::pcmods::sync(mem, level);
+	}
 	if let Some(sharp) = super::pcctl::hud_sharp(mem).filter(|&h| HUD_SHARP.swap(h, Ordering::Relaxed) != h) {
 		eprintln!("retail: PC options: HUD {}", if sharp { "Sharp" } else { "Original" });
 		s.opts.hud = Some(sharp);
@@ -672,7 +695,7 @@ fn sync(mem: &mut Mem, level: u32, toggle: bool, s: &mut St) -> bool {
 		s.save();
 	}
 	// Debug mode (Controls -> Debug): the row's byte opens / closes the dev tools and debug keys at once and is remembered (`debug=on`).
-	if let Some(on) = super::pcctl::debug_on(mem) {
+	if let (true, Some(on)) = (in_level, super::pcctl::debug_on(mem)) {
 		if super::devtools::set_menu(on, true) {
 			eprintln!("retail: PC options: Debug mode {}", if on { "On" } else { "Off" });
 			s.opts.debug = on.then_some(true);
@@ -685,7 +708,11 @@ fn sync(mem: &mut Mem, level: u32, toggle: bool, s: &mut St) -> bool {
 		s.opts.extra_set("pad", pad);
 		s.save();
 	}
-	presets::show(mem, s);
+	// The pause page's Preset row shows the matching preset there; the title page's mirror draws it from `detect_now`, and
+	// writing the byte here would fight the title's stepper (the page magic survives a level, so this must be gated too).
+	if in_level {
+		presets::show(mem, s);
+	}
 	cullwarn::sync(mem);
 	toggle
 }
@@ -880,6 +907,8 @@ fn patch_graphics(mem: &mut Mem, level: u32) -> bool {
 	mem.wr32(GVAL + 0x38, 0);
 	mem.wr32(GVAL + 0x3c, 0);
 	// 6-word rows {label, byte, value 0, value 1, value 2 or 0, value 3 or 0} and the zero record.
+	// The pause menu's Graphics page is the one on screen now (the title's copy is not being pressed).
+	titlegfx::deactivate();
 	super::pcctl::build_gfx(mem, GTAB, &ROWS, HUD_SHARP.load(Ordering::Relaxed), super::pcrender::wanted_dx12());
 	// The Controls page, from the same Camera Options items.
 	super::pcctl::build_page(mem, cp, hdr, val, sound_seq);
@@ -1011,22 +1040,28 @@ fn build_title(mem: &mut Mem, pc: u32, item: u32, s: &mut St) -> Option<u64> {
 	mem.wr32(TGVAL + 0x34, TGTAB);
 	mem.wr32(TGVAL + 0x38, 0);
 	mem.wr32(TGVAL + 0x3c, 0);
-	// 5-word rows {label, byte, value 0, value 1, flags 0 (Cross flips the byte; Video's 1 = the keep-mode prompt)}, the zero record.
-	let tab: Vec<u32> = ROWS[..fogopt::TITLE_ROWS].iter().flat_map(|r| [r[0], r[1], r[2], r[3], 0]).chain([0; 5]).collect();
-	for (i, w) in tab.iter().enumerate() {
-		mem.wr32(TGTAB + 4 * i as u32, *w);
-	}
+	// The page's rows: the stepper and the section's rows, the same definitions the pause page uses (titlegfx.rs).
+	titlegfx::build(mem);
 	mem.wr32(item + 0x34, trecs);
 	Some(if is_pal { 9 } else { 8 })
 }
 
-/// The title's Graphics page as the mirror draws it (viewer/front_mirror.rs): each row's label and value text ids, for the
-/// values last applied.
+/// The title's Graphics page as the mirror draws it (viewer/front_mirror.rs): the stepper and the current section's rows, each
+/// with its label and the text id of the value it shows (titlegfx.rs).
 pub fn title_rows() -> Vec<(u32, u32)> {
-	if let Some(r) = super::pcmods::title_rows() { return r; }
-	let mut v = unpack_gfx(GFX.load(Ordering::Relaxed));
-	v[3] = FULLSCREEN.load(Ordering::Relaxed) as u8;
-	ROWS[..fogopt::TITLE_ROWS].iter().zip(v).map(|(r, v)| (r[0], r[2 + v as usize])).collect()
+	titlegfx::rows()
+}
+
+/// The title Graphics page's stepper text ("< Picture >") for the front end's mirror (viewer/front_mirror.rs).
+pub fn title_gfx_texts(lang: usize) -> Vec<(u32, String)> {
+	titlegfx::texts(lang)
+}
+
+/// The same, into the front end's text map (one call from the mirror's frame).
+pub fn put_title_gfx_texts(text: &mut crate::frontend::Text, lang: usize) {
+	for (id, s) in titlegfx::texts(lang) {
+		text.insert(id, s);
+	}
 }
 
 /// The new texts in `lang` (0 En .. 4 It) as the mirror's strings (font bytes as chars, like the disc's texts).
@@ -1122,6 +1157,14 @@ mod tests {
 	}
 
 	pub(super) static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+	/// The value text the title Graphics page shows for `label` in `sec` (what the front end's mirror draws).
+	fn title_value(sec: usize, label: u32) -> Option<u32> {
+		super::titlegfx::test_section(sec);
+		let got = title_rows().into_iter().find(|r| r.0 == label).map(|r| r.1);
+		super::titlegfx::test_section(0);
+		got
+	}
 
 	/// The hashes and table addresses against the extracted overlays: the text lookup of every level and the Camera Options row table.
 	#[test]
@@ -1518,7 +1561,7 @@ mod tests {
 		}
 		assert_eq!(PcOptions::load(&dirp.join("pc_options.txt")).gi, Some(3));
 		assert!(std::fs::read_to_string(dirp.join("pc_options.txt")).unwrap().contains("gi=high\n"));
-		assert_eq!(title_rows()[10], (ID_GI, ID_HIGH));
+		assert_eq!(title_value(0, ID_GI), Some(ID_HIGH), "Picture: GI is in the first section");
 		// Back to Off: every change is one press (High -> Medium -> Low -> Off).
 		for b in [2u8, 3, 0] {
 			mem.wr8(GI, b);
@@ -1544,7 +1587,7 @@ mod tests {
 			assert_eq!(PcOptions::load(&dirp.join("pc_options.txt")).draw, Some(level));
 			assert!(std::fs::read_to_string(dirp.join("pc_options.txt")).unwrap().contains(&format!("draw={name}\n")));
 		}
-		assert_eq!(title_rows()[12], (ID_DRAW, ID_HIGH));
+		assert_eq!(title_value(2, ID_DRAW), Some(ID_HIGH), "Screen: Draw distance is in the third section");
 		// The title's flip (High 1 -> 0, Low 2 -> 3 or 0) steps the row on too: High -> Low -> Medium.
 		for (write, want) in [(0u8, 2u8), (3, 0)] {
 			mem.wr8(DRAW, write);
@@ -1631,12 +1674,16 @@ mod tests {
 		assert_eq!(items, [TGHDR, 0x1d4a00, 0x1d4a10, TGVAL, 0]);
 		assert_eq!((m.rd32(TGHDR + 0x34), m.rd32(TGVAL), m.rd32(TGVAL + 0x34), m.rd32(TGVAL + 0x38)), (ID_GRAPHICS_HDR, 0x1234, TGTAB, 0));
 		let row = |m: &mut Mem, i: u32| -> Vec<u32> { (0..5).map(|k| m.rd32(TGTAB + 20 * i + 4 * k)).collect() };
-		assert_eq!(row(&mut m, 0), [ID_LIGHTING, LIGHT, ID_LIGHT_CLASSIC, ID_ENHANCED, 0]);
-		for (i, r) in ROWS[..fogopt::TITLE_ROWS].iter().enumerate() {
-			assert_eq!(row(&mut m, i as u32), [r[0], r[1], r[2], r[3], 0], "the title's value item flips between the first two values");
+		assert_eq!(
+			row(&mut m, 0),
+			[crate::retail::pcctl::ID_PAGE, titlegfx::STEP, titlegfx::ID_SECTION, titlegfx::ID_SECTION, 0],
+			"the stepper comes first"
+		);
+		for (k, &i) in crate::retail::pcctl::gfx_section(0).iter().enumerate() {
+			let r = crate::retail::pcctl::gfx_row(i, false);
+			assert_eq!(row(&mut m, 1 + k as u32), [r[0], r[1], r[2], r[3], 0], "row {i}");
 		}
-		assert_eq!(row(&mut m, 12), [ID_DRAW, DRAW, ID_MEDIUM, ID_HIGH, 0]);
-		assert_eq!(row(&mut m, 13), [0; 5]);
+		assert_eq!(row(&mut m, 1 + crate::retail::pcctl::gfx_section(0).len() as u32), [0; 5]);
 		// Re-entry: the list's runtime word stays, the page is rebuilt (the cursor back on the first row).
 		m.wr32(TRECS + 8, 0x77);
 		m.wr32(TGVAL + 0x38, 3);

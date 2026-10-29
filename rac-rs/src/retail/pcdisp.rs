@@ -18,7 +18,7 @@
 //! block, default 0 = today's RAM), the texts are the ids 0x7fb0..0x7fbf in a pool of their own (`POOL`, BASE + 0xE000, 16 slots of
 //! 0x40; the canary of prompts.rs skips it). `%` is not a font glyph (0x25 draws the Cross button), so values carry no unit.
 //!
-//! The Display section is the pause page's only (the title's Graphics page keeps its rows, like HUD, Renderer and Preset).
+//! The Display section is the pause page's and the title's Graphics page (titlegfx.rs) alike.
 use super::pcctl::CBASE;
 use super::pcopts::PcOptions;
 use ee_oracle::cpu::Cpu;
