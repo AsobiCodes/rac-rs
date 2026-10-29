@@ -7,7 +7,8 @@
 //! players pressed Start and nothing happened. With this row On (the default; the options file's `skipcut=on|off`, pcopts.rs) a
 //! plain Start, on the keyboard (Enter / Esc) or the controller, stands for those buttons in `input.rs` (`tick_keys` feeds the scene
 //! and flight tests through `skip_feed`, `movie_poll` the movie test), so retail's own rule decides and ends the cutscene; Off is
-//! retail's rule untouched (Esc and Space keep skipping, as before). The boot logo movies are not touched (the Skip intro row).
+//! retail's rule untouched (Esc and Space keep skipping, as before). This row leaves the boot logo movies alone (the Skip intro row
+//! cuts them before they play); a logo still ends on the player's skip press (Esc / Enter / Space or the controller's Start, input.rs).
 //!
 //! The row's byte lives in the pcctl block, stored INVERTED (0 = On): a default RAM stays all zero, so the RAM hashes of the
 //! replays do not move (`pcctl::skipcut_on`). `sync` hands a change to the options file.

@@ -242,6 +242,8 @@ impl App {
 				fe.text.insert(id, s);
 			}
 		}
+		crate::retail::pcctl::put_fixed_texts(&mut fe.text, lang); // the title Graphics page's rows and values
+		crate::retail::pcext::put_title_gfx_texts(&mut fe.text, lang); // the title Graphics stepper's section name
 		// The title's Mods page (retail/pcmods.rs): its texts follow the mods and settings, so they are refreshed while it is open.
 		if crate::retail::pcmods::title_open() || fe.text.get(crate::retail::pcmods::ID_MODS).is_empty() {
 			for (id, s) in crate::retail::pcmods::texts(lang) {

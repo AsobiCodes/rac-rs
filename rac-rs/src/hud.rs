@@ -222,6 +222,13 @@ pub fn font_glyph_tables(disc: &mut Disc) -> R<Vec<Vec<Glyph>>> {
 /// The three text fonts (core fx_textures records 1..=3, 256x128 PSMT8), paired with `glyphs`
 /// from `font_glyph_tables`. Font ids in the game are 1-based, so font 1 is element 0.
 pub fn level_fonts(level: &Level, glyphs: &[Vec<Glyph>]) -> R<Vec<Font>> {
+	Ok(level_fonts_raw(level, glyphs)?.into_iter().map(|(f, _, _)| f).collect())
+}
+
+/// The three text fonts with the sheet's own bytes: the 8-bit indices (one per texel, row by row) and the
+/// palette in the GS's index order. The indices are what the retail uploads into the graphics memory, so the
+/// fork can recognise the font's upload and put the button artwork in its cells (`retail::xglyphs`).
+pub fn level_fonts_raw(level: &Level, glyphs: &[Vec<Glyph>]) -> R<Vec<(Font, Vec<u8>, Vec<[u8; 4]>)>> {
 	let count = u32_at(&level.index, 0x58)? as usize;
 	let table = u32_at(&level.index, 0x5c)? as usize;
 	let base = u32_at(&level.index, 0x68)? as usize;
@@ -237,10 +244,14 @@ pub fn level_fonts(level: &Level, glyphs: &[Vec<Glyph>]) -> R<Vec<Font>> {
 		}
 		let colours = palette_rgba(span(&level.core, base + pal, 1024)?);
 		let px = span(&level.core, base + pix, w * h)?;
-		out.push(Font {
-			tex: Texture { w, h, rgba: px.iter().map(|&v| colours[v as usize]).collect() },
-			glyphs: glyphs[k - 1].clone(),
-		});
+		out.push((
+			Font {
+				tex: Texture { w, h, rgba: px.iter().map(|&v| colours[v as usize]).collect() },
+				glyphs: glyphs[k - 1].clone(),
+			},
+			px.to_vec(),
+			colours,
+		));
 	}
 	Ok(out)
 }

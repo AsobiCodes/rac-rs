@@ -81,7 +81,8 @@ impl Retail {
 		hit
 	}
 
-	/// The movie now playing is a boot logo movie (retail's rule `Skip::Never`: nothing skips it; the Skip intro row ends it).
+	/// The movie now playing is a boot logo movie (retail's rule `Skip::Never`: retail skips nothing, the player's skip press
+	/// ends one and the Skip intro row cuts it before it plays).
 	pub fn movie_is_logo(&self) -> bool {
 		self.movie_rule == fmv_bridge::Skip::Never
 	}

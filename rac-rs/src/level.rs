@@ -338,6 +338,7 @@ pub enum TextureGroup {
 }
 
 /// An 8-bit indexed texture expanded to RGBA8 (PSMT8 with a CSM1 RGBA32 palette).
+#[derive(Clone)]
 pub struct Texture {
 	pub w: usize,
 	pub h: usize,

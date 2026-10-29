@@ -96,6 +96,21 @@ impl App {
 		let Some(st) = f.st.take() else { return };
 		if let (Some(game), Some(w)) = (&mut self.game, &self.world) {
 			if let Some(g) = &mut self.gpu {
+				// The button glyphs style or the bindings changed (the Graphics page's Button glyphs row, the Controls page): the
+				// pictures in the font sheet's ten button cells are the ones of the buttons the functions are played by now, so
+				// the sheet is written from the one decoded off the disc and goes up again (xglyphs.rs).
+				let (style, map) = (crate::retail::xglyphs::style(), crate::retail::binds::pad_map());
+				if (style, map) != (self.glyph_style, self.glyph_map) {
+					self.glyph_style = style;
+					self.glyph_map = map;
+					if let (Some(slot), Some(orig), Some(tex)) =
+						(self.art.font.as_ref().map(|f| f.0), self.art.font_tex_orig.as_ref(), self.art.font_tex.as_mut())
+					{
+						if crate::retail::xglyphs::blit(orig, tex, style, &map) {
+							g.hud_texture(Some(slot), tex);
+						}
+					}
+				}
 				let p = &game.player;
 				hud(&mut g.hud, g.config.width as f32, g.config.height as f32, Some(st), &self.messages, self.flow.as_ref(), &self.art, self.settings.subtitles);
 				// NOV-28 (water.md): last frame's fog swap goes live, the camera zone fog updates, then the
@@ -201,6 +216,20 @@ if let (Some(m), Some(a), Some(text)) = (&self.pause, &self.ui_art, &self.ui_tex
 					// (retail PCSX2 captures; decomp/notes/ingame_pause_menu.md). The HUD is hidden.
 					g.hud.clear();
 					g.hud_split = None;
+					// The button glyphs style or the button bindings changed: the artwork goes into the font sheet's ten
+					// button cells and the sheet goes up again.
+					let (style, map) = (crate::retail::xglyphs::style(), crate::retail::binds::pad_map());
+					if (style, map) != (self.glyph_style, self.glyph_map) {
+						self.glyph_style = style;
+						self.glyph_map = map;
+						if let (Some(slot), Some(orig), Some(tex)) =
+							(self.art.font.as_ref().map(|f| f.0), self.art.font_tex_orig.as_ref(), self.art.font_tex.as_mut())
+						{
+							if crate::retail::xglyphs::blit(orig, tex, style, &map) {
+								g.hud_texture(Some(slot), tex);
+							}
+						}
+					}
 					overlay::rect(&mut g.hud, [0.0, 0.0, w, h], [0.0, 0.0, 0.0, 0.375]);
 					m.draw(&mut g.hud, w, h, a, text);
 // Selected item model in panel 3 (frontend.rs preview; turntable camera [P]).

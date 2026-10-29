@@ -4,7 +4,7 @@ rac-rs is licensed under GPL-3.0-or-later (see LICENSE). It builds on the publis
 
 ## Contributors
 
-- **DeSynkro** (https://github.com/DeSynkro): the Linux port (pull request #38, v0.4.1): building and running the game on Linux, Linux gamepads, the Linux run and crash logs and the exact maths that give Linux the same game memory as Windows. Contributed under GPL-3.0-or-later like the rest of rac-rs.
+- **DeSynkro** (https://github.com/DeSynkro): the Linux port (pull request #38, v0.4.1): building and running the game on Linux, Linux gamepads, the Linux run and crash logs and the exact maths that give Linux the same game memory as Windows. Contributed under GPL-3.0-or-later like the rest of rac-rs. This fork adds local save dates, the boot logo skip, the Camera Reversed stick fix, the PlayStation / Xbox / Switch button artwork and the title Graphics page.
 
 ## rac1-decomp
 

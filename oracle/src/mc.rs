@@ -27,7 +27,8 @@
 //!   6 Write (+0 fd, +0x14 head len, +0x20 head bytes, +0x18 src, +0xc size after the head): bytes written.
 //!   0xa Flush: 0.   0xd GetDir (+8 flags 0 = new listing, +0xc max entries, +0x10 table, +0x14 pattern): entries
 //!     (64-byte sceMcTblGetDir records: created, modified, size, mode, attr, name [I]).   0xf Delete (+0x14 path):
-//!     0 / -4 / -6 (directory not empty). New and written files keep zero / unchanged dates (no RTC here) [I].
+//!     0 / -4 / -6 (directory not empty). New and written files take the host's local time (clock.rs) in created and
+//!     modified, and a written file's directory takes it in modified [I].
 //! Other functions stop the run (none is used by the game's card state machine on the levels run so far).
 //! The free count is mcman's: free FAT entries among the first `max_allocatable_clusters` clusters (IOP mcman
 //! 0x716b8..0x71784: (clusters_per_card / 1000) * 1000 + 1 clusters from alloc_offset, skipping bad blocks, at most
@@ -74,8 +75,8 @@ impl Ent {
     fn dot(&self) -> bool {
         self.name == "." || self.name == ".."
     }
-    fn new(name: &str, dir: bool) -> Ent {
-        let mut e = Ent { name: name.into(), mode: if dir { M_NEW_DIR } else { M_NEW_FILE }, len: 0, created: [0; 8], modified: [0; 8], attr: 0, data: Vec::new(), kids: Vec::new() };
+    fn new(name: &str, dir: bool, now: [u8; 8]) -> Ent {
+        let mut e = Ent { name: name.into(), mode: if dir { M_NEW_DIR } else { M_NEW_FILE }, len: 0, created: now, modified: now, attr: 0, data: Vec::new(), kids: Vec::new() };
         if dir {
             let mut dot = e.clone();
             dot.name = ".".into();
@@ -137,7 +138,7 @@ impl Card {
         let page = |n: usize| -> Result<&[u8], String> { img.get(n * ps..n * ps + 512).ok_or_else(|| format!("page {n} outside the image")) };
         let sb = page(0)?;
         if &sb[..28] != b"Sony PS2 Memory Card Format " {
-            return Ok(Card { root: Ent::new(".", true), free: 0, cluster: 1024, formatted: false });
+            return Ok(Card { root: Ent::new(".", true, [0; 8]), free: 0, cluster: 1024, formatted: false });
         }
         let h16 = |o: usize| u16::from_le_bytes(sb[o..o + 2].try_into().unwrap()) as usize;
         let w32 = |o: usize| u32::from_le_bytes(sb[o..o + 4].try_into().unwrap());
@@ -732,6 +733,7 @@ impl Cpu {
         if !card.formatted {
             return -2;
         }
+        let now = crate::clock::local_card();
         let Some((last, parent)) = path.split_last() else { return -4 };
         let exists = find(&card.root, &path).is_some();
         if flags & 0x40 != 0 {
@@ -739,7 +741,7 @@ impl Cpu {
             if exists {
                 return -4;
             }
-            let d = Ent::new(last, true);
+            let d = Ent::new(last, true, now);
             let need = 1;
             let Some(par) = find_mut(&mut card.root, parent).filter(|p| p.is_dir()) else { return -4 };
             let old = (par.kids.len() * 512).div_ceil(card.cluster as usize) as u32;
@@ -762,7 +764,7 @@ impl Cpu {
             if card.free < new - old {
                 return -3;
             }
-            par.kids.push(Ent::new(last, false));
+            par.kids.push(Ent::new(last, false, now));
             par.len = par.kids.len() as u32;
             card.free -= new - old;
         } else if find(&card.root, &path).is_some_and(|e| e.is_dir()) {
@@ -774,6 +776,7 @@ impl Cpu {
             let freed = e.data.len().div_ceil(cl) as u32;
             e.data.clear();
             e.len = 0;
+            e.modified = now;
             card.free += freed;
         }
         let Some(slot) = self.mc.fds.iter().position(|f| f.is_none()) else { return -7 };
@@ -797,7 +800,13 @@ impl Cpu {
         }
         e.data[pos..end].copy_from_slice(bytes);
         e.len = e.data.len() as u32;
+        let now = crate::clock::local_card();
+        e.modified = now;
         card.free -= grow;
+        // The directory the file is in changed too.
+        if let Some(par) = find_mut(&mut card.root, &path[..path.len() - 1]) {
+            par.modified = now;
+        }
         if let Some(Some(f)) = self.mc.fds.get_mut(fd) {
             f.pos = end as u32;
         }
@@ -881,6 +890,18 @@ mod blank_tests {
         let names: Vec<&str> = c.root.kids.iter().map(|k| k.name.as_str()).collect();
         assert_eq!(names, [".", ".."]);
         assert_eq!((c.root.name.as_str(), c.root.mode, c.root.len), (".", 0x8427, 2));
+    }
+
+    /// A new file, and the "." and ".." of a new directory, take the time they are given (mc_open and mc_write pass
+    /// the host's local time; Card::blank keeps the zero times of a real formatted card).
+    #[test]
+    fn a_new_entry_takes_the_time_it_is_given() {
+        let now = [0, 9, 5, 16, 23, 10, 0xea, 0x07];
+        let f = Ent::new("save0.bin", false, now);
+        assert_eq!((f.created, f.modified), (now, now));
+        let d = Ent::new("BASCUS-97199RATCHET", true, now);
+        assert_eq!((d.created, d.modified), (now, now));
+        assert_eq!((d.kids[0].created, d.kids[1].modified), (now, now));
     }
 
     /// A cold-boot machine (`Mc::blank_default`) starts from the blank card in port 0, never from the memcards folder.

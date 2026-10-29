@@ -5,17 +5,22 @@ use super::*;
 mod tests {
 	use super::*;
 
-	/// The skip rule on the keyboard, as the gameplay path and the front-end mirror both poll it (`movie_poll`): the logos
-	/// never skip, the attract movie ends on any new key, the New Game intro and the story movies on a new Enter (Start) or
-	/// on Esc / Space (the player's skip keys, which feed Start), and past Veldin Start alone does nothing: retail wants
-	/// Start with C, Left Ctrl, V and B (L1 R1 L2 R2) held, which Esc / Space supply together.
+	/// The skip rule on the keyboard, as the gameplay path and the front-end mirror both poll it (`movie_poll`): a boot
+	/// logo ends on any of the player's skip keys, the attract movie on any new key, the New Game intro and the story
+	/// movies on a new Enter (Start) or on Esc / Space (which feed Start), and past Veldin Start alone does nothing: retail
+	/// wants Start with C, Left Ctrl, V and B (L1 R1 L2 R2) held, which Esc / Space supply together.
 	#[test]
 	fn movie_skip_rule_keyboard() {
 		use fmv_bridge::Skip;
 		use winit::keyboard::KeyCode as K;
 		let poll = |rule: Skip, prev: u16, keys: &[K]| movie_poll(rule, prev, |k| keys.contains(&k), 0, false);
-		// Boot logos (mode -1): nothing skips.
-		assert!(!poll(Skip::Never, 0, &[K::Escape, K::Enter, K::Space]).0);
+		// Boot logos (mode -1): the player's skip keys end one, a key held from before the movie does not.
+		for skip in [K::Escape, K::Enter, K::NumpadEnter, K::Space] {
+			assert!(poll(Skip::Never, 0, &[skip]).0, "{skip:?} skips a logo");
+		}
+		assert!(!poll(Skip::Never, 0x800, &[K::Escape]).0, "Esc held from before the logo");
+		assert!(!poll(Skip::Never, 0x840, &[K::Space]).0, "Space held from before the logo");
+		assert!(!poll(Skip::Never, 0, &[K::KeyF]).0, "other keys are no skip");
 		// Attract movie (mode 2): any new button, but not one already down at the last poll.
 		assert!(poll(Skip::Any, 0, &[K::Space]).0);
 		assert!(poll(Skip::Any, 0, &[K::KeyF]).0);
@@ -89,8 +94,12 @@ mod tests {
 		assert!(movie_poll(Skip::Start, 0, none, 0x800, false).0, "a Veldin / intro movie: controller Start, row Off");
 		assert!(!movie_poll(Skip::Start, 0x800, none, 0x800, false).0, "controller Start held from before");
 		assert!(movie_poll(Skip::Any, 0, none, 0x40, false).0, "the attract movie: any controller button");
-		// The logos stay unskippable either way (the Skip intro row ends them).
-		assert!(!movie_poll(Skip::Never, 0, enter, 0x800, true).0);
+		// A logo ends on the player's skip press with the row On or Off (the logos are not cutscenes; the Skip intro row is
+		// what cuts them before they play), and a Start held from before the logo skips nothing.
+		assert!(movie_poll(Skip::Never, 0, enter, 0, true).0 && movie_poll(Skip::Never, 0, none, 0x800, false).0);
+		assert!(movie_poll(Skip::Never, 0, |k| k == K::Space, 0, false).0, "Space skips a logo");
+		assert!(!movie_poll(Skip::Never, 0x800, enter, 0x800, true).0, "Start held from before the logo");
+		assert!(!movie_poll(Skip::Never, 0, none, 0x40, false).0 && !movie_poll(Skip::Never, 0, |k| k == K::KeyF, 0, false).0);
 		// A button that is not Start feeds nothing, row On or not.
 		assert!(!movie_poll(Skip::Combo, 0, none, 0x40, true).0 && !movie_poll(Skip::Combo, 0, |k| k == K::KeyF, 0, true).0);
 		// Scenes and flights: `skip_feed` turns an already decided skip key into the retail buttons (`pcskip::start_pressed` decides it, row On

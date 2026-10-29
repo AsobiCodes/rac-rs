@@ -253,7 +253,8 @@ pub(super) fn keytap_script() -> Vec<KeyTap> {
 }
 
 /// One poll of the skip test of a playing movie: (the rule ends it now, the pad to remember for the next poll). `pad`: the controller's
-/// buttons now (PS2 bits, `prompts::pad_buttons`); `start_skips`: the Start skips cutscenes row is On (pcskip.rs).
+/// buttons now (PS2 bits, `prompts::pad_buttons`); `start_skips`: the Start skips cutscenes row is On (pcskip.rs). A boot logo
+/// (`Skip::Never`) is ended by the player's skip press alone, row or no row.
 pub(super) fn movie_poll(rule: fmv_bridge::Skip, prev: u16, held: impl Fn(winit::keyboard::KeyCode) -> bool, pad: u16, start_skips: bool) -> (bool, u16) {
 	let skip_key = held(winit::keyboard::KeyCode::Escape) || held(winit::keyboard::KeyCode::Space);
 	let mut now = pad_from_keys(held, false, false).0 | pad;
@@ -264,7 +265,14 @@ pub(super) fn movie_poll(rule: fmv_bridge::Skip, prev: u16, held: impl Fn(winit:
 	if skip_key || (start_skips && now & pcskip::START != 0) {
 		now |= rule.feed();
 	}
-	(rule.pressed(prev, now), now)
+	// The boot logo movies are retail's `Skip::Never`: the player's skip press ends one anyway, so the intro does not stand in
+	// the way. The Start skips cutscenes row plays no part here; the Skip intro row still cuts the logos before they play.
+	// Its rule feeds nothing, so Space (Cross in the pad) is turned into Start as well; Esc, Enter and the controller's Start
+	// are already Start in `now`. Only a new press counts.
+	if rule == fmv_bridge::Skip::Never && skip_key {
+		now |= pcskip::START;
+	}
+	(rule.pressed(prev, now) || (rule == fmv_bridge::Skip::Never && now & !prev & pcskip::START != 0), now)
 }
 
 /// The pad bits Esc / Space add while a scene or a ship flight plays, so retail's own skip test sees its press: the

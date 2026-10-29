@@ -1578,6 +1578,10 @@ struct App {
 	/// NOV-13.5b: this tick's gadget cinematic frame (camera, fade, actors).
 	gadget_frame: Option<game::gadget_scene::SceneFrame>,
 	art: HudArt,
+	/// The button glyphs style and the bindings the font sheet's button cells were blitted with: a change puts the other
+	/// artwork in and sends the sheet up again (xglyphs.rs).
+	glyph_style: u8,
+	glyph_map: [u8; crate::retail::binds::NP],
 	/// Seconds left on the bolt and nanotech counters (they show on a change, then fade).
 	hud_t: (f32, f32),
 	/// Ammo HUD: the weapon shown, bar/icon fade f1 and text fade f2 (0..1 = bytes +0x70/+0x71 over 8).
