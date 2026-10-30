@@ -124,18 +124,23 @@ pub(super) fn blend_posed(a: &Posed, b: &Posed, t: f32) -> Option<Posed> {
 	let mut ps = Vec::with_capacity(b.0.len());
 	let mut ns = Vec::with_capacity(b.1.len());
 	for (k, (&pa, &pb)) in a.0.iter().zip(&b.0).enumerate() {
-		let keep = pa == [0.0; 3] || pb == [0.0; 3] || !near(pa, pb);
-		ps.push(if keep { pb } else { lerp3(pa, pb, t) });
-		let (na, nb) = (a.1[k], b.1[k]);
-		ns.push(if keep {
-			nb
-		} else {
-			let n = lerp3(na, nb, t);
-			let l = dist2([0.0; 3], n).sqrt();
-			if l > 1e-6 { n.map(|c| c / l) } else { nb }
-		});
+		let (p, n) = blend_pn(pa, a.1[k], pb, b.1[k], t);
+		ps.push(p);
+		ns.push(n);
 	}
 	Some((ps, ns))
+}
+
+/// One vertex of `blend_posed` (position and normal from the two poses' entries): the hero marker's selective clipper
+/// (`gpu/marker_clip.rs`) builds single vertices with it, bit for bit what the whole-pose blend gives.
+pub(super) fn blend_pn(pa: [f32; 3], na: [f32; 3], pb: [f32; 3], nb: [f32; 3], t: f32) -> ([f32; 3], [f32; 3]) {
+	let keep = pa == [0.0; 3] || pb == [0.0; 3] || !near(pa, pb);
+	if keep {
+		return (pb, nb);
+	}
+	let n = lerp3(na, nb, t);
+	let l = dist2([0.0; 3], n).sqrt();
+	(lerp3(pa, pb, t), if l > 1e-6 { n.map(|c| c / l) } else { nb })
 }
 
 /// A prop's placement before the newest tick.
@@ -262,8 +267,10 @@ pub(super) struct Smooth {
 	hero_gens: (u64, u64),
 	posed_last: HashMap<PoseKey, Posed>,
 	posed_before: HashMap<PoseKey, Posed>,
-	fx_last: HashMap<usize, Posed>,
-	fx_before: HashMap<usize, Posed>,
+	/// [PC] perf: the joint-record props' skinnings of the last frame (handler/fx_skin.rs).
+	pub(super) fx_skins: super::handler::fx_skin::FxSkins,
+	fx_last: HashMap<usize, std::sync::Arc<Posed>>,
+	fx_before: HashMap<usize, std::sync::Arc<Posed>>,
 	/// Pool sprites by slot key: position and texture after the newest tick and before it.
 	sprites_last: HashMap<u32, (V3, u32)>,
 	sprites_before: HashMap<u32, (V3, u32)>,
@@ -290,7 +297,7 @@ impl Smooth {
 	}
 
 	/// Pose history step; `ticks == 1` keeps the previous pose, more than one tick per frame drops it (snap).
-	fn roll<K: std::hash::Hash + Eq>(ticks: u32, last: &mut HashMap<K, Posed>, before: &mut HashMap<K, Posed>, now: HashMap<K, Posed>) {
+	fn roll<K: std::hash::Hash + Eq, V>(ticks: u32, last: &mut HashMap<K, V>, before: &mut HashMap<K, V>, now: HashMap<K, V>) {
 		if ticks > 0 {
 			*before = if ticks == 1 { std::mem::take(last) } else { HashMap::new() };
 		}
@@ -475,7 +482,7 @@ impl Smooth {
 	/// fills `PROP_XF` with the blended placements. `posed` is moved in and stays readable through `posed()`. `blend[pi]` false = the
 	/// prop's pose is kept in the history but not blended for this frame (a camera-culled moby the sun shadow pass cannot take yet,
 	/// handler/sun_gate.rs); the poses of the props that do blend are blended on the worker pool.
-	pub(super) fn props(&mut self, props: &[Prop], posed: HashMap<PoseKey, Posed>, fx_posed: &mut HashMap<usize, Posed>, blend: &[bool]) {
+	pub(super) fn props(&mut self, props: &[Prop], posed: HashMap<PoseKey, Posed>, fx_posed: &mut HashMap<usize, std::sync::Arc<Posed>>, blend: &[bool]) {
 		let ticks = self.ticks;
 		Self::roll(ticks, &mut self.posed_last, &mut self.posed_before, posed);
 		Self::roll(ticks, &mut self.fx_last, &mut self.fx_before, fx_posed.clone());
@@ -492,8 +499,8 @@ impl Smooth {
 				if prev.pos != cur.pos || prev.rot != cur.rot || prev.scale != cur.scale {
 					xf[pi] = Some((mirror_column(blend_place(&place(prev.pos, prev.rot), &place(cur.pos, cur.rot), t), cur.mirror), prev.scale + (cur.scale - prev.scale) * t));
 				}
-				let now = self.fx_last.get(&pi).or_else(|| self.posed_last.get(&cur.key));
-				let was = self.fx_before.get(&pi).or_else(|| self.posed_before.get(&prev.key));
+				let now = self.fx_last.get(&pi).map(|a| &**a).or_else(|| self.posed_last.get(&cur.key));
+				let was = self.fx_before.get(&pi).map(|a| &**a).or_else(|| self.posed_before.get(&prev.key));
 				let same = prev.key == cur.key && !self.fx_last.contains_key(&pi) && !self.fx_before.contains_key(&pi);
 				if let (Some(a), Some(b), false) = (was, now, same) {
 					if blend.get(pi).copied().unwrap_or(true) {
@@ -507,7 +514,8 @@ impl Smooth {
 			};
 			for ((pi, _, _), bl) in jobs.iter().zip(blended) {
 				if let Some(bl) = bl {
-					fx_posed.insert(*pi, bl);
+					self.fx_skins.born.fx.remove(pi); // [PC] perf: a pose blended now has no token (handler/pose_born.rs)
+					fx_posed.insert(*pi, std::sync::Arc::new(bl));
 				}
 			}
 		}

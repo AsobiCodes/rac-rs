@@ -13,6 +13,7 @@ pub(super) fn open_machine() -> Option<(&'static String, Option<&'static String>
 	gscap::gpu_prestart(hot::idle);
 	let cold = COLD.get();
 	pcext::init(cold.is_some());
+	console_clock::init();
 	prompts::init();
 	// The picture thread's mirror (snap_pipe.rs) copies only the RAM pages written since its last sync: the live RAM is write-watched.
 	if snap_pipe::enabled() {

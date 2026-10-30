@@ -58,6 +58,7 @@ fn bed_tap(i: vec2<i32>, pf: vec3<f32>, zw: f32) -> f32 {
 	let bd = vec2<i32>(textureDimensions(bed_depth));
 	let j = clamp(i, vec2<i32>(0), bd - vec2<i32>(1));
 	let z = linear_depth(textureLoad(bed_depth, j, 0));
+	if (z >= w.proj.w * 0.98) { return 40.0; } // [PC] perf (nwater): 40 either way (the hero or `wl_d`), without the unproject
 	if (hero_pixel(vec2<i32>((vec2<f32>(j) + 0.5) / vec2<f32>(bd) / w.size.zw), z, pf.z)) { return 40.0; }
 	return wl_d(z, pf, zw);
 }
@@ -83,6 +84,10 @@ fn shore_depth_w(uv: vec2<f32>, pf: vec3<f32>, zw: f32) -> f32 {
 
 // The fade at the water pixel pf (uv = its pixel): 0 at the waterline, 1 from SHORE_FADE units of water over the bed.
 fn shore_fade(uv: vec2<f32>, pf: vec3<f32>, zw: f32) -> f32 {
+	if ((u32(w.lod.w) & 2u) != 0u) { // two of the four wide reads (8 bed taps instead of 16)
+		let o = 0.75 / vec2<f32>(textureDimensions(bed_depth));
+		return smoothstep(0.0, SHORE_FADE, 0.5 * (shore_depth(uv - o, pf, zw) + shore_depth(uv + o, pf, zw)));
+	}
 	return smoothstep(0.0, SHORE_FADE, shore_depth_w(uv, pf, zw));
 }
 

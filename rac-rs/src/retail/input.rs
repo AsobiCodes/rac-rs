@@ -62,6 +62,8 @@ impl Retail {
 				self.taps.insert(t.key, TAP_FIELDS);
 			}
 		}
+		// RAC_RETAIL_MOUSE: the scripted pointer of a menu run (mouse_script.rs).
+		mouse_script::poll(self);
 		let no_taps = HashMap::new();
 		let taps = if kb_taken { &no_taps } else { &self.taps };
 		// A menu is open: the left button clicks it (Circle = fire is off), see `mouse_menu`, and the keyboard works it the modern
@@ -79,7 +81,7 @@ impl Retail {
 				let (b, s) = menu_keys::menu_pad(&sc, &live);
 				// A dialog or the vendor (no page menu, whose clicks `mouse_menu` takes): a left click is the screen's confirm, as
 				// Enter. Only a click made there (the tap latch, not a button held since play, where it fired).
-				let click = menu.is_none() && self.mouse_taps.0[0] > 0;
+				let click = menu.is_none() && self.snap.vend.is_none() && self.mouse_taps.0[0] > 0;
 				let extra = (if middle { mouse_menu::TRIANGLE } else { 0 }) | (if click { sc.confirm } else { 0 });
 				(b | extra, s)
 			}
@@ -94,6 +96,8 @@ impl Retail {
 		// A gamepad adds its buttons and sticks and, when it moved, becomes the device of the button prompts (prompts.rs).
 		self.kb_rs = [s[0], s[1]].map(|v| (v as i16 - 0x80) as i8);
 		prompts::poll_pad(&mut b, &mut s);
+		// Quick Select wheel (RAC_WHEEL_MOUSE=1): Triangle held while retail's wheel is up = the mouse direction is the left stick (wheel_mouse.rs).
+		wheel_mouse::step(menu.is_none() && keys_screen.is_none() && b & mouse_menu::TRIANGLE != 0, self.snap.wheel_up, &mut s);
 		let (mode, front) = (self.snap.mode, self.snap.front);
 		// Esc / Space skip a scene or ship flight through retail's own skip test (`skip_feed`); so does a plain Start (keyboard or
 		// controller: `b` holds both) while the Start skips cutscenes row is On (pcskip.rs; GitHub #34 / #23).
@@ -101,39 +105,51 @@ impl Retail {
 		if !front {
 			b |= skip_feed(mode, self.snap.ship, skip_key);
 		}
+		let mut instant = None;
 		if let Some(tb) = self.tb.as_mut().filter(|t| t.active()) {
 			// The boot to the title (title_boot.rs): the game is steered by pulses, the player's keys are ignored.
 			b = tb.step(self.snap.menu.as_ref(), mode, front);
 			s = [0x80; 4];
 		} else {
 			// The left stick counts as a menu button too (WASD on the Galactic Map, a controller's stick): `b` has no stick bits.
-			b |= self.mm.step(self.snap.menu.as_ref(), b | mouse_menu::stick_bits(s));
+			b |= self.mm.step(self.snap.menu.as_ref().or(self.snap.vend.as_ref()), b | mouse_menu::stick_bits(s));
 			if let Some(tb) = self.tb.as_mut() {
 				b |= tb.pilot(self.snap.menu.as_ref(), mode, front, &mut self.mm);
 			}
+			// An instant selection (or its end) for the worker's next field (mouse_instant.rs), sent below once it is known whether the
+			// game gets a neutral pad this field.
+			instant = self.mm.take_cmd();
 		}
 		// The Controls page waits for a key or button (binds.rs): the keys that went down this field (a tap counts TAP_FIELDS at
 		// its first poll, so the Confirm that started the capture never binds) and the controller's new buttons go to it, and
 		// the game sees a neutral pad meanwhile.
+		// The game sees a neutral pad in the three states below; the worker's instant command must not move the menu either then.
+		let mut neutral = false;
 		if binds::capturing() {
 			let fresh: Vec<winit::keyboard::KeyCode> = taps.iter().filter(|(_, n)| **n == TAP_FIELDS).map(|(k, _)| *k).collect();
 			binds::capture_poll(&fresh, prompts::phys_fresh());
 			self.cap_hold = (fresh, prompts::phys_now());
 			(b, s) = (0, [0x80; 4]);
+			neutral = true;
 		} else if !self.cap_hold.0.is_empty() || self.cap_hold.1 != 0 {
 			// The key or button that ended the capture is still down: it is not a press on the menu (it may be Confirm or Back now).
 			self.cap_hold.0.retain(|k| down(*k));
 			self.cap_hold.1 &= prompts::phys_now();
 			if !self.cap_hold.0.is_empty() || self.cap_hold.1 != 0 {
 				(b, s) = (0, [0x80; 4]);
+				neutral = true;
 			}
 		}
 		// [PC] DEV ONLY (RAC_DEV_TOOLS=1, devtools.rs): the free camera hands the game a neutral pad; the stick clicks that turned
 		// it off stay away from the game until released. Off: no change.
 		if devtools::free_on() {
 			(b, s) = (0, [0x80; 4]);
+			neutral = true;
 		} else {
 			b &= !devtools::pad_mask();
+		}
+		if let Some(c) = instant {
+			mouse_instant::send(mouse_instant::when_neutral(c, neutral));
 		}
 		self.taps.retain(|_, n| {
 			*n -= 1;
@@ -149,7 +165,7 @@ impl Retail {
 
 	/// A page menu is on screen (pause menu, Quick Select, map): the mouse works it and the left button does not fire.
 	pub fn mouse_menu_active(&self) -> bool {
-		self.snap.menu.is_some()
+		self.snap.menu.is_some() || self.snap.vend.is_some()
 	}
 
 	/// The cursor is at (fx, fy), fractions of the window's client area: the overlay pixel under it.
@@ -184,6 +200,11 @@ impl Retail {
 
 	pub fn mouse_back(&mut self) {
 		self.mm.back();
+	}
+
+	/// The left button went up (ends a Sound Options bar drag).
+	pub fn mouse_release(&mut self) {
+		self.mm.button_up();
 	}
 
 	pub fn mouse_wheel(&mut self, y: f32) {
@@ -252,6 +273,10 @@ pub(super) fn keytap_script() -> Vec<KeyTap> {
 		.collect()
 }
 
+/// `prev` for the FIRST poll of a boot logo: every button down then counts as held from before (Space is remembered as Cross in the pad
+/// state, so it would otherwise look like a new Start once the rule turns it into one).
+pub(super) const FIRST_POLL: u16 = u16::MAX;
+
 /// One poll of the skip test of a playing movie: (the rule ends it now, the pad to remember for the next poll). `pad`: the controller's
 /// buttons now (PS2 bits, `prompts::pad_buttons`); `start_skips`: the Start skips cutscenes row is On (pcskip.rs).
 pub(super) fn movie_poll(rule: fmv_bridge::Skip, prev: u16, held: impl Fn(winit::keyboard::KeyCode) -> bool, pad: u16, start_skips: bool) -> (bool, u16) {
@@ -264,7 +289,14 @@ pub(super) fn movie_poll(rule: fmv_bridge::Skip, prev: u16, held: impl Fn(winit:
 	if skip_key || (start_skips && now & pcskip::START != 0) {
 		now |= rule.feed();
 	}
-	(rule.pressed(prev, now), now)
+	// The boot logo movies have no skip in retail (`Skip::Never`): the port lets the player's skip press end them, so the intro is
+	// not in the way (the Skip intro row cuts them before they play, when the player asked for that). A press held from before
+	// the logo counts for nothing, as everywhere. (Ported from DeSynkro's rac-rs-linux, commit 97e5c493.)
+	if rule == fmv_bridge::Skip::Never && (skip_key || now & pcskip::START != 0) {
+		now |= pcskip::START;
+	}
+	let hit = rule.pressed(prev, now) || (rule == fmv_bridge::Skip::Never && now & !prev & pcskip::START != 0);
+	(hit, now)
 }
 
 /// The pad bits Esc / Space add while a scene or a ship flight plays, so retail's own skip test sees its press: the

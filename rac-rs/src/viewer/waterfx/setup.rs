@@ -11,10 +11,10 @@ impl WaterFx {
 			Some(2) => "return vec4<f32>(g.x * 4.0 + 0.5, g.y * 4.0 + 0.5, g.z, 1.0);",
 			Some(3) => "return vec4<f32>((uv - uv0) * 60.0 + vec2<f32>(0.5), clamp((zs - zw) / 2.0, 0.0, 1.0), 1.0);",
 			Some(4) => "return vec4<f32>(rs * 3.0 + vec2<f32>(0.5), 0.5, 1.0);",
-			Some(5) => "return vec4<f32>(orig, 1.0);",
+			Some(5) => "return vec4<f32>(to_linear(textureSampleLevel(scene, lsamp, uv0, 0.0).rgb), 1.0);",
 			_ => "",
 		};
-		let src = SHADER.replace("//DBGHOOK", dbg) + &skymap::wgsl(12, 13) + edge_calm::EDGE_WGSL + far_look::FAR_WGSL + steep_look::STEEP_WGSL + shore_fade::SHORE_FADE_WGSL + shore_map::SHORE_DIST_WGSL + hero_crest::HERO_CREST_WGSL + rim::RIM_WGSL + underside::UNDER_WGSL + dry_tiles::DRY_WGSL;
+		let src = SHADER.replace("//DBGHOOK", dbg) + fall_wgsl::FALL_WGSL + &skymap::wgsl(12, 13) + edge_calm::EDGE_WGSL + far_look::FAR_WGSL + steep_look::STEEP_WGSL + shore_fade::SHORE_FADE_WGSL + shore_map::SHORE_DIST_WGSL + hero_crest::HERO_CREST_WGSL + rim::RIM_WGSL + underside::UNDER_WGSL + dry_tiles::DRY_WGSL + grid_waves::GRID_WAVES_WGSL + far_lod::FAR_LOD_WGSL + nwater::NWATER_WGSL + bed_min::BED_MIN_WGSL;
 		let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("water fx"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("water fx", src.into())) });
 		let tex = |binding: u32, sample_type: wgpu::TextureSampleType, multisampled: bool| wgpu::BindGroupLayoutEntry {
 			binding,
@@ -37,7 +37,7 @@ impl WaterFx {
 				tex(8, wgpu::TextureSampleType::Float { filterable: true }, false),
 				tex(9, wgpu::TextureSampleType::Depth, true),
 				wgpu::BindGroupLayoutEntry { visibility: wgpu::ShaderStages::VERTEX_FRAGMENT, ..tex(10, unfiltered, false) },
-				wgpu::BindGroupLayoutEntry { binding: 11, visibility: wgpu::ShaderStages::VERTEX_FRAGMENT, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None }, tex(12, wgpu::TextureSampleType::Depth, true), wgpu::BindGroupLayoutEntry { binding: 13, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
+				wgpu::BindGroupLayoutEntry { binding: 11, visibility: wgpu::ShaderStages::VERTEX_FRAGMENT, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None }, tex(12, wgpu::TextureSampleType::Depth, true), wgpu::BindGroupLayoutEntry { binding: 13, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None }, tex(14, unfiltered, false),
 			],
 		});
 		let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("water fx"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
@@ -100,11 +100,11 @@ impl WaterFx {
 			multiview_mask: None,
 			cache: None,
 		});
-		let dry = DryTiles::new(device, &shader, &layout);
+		let dry = DryTiles::new(device, &shader, &layout); let bed_min = BedMin::new(device, &shader);
 		let p_grid = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
 			label: Some("water sea grid"),
-			layout: Some(&dry.grid_pl),
-			vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs_grid"), compilation_options: Default::default(), buffers: &[] },
+			layout: Some(&dry.waves.grid_pl),
+			vertex: wgpu::VertexState { module: &shader, entry_point: Some(dry.waves.vs_entry()), compilation_options: Default::default(), buffers: &[] },
 			fragment: Some(wgpu::FragmentState { module: &shader, entry_point: Some("fs_grid"), compilation_options: Default::default(), targets: &[Some(wgpu::ColorTargetState { format: WPOS_FORMAT, blend: None, write_mask: wgpu::ColorWrites::ALL })] }),
 			primitive: Default::default(),
 			depth_stencil: Some(wgpu::DepthStencilState { format: wgpu::TextureFormat::Depth32Float, depth_write_enabled: Some(true), depth_compare: Some(wgpu::CompareFunction::Less), stencil: Default::default(), bias: Default::default() }),
@@ -172,7 +172,7 @@ impl WaterFx {
 			sheet_level: usize::MAX,
 			shore_game: usize::MAX,
 			p_mask,
-			p_grid, dry,
+			p_grid, dry, bed_min,
 			p_shore, p_shore_keep,
 			p_shore_h,
 			p_shore_v,
@@ -247,14 +247,18 @@ impl WaterFx {
 		let copy = make("water scene copy", self.format, wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING);
 		let copy_v = copy.create_view(&Default::default());
 		let depth_only = depth.texture().create_view(&wgpu::TextureViewDescriptor { aspect: wgpu::TextureAspect::DepthOnly, ..Default::default() });
-		let half = |label, format, samples, usage| {
-			let size = wgpu::Extent3d { width: (w / 2).max(1), height: (h / 2).max(1), depth_or_array_layers: 1 };
+		let half_by = |div: u32, label, format, samples, usage| {
+			let size = wgpu::Extent3d { width: (w / div).max(1), height: (h / div).max(1), depth_or_array_layers: 1 };
 			device.create_texture(&wgpu::TextureDescriptor { label: Some(label), size, mip_level_count: 1, sample_count: samples, dimension: wgpu::TextureDimension::D2, format, usage, view_formats: &[] }).create_view(&Default::default())
 		};
+		// ([PC] RAC_TUNE `mirror_div` / `bed_div` (tune.rs): the mirrors and the bed smaller; the default, 2, is today's size.)
+		let (mir, bed_div) = (super::tune::mirror_div(), super::tune::bed_div());
+		let half = |label, format, samples, usage| half_by(mir, label, format, samples, usage);
+		let bed_half = |label, format, samples, usage| half_by(bed_div, label, format, samples, usage);
 		let mirror_ms = half("water mirror msaa", self.format, MSAA, wgpu::TextureUsages::RENDER_ATTACHMENT);
 		let mirror_tex = device.create_texture(&wgpu::TextureDescriptor {
 			label: Some("water mirror"),
-			size: wgpu::Extent3d { width: (w / 2).max(1), height: (h / 2).max(1), depth_or_array_layers: super::mirror::MAX_MIRRORS as u32 },
+			size: wgpu::Extent3d { width: (w / mir).max(1), height: (h / mir).max(1), depth_or_array_layers: super::mirror::MAX_MIRRORS as u32 },
 			mip_level_count: 1,
 			sample_count: 1,
 			dimension: wgpu::TextureDimension::D2,
@@ -267,12 +271,13 @@ impl WaterFx {
 			.map(|k| mirror_tex.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2), base_array_layer: k, array_layer_count: Some(1), ..Default::default() }))
 			.collect();
 		let mirror_depth = half("water mirror depth", self.depth_format, MSAA, wgpu::TextureUsages::RENDER_ATTACHMENT);
-		let bed_ms = half("water bed msaa", self.format, MSAA, wgpu::TextureUsages::RENDER_ATTACHMENT);
-		let bed = half("water bed", self.format, 1, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING);
-		let bed_depth = half("water bed depth", self.depth_format, MSAA, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING);
+		let bed_ms = bed_half("water bed msaa", self.format, MSAA, wgpu::TextureUsages::RENDER_ATTACHMENT);
+		let bed = bed_half("water bed", self.format, 1, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING);
+		let bed_depth = bed_half("water bed depth", self.depth_format, MSAA, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING);
 		let bed_depth_only = bed_depth.texture().create_view(&wgpu::TextureViewDescriptor { aspect: wgpu::TextureAspect::DepthOnly, ..Default::default() });
+			let bm = self.bed_min.groups(device, &self.ubuf, &bed_depth_only);
 		let seamask = make("water sea mask", wgpu::TextureFormat::R32Float, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING).create_view(&Default::default());
-		let group = |scene_v: &wgpu::TextureView, lin_v: &wgpu::TextureView, wpos_v: &wgpu::TextureView, mirror_v: &wgpu::TextureView, glow_v: &wgpu::TextureView, bed_v: &wgpu::TextureView, mask_v: &wgpu::TextureView| {
+		let group = |scene_v: &wgpu::TextureView, lin_v: &wgpu::TextureView, wpos_v: &wgpu::TextureView, mirror_v: &wgpu::TextureView, glow_v: &wgpu::TextureView, bed_v: &wgpu::TextureView, mask_v: &wgpu::TextureView, bm_v: &wgpu::TextureView| {
 			device.create_bind_group(&wgpu::BindGroupDescriptor {
 				label: Some("water fx"),
 				layout: &self.layout,
@@ -288,14 +293,14 @@ impl WaterFx {
 					wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(bed_v) },
 					wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&bed_depth_only) },
 					wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(mask_v) },
-					wgpu::BindGroupEntry { binding: 11, resource: self.shore.as_entire_binding() }, wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(self.sky.depth_view()) }, wgpu::BindGroupEntry { binding: 13, resource: self.sky.uniform().as_entire_binding() },
+					wgpu::BindGroupEntry { binding: 11, resource: self.shore.as_entire_binding() }, wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(self.sky.depth_view()) }, wgpu::BindGroupEntry { binding: 13, resource: self.sky.uniform().as_entire_binding() }, wgpu::BindGroupEntry { binding: 14, resource: wgpu::BindingResource::TextureView(bm_v) },
 				],
 			})
 		};
-		let g_pos = group(&self.dummy, &self.dummy_r32, &self.dummy_r32, &self.dummy_arr, &self.dummy, &self.dummy, &self.dummy_r32);
-		let g_grid = group(&self.dummy, &self.dummy_r32, &self.dummy_r32, &self.dummy_arr, &self.dummy, &self.dummy, &seamask);
-		let g_shade = group(&copy_v, lin, &wpos, &mirror, glow, &bed, &seamask);
-		let dry = self.dry.groups(device, (w, h), &self.ubuf, &depth_only, &seamask);
+		let g_pos = group(&self.dummy, &self.dummy_r32, &self.dummy_r32, &self.dummy_arr, &self.dummy, &self.dummy, &self.dummy_r32, &self.dummy_r32);
+		let g_grid = group(&self.dummy, &self.dummy_r32, &self.dummy_r32, &self.dummy_arr, &self.dummy, &self.dummy, &seamask, &self.dummy_r32);
+		let g_shade = group(&copy_v, lin, &wpos, &mirror, glow, &bed, &seamask, &bm.view);
+		let dry = self.dry.groups(device, (w, h), (&self.ubuf, &self.shore), &depth_only, &seamask);
 		let g_shore = device.create_bind_group(&wgpu::BindGroupDescriptor {
 			label: Some("water shore map"),
 			layout: &self.shore_layout,
@@ -305,6 +310,6 @@ impl WaterFx {
 				wgpu::BindGroupEntry { binding: 2, resource: self.shore.as_entire_binding() },
 			],
 		});
-		self.t = Some(Targets { key: (w, h, generation, self.sky.made()), wpos, wdepth, copy, g_pos, g_shade, mirror_ms, mirror_layers, mirror_depth, bed_ms, bed, bed_depth, seamask, g_grid, g_shore, dry });
+		self.t = Some(Targets { key: (w, h, generation, self.sky.made()), wpos, wdepth, copy, g_pos, g_shade, mirror_ms, mirror_layers, mirror_depth, bed_ms, bed, bed_depth, seamask, g_grid, g_shore, dry, bed_min: bm });
 	}
 }

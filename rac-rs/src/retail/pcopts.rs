@@ -75,10 +75,14 @@ use std::path::{Path, PathBuf};
 
 /// The PC option globals (the pcdisp rows, the pcskip row) are process-wide atomics that `pcctl::build_gfx` copies into the menu bytes
 /// and `rscale` reads. A test that sets one, or reads one together with code that sets it, holds this guard for its whole body.
+/// One lock for all of them (`pcext`'s tests use the same one as `SERIAL`): the PC menu statics (`pcinput`, `titlegfx`'s
+/// `presets::TITLE_LAST`, `HUD_SHARP`, ...) are shared by every test that runs `pcext::sync`, so a test holds it for its whole body
+/// and never takes it twice.
+#[cfg(test)]
+pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[cfg(test)]
 pub(crate) fn globals_guard() -> std::sync::MutexGuard<'static, ()> {
-	static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-	LOCK.lock().unwrap_or_else(|e| e.into_inner())
+	TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// The language of a setup that wrote `lang=` into generated/play.cfg (`main::launch_args`, the no-argument start; today's setup writes

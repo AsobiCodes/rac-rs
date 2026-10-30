@@ -17,11 +17,11 @@ impl Gpu {
 						pass.set_pipeline(&self.hud_pipeline[2]);
 						pass.set_bind_group(1, &bind, &[]);
 					} else if d.texture == RETAIL_OV_TEX {
-						let Some((_, bind, _, _)) = &self.retail_ov else { continue };
+						let Some((_, bind, _, _, _)) = &self.retail_ov else { continue };
 						pass.set_pipeline(&self.hud_pipeline[3]);
 						pass.set_bind_group(1, bind, &[]);
 					} else if d.texture == RETAIL_FILTER_TEX {
-						let Some((_, bind, _, _)) = &self.retail_ov else { continue };
+						let Some((_, bind, _, _, _)) = &self.retail_ov else { continue };
 						pass.set_pipeline(&self.hud_pipeline[4]);
 						pass.set_bind_group(1, bind, &[]);
 					} else if d.texture == ITEM_PANEL_TEX || d.texture == POPUP_PANEL_TEX || d.texture == PORTRAIT_PANEL_TEX {

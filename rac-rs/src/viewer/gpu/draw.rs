@@ -70,7 +70,7 @@ struct DrawBufs {
 impl Gpu {
 	pub(in crate::viewer) fn draw(&mut self, cam: &Camera, capture: bool) -> Option<crate::render::Image> {
 		super::passtime::frame_begin(&self.device); // [PC] RAC_GPU_PASSES (passtime.rs)
-		self.swap_repl(); // [PC] texture packs
+		{ let _s = super::profile::span("d_swap"); self.swap_repl(); } // [PC] texture packs
 		let classic_ready = split::take_ready(); // [PC] split view (split.rs): the Classic half was drawn offscreen first (handler/frame_split.rs)
 		let dc = self.frame_uniforms(cam)?;
 		let mut dfx = self.frame_effects(cam, &dc)?;
@@ -96,6 +96,24 @@ pub(super) fn clear_slots(slots: &HashMap<u32, usize>, n: usize, textures: &Hash
 		}
 	}
 	clear
+}
+
+/// [PC] Dynamic shadows (sunshadow.rs, lane v042_shadow): per texture slot the smallest texel alpha (as uploaded: the texture value
+/// 0..255); 0 when the slot has no texels here (then its casters keep the alpha test). A caster whose slot never goes below
+/// the cut of its kind (terrain 191, tie 127, shrub 96) is drawn depth-only: the same depth, no texture fetch. All zeros (every
+/// caster keeps the alpha test) when the scene is built with a textures mod: its replacement images can carry other alphas than
+/// these original textures. Decided here, once per scene, not per frame.
+pub(super) fn min_alpha_slots(slots: &HashMap<u32, usize>, n: usize, textures: &HashMap<u32, Texture>) -> Vec<u8> {
+	let mut min = vec![0u8; n];
+	if crate::texpack::packs().is_some() {
+		return min;
+	}
+	for (&key, &slot) in slots {
+		if let Some(t) = textures.get(&(key & crate::mobies::KEY_MASK)).filter(|t| !t.rgba.is_empty()) {
+			min[slot] = t.rgba.iter().map(|c| c[3]).min().unwrap_or(0);
+		}
+	}
+	min
 }
 
 /// `rec`: [PC] Water Enhanced records each strip's buffers (waterfx.rs), with its flow slot from the list (by strip index; 0 past it);

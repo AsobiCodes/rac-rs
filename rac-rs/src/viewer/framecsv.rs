@@ -11,6 +11,7 @@
 //!   for a published overlay (`CapTake::take`); `S` - the capture thread's `Queue::submit` incl. the wait for the submit lock
 //!   (gpu_shared::submit); `R` - the capture thread waiting for the picture's readback (`Gpu::rb_finish` blocking / `submit` non-lazy).
 //!   Only waits longer than 50 us are written.
+//! - `W start redraw ticks` + 13 phases, then `X start name=us ...` - a redraw longer than `RAC_SLOW_MS` and its biggest spans (`slow`).
 //! Written about once a second (so a killed run keeps its data) and the rest when the event loop ends (`flush`, viewer/startup.rs). The
 //! file write happens outside the lock that the game, capture and present threads push their rows under.
 //! tools/frames.py (lane) analyses the file.
@@ -98,6 +99,22 @@ pub(super) fn flush() {
 pub(super) fn frame(start: Instant, redraw_ms: f32, ticks: u32, acquire_ms: f32, encode_ms: f32, present_ms: f32) {
 	if on() {
 		push('F', start, &[redraw_ms, ticks as f32, acquire_ms, encode_ms, present_ms]);
+	}
+}
+
+/// A redraw longer than `RAC_SLOW_MS` (default 8.3): `W start redraw ticks` + the 13 phases (ms), then `X start` + its biggest spans
+/// as `name=us` text (P9d: which stage spiked; tools read the W rows and skip the text rows).
+pub(super) fn slow(start: Instant, redraw_ms: f32, ticks: u32, phases: &[f32], spans: &str) {
+	static LIMIT: OnceLock<f32> = OnceLock::new();
+	let limit = *LIMIT.get_or_init(|| std::env::var("RAC_SLOW_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(8.3));
+	if on() && redraw_ms > limit {
+		let mut f = vec![redraw_ms, ticks as f32];
+		f.extend_from_slice(phases);
+		push('W', start, &f);
+		let Some(s) = SINK.get() else { return };
+		let mut s = s.lock().unwrap_or_else(|e| e.into_inner());
+		let t = start.saturating_duration_since(s.t0).as_secs_f64() * 1000.0;
+		s.buf.push_str(&format!("X {t:.3} {spans}\n"));
 	}
 }
 

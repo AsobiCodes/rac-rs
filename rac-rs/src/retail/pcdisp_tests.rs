@@ -70,7 +70,7 @@ fn every_text_is_short_font_bytes_in_every_language() {
 			assert!(s.len() < SLOT as usize - 1 && s.len() <= 22, "{id:#x} {lang}: {s:?}");
 			assert!(s.iter().all(|&b| (0x20..0x7f).contains(&b) || (0x80..=0xb0).contains(&b)), "{id:#x} {lang}: {s:?}");
 			assert!(!s.contains(&b'%'), "0x25 draws the Cross glyph: {s:?}");
-			assert_eq!(s.is_empty(), id > ID_VRS, "{id:#x} {lang}: ids 0x7fb0..=0x7fb8 have text, the rest none");
+			assert_eq!(s.is_empty(), id > ID_VRS && !crate::retail::pcinput::IDS.contains(&id), "{id:#x} {lang}: ids 0x7fb0..=0x7fb8 (pcdisp) and 0x7fba, 0x7fbb, 0x7fbc, 0x7fbd (pcinput) have text, the rest none");
 		}
 		assert!(LABELS.iter().all(|t| t[lang].len() <= 21) && SECTION[lang].len() <= 21);
 	}

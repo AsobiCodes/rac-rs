@@ -98,6 +98,24 @@ impl Cpu {
                 1
             }
             0x7f => 32 << 20,
+            // GetOsdConfigParam(u32 *p) of a savestate run (the cold kernel answers it itself): only the clock needs it, the
+            // game reads the time zone from it (boot 0x12d2b0); version 2 = configured, language and flags as cold.rs.
+            0x4b if crate::clock::real() => {
+                if a0 != 0 {
+                    self.mem.wr32(a0, crate::cold::osd_config_word());
+                }
+                0
+            }
+            // GetOsdConfigParam2(void *p, int size, int offset): the second settings block, where byte 1 bit 4 is the summer
+            // time flag (boot 0x12d308); the rest reads as zero.
+            0x6f if crate::clock::real() => {
+                let (size, off) = (a1 as usize, self.g(6) as usize);
+                let z = crate::clock::zone();
+                for k in 0..size.min(0x40) {
+                    self.mem.wr8(a0 + k as u32, crate::clock::osd2_byte(z, off + k));
+                }
+                1
+            }
             _ => 0,
         };
         self.r[2] = (self.r[2] & !(u64::MAX as u128)) | (v as u64) as u128;
@@ -296,6 +314,17 @@ impl Cpu {
             self.mem.wr32(recv, h);
             return;
         }
+        // CDVD S-command server (sid 0x80000593, which sif_bind_rpc maps to the made-up server id 0x410f0: not a game address, so PAL and USA
+        // alike; both discs bind client 0x132d08 to it, proven by ORACLE_RPC logs): fno 1 is sceCdReadClock
+        // (boot 0x121780): word 0 = 1 (done), then the console's RTC at recv + 4 (clock.rs: sceCdCLOCK, JST, BCD) which the wrapper
+        // copies into the caller's struct. Only with the host clock on; otherwise the generic reply below (zeros) stays.
+        if server == 0x410f0 && fno == 1 && recv != 0 && rsize >= 0xc && crate::clock::real() {
+            self.mem.wr32(recv, 1);
+            for (k, b) in crate::clock::rtc_now().iter().enumerate() {
+                self.mem.wr8(recv + 4 + k as u32, *b);
+            }
+            return;
+        }
         if client == 0x132d08 && fno == 4 {
             self.mem.wr32(recv, 0);
             return;
@@ -306,37 +335,7 @@ impl Cpu {
         // fno 0x4d is the batch below. fno 0 = the module init 0x6918 and fno 42 = stream init {handlers, buffer bytes}
         // (boot FUN_0022c3e0; a savestate's driver had both applied before the save, `Inner::boot`).
         if client == 0x15ebc0 && fno != 0x4d {
-            let vb = self.mem.rd32(VBCOUNT);
-            let words = (ssize / 4).min(7);
-            let d: [u32; 7] = std::array::from_fn(|j| if send != 0 && (j as u32) < words { self.mem.rd32(send + 4 * j as u32) } else { 0 });
-            let res = {
-                let inner = self.snd.ensure(&self.iop, &self.mem.ram, self.cold.is_some(), vb);
-                let now = inner.vb;
-                inner.advance_to(now);
-                match fno {
-                    0 => {
-                        inner.module_init();
-                        u32::MAX
-                    }
-                    42 => {
-                        inner.stream_init(d[0] as usize, d[1]);
-                        u32::MAX
-                    }
-                    _ => inner.command(now, fno as i16, &d, &mut self.iso).unwrap_or(u32::MAX),
-                }
-            };
-            if std::env::var("ORACLE_SNDTRACE").is_ok() {
-                eprintln!("sndtrace vb {vb} direct cid {fno} {:08x} {:08x} {:08x} -> {res:08x}", d[0], d[1], d[2]);
-            }
-            if recv != 0 && rsize >= 8 {
-                let n = rsize / 4;
-                for k in 1..n - 1 {
-                    self.mem.wr32(recv + 4 * k, 0);
-                }
-                self.mem.wr32(recv, u32::MAX);
-                self.mem.wr32(recv + 4, res);
-                self.mem.wr32(recv + 4 * (n - 1), u32::MAX);
-            }
+            self.snd_direct(fno, send, ssize, recv, rsize);
             return;
         }
         if recv == 0 || rsize < 8 {
@@ -407,5 +406,195 @@ impl Cpu {
         }
         self.mem.wr32(recv, u32::MAX);
         self.mem.wr32(recv + 4 * (n - 1), u32::MAX);
+    }
+
+    /// `rpc_reply`: a 989snd direct call on the command client 0x15ebc0 (any fno but the batch 0x4d; see the comment there).
+    fn snd_direct(&mut self, fno: u32, send: u32, ssize: u32, recv: u32, rsize: u32) {
+        let vb = self.mem.rd32(VBCOUNT);
+        let words = (ssize / 4).min(7);
+        let d: [u32; 7] = std::array::from_fn(|j| if send != 0 && (j as u32) < words { self.mem.rd32(send + 4 * j as u32) } else { 0 });
+        let res = {
+            let inner = self.snd.ensure(&self.iop, &self.mem.ram, self.cold.is_some(), vb);
+            let now = inner.vb;
+            inner.advance_to(now);
+            match fno {
+                0 => {
+                    inner.module_init();
+                    u32::MAX
+                }
+                42 => {
+                    inner.stream_init(d[0] as usize, d[1]);
+                    u32::MAX
+                }
+                _ => inner.command(now, fno as i16, &d, &mut self.iso).unwrap_or(u32::MAX),
+            }
+        };
+        if std::env::var("ORACLE_SNDTRACE").is_ok() {
+            eprintln!("sndtrace vb {vb} direct cid {fno} {:08x} {:08x} {:08x} -> {res:08x}", d[0], d[1], d[2]);
+        }
+        if recv != 0 && rsize >= 8 {
+            let n = rsize / 4;
+            for k in 1..n - 1 {
+                self.mem.wr32(recv + 4 * k, 0);
+            }
+            self.mem.wr32(recv, u32::MAX);
+            self.mem.wr32(recv + 4, res);
+            self.mem.wr32(recv + 4 * (n - 1), u32::MAX);
+        }
+    }
+}
+
+/// The console clock paths (clock.rs) as the game reaches them: the OSD syscalls and the CDVD sceCdReadClock RPC, run on a bare Cpu
+/// with the clock's test stand-in for the host (known time, zone and switch). The conversion at the end is the game's own
+/// (boot 0x12d6d8): RTC + time zone + 60 * summer time - 540 minutes, applied to what the oracle handed over.
+#[cfg(test)]
+mod clock_wiring_tests {
+    use crate::clock::{self, fake::Fake, Zone};
+    use crate::cpu::Cpu;
+    use crate::mem::Mem;
+
+    /// 2026-10-28 14:07:09 UTC.
+    const T: i64 = 1_793_196_429;
+    const BUF: u32 = 0x20_0000;
+
+    fn host(real: bool, unix: i64, std_min: i32, dst: bool) -> Fake {
+        Fake { real, unix, zone: Zone { std_min, dst } }
+    }
+
+    /// Calls syscall `n` with a0 = BUF, a1 = size, a2 = offset; returns v0.
+    fn sys(c: &mut Cpu, n: u64, size: u64, off: u64) -> u32 {
+        c.s(3, n);
+        c.s(4, BUF as u64);
+        c.s(5, size);
+        c.s(6, off);
+        c.syscall(0x100000);
+        c.g(2) as u32
+    }
+
+    /// The game's reading of the clock: the S-command reply, GetOsdConfigParam and GetOsdConfigParam2, then its conversion.
+    fn game_time(c: &mut Cpu) -> clock::Civil {
+        let client = 0x30_0000;
+        let (send, recv) = (0x31_0000, 0x32_0000);
+        c.mem.wr32(client + 0x24, 0x410f0);
+        c.rpc_reply(client, 1, send, 0, recv, 0x10, 0, 0);
+        assert_eq!(c.mem.rd32(recv), 1, "sceCdReadClock result word");
+        let b: Vec<u8> = (0..8).map(|k| c.mem.rd8(recv + 4 + k)).collect();
+        let dec = |v: u8| u32::from(v >> 4) * 10 + u32::from(v & 15);
+        assert_eq!((b[0], b[4]), (0, 0));
+        let rtc = clock::Civil { year: 2000 + dec(b[7]), month: dec(b[6]), day: dec(b[5]), hour: dec(b[3]), min: dec(b[2]), sec: dec(b[1]) };
+        sys(c, 0x4b, 0, 0);
+        let word = c.mem.rd32(BUF);
+        assert_eq!((word >> 13) & 7, 2, "OSD version 2 = configured");
+        let tz = (word as i32) >> 21;
+        c.mem.wr8(BUF, 0);
+        c.mem.wr8(BUF + 1, 0);
+        assert_eq!(sys(c, 0x6f, 1, 1), 1);
+        let dst = c.mem.rd8(BUF) & 0x10 != 0;
+        // RTC as seconds (days from civil, Hinnant), then the game's shift in minutes.
+        let (y, m) = (i64::from(rtc.year) - i64::from(rtc.month <= 2), i64::from(rtc.month));
+        let era = y.div_euclid(400);
+        let yoe = y - era * 400;
+        let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + i64::from(rtc.day) - 1;
+        let days = era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468;
+        let secs = days * 86_400 + i64::from(rtc.hour) * 3600 + i64::from(rtc.min) * 60 + i64::from(rtc.sec);
+        clock::civil_from_unix(secs + (i64::from(tz) + if dst { 60 } else { 0 } - 540) * 60)
+    }
+
+    fn at(year: u32, month: u32, day: u32, hour: u32, min: u32, sec: u32) -> clock::Civil {
+        clock::Civil { year, month, day, hour, min, sec }
+    }
+
+    /// With the clock on, syscall 0x4b hands over the configured OSD word (version 2, the host's time zone in bits 21..31) and
+    /// 0x6f the summer time flag (byte 1 bit 4); the bytes the game does not ask for stay zero.
+    #[test]
+    fn the_osd_syscalls_report_the_hosts_zone() {
+        let mut c = Cpu::new(Mem::new());
+        clock::fake::with(host(true, T, -300, true), || {
+            assert_eq!(sys(&mut c, 0x4b, 0, 0), 0);
+            let w = c.mem.rd32(BUF);
+            assert_eq!((w >> 13) & 7, 2);
+            assert_eq!((w as i32) >> 21, -300);
+            // size 2 from offset 0: byte 0 zero, byte 1 the flag; size 1 from offset 1: the flag alone
+            c.mem.wr8(BUF, 0xff);
+            c.mem.wr8(BUF + 1, 0xff);
+            assert_eq!(sys(&mut c, 0x6f, 2, 0), 1);
+            assert_eq!((c.mem.rd8(BUF), c.mem.rd8(BUF + 1)), (0, 0x10));
+            assert_eq!(sys(&mut c, 0x6f, 1, 1), 1);
+            assert_eq!(c.mem.rd8(BUF), 0x10);
+        });
+        clock::fake::with(host(true, T, 60, false), || {
+            sys(&mut c, 0x6f, 1, 1);
+            assert_eq!(c.mem.rd8(BUF), 0, "no summer time: flag clear");
+        });
+    }
+
+    /// The fixed clock leaves both syscalls to their old behaviour: nothing written, result 0.
+    #[test]
+    fn the_fixed_clock_writes_nothing() {
+        let mut c = Cpu::new(Mem::new());
+        clock::fake::with(host(false, T, 60, true), || {
+            c.mem.wr32(BUF, 0x1234_5678);
+            assert_eq!(sys(&mut c, 0x4b, 0, 0), 0);
+            assert_eq!(c.mem.rd32(BUF), 0x1234_5678);
+            assert_eq!(sys(&mut c, 0x6f, 1, 1), 0);
+            assert_eq!(c.mem.rd32(BUF), 0x1234_5678);
+        });
+    }
+
+    /// The S-command reply: result word 1, then the RTC in JST as BCD at recv + 4; with the fixed clock the buffer stays as it was.
+    #[test]
+    fn the_rpc_reply_holds_the_rtc() {
+        let mut c = Cpu::new(Mem::new());
+        let (client, recv) = (0x30_0000, 0x32_0000);
+        c.mem.wr32(client + 0x24, 0x410f0);
+        clock::fake::with(host(true, T, 60, false), || {
+            c.rpc_reply(client, 1, 0x31_0000, 0, recv, 0x10, 0, 0);
+            assert_eq!(c.mem.rd32(recv), 1);
+            let b: Vec<u8> = (0..8).map(|k| c.mem.rd8(recv + 4 + k)).collect();
+            // 2026-10-28 14:07:09 UTC is 23:07:09 JST
+            assert_eq!(b, [0x00, 0x09, 0x07, 0x23, 0x00, 0x28, 0x10, 0x26]);
+        });
+        let mut d = Cpu::new(Mem::new());
+        d.mem.wr32(client + 0x24, 0x410f0);
+        clock::fake::with(host(false, T, 60, false), || {
+            d.rpc_reply(client, 1, 0x31_0000, 0, recv, 0x10, 0, 0);
+            let b: Vec<u8> = (0..8).map(|k| d.mem.rd8(recv + 4 + k)).collect();
+            assert_eq!(b, [0; 8], "fixed clock: the old zero reply, no time");
+        });
+    }
+
+    /// RTC + syscall words + the game's conversion = the host's local time, for zones east and west, with and without summer
+    /// time, with a summer time shift of 30 minutes (Lord Howe, via the Windows values), and across a midnight.
+    #[test]
+    fn the_game_ends_up_with_local_time() {
+        let cases = [
+            // Berlin, winter: UTC+1; Los Angeles in summer time (PDT, UTC-7); Tokyo; Kathmandu (+5:45), 20:00 UTC = 01:45 next day
+            (T, clock::zone_from_current(60, false), at(2026, 10, 28, 15, 7, 9)),
+            (T, clock::zone_from_current(-420, true), at(2026, 10, 28, 7, 7, 9)),
+            (T, clock::zone_from_current(540, false), at(2026, 10, 28, 23, 7, 9)),
+            (1_793_217_600, clock::zone_from_current(345, false), at(2026, 10, 29, 1, 45, 0)),
+            // Lord Howe in summer: UTC+11 although its standard time is +10:30 (Windows: bias -630, daylight bias -30)
+            (T, clock::zone_from_windows(-630, 0, -30, 2), at(2026, 10, 29, 1, 7, 9)),
+            // a Windows zone whose summer time moves the clock back (Morocco in Ramadan: bias -60, daylight bias +60 = UTC+0)
+            (T, clock::zone_from_windows(-60, 0, 60, 2), at(2026, 10, 28, 14, 7, 9)),
+            // Dublin on Linux in winter: the C library says isdst=1 with offset 0
+            (T, clock::zone_from_current(0, true), at(2026, 10, 28, 14, 7, 9)),
+        ];
+        for (unix, z, want) in cases {
+            let mut c = Cpu::new(Mem::new());
+            let got = clock::fake::with(Fake { real: true, unix, zone: z }, || game_time(&mut c));
+            assert_eq!(got, want, "zone {z:?}");
+        }
+    }
+
+    /// The zone is read at each use, not once: a session that crosses a summer time change (Dublin style, where winter counts as
+    /// summer time and the standard offset flips) still gets the right local time before (UTC+0) and an hour later (UTC+1).
+    #[test]
+    fn a_session_crossing_a_time_change_stays_right() {
+        let mut c = Cpu::new(Mem::new());
+        let before = clock::fake::with(Fake { real: true, unix: T, zone: clock::zone_from_current(0, true) }, || game_time(&mut c));
+        let after = clock::fake::with(Fake { real: true, unix: T + 3600, zone: clock::zone_from_current(60, false) }, || game_time(&mut c));
+        assert_eq!(before, at(2026, 10, 28, 14, 7, 9));
+        assert_eq!(after, at(2026, 10, 28, 16, 7, 9));
     }
 }

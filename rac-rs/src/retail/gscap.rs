@@ -11,6 +11,7 @@
 //! is drawn into VRAM so later prims can sample it.
 
 mod draw;
+mod font;
 pub(crate) mod edge_cut;
 mod texname;
 mod texrepl;
@@ -269,7 +270,6 @@ pub struct Gs {
     repl: texrepl::ReplState,
 }
 
-
 /// P1 mode: the menu page draws an actor (the post-game page's green robot, class 1957) through VU1 (path 1) into a
 /// render-to-texture panel; the capture draws only paths 2 and 3, so the panel stayed empty. While a page that does
 /// this is up (retail.rs sends `P1_ON` / `P1_OFF`), the job's VIF1 stream also runs through the GS-full VIF1 + VU1
@@ -434,7 +434,6 @@ impl Gs {
         }
     }
 
-
     /// [PC] (speed) Lazy readback: a published overlay is collected later (`gpu_finish`, `ready`) while the capture records the
     /// next job; the caller must not let `ends` pass `pending_tag`.
     pub fn set_lazy(&mut self, on: bool) {
@@ -451,7 +450,6 @@ impl Gs {
     fn stat(&mut self, k: String) {
         *self.stats.entry(k).or_insert(0) += 1;
     }
-
 
     /// VIF1 words (DMA order, TTE words included). `marks` gives (word index, phase in its qword): a
     /// DMA block starts at phase 0, TTE words at phase 2. Only DIRECT/DIRECTHL data reaches the GIF.
@@ -1361,10 +1359,11 @@ impl Gs {
         for p in &self.pend {
             Self::pb_set(&mut self.pbits, p.lo, p.hi);
         }
-        for p in &run {
+        for p in &mut run {
+            let retail_sheet = self.patch_font(p);
             if self.gpu.is_some() {
                 self.gpu_xfer(p.bb, p.pos, p.rr, 0, &p.data);
-                self.repl_shadow(p.bb, p.pos, p.rr, 0, &p.data);
+                self.repl_shadow(p.bb, p.pos, p.rr, 0, retail_sheet.as_deref().unwrap_or(&p.data));
                 self.gq = p.data.len() as u32;
                 continue;
             }

@@ -7,6 +7,8 @@
 
 use super::*;
 
+mod check;
+
 /// RAC_HERO_GPU: unset = `Auto` (GPU build, verified by a self-check on first use), `0` = `Off` (CPU build always), `1` = `On` (GPU
 /// build, no self-check: for measuring). RAC_HERO_GPU_CHECK=1 = `Check` (GPU build, compared with the CPU build every frame).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -60,6 +62,7 @@ pub(super) fn gpu_hero_check() -> bool {
 pub(super) fn device_created(adapter: &wgpu::Adapter, device: &wgpu::Device) {
 	use std::sync::atomic::Ordering::Relaxed;
 	FAILED.store(false, Relaxed);
+	super::gpu::marker_clip::reset();
 	for l in &LEFT {
 		l.store(SELF_FRAMES, Relaxed);
 	}
@@ -346,12 +349,46 @@ pub(super) struct HeroGpu {
 	flip: bool,
 	rad_now: f32,
 	rad_before: f32,
+	/// The entries of the pose being written (reused between ticks).
+	scratch: Vec<PoseEntry6>,
+	/// [PC] perf (lane A, v0.4.2): counts the changes of the kept poses, and the chunk spheres / face table made from them (marker_clip.rs).
+	pose_version: u64,
+	chunks: super::gpu::marker_clip::ChunkCache,
+	/// [PC] perf (v0.4.2): the self-check slots (staging buffer + check in flight each, two at most; check.rs).
+	checks: [check::Slot; check::SLOTS],
+	/// The slot `start_check` filled last (its CPU bytes come next).
+	last_check: usize,
+	/// The check's own build output and bind group (same pipeline; created at the first check), and what the bind group is made of.
+	chk: Option<(wgpu::Buffer, wgpu::BindGroup)>,
+	layout: wgpu::BindGroupLayout,
+	model_buf: wgpu::Buffer,
 }
 
 type PoseEntry6 = [f32; 6];
 
-fn entries(p: &Posed) -> Vec<PoseEntry6> {
-	p.0.iter().zip(&p.1).map(|(a, b)| [a[0], a[1], a[2], b[0], b[1], b[2]]).collect()
+/// The pose buffer entries of `p` into `out` (its allocation reused: [PC] perf, a new 1.25 MB Vec per tick page-faulted in).
+fn entries_into(out: &mut Vec<PoseEntry6>, p: &Posed) {
+	out.clear();
+	out.extend(p.0.iter().zip(&p.1).map(|(a, b)| [a[0], a[1], a[2], b[0], b[1], b[2]]));
+}
+
+/// `entries_into` on the rayon pool: the same entries in the same order, filled in chunks (the allocation is reused).
+fn entries_into_par(out: &mut Vec<PoseEntry6>, p: &Posed) {
+	use rayon::prelude::*;
+	out.clear();
+	out.par_extend(p.0.par_iter().zip(p.1.par_iter()).map(|(a, b)| [a[0], a[1], a[2], b[0], b[1], b[2]]));
+}
+
+/// The largest position length of `p` (the `far` closure of `set_poses`) on the rayon pool: a maximum does not depend on the order.
+fn far_par(p: &Posed) -> f32 {
+	use rayon::prelude::*;
+	p.0.par_iter().map(|e| (e[0] * e[0] + e[1] * e[1] + e[2] * e[2]).sqrt()).reduce(|| 0.0f32, f32::max)
+}
+
+/// `dst` becomes a copy of `src`, reusing `dst`'s allocations.
+fn keep_copy(dst: &mut Posed, src: &Posed) {
+	dst.0.clone_from(&src.0);
+	dst.1.clone_from(&src.1);
 }
 
 impl HeroGpu {
@@ -408,11 +445,7 @@ impl HeroGpu {
 			eprintln!("hero_gpu: shader / pipeline rejected by the driver ({e}) -> CPU path");
 			return None;
 		}
-		Some(HeroGpu { pipeline, bind, params, poses, n, kept_before: Default::default(), kept_now: Default::default(), gen_before: 0, gen_now: 0, radius: 0.0, last: None, armed: false.into(), have_poses: false, radius_blend: false, flip: false, rad_now: 0.0, rad_before: 0.0 })
-	}
-
-	pub(super) fn n(&self) -> usize {
-		self.n
+		Some(HeroGpu { pipeline, bind, params, poses, n, kept_before: Default::default(), kept_now: Default::default(), gen_before: 0, gen_now: 0, radius: 0.0, last: None, armed: false.into(), have_poses: false, radius_blend: false, flip: false, rad_now: 0.0, rad_before: 0.0, scratch: Vec::new(), pose_version: 0, chunks: Default::default(), checks: Default::default(), last_check: 0, chk: None, layout, model_buf })
 	}
 
 	/// Uploads the pose(s) that differ from what the buffer holds. `before` None = no blend source (the shader gets have-before 0).
@@ -451,7 +484,8 @@ impl HeroGpu {
 		let shift = !check && self.have_poses && self.gen_now != 0 && now.1 != self.gen_now && blend.is_some_and(|(_, g)| g == self.gen_now);
 		if shift {
 			self.flip = !self.flip;
-			self.kept_before = std::mem::take(&mut self.kept_now);
+			// Swapped, not moved: both copies keep their allocations (`kept_now` is rewritten just below).
+			std::mem::swap(&mut self.kept_before, &mut self.kept_now);
 			self.gen_before = self.gen_now;
 			self.rad_before = self.rad_now;
 			changed = true;
@@ -459,27 +493,53 @@ impl HeroGpu {
 		// Byte offsets of the two halves.
 		let (now_off, before_off) = if self.flip { (0, (n * 24) as u64) } else { ((n * 24) as u64, 0) };
 		if shift || !held(&self.kept_now, self.gen_now, now.0, now.1, self.have_poses) {
-			queue.write_buffer(&self.poses, now_off, bytemuck::cast_slice(&entries(now.0)));
-			self.kept_now = now.0.clone();
-			self.rad_now = far(&self.kept_now);
+			// [PC] perf (lane tick): the three memory-bound jobs of a new tick pose (the 1.25 MB entries + their upload, the kept copy, the
+			// radius) run side by side; `far` of the kept copy is `far` of `now.0` (the copy has the same values).
+			let (scratch, kept, poses) = (&mut self.scratch, &mut self.kept_now, &self.poses);
+			let (rad, ()) = rayon::join(
+				|| rayon::join(|| far_par(now.0), || keep_copy(kept, now.0)).0,
+				|| {
+					entries_into_par(scratch, now.0);
+					queue.write_buffer(poses, now_off, bytemuck::cast_slice(scratch));
+				},
+			);
+			self.rad_now = rad;
 			changed = true;
 		}
 		self.gen_now = now.1;
 		if let (Some((b, g)), false) = (blend, shift) {
 			if !held(&self.kept_before, self.gen_before, b, g, self.have_poses) {
-				queue.write_buffer(&self.poses, before_off, bytemuck::cast_slice(&entries(b)));
-				self.kept_before = b.clone();
+				entries_into(&mut self.scratch, b);
+				queue.write_buffer(&self.poses, before_off, bytemuck::cast_slice(&self.scratch));
+				keep_copy(&mut self.kept_before, b);
 				self.rad_before = far(&self.kept_before);
 				changed = true;
 			}
 			self.gen_before = g;
 		}
 		self.have_poses = true;
+		if changed {
+			self.pose_version += 1;
+		}
 		if changed || self.radius_blend != blend.is_some() {
 			self.radius_blend = blend.is_some();
 			self.radius = self.rad_now.max(if blend.is_some() { self.rad_before } else { 0.0 });
 		}
 		blend.is_some()
+	}
+
+	/// The faces of the marker the guard-band clipper may take this frame (marker_clip.rs): a superset of the ones `clip_face` clips,
+	/// from bounding spheres of the kept poses (the blend source counts when the shader blends).
+	pub(super) fn marker_candidates(&mut self, view: &super::clip::ClipView, inp: &super::gpu::marker_ctx::MarkerIn, faces: &[super::clip::PropFace]) -> Vec<u32> {
+		let before = self.radius_blend.then_some(&self.kept_before);
+		self.chunks.candidates((self.pose_version, self.radius_blend), &self.kept_now, before, view, inp, faces)
+	}
+
+	/// The poses the build draws from (what `poses` holds), for the selective clipper's vertices: the blend of the two kept poses at `t`
+	/// when the shader blends, else the newest one. Same bytes as the spheres of `marker_candidates` bound.
+	pub(super) fn kept_pose(&self, t: f32) -> super::gpu::marker_ctx::Pose<'_> {
+		use super::gpu::marker_ctx::Pose;
+		if self.radius_blend { Pose::Blend { before: &self.kept_before, now: &self.kept_now, t } } else { Pose::Plain(&self.kept_now) }
 	}
 
 	/// 1.0 when the "before" pose is in the second half of the pose buffer (the shader's `fl`), else 0.0.
@@ -518,6 +578,8 @@ impl HeroGpu {
 
 	/// Encodes this frame's build (once; the next `queue_build` re-arms it).
 	pub(super) fn record(&self, enc: &mut wgpu::CommandEncoder) {
+		// [PC] perf (lane nhero): a check frame's own build + copy ride in this frame's encoder (check.rs).
+		self.record_checks(enc);
 		if !self.armed.swap(false, std::sync::atomic::Ordering::Relaxed) {
 			return;
 		}
@@ -582,5 +644,29 @@ pub(super) fn note_check(gpu: &[u8], cpu: &[u8]) {
 		eprintln!("hero_gpu_check: {} frames, {} differ, {} of {} vertices differ, max abs diff {:e}", n, BAD_FRAMES.load(Relaxed), BAD_VERTS.load(Relaxed), VERTS.load(Relaxed), f32::from_bits(MAXDIFF.load(Relaxed)));
 		eprintln!("hero_gpu_check pose generation: {} 'equal' verdicts, {} of them with different bytes", GEN_CALLS.load(Relaxed), GEN_MISMATCH.load(Relaxed));
 		eprintln!("hero_gpu_check fields: {:?}", FIELD.iter().map(|c| c.load(Relaxed)).collect::<Vec<_>>());
+	}
+}
+
+#[cfg(test)]
+mod pose_copy_tests {
+	use super::*;
+
+	fn posed(n: usize, k: f32) -> Posed {
+		((0..n).map(|i| [i as f32 + k, -k, 0.5 * i as f32]).collect(), (0..n).map(|i| [k, i as f32, -1.0]).collect())
+	}
+
+	/// The reused buffers give the same entries / copies as fresh ones, also after a longer pose was in them.
+	#[test]
+	fn reused_buffers_match_fresh_ones() {
+		let (big, small) = (posed(9, 3.0), posed(4, 7.0));
+		let mut out = Vec::new();
+		let mut kept: Posed = Default::default();
+		for p in [&big, &small, &big] {
+			entries_into(&mut out, p);
+			let fresh: Vec<PoseEntry6> = p.0.iter().zip(&p.1).map(|(a, b)| [a[0], a[1], a[2], b[0], b[1], b[2]]).collect();
+			assert_eq!(bytemuck::cast_slice::<_, u8>(&out), bytemuck::cast_slice::<_, u8>(&fresh));
+			keep_copy(&mut kept, p);
+			assert_eq!(&kept, p);
+		}
 	}
 }

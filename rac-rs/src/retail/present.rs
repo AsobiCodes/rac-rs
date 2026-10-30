@@ -43,7 +43,8 @@ impl Retail {
 			return None;
 		}
 		// The skip rule of this movie; a button down now is not a new press (retail reads newly pressed buttons).
-		(self.movie_rule, self.movie_prev) = (q.skip, self.pad_last);
+		// The boot logo (`Skip::Never`) turns Esc / Space into Start in `movie_poll`, so a key held from before must not look new there.
+		(self.movie_rule, self.movie_prev) = (q.skip, if q.skip == fmv_bridge::Skip::Never { input::FIRST_POLL } else { self.pad_last });
 		Some(q)
 	}
 
@@ -109,14 +110,16 @@ impl Retail {
 	/// The retail overlay of the field `tick` just took, if one finished (each is handed out once).
 	/// This field's overlay was drawn into the display buffer (no-present field) and is not one uniform colour: it
 	/// replaces a held movie picture.
-	pub fn overlay_covers(&self) -> bool {
+	pub fn overlay_covers(&mut self) -> bool {
+		self.resolve_ov();
 		self.snap.ov_disp && self.movie_tint().is_none() && self.snap.ov.is_some()
 	}
 
 	/// This field's display-buffer overlay is one colour over the whole frame (the movie-end fade: black sprite strips
 	/// over the movie's last picture, GS alpha (Cs-Cd)*As+Cd [C stage 6]): the held movie picture's tint, as
 	/// `fmv::present::Presenter::tint` (rgb added, a = how much of the picture shows).
-	pub fn movie_tint(&self) -> Option<[f32; 4]> {
+	pub fn movie_tint(&mut self) -> Option<[f32; 4]> {
+		self.resolve_ov();
 		let (_, _, px, _) = self.snap.ov.as_ref().filter(|_| self.snap.ov_disp)?;
 		let p = *px.first()?;
 		px.iter().all(|q| *q == p).then(|| p.map(|c| c as f32 / 255.0))
@@ -124,6 +127,7 @@ impl Retail {
 
 	/// The overlay picture with the guard that was measured on it (`HudGuard`: what the HUD position's corner cells must know).
 	pub fn take_overlay(&mut self) -> Option<(u32, u32, Vec<[u8; 4]>, HudGuard)> {
+		self.resolve_ov();
 		self.snap.ov.take()
 	}
 

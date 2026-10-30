@@ -40,8 +40,9 @@ impl Gpu {
 /// `clip_props`: the slots' vertices, as the records `vs_props` poses.
 #[derive(Clone, Copy)]
 pub(super) enum ClipSrc<'a> {
-	/// Records, pose entries and per-slot model-space bounding radii.
-	Gpu(&'a [super::gpuskin::PropInst], &'a [super::gpuskin::PoseEntry], &'a [f32]),
+	/// Records, the pose entries (the CPU mirror; in the direct mode of gpu/pose_reuse.rs empty, the poses are then the jobs'
+	/// sources: `slot_pose`) and per-slot model-space bounding radii.
+	Gpu(&'a [super::gpuskin::PropInst], &'a [super::gpuskin::PoseEntry], Option<&'a [super::pose_reuse::PoseJob<'a>]>, &'a [f32]),
 }
 
 /// Initial capacity of the clipped-polygon overlay (vertices, indices); it only grows (NOV-5.9c Order 7).
@@ -110,15 +111,13 @@ pub(super) fn clip_props(queue: &wgpu::Queue, scene: &mut Scene, src: ClipSrc, s
 	if let Some(view) = scene.clip_view {
 		let (band, port) = (view.band(), view.viewport());
 		// [PC] perf: the slots are scanned and clipped on the frame worker pool, then queued in slot / face order.
+		// [PC] lane nprops: only the shown slots with faces are handed to the pool, and only those with polygons are kept.
 		let (ranges, model) = (&scene.props_ranges, &scene.props_model);
-		let per_slot: Vec<Vec<(u32, super::clip::ClipPoly)>> = scene
-			.prop_faces
+		let todo: Vec<usize> = (0..scene.prop_faces.len()).filter(|&pi| shown.get(pi).copied().unwrap_or(false) && !scene.prop_faces[pi].is_empty()).collect();
+		let per_slot: Vec<(usize, Vec<(u32, super::clip::ClipPoly)>)> = todo
 			.par_iter()
-			.enumerate()
-			.map(|(pi, faces)| {
-				if faces.is_empty() || !shown.get(pi).copied().unwrap_or(false) {
-					return Vec::new();
-				}
+			.filter_map(|&pi| {
+				let faces = &scene.prop_faces[pi];
 				// One flag scan per slot replaces a bounding sphere: nothing outside the band, or everything past one viewport plane.
 				// (PC perf: one pass, no projected copy.)
 				let straddles = |positions: &mut dyn Iterator<Item = [f32; 3]>| {
@@ -131,26 +130,29 @@ pub(super) fn clip_props(queue: &wgpu::Queue, scene: &mut Scene, src: ClipSrc, s
 					!inside && all_out == 0
 				};
 				// `slot` holds the vertices from index `base` on (the faces store batch indices).
-				let clip = |slot: &[Vertex], base: usize| faces.iter().enumerate().filter_map(|(fi, f)| super::clip::clip_face(&view, f.idx.map(|i| slot[i as usize - base]), f.phase, f.tex, f.cull).map(|poly| (fi as u32, poly))).collect();
+				let clip = |slot: &[Vertex], base: usize| faces.iter().enumerate().filter_map(|(fi, f)| super::clip::clip_face(&view, f.idx.map(|i| slot[i as usize - base]), f.phase, f.tex, f.cull).map(|poly| (fi as u32, poly))).collect::<Vec<_>>();
 				let r = ranges[pi].clone();
-				match src {
+				let polys = match src {
 					// [PC] perf round 3: the slot's vertices as `vs_props` poses them (positions only for the scan).
-					ClipSrc::Gpu(inst, pose, rad) => {
+					ClipSrc::Gpu(inst, mirror, jobs, rad) => {
 						let s = &inst[pi];
 						// A slot whose bounding sphere settles the scan skips it (same verdict, no per-vertex work).
 						if super::gpuskin::slot_sphere(s, rad[pi]).is_some_and(|(c, r)| super::gpuskin::sphere_skips(&view, c, r)) {
-							return Vec::new();
+							return None;
 						}
-						if !straddles(&mut model[r.clone()].iter().enumerate().map(|(j, m0)| super::gpuskin::emulate_pos(s, pose, m0.pos, j))) {
-							return Vec::new();
+						// The slot's pose entries: the mirror's (record as is), or in the direct mode converted from the pose's source.
+						let (s, pose) = super::pose_reuse::slot_pose(mirror, jobs, s);
+						if !straddles(&mut model[r.clone()].iter().enumerate().map(|(j, m0)| super::gpuskin::emulate_pos(&s, &pose, m0.pos, j))) {
+							return None;
 						}
-						let slot: Vec<Vertex> = model[r.clone()].iter().enumerate().map(|(j, m0)| super::gpuskin::emulate(s, pose, m0, j)).collect();
+						let slot: Vec<Vertex> = model[r.clone()].iter().enumerate().map(|(j, m0)| super::gpuskin::emulate(&s, &pose, m0, j)).collect();
 						clip(&slot, r.start)
 					}
-				}
+				};
+				(!polys.is_empty()).then_some((pi, polys))
 			})
 			.collect();
-		for (pi, polys) in per_slot.into_iter().enumerate() {
+		for (pi, polys) in per_slot {
 			for (fi, poly) in polys {
 				taken.push((pi as u32, fi));
 				scene.clip_queue.push(poly);

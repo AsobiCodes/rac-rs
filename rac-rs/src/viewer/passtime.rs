@@ -28,6 +28,8 @@ struct Timer {
 	resolve: Vec<wgpu::Buffer>,
 	read: Vec<wgpu::Buffer>,
 	period: f64,
+	/// The device has TIMESTAMP_QUERY_INSIDE_PASSES (`lap`).
+	inside: bool,
 	next: AtomicU32,
 	labels: Mutex<Vec<&'static str>>,
 	state: Mutex<State>,
@@ -42,6 +44,8 @@ struct State {
 	sum: BTreeMap<&'static str, (f64, u64)>,
 	span: f64,
 	total: f64,
+	/// Idle time between a pass's end stamp and the next pass's start stamp, summed per label of the pass before the gap.
+	gaps: BTreeMap<&'static str, f64>,
 }
 
 static TIMER: OnceLock<Option<Timer>> = OnceLock::new();
@@ -53,7 +57,7 @@ fn wanted() -> Option<u64> {
 
 /// The device feature the timing needs (empty unless RAC_GPU_PASSES is set and the adapter has it).
 pub(super) fn features(adapter: &wgpu::Adapter) -> wgpu::Features {
-	if wanted().is_some() { wgpu::Features::TIMESTAMP_QUERY & adapter.features() } else { wgpu::Features::empty() }
+	if wanted().is_some() { (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES) & adapter.features() } else { wgpu::Features::empty() }
 }
 
 /// After the window's device exists: makes the timer when RAC_GPU_PASSES is set and the device has timestamps.
@@ -67,6 +71,7 @@ pub(super) fn init(device: &wgpu::Device, queue: &wgpu::Queue) {
 			resolve: (0..RING).map(|_| mk("pass time resolve", wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC)).collect(),
 			read: (0..RING).map(|_| mk("pass time read", wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST)).collect(),
 			period: queue.get_timestamp_period() as f64,
+			inside: device.features().contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES),
 			next: AtomicU32::new(0),
 			labels: Mutex::new(Vec::new()),
 			state: Mutex::new(State {
@@ -78,6 +83,7 @@ pub(super) fn init(device: &wgpu::Device, queue: &wgpu::Queue) {
 				sum: BTreeMap::new(),
 				span: 0.0,
 				total: 0.0,
+				gaps: BTreeMap::new(),
 			}),
 		}
 	});
@@ -122,6 +128,28 @@ pub(super) fn rw(label: &str) -> Option<wgpu::RenderPassTimestampWrites<'static>
 /// `timestamp_writes` of a compute pass named `label`.
 pub(super) fn cw(label: &str) -> Option<wgpu::ComputePassTimestampWrites<'static>> {
 	pair(label).map(|(qs, i)| wgpu::ComputePassTimestampWrites { query_set: qs, beginning_of_pass_write_index: Some(i), end_of_pass_write_index: Some(i + 1) })
+}
+
+/// A lap stamp inside an open render pass (the pass must have been made with `rw`): the table gets a row `lap NAME` with the time
+/// from the previous lap of the pass (the first lap, `start`, only opens the clock). Needs TIMESTAMP_QUERY_INSIDE_PASSES.
+pub(super) fn lap(pass: &mut wgpu::RenderPass<'_>, name: &str) {
+	let Some(t) = timer().filter(|t| t.inside) else { return };
+	let i = t.next.fetch_add(1, Ordering::Relaxed);
+	if i >= PAIRS {
+		return;
+	}
+	if let Ok(mut l) = t.labels.lock() {
+		l.push(intern(&format!("@{name}")));
+	}
+	pass.write_timestamp(&t.qs, 2 * i);
+	pass.write_timestamp(&t.qs, 2 * i + 1);
+}
+
+/// `lap` with a name that is only built while the lap timer is on (the name of a lap per draw run costs nothing otherwise).
+pub(super) fn lap_with(pass: &mut wgpu::RenderPass<'_>, name: impl FnOnce() -> String) {
+	if timer().is_some_and(|t| t.inside) {
+		lap(pass, &name());
+	}
 }
 
 /// Start of a frame's encoding: forgets the stamps of a frame that was never finished, maps the readings that are old enough and
@@ -171,8 +199,25 @@ pub(super) fn frame_begin(device: &wgpu::Device) {
 fn take(st: &mut State, period: f64, v: &[u64], n: usize, labels: &[&'static str]) {
 	let (mut lo, mut hi, mut sum) = (u64::MAX, 0u64, 0.0);
 	let mut rows: Vec<(&'static str, f64)> = Vec::new();
+	let mut times: Vec<(u64, u64, &'static str)> = Vec::new();
+	let mut prev_lap: Option<u64> = None;
 	for (i, &label) in labels.iter().enumerate().take(n) {
 		let (a, b) = (v[2 * i], v[2 * i + 1]);
+		if let Some(name) = label.strip_prefix('@') {
+			// Lap stamps (`lap`): a row per lap, not part of the pass sum, the gaps or the span.
+			if name == "start" {
+				prev_lap = None;
+			}
+			if a != 0 {
+				if let Some(p) = prev_lap.filter(|&p| a >= p) {
+					let e = st.sum.entry(intern(&format!("lap {name}"))).or_insert((0.0, 0));
+					e.0 += (a - p) as f64 * period * 1e-6;
+					e.1 += 1;
+				}
+				prev_lap = Some(a);
+			}
+			continue;
+		}
 		if a == 0 || b < a {
 			continue;
 		}
@@ -181,6 +226,7 @@ fn take(st: &mut State, period: f64, v: &[u64], n: usize, labels: &[&'static str
 		let ms = (b - a) as f64 * period * 1e-6;
 		sum += ms;
 		rows.push((label, ms));
+		times.push((a, b, label));
 	}
 	if rows.is_empty() {
 		return;
@@ -189,6 +235,13 @@ fn take(st: &mut State, period: f64, v: &[u64], n: usize, labels: &[&'static str
 		let e = st.sum.entry(label).or_insert((0.0, 0));
 		e.0 += ms;
 		e.1 += 1;
+	}
+	// Gaps: sorted by start stamp, the time from one pass's end to the next pass's start (barriers, resolves, drains), by the pass before it.
+	times.sort_by_key(|t| t.0);
+	for w in times.windows(2) {
+		if w[1].0 > w[0].1 {
+			*st.gaps.entry(w[0].2).or_insert(0.0) += (w[1].0 - w[0].1) as f64 * period * 1e-6;
+		}
 	}
 	st.frames += 1;
 	st.total += sum;
@@ -201,6 +254,11 @@ fn print_table(st: &mut State) {
 	rows.sort_by(|a, b| b.1.0.total_cmp(&a.1.0));
 	let body: Vec<String> = rows.iter().map(|(l, (ms, c))| format!("{l} {:.3} ({:.1})", ms / n, *c as f64 / n)).collect();
 	eprintln!("gpupass: {} frames | {} | sum {:.3} ms, span {:.3} ms", st.frames, body.join(" | "), st.total / n, st.span / n);
+	let mut gaps: Vec<_> = st.gaps.iter().collect();
+	gaps.sort_by(|a, b| b.1.total_cmp(a.1));
+	let gaps: Vec<String> = gaps.iter().map(|(l, ms)| format!("{l} {:.3}", **ms / n)).collect();
+	eprintln!("gpugap: after pass | {} | total {:.3} ms", gaps.join(" | "), st.gaps.values().sum::<f64>() / n);
+	st.gaps.clear();
 	st.sum.clear();
 	st.frames = 0;
 	st.total = 0.0;
@@ -228,7 +286,7 @@ mod tests {
 	use super::*;
 
 	fn state() -> State {
-		State { slots: Vec::new(), ready: Vec::new(), frame: 0, every: 120, frames: 0, sum: BTreeMap::new(), span: 0.0, total: 0.0 }
+		State { slots: Vec::new(), ready: Vec::new(), frame: 0, every: 120, frames: 0, sum: BTreeMap::new(), span: 0.0, total: 0.0, gaps: BTreeMap::new() }
 	}
 
 	#[test]

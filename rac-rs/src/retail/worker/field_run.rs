@@ -4,7 +4,7 @@
 use super::*;
 
 impl Worker {
-	pub(super) fn field_begin(&mut self, fin: FieldIn) -> std::time::Instant {
+	pub(super) fn field_begin(&mut self, mut fin: FieldIn) -> std::time::Instant {
 		let shipmouse_state = &mut self.shipmouse_state;
 		let wperf = &mut self.wperf;
 		let mut m = &mut *self.m;
@@ -36,6 +36,11 @@ impl Worker {
 		let cam_stick = !front && !booting && !disc::extras_off() && !ship && turret.is_none();
 		if cam_stick {
 			pad_sticks = modcam::sticks::camera_sticks(&m, pad_sticks, fin.mc.keys);
+		}
+		// The mouse's instant selection in the page menus (mouse_instant.rs): the cursor words it writes and the pad bits it adds
+		// are in this field, before the pad is set (and recorded). Without a mouse request: the pad as it came.
+		if !booting && !disc::extras_off() {
+			fin.buttons = mouse_instant::field(&mut m, front, fin.buttons);
 		}
 		m.set_pad(fin.buttons, pad_sticks);
 		// Button prompts: the device of this field (prompts.rs).

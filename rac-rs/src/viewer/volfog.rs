@@ -561,7 +561,8 @@ impl VolFog {
 			p.set_bind_group(0, g, &[]);
 			p.draw(0..3, 0..1);
 		};
-		let clear = wgpu::LoadOp::Clear(wgpu::Color::BLACK);
+		// March and accumulate each draw one full-screen triangle without blending: no clear first (post.rs `overwrite`).
+		let clear = super::post::overwrite();
 		let groups = binds.groups[read].get_or_insert_with(|| {
 			let dv = depth.texture().create_view(&wgpu::TextureViewDescriptor { aspect: wgpu::TextureAspect::DepthOnly, ..Default::default() });
 			[group(&dv, &pipes.dummy, &pipes.dummy), group(&dv, &t.cur, &t.hist[read]), group(&dv, &t.hist[write], &pipes.dummy)]

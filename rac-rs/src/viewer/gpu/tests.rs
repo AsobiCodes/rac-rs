@@ -101,7 +101,8 @@ mod instance_tests {
 		assert!(shrub_alpha(95, shrub_carrier(0x80)).0 < 96);
 		// The shader text carries the same constants.
 		assert!(super::super::SHADER.contains("floor(ta * a / 128.0)"));
-		assert!(super::super::SHADER.contains("r.a * 128.0 < 12.0") && super::super::SHADER.contains("r.a * 128.0 < 96.0"));
+		// (the entries test `ra`, the alpha of `shrub_alpha`, before the colour is computed: lane scene speed cut)
+		assert!(super::super::SHADER.contains("ra * 128.0 < 12.0") && super::super::SHADER.contains("ra * 128.0 < 96.0"));
 	}
 
 	#[test]

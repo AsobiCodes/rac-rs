@@ -6,7 +6,8 @@
 //! - `RAC_CLOUD_DIV=N` (2..8): overrides the cloud grid divisor at Clouds High (volclouds/params.rs `Quality::div`, 6; 4 = a quarter).
 //! - `RAC_CLOUD_REUSE=1`: the clouds are marched every other frame; the frame between draws the last result turned to the new view
 //!   (volclouds.rs `march`, layer.rs `fs_apply_clouds`); only while the view stays within `CLOUD_REUSE_DEG` of the marched one.
-//! - `RAC_SUN_PLAIN`, `RAC_SUN_NODYN`: measuring aids of the shadow pass (texel-alpha casters drawn depth-only, no props / mobys).
+//! - `RAC_SUN_PLAIN`, `RAC_SUN_NODYN`: measuring aids of the shadow pass (texel-alpha casters drawn without the cut, no props / mobys).
+//! - `RAC_SUN_NOCULL`: A/B aid, the shadow pass without the exact cuts of lane v042_shadow (same picture).
 
 use std::sync::OnceLock;
 
@@ -49,6 +50,20 @@ pub(super) fn sun_plain() -> bool {
 pub(super) fn sun_nodyn() -> bool {
 	static S: OnceLock<bool> = OnceLock::new();
 	*S.get_or_init(|| flag("RAC_SUN_NODYN", false))
+}
+
+/// RAC_SUN_NOCULL: A/B aid, the shadow pass without the exact cuts of lane v042_shadow (depth-only casters, props cull, tie / shrub box
+/// cull): the draw lists of the lane's base. The picture is the same either way.
+pub(super) fn sun_nocull() -> bool {
+	static S: OnceLock<bool> = OnceLock::new();
+	*S.get_or_init(|| flag("RAC_SUN_NOCULL", false))
+}
+
+/// RAC_SUN_FRUSTUM: Sun shadow pass leaves out the casters whose shadow cannot enter the camera's main view pyramid (sunshadow/view.rs).
+/// Lossy for the other readers of the cascades (water mirror, cloud sky capture, water sky map), so off by default.
+pub(super) fn sun_frustum() -> bool {
+	static S: OnceLock<bool> = OnceLock::new();
+	*S.get_or_init(|| flag("RAC_SUN_FRUSTUM", false))
 }
 
 #[cfg(test)]

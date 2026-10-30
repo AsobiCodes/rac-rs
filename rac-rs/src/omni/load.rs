@@ -25,13 +25,17 @@ pub(super) fn exe_dir() -> Option<PathBuf> {
 	std::env::current_exe().ok()?.parent().map(Path::to_path_buf)
 }
 
-/// RAC_OMNI_DLL=path, else the DLL next to the exe.
+/// The loader library's file name on this platform (the messages name it, the player looks for it next to the exe).
+pub(super) fn lib_name() -> &'static str {
+	if cfg!(windows) { "omniloader.dll" } else { "libomniloader.so" }
+}
+
+/// RAC_OMNI_DLL=path, else the loader library next to the exe.
 fn dll_path() -> Option<PathBuf> {
 	if let Some(p) = std::env::var_os("RAC_OMNI_DLL") {
 		return Some(PathBuf::from(p));
 	}
-	let name = if cfg!(windows) { "omniloader.dll" } else { "libomniloader.so" };
-	Some(exe_dir()?.join(name))
+	Some(exe_dir()?.join(lib_name()))
 }
 
 /// Linux: whether a mod loader can run: not switched off (`RAC_OMNI=0`) and its library next to the exe (or `RAC_OMNI_DLL`). The Mods
@@ -122,7 +126,7 @@ pub fn start(ntsc: bool, c: &mut ee_oracle::cpu::Cpu) -> Option<Omni> {
 		return None;
 	}
 	let Some(path) = dll_path().filter(|p| p.is_file()) else {
-		eprintln!("omni: {} mod folder(s) in {} but omniloader.dll is not next to the exe: mods are off", found.len(), dir.display());
+		eprintln!("omni: {} mod folder(s) in {} but {} is not next to the exe: mods are off", found.len(), dir.display(), lib_name());
 		return None;
 	};
 	// What to load (omni/plugins.rs): the mods `active.txt` switches on (or an explicit plugins.json), with the values of settings.json.

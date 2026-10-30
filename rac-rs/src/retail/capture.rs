@@ -22,6 +22,36 @@ pub(super) struct Capture {
 	/// The sender the machine's `gsq` holds while the capture is fed (the field-end markers go through it even while the
 	/// front end's GS-full pipe takes the jobs, title_boot.rs).
 	pub(super) tx: Option<std::sync::mpsc::Sender<ee_oracle::gs::Job>>,
+	/// The deferred takes (`OvLate`) not run yet (`LateTakes`).
+	pub(super) late: Arc<LateTakes>,
+}
+
+/// [PC] The deferred takes (`OvLate`) the worker handed out, by the field each takes up to (`want`): the highest issued and the
+/// highest run (or dropped). They run on the main thread in field order, so while `done < issued` the overlays up to `issued` are
+/// theirs. A take at the field's end (the front end) leaves those to them and takes only the newer ones: it gives the same overlays
+/// as when the deferred takes ran first (at the switch from play to the title menu the worker's take could run first and take the
+/// last in-game field's overlay away; review 2026-10-29).
+#[derive(Default)]
+pub(super) struct LateTakes {
+	issued: AtomicU64,
+	done: AtomicU64,
+}
+
+impl LateTakes {
+	/// The field up to which the overlays belong to deferred takes not run yet (0 = none).
+	fn pending(&self) -> u64 {
+		let i = self.issued.load(Ordering::SeqCst);
+		if self.done.load(Ordering::SeqCst) < i { i } else { 0 }
+	}
+}
+
+/// Held by a deferred take: marks it run when dropped (after its take, or with the `OvLate` if it never ran).
+pub(super) struct LateDone(Arc<LateTakes>, u64);
+
+impl Drop for LateDone {
+	fn drop(&mut self) {
+		self.0.done.fetch_max(self.1, Ordering::SeqCst);
+	}
 }
 
 /// How many fields the capture may trail the interpreter by (RAC_RETAIL_GS_LAG=N; 0 = never wait, the old behaviour).
@@ -102,7 +132,7 @@ pub(super) fn rtt_page(s: &Snap) -> bool {
 
 /// The capture thread on a given 4 MB VRAM (a cold boot has no GS.bin: empty VRAM, attached from the first field).
 pub(super) fn capture_gs_vram(m: &mut ee_oracle::Machine, vram: Vec<u8>, vu_dir: &str) -> Option<Capture> {
-	let mut c = Capture { tx: None, slot: Arc::new(Mutex::new(Default::default())), ends: Arc::new(AtomicU64::new(0)), queued: Arc::new(AtomicU64::new(0)), ran: Arc::new(AtomicU64::new(0)), dead: Arc::new(AtomicBool::new(false)), lag: std::env::var("RAC_RETAIL_GS_LAG").ok().and_then(|v| v.parse().ok()).unwrap_or(GS_LAG) };
+	let mut c = Capture { tx: None, slot: Arc::new(Mutex::new(Default::default())), ends: Arc::new(AtomicU64::new(0)), queued: Arc::new(AtomicU64::new(0)), ran: Arc::new(AtomicU64::new(0)), dead: Arc::new(AtomicBool::new(false)), late: Default::default(), lag: std::env::var("RAC_RETAIL_GS_LAG").ok().and_then(|v| v.parse().ok()).unwrap_or(GS_LAG) };
 	// The machine's sender feeds a relay that counts the jobs, then the capture thread.
 	let (tx, rx) = std::sync::mpsc::channel::<ee_oracle::gs::Job>();
 	let (tx2, rx2) = std::sync::mpsc::channel::<ee_oracle::gs::Job>();
@@ -237,13 +267,21 @@ impl Capture {
 
 	/// The overlay for snap `field`: waits until field `field - delay` is drawn, then hands out the newest overlay
 	/// published up to that field (older ones of the same window are what the display showed before it).
+	/// The overlays up to a deferred take's field not run yet stay for it (`LateTakes`).
 	pub(super) fn take(&self, field: u64, delay: u64) -> Option<gscap::Overlay> {
-		self.handle().take(field, delay)
+		self.handle().take_above(field, delay, self.late.pending())
 	}
 
 	/// The parts `take` needs, to run it on another thread.
 	pub(super) fn handle(&self) -> CapTake {
 		CapTake { ends: self.ends.clone(), dead: self.dead.clone(), slot: self.slot.clone() }
+	}
+
+	/// A deferred take of field `field` is handed out (`OvLate`): it holds the returned mark until it ran.
+	pub(super) fn late(&self, field: u64, delay: u64) -> LateDone {
+		let want = field.saturating_sub(delay);
+		self.late.issued.fetch_max(want, Ordering::SeqCst);
+		LateDone(self.late.clone(), want)
 	}
 }
 
@@ -256,6 +294,11 @@ pub(super) struct CapTake {
 
 impl CapTake {
 	pub(super) fn take(&self, field: u64, delay: u64) -> Option<gscap::Overlay> {
+		self.take_above(field, delay, 0)
+	}
+
+	/// `take`, leaving the overlays of fields up to `keep` in the queue (`LateTakes`). The queue is in field order.
+	fn take_above(&self, field: u64, delay: u64, keep: u64) -> Option<gscap::Overlay> {
 		let want = field.saturating_sub(delay);
 		let t = std::time::Instant::now();
 		while self.ends.load(Ordering::SeqCst) < want && !self.dead.load(Ordering::SeqCst) && t.elapsed().as_millis() <= GS_WAIT_MS {
@@ -263,10 +306,37 @@ impl CapTake {
 		}
 		crate::viewer::framecsv::wait('T', t);
 		let mut q = self.slot.lock().ok()?;
-		let mut last = None;
-		while q.front().is_some_and(|(f, _)| *f <= want) {
-			last = q.pop_front().map(|(_, o)| o);
-		}
-		last
+		let lo = q.partition_point(|(f, _)| *f <= keep);
+		let hi = q.partition_point(|(f, _)| *f <= want);
+		if hi > lo { q.drain(lo..hi).last().map(|(_, o)| o) } else { None }
+	}
+}
+
+#[cfg(test)]
+mod late_tests {
+	use super::*;
+
+	fn ov(field: u64) -> gscap::Overlay {
+		gscap::Overlay { w: field as u32, h: 0, rows: 0, frozen: false, disp: false, px: Vec::new(), rgba: Vec::new(), hd: None, guard: Default::default() }
+	}
+
+	/// A take at the field's end (front end) while the deferred take of an older field has not run yet gives what it gives after it.
+	#[test]
+	fn field_end_take_leaves_the_deferred_ones() {
+		let slot = Arc::new(Mutex::new((1..=3).map(|f| (f, ov(f))).collect()));
+		let c = Capture { tx: None, slot, ends: Arc::new(AtomicU64::new(9)), queued: Default::default(), ran: Default::default(), dead: Default::default(), late: Default::default(), lag: 0 };
+		let (h, done) = (c.handle(), c.late(2, 0));
+		assert_eq!(c.take(3, 0).map(|o| o.w), Some(3));
+		assert_eq!(h.take(2, 0).map(|o| o.w), Some(2));
+		drop(done);
+		c.slot.lock().unwrap().extend([(4, ov(4)), (5, ov(5))]);
+		assert_eq!(c.take(5, 0).map(|o| o.w), Some(5));
+		// Nothing newer than the deferred take's field: none, as when it ran first. Dropped unrun, its overlay goes to the next take.
+		c.slot.lock().unwrap().push_back((6, ov(6)));
+		let done = c.late(6, 0);
+		assert!(c.take(7, 0).is_none());
+		drop(done);
+		assert_eq!(c.take(8, 0).map(|o| o.w), Some(6));
+		assert!(c.slot.lock().unwrap().is_empty());
 	}
 }

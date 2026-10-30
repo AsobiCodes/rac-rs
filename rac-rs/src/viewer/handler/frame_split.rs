@@ -9,7 +9,7 @@ pub(super) fn run(g: &mut Gpu, game: Option<&Game>, smooth: &smooth::Smooth, deb
 	g.split_classic(cam, &mut |g: &mut Gpu| {
 		let Some(game) = game else { return };
 		g.redo_clip_view(cam);
-		let (centres, radii) = (game.fade_centres(), game.fade_radii());
-		g.set_props(Some(&game.props), smooth.posed(), &f.fx_posed, &f.actors, debris, &[], &centres, &radii);
+		let (centres, radii) = game.fade_spheres();
+		g.set_props(Some(&game.props), smooth.posed(), &f.fx_posed, &smooth.fx_skins.born, &f.actors, debris, &[], &centres, &radii);
 	});
 }

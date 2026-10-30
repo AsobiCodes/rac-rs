@@ -76,7 +76,8 @@ fn yellow_clusters<G>(ov: &Ov<G>, rect: [i32; 4]) -> Vec<f32> {
 }
 
 /// The list item's state: (page's current item, the list's cursor, the selected row's drawn y as bits).
-fn state(r: &Retail, addr: u32, rect: [i32; 4]) -> (u32, u32, Option<u32>) {
+fn state(r: &mut Retail, addr: u32, rect: [i32; 4]) -> (u32, u32, Option<u32>) {
+	r.resolve_ov();
 	let m = r.snap.menu.as_ref();
 	let cursor = m.and_then(|m| m.items.iter().find(|i| i.addr == addr)).map_or(u32::MAX, |i| match i.kind {
 		Kind::Label { cursor, .. } => cursor,
@@ -138,6 +139,7 @@ fn sweep(r: &mut Retail, addr: u32, tag: &str, fails: &mut Vec<String>) -> Vec<R
 		if m.cur != addr || seen.iter().any(|d| d.k == *k) {
 			break;
 		}
+		r.resolve_ov();
 		let Some(&y) = yellow_clusters(&r.snap.ov, it.rect).first() else {
 			fails.push(format!("{tag}: row {k}: no yellow text in the HUD capture (settled {ok}, was {cursor})"));
 			break;
@@ -295,6 +297,7 @@ fn mouse_lists_in_game() {
 	}
 	assert!(until(&mut r, 600, |m| m.id == 2), "pause menu did not open: mode {} menu {:?}", r.snap.mode, r.snap.menu);
 	pump(&mut r, 40);
+	r.resolve_ov();
 	eprintln!("lists: overlay {:?}", r.snap.ov.as_ref().map(|(w, h, _, _)| (*w, *h)));
 	let mut fails = Vec::new();
 	let mut visited = Vec::new();

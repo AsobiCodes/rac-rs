@@ -64,10 +64,12 @@ pub fn language() -> u32 {
 
 /// The console's OSD settings word (GetOsdConfigParam): bit 0 spdif, bits 1-2 screen type (0 4:3, 1 full, 2 16:9), bit 3 video
 /// output, bit 4 japLanguage, bits 5-12 ps1drv, bits 13-15 version (2), bits 16-20 language (`language()`), bits 21-31 timezone
-/// offset. Defaults: English, 4:3 (env COLD_ASPECT 0..3).
-fn osd_config_word() -> u32 {
+/// offset. Defaults: English, 4:3 (env COLD_ASPECT 0..3), time zone 0; with the host clock on (clock::set_real) the time zone is
+/// the host's standard offset, so the game's own clock conversion (boot 0x12d6d8) shows local time.
+pub(crate) fn osd_config_word() -> u32 {
     let aspect = std::env::var("COLD_ASPECT").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
-    2 << 13 | (language() & 0x1f) << 16 | (aspect & 3) << 1
+    let zone = if crate::clock::real() { crate::clock::osd_zone_bits(crate::clock::zone()) } else { 0 };
+    2 << 13 | (language() & 0x1f) << 16 | (aspect & 3) << 1 | zone
 }
 
 pub struct Hnd {
@@ -409,10 +411,13 @@ pub fn syscall(c: &mut Cpu, k: &mut Kernel, pc: u32) -> bool {
         }
         // 0x76 sceSifDmaStat is left to hle.rs (-1: finished). 0x78 sceSifSetDChain: nothing to chain.
         0x78 => 0,
-        // GetOsdConfigParam(u32 *p): the console's OSD settings word (`osd_config_word`, language from `language()`).
+        // GetOsdConfigParam(u32 *p): the console's OSD settings word (`osd_config_word`, language from `language()`). With the host
+        // clock on the word is built again at every call, so its time zone and the summer time flag (hle.rs 0x6f) are read together
+        // at the moment of the save (a session can cross a summer time change); otherwise it is the word fixed at boot.
         0x4b => {
             if a0 != 0 {
-                c.mem.wr32(a0, k.osd_word);
+                let w = if crate::clock::real() { osd_config_word() } else { k.osd_word };
+                c.mem.wr32(a0, w);
             }
             0
         }

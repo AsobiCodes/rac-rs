@@ -29,8 +29,14 @@ use crate::shadows::RecPrim;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+mod index;
+mod late;
+#[cfg(test)]
+mod oracle;
 mod still;
 mod weld;
+
+pub(super) use late::{fx_late, wait_in_tick};
 
 type V3 = [f32; 3];
 
@@ -45,6 +51,8 @@ struct Field {
 	key: (u32, u32, bool, bool),
 	/// The retail snapshot's serial (`Retail::shown_field`): a tick that brought no new field keeps it.
 	shown: u32,
+	/// The number of this field among the ones kept (`State::fields` when it was made): the lookup tables made for it carry it.
+	serial: u64,
 }
 
 #[derive(Default)]
@@ -72,12 +80,21 @@ struct State {
 	/// The standing kinds of queue A and queue B at the newest field (`still_kinds`), and the kinds `still::hold` carried into it.
 	standing: [std::collections::HashSet<(usize, bool)>; 2],
 	held: [Vec<(usize, bool)>; 2],
+	/// The lookup tables of `cur`'s queue A / queue B quads (`index::QIndex`), and of `prev`'s: made once per field, the ones
+	/// made for a field serve as the next field's `pidx` (swapped in `pair_field`).
+	idx: [index::QIndex; 2],
+	pidx: [index::QIndex; 2],
+	/// The welded vertices of `cur`'s corners (`weld::Verts`), buffers reused from field to field.
+	wv: weld::Verts,
+	/// [PC] The newest field's effects layer is still on the VU1 thread: its quad work and the queue-A / queue-B blend wait for
+	/// `late::fx_late` (late.rs).
+	late: Option<late::Late>,
 }
 
 /// [PC] FxHash-style hasher for the per-field pairing maps (`pair_ordered`, `still_kinds`): with std's SipHash, Pokitaru's pool
 /// and waterfall quads cost ~2.3 ms of the main thread a field. Only lookups use it, never an iteration order.
 #[derive(Default, Clone, Copy)]
-struct FxHasher(u64);
+pub(in crate::viewer) struct FxHasher(u64);
 
 impl FxHasher {
 	#[inline]
@@ -115,7 +132,7 @@ impl std::hash::Hasher for FxHasher {
 	}
 }
 
-type FxMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<FxHasher>>;
+pub(in crate::viewer) type FxMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<FxHasher>>;
 
 thread_local! {
 	static ST: RefCell<State> = RefCell::new(State::default());
@@ -192,18 +209,7 @@ fn cam_cut(a: &Cam, b: &Cam, hero: Option<(V3, V3)>, last: (f32, f32, f32), mode
 /// for nothing), and the first field after it is switched On is a cut.
 pub(super) fn field(r: &Retail, on: bool) {
 	if !on {
-		ST.with(|s| {
-			let mut s = s.borrow_mut();
-			s.fields += 1;
-			s.prev = None;
-			s.cur = None;
-			s.cut = true;
-			s.quads = Default::default();
-			s.still = Default::default();
-			s.weld = Default::default();
-			s.standing = Default::default();
-			s.held = Default::default();
-		});
+		ST.with(|s| reset_off(&mut s.borrow_mut()));
 		return;
 	}
 	let (fx, sh, orbs, key) = r.smooth_src();
@@ -213,69 +219,155 @@ pub(super) fn field(r: &Retail, on: bool) {
 	if ST.with(|s| s.borrow().cur.as_ref().is_some_and(|c| c.shown == r.shown_field() && c.key == key)) {
 		return;
 	}
-	let mut f = Field { fx: fx.cloned(), shadows: sh.cloned(), orbs: orbs.map(<[OrbDraw]>::to_vec), cam: Some(r.camera(1.0)), key, shown: r.shown_field() };
+	let sp_clone = super::profile::span("i_clone");
+	let mut f = Field { fx: fx.cloned(), shadows: sh.cloned(), orbs: orbs.map(<[OrbDraw]>::to_vec), cam: Some(r.camera(1.0)), key, shown: r.shown_field(), serial: 0 };
+	drop(sp_clone);
 	ST.with(|s| {
 		let mut s = s.borrow_mut();
-		s.fields += 1;
-		let prev = s.cur.take();
-		let (mv, cut) = match prev.as_ref() {
-			Some(p) if p.key == f.key && !f.key.3 => match (&p.cam, &f.cam) {
-				(Some(a), Some(b)) => {
-					let hero = match (p.fx.as_ref().and_then(|x| x.hero), f.fx.as_ref().and_then(|x| x.hero)) {
-						(Some(ha), Some(hb)) if !f.key.2 => Some((ha, hb)),
-						_ => None,
-					};
-					cam_cut(a, b, hero, s.last_move, crate::retail::modcam::on())
-				}
-				_ => ((0.0, 0.0, 0.0), true),
-			},
-			_ => ((0.0, 0.0, 0.0), true),
-		};
-		s.last_move = mv;
-		s.cut = cut;
-		if cut {
-			s.cuts += 1;
-			if std::env::var_os("RAC_SMOOTH_LOG").is_some() {
-				eprintln!("smooth: cut {} of {} fields at field {} (move {:.2} m, turn {:.2} rad, zoom {:.2}, key {:?})", s.cuts, s.fields, r.field_count(), mv.0, mv.1, mv.2, f.key);
-			}
-		}
-		// A standing mesh missing for one field is carried over from the field before (`still::hold`).
-		let held = match (prev.as_ref().and_then(|p| p.fx.as_ref()), f.fx.as_mut()) {
-			(Some(a), Some(b)) if !cut => [still::hold(&a.qa, &mut b.qa, &s.standing[0], &s.held[0]), still::hold(&a.qb, &mut b.qb, &s.standing[1], &s.held[1])],
-			_ => Default::default(),
-		};
-		if held.iter().any(|h| !h.is_empty()) && std::env::var_os("RAC_SMOOTH_LOG").is_some() {
-			eprintln!("smooth: hold field {}: kinds {held:?}", r.field_count());
-		}
-		s.held = held;
-		let ((qa, sa, ka), (qb, sb, kb)) = match (prev.as_ref().and_then(|p| p.fx.as_ref()), f.fx.as_ref()) {
-			(Some(a), Some(b)) if !cut => (all_pairs(&a.qa, &b.qa), all_pairs(&a.qb, &b.qb)),
-			_ => Default::default(),
-		};
-		(s.quads, s.still, s.standing) = ([qa, qb], [sa, sb], [ka, kb]);
-		s.weld = match (prev.as_ref().and_then(|p| p.fx.as_ref()), f.fx.as_ref()) {
-			(Some(a), Some(b)) if !cut => {
-				let (w, st) = weld::weld([&a.qa, &a.qb], [&b.qa, &b.qb], &s.quads, &s.still);
-				if (st.split > 0 || st.carried > 0) && std::env::var_os("RAC_SMOOTH_LOG").is_some() {
-					eprintln!("smooth: weld field {}: {st:?}", r.field_count());
-				}
-				w
-			}
-			_ => Default::default(),
-		};
-		s.prev = prev;
-		s.cur = Some(f);
-		if s.fields % 500 == 0 && s.stat.0 > 0 && std::env::var_os("RAC_SMOOTH_LOG").is_some() {
-			let (n, sum, max, cost) = s.stat;
-			eprintln!(
-				"smooth: {n} blended frames in 500 fields: picture delay mean {:.1} ms, max {:.1} ms; blend {:.3} ms/frame",
-				sum / n as f64 * 1e3,
-				max * 1e3,
-				cost / n as f64 * 1e3
-			);
-			s.stat = (0, 0.0, 0.0, 0.0);
+		if r.fx_pending() {
+			// The effects layer is still out: the cut now, the quad work once it is in (late.rs).
+			let prev = cut_of(&mut s, &mut f, r.field_count());
+			(s.prev, s.cur, s.late) = (prev, Some(f), Some(late::Late { field_no: r.field_count(), alpha: None }));
+		} else {
+			advance(&mut s, f, r.field_count());
 		}
 	});
+}
+
+/// Smoothing is Off: nothing is kept and the first field after it is switched On is a cut.
+fn reset_off(s: &mut State) {
+	s.fields += 1;
+	s.prev = None;
+	s.cur = None;
+	s.cut = true;
+	s.quads = Default::default();
+	s.still = Default::default();
+	s.weld = Default::default();
+	s.standing = Default::default();
+	s.held = Default::default();
+	s.late = None;
+}
+
+/// A new field `f` (number `field_no` of the game) arrives: the cut decision against the field before, `still::hold`, the pairing.
+fn advance(s: &mut State, mut f: Field, field_no: u32) {
+	let prev = cut_of(s, &mut f, field_no);
+	pair_new(s, prev, f, field_no);
+}
+
+/// `advance`, first half: numbers the new field `f` and decides whether it is a cut against the field before, which it returns
+/// (taken out of `cur`).
+fn cut_of(s: &mut State, f: &mut Field, field_no: u32) -> Option<Field> {
+	s.fields += 1;
+	f.serial = s.fields;
+	let prev = s.cur.take();
+	let (mv, cut) = match prev.as_ref() {
+		Some(p) if p.key == f.key && !f.key.3 => match (&p.cam, &f.cam) {
+			(Some(a), Some(b)) => {
+				let hero = match (p.fx.as_ref().and_then(|x| x.hero), f.fx.as_ref().and_then(|x| x.hero)) {
+					(Some(ha), Some(hb)) if !f.key.2 => Some((ha, hb)),
+					_ => None,
+				};
+				cam_cut(a, b, hero, s.last_move, crate::retail::modcam::on())
+			}
+			_ => ((0.0, 0.0, 0.0), true),
+		},
+		_ => ((0.0, 0.0, 0.0), true),
+	};
+	s.last_move = mv;
+	s.cut = cut;
+	if cut {
+		s.cuts += 1;
+		if std::env::var_os("RAC_SMOOTH_LOG").is_some() {
+			eprintln!("smooth: cut {} of {} fields at field {} (move {:.2} m, turn {:.2} rad, zoom {:.2}, key {:?})", s.cuts, s.fields, field_no, mv.0, mv.1, mv.2, f.key);
+		}
+	}
+	if s.fields % 500 == 0 && s.stat.0 > 0 && std::env::var_os("RAC_SMOOTH_LOG").is_some() {
+		let (n, sum, max, cost) = s.stat;
+		eprintln!(
+			"smooth: {n} blended frames in 500 fields: picture delay mean {:.1} ms, max {:.1} ms; blend {:.3} ms/frame",
+			sum / n as f64 * 1e3,
+			max * 1e3,
+			cost / n as f64 * 1e3
+		);
+		s.stat = (0, 0.0, 0.0, 0.0);
+	}
+	prev
+}
+
+/// `advance`, second half (the whole lists of `f` are in): `still::hold`, the pairing with the field before (`prev`); `f` becomes
+/// `cur`.
+fn pair_new(s: &mut State, prev: Option<Field>, mut f: Field, field_no: u32) {
+	let cut = s.cut;
+	// A standing mesh missing for one field is carried over from the field before (`still::hold`).
+	let sp_hold = super::profile::span("i_hold");
+	let held = match (prev.as_ref().and_then(|p| p.fx.as_ref()), f.fx.as_mut()) {
+		(Some(a), Some(b)) if !cut => [still::hold(&a.qa, &mut b.qa, &s.standing[0], &s.held[0]), still::hold(&a.qb, &mut b.qb, &s.standing[1], &s.held[1])],
+		_ => Default::default(),
+	};
+	if held.iter().any(|h| !h.is_empty()) && std::env::var_os("RAC_SMOOTH_LOG").is_some() {
+		eprintln!("smooth: hold field {field_no}: kinds {held:?}");
+	}
+	drop(sp_hold);
+	s.held = held;
+	pair_field(s, prev.as_ref(), &f, cut, field_no, PAR_MIN);
+	s.prev = prev;
+	s.cur = Some(f);
+}
+
+/// Fewer quads than this (queue A + B) are paired on the render thread alone: a rayon hand-over costs more than the work.
+const PAR_MIN: usize = 1024;
+
+/// `rayon::join` when `on`, else one after the other.
+fn par<A: Send, B: Send>(on: bool, fa: impl FnOnce() -> A + Send, fb: impl FnOnce() -> B + Send) -> (A, B) {
+	if on { rayon::join(fa, fb) } else { (fa(), fb()) }
+}
+
+/// The newest field's lookup tables, and (unless it is a `cut`, or a list is missing) its pairing with the field before: the moving
+/// pairs, the standing pairs and kinds, the welded corners. The queue-A and queue-B pairings and the weld's vertex table are
+/// independent of each other and run in parallel when the lists are long (`par_min` quads). `f` = the newest field (hold already applied), `prev` the one before.
+fn pair_field(s: &mut State, prev: Option<&Field>, f: &Field, cut: bool, field_no: u32, par_min: usize) {
+	let State { idx, pidx, wv, quads, still, weld: wl, standing, .. } = s;
+	// The tables made for the field before (for its lists as they are now) are this field's `prev` tables.
+	std::mem::swap(idx, pidx);
+	let Some(b) = f.fx.as_ref() else {
+		idx[0].build_for(&[], f.serial);
+		idx[1].build_for(&[], f.serial);
+		(*quads, *still, *wl, *standing) = Default::default();
+		return;
+	};
+	let big = b.qa.len() + b.qb.len() >= par_min;
+	let [ia, ib] = idx;
+	let Some((p, a)) = prev.filter(|_| !cut).and_then(|p| Some((p, p.fx.as_ref()?))) else {
+		par(big, || ia.build_for(&b.qa, f.serial), || ib.build_for(&b.qb, f.serial));
+		(*quads, *still, *wl, *standing) = Default::default();
+		return;
+	};
+	let [pa, pb] = pidx;
+	// The tables are the ones made for `prev`'s lists (same field serial); a table of another field, or of another length, is rebuilt.
+	if pa.serial != p.serial || pa.len() != a.qa.len() {
+		pa.build_for(&a.qa, p.serial);
+	}
+	if pb.serial != p.serial || pb.len() != a.qb.len() {
+		pb.build_for(&a.qb, p.serial);
+	}
+	let (pa, pb) = (&*pa, &*pb);
+	let task = |p: &index::QIndex, c: &mut index::QIndex, pq: &[WorldQuad], cq: &[WorldQuad]| {
+		c.build_for(cq, f.serial);
+		index::pairs(pq, cq, p, c)
+	};
+	let sp_pairs = super::profile::span("i_pairs");
+	let ((ra, rb), ()) = par(big, || par(big, || task(pa, ia, &a.qa, &b.qa), || task(pb, ib, &a.qb, &b.qb)), || wv.index([&b.qa, &b.qb]));
+	drop(sp_pairs);
+	*standing = [ra.standing, rb.standing];
+	*quads = [ra.moving, rb.moving];
+	*still = [ra.still, rb.still];
+	let sp_weld = super::profile::span("i_weld");
+	let (w, st) = weld::weld_with(wv, [&a.qa, &a.qb], [&b.qa, &b.qb], quads, still);
+	if (st.split > 0 || st.carried > 0) && std::env::var_os("RAC_SMOOTH_LOG").is_some() {
+		eprintln!("smooth: weld field {field_no}: {st:?}");
+	}
+	*wl = w;
+	drop(sp_weld);
 }
 
 /// After the ticks of a display frame: whether this frame draws between fields (`want` = the player's choice, already false
@@ -284,13 +376,16 @@ pub(super) fn frame(r: Option<&mut Retail>, want: bool, alpha: f32) -> bool {
 	let Some(r) = r else { return want };
 	let t0 = std::time::Instant::now();
 	let blend = ST.with(|s| {
-		let s = s.borrow();
-		match (want && !s.cut && !r.paused(), &s.prev, &s.cur) {
+		let mut s = s.borrow_mut();
+		let late = s.late.is_some();
+		let d = match (want && !s.cut && !r.paused(), &s.prev, &s.cur) {
 			(true, Some(p), Some(c)) => Some(SmoothDraw {
 				fx: match (&p.fx, &c.fx) {
+					// The effects layer is still out: queue A / queue B wait for `late::fx_late`.
+					(Some(a), Some(b)) if late => Some(blend_fx(a, b, alpha, &Default::default())),
 					(Some(a), Some(b)) => {
-						let mut o = still::blend(blend_fx(a, b, alpha, &s.quads), a, alpha, &s.still);
-						weld::apply(&mut o.qa, &mut o.qb, alpha, &s.weld);
+						let mut o = blend_fx(a, b, alpha, &Default::default());
+						late::blend_quads(&mut o, a, alpha, &s);
 						Some(o)
 					}
 					_ => None,
@@ -310,7 +405,11 @@ pub(super) fn frame(r: Option<&mut Retail>, want: bool, alpha: f32) -> bool {
 				},
 			}),
 			_ => None,
+		};
+		if let Some(l) = s.late.as_mut() {
+			l.alpha = d.as_ref().and_then(|d| d.fx.as_ref()).map(|_| alpha);
 		}
+		d
 	});
 	let on = blend.is_some();
 	r.set_smooth(blend);
@@ -364,104 +463,12 @@ fn pair_ordered<K: std::hash::Hash + Eq + Copy>(prev: &[(K, V3)], cur: &[(K, V3)
 /// effects layer rebuilds positions from GS depth, which wobble by up to about 0.1 a field.
 const STILL_EPS: f32 = 0.2;
 
-/// [PC] The quad kinds (texture, blend) that stand still: at least half their quads this field lie where one of last field's did
-/// (`STILL_EPS`). Pokitaru's pool surface and waterfall sheets are such meshes; which of their triangles retail draws changes as
-/// the camera turns (its VU1 clip), so the k-th of a kind is often another triangle than last field's k-th, and blending the two
-/// pulled neighbours together: holes in the water for a frame (user clip 2026-10-19). Standing quads are drawn as they are.
-/// The same triangle may come with its corners in another order (where its strip starts changes with the clip), so corners
-/// match in any order, and the grid cell is the quad's centre.
-/// A quad hits when a quad of its kind in last field's grid cell or one of the 26 around it is the `same`; a kind of fewer than 4
-/// quads never counts, and a kind is decided (and its other quads skip the search) once half its quads hit or no longer can.
-fn still_kinds(prev: &[WorldQuad], cur: &[WorldQuad]) -> std::collections::HashSet<(usize, bool)> {
-	let mid = |q: &WorldQuad| std::array::from_fn::<f32, 3, _>(|c| (q.pos[0][c] + q.pos[1][c] + q.pos[2][c] + q.pos[3][c]) * 0.25);
-	let cell = |p: [f32; 3]| ((p[0] / 0.5).floor() as i32, (p[1] / 0.5).floor() as i32, (p[2] / 0.5).floor() as i32);
-	// Per kind of this field: (hits, quads searched, quads).
-	let mut count: FxMap<(usize, bool), (u32, u32, u32)> = FxMap::default();
-	for q in cur {
-		count.entry(kind_of(q)).or_default().2 += 1;
-	}
-	// Last field's quads of the kinds that can count, chained per (kind, cell): `head` holds a cell's last quad, `next` the one before.
-	const END: u32 = u32::MAX;
-	let mut head: FxMap<((usize, bool), (i32, i32, i32)), u32> = FxMap::default();
-	let mut next = vec![END; prev.len()];
-	for (j, q) in prev.iter().enumerate() {
-		let kind = kind_of(q);
-		if count.get(&kind).is_some_and(|c| c.2 >= 4) {
-			let e = head.entry((kind, cell(mid(q)))).or_insert(END);
-			next[j] = *e;
-			*e = j as u32;
-		}
-	}
-	let close = |a: V3, b: V3| (0..3).all(|c| (a[c] - b[c]).abs() < STILL_EPS);
-	let within = |a: &WorldQuad, b: &WorldQuad| a.pos.iter().all(|&p| b.pos.iter().any(|&q| close(p, q)));
-	let same = |a: &WorldQuad, b: &WorldQuad| within(a, b) && within(b, a);
-	// The quad's own cell first (where a standing quad nearly always is), then the 26 around it.
-	const AROUND: [(i32, i32, i32); 27] = {
-		let mut o = [(0, 0, 0); 27];
-		let mut n = 1;
-		let mut i = 0;
-		while i < 27 {
-			let d = ((i / 9) as i32 - 1, (i / 3 % 3) as i32 - 1, (i % 3) as i32 - 1);
-			if d.0 != 0 || d.1 != 0 || d.2 != 0 {
-				o[n] = d;
-				n += 1;
-			}
-			i += 1;
-		}
-		o
-	};
-	for q in cur {
-		let kind = kind_of(q);
-		let Some(e) = count.get_mut(&kind) else { continue };
-		let (hit, searched, n) = *e;
-		if n < 4 || 2 * hit >= n || 2 * (hit + n - searched) < n {
-			continue;
-		}
-		let (cx, cy, cz) = cell(mid(q));
-		let found = AROUND.iter().any(|&(dx, dy, dz)| {
-			let mut j = head.get(&(kind, (cx + dx, cy + dy, cz + dz))).copied().unwrap_or(END);
-			while j != END {
-				if same(&prev[j as usize], q) {
-					return true;
-				}
-				j = next[j as usize];
-			}
-			false
-		});
-		e.0 += found as u32;
-		e.1 += 1;
-	}
-	count.into_iter().filter(|&(_, (hit, _, n))| n >= 4 && 2 * hit >= n).map(|(k, _)| k).collect()
-}
-
 /// [PC] A quad's kind for pairing (texture, blend): the effects layer packs each corner's fog F and the fog colour into the high
 /// bits of `tex` (retail/efx_draw.rs `FOG_BITS`), which change as the camera moves, so they are left out. With them in, the same
 /// waterfall sheet was hundreds of kinds that changed from field to field and its triangles paired with others of the same fog:
 /// torn sheets on smoothed frames while the camera turned (user clip 2026-10-19).
 fn kind_of(q: &WorldQuad) -> (usize, bool) {
 	(crate::retail::efx_draw::plain_tex(q.tex), q.additive)
-}
-
-/// The quads of `cur` that blend with one of `prev` as (index in `cur`, index in `prev`): the k-th quad of a kind pairs with the
-/// k-th of that kind (`pair_ordered`), not of a standing kind (`still_kinds`, left as they are), every corner `near`. Once per
-/// field; each display frame only lerps them (`lerp_quads`).
-fn quad_pairs(prev: &[WorldQuad], cur: &[WorldQuad], still: &std::collections::HashSet<(usize, bool)>) -> Vec<(u32, u32)> {
-	let key = |q: &WorldQuad| (kind_of(q), q.pos[0]);
-	let pairs = pair_ordered(&prev.iter().map(key).collect::<Vec<_>>(), &cur.iter().map(key).collect::<Vec<_>>());
-	cur.iter()
-		.zip(pairs)
-		.enumerate()
-		.filter_map(|(i, (q, j))| {
-			let j = j?;
-			(!still.contains(&kind_of(q)) && (0..4).all(|k| near(prev[j].pos[k], q.pos[k]))).then_some((i as u32, j as u32))
-		})
-		.collect()
-}
-
-/// The moving quads' pairs (`quad_pairs`), the standing ones' (`still::still_pairs`) and the standing kinds of one queue.
-fn all_pairs(prev: &[WorldQuad], cur: &[WorldQuad]) -> (Vec<(u32, u32)>, Vec<still::StillPair>, std::collections::HashSet<(usize, bool)>) {
-	let still = still_kinds(prev, cur);
-	(quad_pairs(prev, cur, &still), still::still_pairs(prev, cur, &still), still)
 }
 
 /// `pairs`: `quad_pairs(prev, cur, ..)`. Colours only: the corners move by their welded vertex (`weld::apply`).
@@ -729,14 +736,14 @@ mod tests {
 		for q in &mut cur {
 			q.pos = [q.pos[1], q.pos[2], q.pos[0], q.pos[0]];
 		}
-		let still = still_kinds(&prev, &cur);
-		assert!(still.contains(&(42, false)), "{still:?}");
+		let p = index::pairs_of(&prev, &cur);
+		assert!(p.standing.contains(&(42, false)), "{:?}", p.standing);
 		let mut out = cur.clone();
-		lerp_quads(&prev, &mut out, 0.5, &quad_pairs(&prev, &cur, &still_kinds(&prev, &cur)));
+		lerp_quads(&prev, &mut out, 0.5, &p.moving);
 		assert!(out.iter().zip(&cur).all(|(a, b)| a.pos == b.pos));
 	}
 
-	/// `still_kinds` (chained grid, decided kinds skip the search) answers what the plain rule does: a kind of at least 4 quads
+	/// `index::pairs` (chained grid, decided kinds skip the search) answers what the plain rule does: a kind of at least 4 quads
 	/// where at least half find the `same` quad of their kind within one 0.5 grid cell of their centre's.
 	#[test]
 	fn still_kinds_matches_plain_rule() {
@@ -796,7 +803,7 @@ mod tests {
 				c.pos = [c.pos[2], c.pos[3], c.pos[0], c.pos[1]];
 				cur.push(c);
 			}
-			assert_eq!(still_kinds(&prev, &cur), plain(&prev, &cur), "round {round}");
+			assert_eq!(index::pairs_of(&prev, &cur).standing, plain(&prev, &cur), "round {round}");
 		}
 	}
 }

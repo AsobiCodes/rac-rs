@@ -2,6 +2,8 @@
 
 use super::*;
 
+pub(super) mod bgpool;
+
 pub fn run(iso_path: &str, level: usize, shot: Option<String>, start: Option<[f32; 5]>, play: bool, front: bool, give: Option<(u8, Option<u16>)>) -> Result<(), Box<dyn std::error::Error>> {
 	init_pool();
 	let mut app = new_app(iso_path, level, shot, start, play, front, give)?;

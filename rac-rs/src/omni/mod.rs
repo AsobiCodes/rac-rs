@@ -36,6 +36,7 @@
 mod binding;
 mod bridge;
 mod cabi;
+pub mod hostabi;
 mod card;
 pub mod clash;
 mod codeguard;

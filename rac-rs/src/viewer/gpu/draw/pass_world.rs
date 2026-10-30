@@ -3,8 +3,12 @@
 
 use super::*;
 
+/// [probe] Lap names of the batch loop in `pass_world` (RAC_GPU_PASSES, passtime.rs `lap`), in loop order.
+const LAPS: [&str; 9] = ["world", "tfrags", "ties", "marker", "props", "clipped", "debris", "warp", "tfrags lt"];
+
 impl Gpu {
 	pub(in crate::viewer) fn pass_sky(&self, mut pass: &mut wgpu::RenderPass<'_>, scene: &Scene, warp: bool, skip: u64, star: bool) {
+			crate::viewer::passtime::lap(pass, "start"); // [probe] RAC_GPU_PASSES laps of the level pass (passtime.rs)
 			// The sky first, as retail: the sky pass FUN_0023fbb8 is the first draw of the frame render (aridia_presentation.md;
 			// GSPIX play/eudora1_0039 (384,37): sky texel, then the tfrag texel blended over it). It writes no Z, so every world draw
 			// covers it, and blended world texels (tfrag texels below alpha 0x60 write no Z) mix with the sky, not the clear colour
@@ -61,14 +65,13 @@ impl Gpu {
 			// [PC] Dynamic shadows replace the retail shadow volumes (no double shadows).
 			let volumes = self.volume_buf.as_ref().filter(|_| !super::super::pipe_guard::off(super::super::pipe_guard::Effect::ShadowVol) && sun.is_none() && self.volume_counts != (0, 0) && (props.is_some() && !scene.props_late.is_empty() || self.shadow.marker_late && marker.is_some()));
 			let marker_late = marker.filter(|_| volumes.is_some() && self.shadow.marker_late);
-			let (props_main, props_late) = match volumes {
-				Some(_) => super::shadowvol::split_late(&scene.props.draws, &scene.slot_runs, &scene.props_late),
-				None => (Vec::new(), Vec::new()),
-			};
+			// [PC] speed (props_live.rs): the props draws without their dead slots (collapsed to a point by `vs_props`: no pixel).
+			let (props_live, props_main, props_late) = scene.props_level_draws(props.is_some(), volumes.is_some());
 			// Retail frame order: the tfrag pass, then the tie pass (FUN_0021af28: tfrag_frame, then TieProc), so a blended tie texel
 			// mixes with the terrain behind it. The texels that write no Z (tfrag below alpha 0x60, tie below 0x40) come last.
 			// `tie`: Some(pass) for the two tie passes (`tie_pipelines`).
 			for (bi, (pipeline, batch, tie)) in [(&self.pipeline, Some(&scene.world).filter(|_| !warp), None), (&self.tfrag_pipeline, Some(&scene.tfrags).filter(|_| !warp), None), (&self.pipeline, Some(&scene.ties).filter(|_| !warp), Some(0)), (&self.pipeline, marker.filter(|_| marker_late.is_none()), None), (&self.pipeline, props, None), (&self.pipeline, clipped, None), (&self.pipeline, debris, None), (&self.pipeline, warp_batch, None), (&self.tfrag_pipeline_lt, Some(&scene.tfrags).filter(|_| !warp), None), (&self.pipeline, Some(&scene.ties).filter(|_| !warp), Some(1))].into_iter().enumerate() {
+					crate::viewer::passtime::lap(pass, if bi == 0 { "sky" } else { LAPS[bi - 1] }); // [probe] RAC_GPU_PASSES laps (passtime.rs): the previous batch's time
 				let Some(batch) = batch else { continue };
 				if dskip(["world", "tfrags", "ties", "marker", "props", "clipped", "debris", "warp", "tfrags", "ties"][bi]) {
 					continue;
@@ -109,7 +112,7 @@ impl Gpu {
 				pass.set_pipeline(pipeline);
 				pass.set_vertex_buffer(0, batch.vbuf.slice(..));
 				pass.set_index_buffer(batch.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-				let draws: &[Draw] = if volumes.is_some() && std::ptr::eq(batch, &scene.props) { &props_main } else { &batch.draws };
+				let draws: &[Draw] = if volumes.is_some() && std::ptr::eq(batch, &scene.props) { &props_main } else if std::ptr::eq(batch, &scene.props) { &props_live } else { &batch.draws };
 				// The moby batches (marker, props, clipped props, debris) carry the material's TEX1 K word as the first instance
 				// (`moby_word`); the world and tfrag batches keep theirs (the tfrag pass reads its own word from it).
 				let moby_pass = matches!(bi, 3 | 4 | 5 | 6);
@@ -180,7 +183,8 @@ impl Gpu {
 					};
 					for (k, pipeline) in pipelines.iter().enumerate() {
 						pass.set_pipeline(pipeline);
-						for d in &batch.draws {
+						let draws: &[Draw] = if std::ptr::eq(batch, &scene.props) { &props_live } else { &batch.draws };
+						for d in draws {
 							// Retail culls in VU1 before the GS: the blended texels of a culled packet keep its cull mode.
 							if d.cull != 0 {
 								pass.set_pipeline(&culled[2 * (d.cull as usize - 1) + k]);
@@ -194,22 +198,27 @@ impl Gpu {
 						}
 					}
 				}
-				// BRIDGE-45: the metal texels below alpha 0x80 and every metal face drawn with a metal alpha below 0x80.
-				if let Some((batch, tex)) = metal {
-					pass.set_vertex_buffer(0, batch.vbuf.slice(..));
-					pass.set_index_buffer(batch.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-					for pipeline in &self.moby_pipelines {
-						pass.set_pipeline(pipeline);
-						for d in &batch.draws {
-							pass.set_bind_group(1, &tex[d.texture], &[]);
-							pass.draw_indexed(d.start..d.start + d.count, 0, 0..1);
-						}
-					}
-				}
+				self.abe_metal(pass, metal);
 			}
 	}
 
+	/// BRIDGE-45: the metal texels below alpha 0x80 and every metal face drawn with a metal alpha below 0x80 (the ABE pass).
+	fn abe_metal(&self, pass: &mut wgpu::RenderPass<'_>, metal: Option<(&Batch, &[wgpu::BindGroup; 2])>) {
+		if let Some((batch, tex)) = metal {
+			pass.set_vertex_buffer(0, batch.vbuf.slice(..));
+			pass.set_index_buffer(batch.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+			for pipeline in &self.moby_pipelines {
+				pass.set_pipeline(pipeline);
+				for d in &batch.draws {
+					pass.set_bind_group(1, &tex[d.texture], &[]);
+					pass.draw_indexed(d.start..d.start + d.count, 0, 0..1);
+				}
+			}
+		}
+	}
+
 	pub(super) fn pass_shop_models(&self, pass: &mut wgpu::RenderPass<'_>, scene: &Scene, cam: &Camera, eye: &Camera, aspect: f32, wfar: f32, warp: bool) {
+			crate::viewer::passtime::lap(pass, "quads");
 			// NOV-13.3: the vendor shop's item models, world mobies seen by the world camera (decomp/notes/vendor.md
 			// "NOV-13.3"). Their meshes are the model-space preview batches, so the view-projection takes the model
 			// matrix and the eye, the point lights and the light direction move into the model frame. Lit by the

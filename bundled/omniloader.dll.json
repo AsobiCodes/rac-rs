@@ -1,0 +1,8 @@
+{
+  "name": "omniloader.dll",
+  "version": "0.1.0",
+  "abi": "1.6",
+  "platform": "windows-x86_64",
+  "sha256": "6c48280368de6d9f258b80c484d4cffe602fce5e9c1141f8e2b4e9aed445ff98",
+  "source": "omniloader 0.1.0 (same source as the v0.4.1 omniloader.dll, rebuilt without build-machine paths), static CRT"
+}

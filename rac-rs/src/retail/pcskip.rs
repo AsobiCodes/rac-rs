@@ -1,5 +1,5 @@
-//! The Start skips cutscenes row (Pause -> Options -> Graphics -> System -> Start skips cutscenes: On / Off; pause page only, the
-//! title's Graphics table stops at `pcext::fogopt::TITLE_ROWS`), retail side.
+//! The Start skips cutscenes row (Pause -> Options -> Graphics -> System -> Start skips cutscenes: On / Off; the title's Graphics
+//! page shows it too (`pcext/titlegfx.rs`)), retail side.
 //!
 //! Retail lets a plain Start skip a movie or an in-engine scene only in Veldin, in the New Game intro, in New Game+ and after the
 //! game is beaten (decomp/notes/cutscene_skip.md); everywhere else in a normal run the player's test wants Start with L1 + R1 + L2 +
@@ -7,7 +7,7 @@
 //! players pressed Start and nothing happened. With this row On (the default; the options file's `skipcut=on|off`, pcopts.rs) a
 //! plain Start, on the keyboard (Enter / Esc) or the controller, stands for those buttons in `input.rs` (`tick_keys` feeds the scene
 //! and flight tests through `skip_feed`, `movie_poll` the movie test), so retail's own rule decides and ends the cutscene; Off is
-//! retail's rule untouched (Esc and Space keep skipping, as before). The boot logo movies are not touched (the Skip intro row).
+//! retail's rule untouched (Esc and Space keep skipping, as before). The boot logo movies end on a new Start, Esc, Enter or Space too (v0.4.2, `movie_poll`; the Skip intro row cuts them before they play).
 //!
 //! The row's byte lives in the pcctl block, stored INVERTED (0 = On): a default RAM stays all zero, so the RAM hashes of the
 //! replays do not move (`pcctl::skipcut_on`). `sync` hands a change to the options file.

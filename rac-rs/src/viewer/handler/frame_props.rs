@@ -33,7 +33,7 @@ impl App {
 			let p = &game.player;
 			let mut posed: HashMap<PoseKey, Posed> = HashMap::new();
 			// Vendor and orb: blend / joint-spin poses (vendor.rs vendor_fx), one skinning per prop.
-			let mut fx_posed: HashMap<usize, Posed> = HashMap::new();
+			let mut fx_posed: HashMap<usize, std::sync::Arc<Posed>> = HashMap::new();
 			// The skinning of the props with joint records is done on the worker pool below (`fx_jobs`).
 			let mut fx_jobs: Vec<(usize, &mobies::MobyClass, Vec<[f32; 12]>)> = Vec::new();
 			for (pi, pr) in game.props.iter().enumerate().filter(|(pi, _)| pose[*pi]) {
@@ -41,7 +41,7 @@ impl App {
 				if let (Some(fp), Some((class, a))) = (flight_pose.filter(|fp| fp.prop == pi), self.prop_anims.get(&pr.class_id)) {
 					if a.sequences.len() > 2 && !a.sequences[1].frames.is_empty() && !a.sequences[2].frames.is_empty() {
 						let (f0, f1) = game::transit::ship_blend_frames(a.sequences[1].frames.len());
-						fx_posed.insert(pi, anim::skin_all(class, &a.pose_frames(&a.sequences[1].frames[f0], &a.sequences[2].frames[f1.min(a.sequences[2].frames.len() - 1)], fp.blend)));
+						fx_posed.insert(pi, std::sync::Arc::new(anim::skin_all(class, &a.pose_frames(&a.sequences[1].frames[f0], &a.sequences[2].frames[f1.min(a.sequences[2].frames.len() - 1)], fp.blend))));
 						continue;
 					}
 				}
@@ -62,26 +62,26 @@ impl App {
 					}
 				}
 			}
-			{
-				use rayon::prelude::*;
-				let _s = profile::span("prop_skin_fx");
-				let skin = |(pi, class, mats): &(usize, &mobies::MobyClass, Vec<[f32; 12]>)| (*pi, anim::skin_all(class, mats));
-				let done: Vec<(usize, Posed)> = if fx_jobs.len() < 3 { fx_jobs.iter().map(skin).collect() } else { fx_jobs.par_iter().map(skin).collect() };
-				fx_posed.extend(done);
-			}
+			// [PC] perf: a prop whose class and joint matrices are last frame's keeps its skinning (fx_skin.rs).
+			{ let _s = profile::span("prop_skin_fx"); self.smooth.fx_skins.skin(fx_jobs, &mut fx_posed); }
 			// PC perf: no game tick since the last frame's poses (same stamp): the anim states are unchanged, so each
 			// pose key's skinning is moved over from that frame instead of recomputed.
 			let stamp = (game.frames, game.props.as_ptr() as usize, game.props.len());
 			let mut last = if self.smooth.ticks == 0 && self.pose_stamp == Some(stamp) { self.smooth.take_posed() } else { HashMap::new() };
 			self.pose_stamp = Some(stamp);
 			// [PC] perf: the joint matrices per new key here, the skinning on the frame worker pool; the keys go into
-			// `posed` in first-seen order as before.
-			let mut todo: Vec<(PoseKey, Result<Posed, (&mobies::MobyClass, Vec<[f32; 12]>)>)> = Vec::new();
+			// `posed` in first-seen order as before. A key skinned from last frame's class and matrices takes last frame's pose
+			// (`pose_born.rs`, which also gives each key pose its token).
+			let mut todo: Vec<(PoseKey, usize, pose_born::KeyJob)> = Vec::new();
 			for pr in game.props.iter().enumerate().filter(|(pi, _)| pose[*pi]).map(|(_, p)| p) {
 				if let Some((class, a)) = self.prop_anims.get(&pr.class_id) {
 					let key = pose_key(pr);
 					if !posed.contains_key(&key) {
-						todo.push((key, last.remove(&key).ok_or_else(|| (class, pr.anim.pose(a, &[])))));
+						let job = match last.remove(&key) {
+							Some(p) => pose_born::KeyJob::Moved(p),
+							None => self.smooth.fx_skins.keys.job(key, class, pr.anim.pose(a, &[]), self.smooth.posed()),
+						};
+						todo.push((key, class as *const mobies::MobyClass as usize, job));
 						posed.insert(key, Default::default());
 					}
 				}
@@ -89,14 +89,17 @@ impl App {
 			drop(last);
 			{
 				use rayon::prelude::*;
+				use pose_born::KeyJob;
 				let _s = profile::span("prop_skin");
-				let done: Vec<Posed> = todo.par_iter_mut().map(|(_, job)| match job {
-					Ok(p) => std::mem::take(p),
-					Err((class, mats)) => anim::skin_all(class, mats),
+				let done: Vec<Posed> = todo.par_iter_mut().map(|(_, _, job)| match job {
+					KeyJob::Moved(p) | KeyJob::Kept(p) => std::mem::take(p),
+					KeyJob::Skin(class, mats) => anim::skin_all(class, mats),
 				}).collect();
-				for ((key, _), p) in todo.iter().zip(done) {
+				for ((key, _, _), p) in todo.iter().zip(done) {
 					posed.insert(*key, p);
 				}
+				let fs = &mut self.smooth.fx_skins;
+				fs.keys.settle(todo, &mut fs.born.keys);
 			}
 			// PC-FPS-1: blended poses join `fx_posed`, blended placements go to `smooth::PROP_XF`.
 			{ let _s = profile::span("sm_props"); self.smooth.props(&game.props, posed, &mut fx_posed, &blend); }

@@ -6,7 +6,7 @@ mod tests {
 	use super::*;
 
 	/// The skip rule on the keyboard, as the gameplay path and the front-end mirror both poll it (`movie_poll`): the logos
-	/// never skip, the attract movie ends on any new key, the New Game intro and the story movies on a new Enter (Start) or
+	/// end on a new Start, Esc or Space (v0.4.2; retail has no skip), the attract movie ends on any new key, the New Game intro and the story movies on a new Enter (Start) or
 	/// on Esc / Space (the player's skip keys, which feed Start), and past Veldin Start alone does nothing: retail wants
 	/// Start with C, Left Ctrl, V and B (L1 R1 L2 R2) held, which Esc / Space supply together.
 	#[test]
@@ -14,8 +14,19 @@ mod tests {
 		use fmv_bridge::Skip;
 		use winit::keyboard::KeyCode as K;
 		let poll = |rule: Skip, prev: u16, keys: &[K]| movie_poll(rule, prev, |k| keys.contains(&k), 0, false);
-		// Boot logos (mode -1): nothing skips.
-		assert!(!poll(Skip::Never, 0, &[K::Escape, K::Enter, K::Space]).0);
+		// Boot logos (mode -1): retail skips nothing, the port's skip press ends them (the Skip intro row cuts them too).
+		assert!(poll(Skip::Never, 0, &[K::Enter]).0);
+		assert!(poll(Skip::Never, 0, &[K::Escape]).0);
+		assert!(poll(Skip::Never, 0, &[K::Space]).0);
+		assert!(!poll(Skip::Never, 0, &[K::KeyF]).0, "other keys are no skip");
+		assert!(!poll(Skip::Never, 0x800, &[K::Enter]).0, "Start held from before the logo");
+		assert!(!poll(Skip::Never, 0x800, &[K::Space]).0, "Space held later in the logo (it was remembered as Start)");
+		// The first poll of the logo (what `take_movie` seeds): Space, Esc or Enter held from before, whatever the pad state was, is no press.
+		for key in [K::Space, K::Escape, K::Enter] {
+			let (hit, prev) = poll(Skip::Never, input::FIRST_POLL, &[key]);
+			assert!(!hit && !poll(Skip::Never, prev, &[key]).0, "{key:?} held from before the logo");
+			assert!(poll(Skip::Never, prev, &[]).0 == false && poll(Skip::Never, 0, &[key]).0, "a later press still skips");
+		}
 		// Attract movie (mode 2): any new button, but not one already down at the last poll.
 		assert!(poll(Skip::Any, 0, &[K::Space]).0);
 		assert!(poll(Skip::Any, 0, &[K::KeyF]).0);
@@ -89,8 +100,10 @@ mod tests {
 		assert!(movie_poll(Skip::Start, 0, none, 0x800, false).0, "a Veldin / intro movie: controller Start, row Off");
 		assert!(!movie_poll(Skip::Start, 0x800, none, 0x800, false).0, "controller Start held from before");
 		assert!(movie_poll(Skip::Any, 0, none, 0x40, false).0, "the attract movie: any controller button");
-		// The logos stay unskippable either way (the Skip intro row ends them).
-		assert!(!movie_poll(Skip::Never, 0, enter, 0x800, true).0);
+		// The logos end on a new Start either way (the row only matters for the cutscenes), not on one held from before.
+		assert!(movie_poll(Skip::Never, 0, enter, 0x800, true).0);
+		assert!(movie_poll(Skip::Never, 0, none, 0x800, false).0, "the pad's Start ends a boot logo too");
+		assert!(!movie_poll(Skip::Never, 0x800, none, 0x800, false).0);
 		// A button that is not Start feeds nothing, row On or not.
 		assert!(!movie_poll(Skip::Combo, 0, none, 0x40, true).0 && !movie_poll(Skip::Combo, 0, |k| k == K::KeyF, 0, true).0);
 		// Scenes and flights: `skip_feed` turns an already decided skip key into the retail buttons (`pcskip::start_pressed` decides it, row On
@@ -351,7 +364,7 @@ mod tests {
 			r.tick_keys(|k| k == K::Enter, false, false);
 		}
 		assert!(until(&mut r, 600, |m| m.id == 2), "pause menu did not open: mode {} menu {:?}", r.snap.mode, r.snap.menu);
-		if let Some((w, rows, _, _)) = &r.snap.ov {
+		if let Some((w, rows, _, _)) = { r.resolve_ov(); &r.snap.ov } {
 			eprintln!("mouse: overlay {w}x{rows}");
 		}
 		pump(&mut r, 30);

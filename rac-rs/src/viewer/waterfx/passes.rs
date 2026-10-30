@@ -76,8 +76,7 @@ impl WaterFx {
 		let in_geo = |d: &WaterDraw| d.sea() && d.plane.is_some_and(|b| planes.iter().any(|p| (p[0] - b[0]).abs() < 1.5));
 		let g = look.unwrap_or(GeoLook { cell: 8.0, band: 8.0, len: 9.0, sig: 0.0, sigq: 1.0, amp: 0.0 });
 		let [mx, mb, mt] = GRID_MARGIN;
-		let cols = ((w * (1.0 + mx) / g.cell).ceil() as u32).max(1);
-		let rows = ((h * (1.0 + 0.5 * (mb + mt)) / g.cell).ceil() as u32).max(1);
+		let (cols, rows) = grid_dims(w, h, g.cell);
 		let ivp = super::mirror::inverse(&f.vp).unwrap_or(f.vp);
 		let origin = [((f.eye[0] / SHORE_CELL).floor() - (SHORE_N / 2) as f32) * SHORE_CELL, ((f.eye[1] / SHORE_CELL).floor() - (SHORE_N / 2) as f32) * SHORE_CELL];
 		let u = WaterU {
@@ -103,19 +102,15 @@ impl WaterFx {
 			ggrid: [cols as f32, rows as f32, g.cell, g.band],
 			gridb: [-1.0 - mx, -1.0 - mb, (2.0 + 2.0 * mx) / cols as f32, (2.0 + mb + mt) / rows as f32],
 			wgeo: [g.sig, g.sigq, g.amp, g.len],
-			mirror2: [mirrors.get(1).copied().unwrap_or(0.0), mirrors.get(2).copied().unwrap_or(0.0), mirrors.len() as f32, 0.0],
+			mirror2: [mirrors.get(1).copied().unwrap_or(0.0), mirrors.get(2).copied().unwrap_or(0.0), mirrors.len() as f32, 0.0], lod: super::bed_min::lod_flags(super::far_lod::params(), !planes.is_empty()),
 		};
 		queue.write_buffer(&self.ubuf, 0, bytemuck::bytes_of(&u));
 		self.geo_draw = None;
 		if !planes.is_empty() {
 			let top = self.heave.shore.at(f.game, planes.iter().map(|p| p[0]).fold(f32::MIN, f32::max)); // tide-free (`shore_ref.rs`)
-			queue.write_buffer(&self.shore_u, 0, bytemuck::bytes_of(&ShoreU { ivp, vp: f.vp, map: [origin[0], origin[1], SHORE_CELL, top + SHORE_CAP], size: [SHORE_STRIDE as f32, SHORE_N as f32, top - SHORE_NEAR, top + SHORE_HIGH] }));
+			queue.write_buffer(&self.shore_u, 0, bytemuck::bytes_of(&ShoreU { ivp, vp: f.vp, map: [origin[0], origin[1], SHORE_CELL, top + SHORE_CAP], size: [super::tune::shore_stride() as f32, SHORE_N as f32, top - SHORE_NEAR, top + SHORE_HIGH] }));
 			if self.grid_ib.as_ref().is_none_or(|g| (g.1, g.2) != (cols, rows)) {
-				let vc = cols + 1;
-				let idx: Vec<u32> = (0..rows).flat_map(|j| (0..cols).flat_map(move |i| {
-					let a = j * vc + i;
-					[a, a + 1, a + vc, a + 1, a + vc + 1, a + vc]
-				})).collect();
+				let idx = super::grid_waves::grid_indices(cols, rows);
 				let ib = device.create_buffer(&wgpu::BufferDescriptor { label: Some("water sea grid"), size: std::mem::size_of_val(&idx[..]) as u64, usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
 				queue.write_buffer(&ib, 0, bytemuck::cast_slice(&idx));
 				self.grid_ib = Some((ib, cols, rows));
@@ -231,14 +226,14 @@ impl WaterFx {
 	/// [PC] Geometric sea waves, after `positions` and `Gpu::draw_bed`: the shore map from the bed's depth, then the projected
 	/// grid of each sea plane into the position target (nearest surface wins against the other water).
 	pub(in crate::viewer) fn sea_waves(&self, enc: &mut wgpu::CommandEncoder) {
-		let (Some(t), Some((planes, n)), Some((ib, ..))) = (&self.t, self.geo_draw, &self.grid_ib) else { return };
+		let (Some(t), Some((planes, n)), Some((ib, cols, rows))) = (&self.t, self.geo_draw, &self.grid_ib) else { return };
 		// (The first four quarters: the last four keep the map over frames, `cs_shore_keep`.)
 		enc.clear_buffer(&self.shore, 0, Some((4 * SHORE_N * SHORE_N * 4) as u64));
 		{
 			let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("water shore map"), timestamp_writes: crate::viewer::passtime::cw("water shore map") });
 			cp.set_pipeline(&self.p_shore);
 			cp.set_bind_group(0, &t.g_shore, &[]);
-			let (bw, bh) = ((t.key.0 / 2).max(1).div_ceil(SHORE_STRIDE), (t.key.1 / 2).max(1).div_ceil(SHORE_STRIDE));
+			let (bw, bh) = ((t.key.0 / super::tune::bed_div()).max(1).div_ceil(super::tune::shore_stride()), (t.key.1 / super::tune::bed_div()).max(1).div_ceil(super::tune::shore_stride()));
 			cp.dispatch_workgroups(bw.div_ceil(8), bh.div_ceil(8), 1);
 			// [PC] The map kept over frames (`cs_shore_keep`), then the distance map (`cs_shore_h`, `cs_shore_v`).
 			for p in [&self.p_shore_keep, &self.p_shore_h, &self.p_shore_v] {
@@ -248,6 +243,7 @@ impl WaterFx {
 			}
 		}
 		self.dry.dispatch(enc, &t.dry);
+		self.dry.waves.dispatch(enc, &t.dry.waves, (*cols, *rows), planes);
 		let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
 			label: Some("water sea grid"),
 			color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &t.wpos, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } })],
@@ -258,7 +254,7 @@ impl WaterFx {
 		});
 		pass.set_pipeline(&self.p_grid);
 		pass.set_bind_group(0, &t.g_grid, &[]);
-		pass.set_bind_group(1, &t.dry.g_in, &[]);
+		pass.set_bind_group(1, &t.dry.waves.g_in, &[]);
 		pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
 		pass.draw_indexed(0..n, 0, 0..planes);
 	}
@@ -277,6 +273,8 @@ impl WaterFx {
 	/// `fall_tex`: the bind group of the level's waterfall texture (`fall_fx_tex`), if any.
 	pub(in crate::viewer) fn shade(&self, enc: &mut wgpu::CommandEncoder, scene: &wgpu::TextureView, ao: Option<&wgpu::TextureView>, fall_tex: Option<&wgpu::BindGroup>) {
 		let Some(t) = &self.t else { return };
+		// [PC] perf (nwater): the 4 x 4 bed-depth minima `fs_water`'s shore fade asks (`bed_min.rs`); `lod_flags` set the same condition.
+		if self.geo_draw.is_some() && super::bed_min::enabled() { self.bed_min.dispatch(enc, &t.bed_min); }
 		// [PC] No screen-space occlusion on the far open sea (`fs_ao_sea`).
 		if let Some(ao) = ao {
 			let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {

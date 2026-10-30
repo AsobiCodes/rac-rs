@@ -12,7 +12,8 @@ pub(super) fn tick_render_state(gpu: &mut Option<Gpu>, game: &mut game::Game, c:
 	game.glint_cull(c.pos, right, up, f);
 	if let Some(g) = gpu {
 		let aspect = g.config.width as f32 / g.config.height.max(1) as f32;
-		let v = g.props_verdict(&c, aspect, &game.props, &game.fade_centres(), &game.fade_radii());
+		let (fc, fr) = game.fade_spheres();
+		let v = g.props_verdict(&c, aspect, &game.props, &fc, &fr);
 		if !v.is_empty() {
 			game.set_draw_verdict(&v);
 		}
@@ -40,7 +41,8 @@ impl App {
 				if let Some(r) = &mut self.retail {
 					// The held keys plus the taps since the last field (Retail::press_key).
 					let keys = &self.keys;
-					r.tick_keys(|k| keys.contains(&k), self.fire_mouse, self.quick_mouse);
+					super::interp::fx_late(r); { let _s = profile::span("t_keys"); r.tick_keys(|k| keys.contains(&k), self.fire_mouse, self.quick_mouse); } if super::interp::wait_in_tick() { super::interp::fx_late(r); } // [PC] the effects layer of the field before (if no upload took it) / RAC_FX_LATE=0: of this one (interp/late.rs)
+					profile::span_add("t_wait", r.waited); profile::span_add("t_fms", r.ms); { let (ov, fx) = crate::retail::tick::take_late_waits(); profile::span_add("t_wov", ov); profile::span_add("t_wfx", fx); } // P9e: wait for the game thread's field / what that field cost it; t_wov / t_wfx: the late waits (overlay / VU1 layer) of the field taken before
 					// The game asked for a movie (retail/fmv_bridge.rs): stream it from the disc in the game's own language
 					// (its value is the PSS audio track: 0 En, 2 Fr, 3 De, 4 Es, 5 It); drawn over the frame until it ends.
 					// The retail front end (logos, title, attract and intro movies) is the mirror's: it takes its movies
@@ -62,31 +64,31 @@ impl App {
 					if let Some(g) = &self.gpu {
 						r.set_aspect(g.config.width as f32 / g.config.height.max(1) as f32);
 					}
-					r.sync(game);
+					{ let _s = profile::span("t_sync"); r.sync(game); }
 					// [PC] TEST ONLY: RAC_TEST_CLOCK counts the retail fields shown (viewer/test_clock.rs).
 					test_clock::set_fields(r.shown_field());
 					// [PC] Frame smoothing (interp.rs): this field's draw lists and its cut verdict (nothing kept while it is Off).
 					let smooth_menu = if crate::retail::pcext::enabled() { super::interp::wanted(crate::retail::pcext::graphics().smoothing) } else { self.settings.smooth };
-					super::interp::field(r, smooth_menu);
+					{ let _s = profile::span("t_interp"); super::interp::field(r, smooth_menu); }
 					if (!r.holds() || r.overlay_covers() || r.menu_presents() || r.gs_front_drops_movie()) && MOVIE_HOLD.swap(false, std::sync::atomic::Ordering::Relaxed) {
 						if let Some(g) = &mut self.gpu {
 							g.movie.clear();
 						}
 					}
-					// The movie-end fade darkens the held movie picture (retail draws it into the display buffer).
-					if let (true, Some(t), Some(g)) = (MOVIE_HOLD.load(std::sync::atomic::Ordering::Relaxed), r.movie_tint(), &mut self.gpu) {
+					// The movie-end fade darkens the held movie picture (retail draws it into the display buffer). Read only while one is held: reading waits for the overlay.
+					if let Some((t, g)) = MOVIE_HOLD.load(std::sync::atomic::Ordering::Relaxed).then(|| r.movie_tint()).flatten().zip(self.gpu.as_mut()) {
 						g.movie.tint = t;
 					}
 					if MOVIE_HOLD.load(std::sync::atomic::Ordering::Relaxed) && std::env::var_os("RAC_SCENE_LOG").is_some() {
 						eprintln!("retail: movie hold field {} holds {} covers {} tint {:?}", r.field_count(), r.holds(), r.overlay_covers(), r.movie_tint());
 					}
 					// Scene actors play sequences retail appended to their classes (retail.rs `scene_seqs`).
-					r.scene_seqs(&mut self.prop_anims, self.hero_anim.as_mut());
+					{ let _s = profile::span("t_seqs"); r.scene_seqs(&mut self.prop_anims, self.hero_anim.as_mut()); }
 					// Mode 6 takeoff / landing stream: retail's ship gloss (canopy) quads of this field.
 					self.gloss_quads.clear();
 					self.gloss_quads.extend_from_slice(r.ship_gloss());
 					// Mode 6 substate 4: the arrival warp from retail's state (travel/mirror_warp.rs).
-					travel::mirror_warp::field(r, self.gpu.as_mut(), &self.iso_path);
+					{ let _s = profile::span("t_warp"); travel::mirror_warp::field(r, self.gpu.as_mut(), &self.iso_path); }
 					// The interpreter stopped (a crash or a spin): say so in the title bar, the frozen frame shows nothing.
 					if let (Some(e), Some(g)) = (r.take_stop(), &self.gpu) {
 						g.window.set_title(&format!("{}: RETAIL STOPPED: {e}", crate::app_name()));
@@ -96,10 +98,7 @@ impl App {
 						self.hud_seen = (game.bolts, game.health);
 					}
 					// 989snd: the exact driver's SPU2 register writes of the field play on the SPU2 voice mixer (retail/snd.rs).
-					let ev = r.take_sound();
-					if let Some(a) = &mut self.audio {
-						crate::retail::snd::field(a, ev);
-					}
+					{ let _s = profile::span("t_snd"); let ev = r.take_sound(); if let Some(a) = &mut self.audio { crate::retail::snd::field(a, ev); } }
 					if let Some(c) = r.hero_clock() {
 						c.apply(&mut self.hero_rig.hero);
 					}
@@ -162,7 +161,7 @@ impl App {
 							}
 						}
 					}
-					tick_render_state(&mut self.gpu, game, (c.0, c.1, c.2, c.3 * PROJ_Y_RATIO), r.camera_up(1.0));
+					{ let _s = profile::span("t_state"); tick_render_state(&mut self.gpu, game, (c.0, c.1, c.2, c.3 * PROJ_Y_RATIO), r.camera_up(1.0)); }
 					self.play_ticks += 1;
 					tick_wait += r.waited;
 					if tick_wait > tick_wait_max {

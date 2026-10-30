@@ -5,7 +5,7 @@ use super::*;
 
 impl Gpu {
 	pub(super) fn frame_uniforms(&mut self, cam: &Camera) -> Option<DrawFrame> {
-		self.tag_ice();
+		{ let _s = super::profile::span("d_ice"); self.tag_ice(); }
 		self.cull_shrubs(cam);
 		self.cull_ties();
 		self.cull_tfrags();
@@ -22,6 +22,7 @@ impl Gpu {
 		// level's key light. Classic: the frame below is drawn exactly as before (the shadow uniforms stay zero).
 		let gfx = crate::retail::pcext::graphics();
 		let post_on = crate::retail::splitview::fx(gfx.enhanced() && self.modern_ok && !super::super::pipe_guard::off(super::super::pipe_guard::Effect::Post)); // [PC] split view: the one gate of every Enhanced pass below (pipe_guard.rs: off when the driver refused the post shaders)
+		let sp_sun = super::profile::span("d_sun");
 		let sun = match super::sunshadow::casts(post_on, gfx.shadows, scene.warp_shown, self.ship_fight) {
 			true => {
 				let rows = self.sun_rows();
@@ -30,12 +31,14 @@ impl Gpu {
 			}
 			false => None,
 		};
+		drop(sp_sun);
 		super::sunshadow::write_uniforms(&mut u, sun.as_ref());
 		// [PC] Enhanced flag for the shaders (`crisp_leaf`).
 		u.sun_texel[3] = if post_on { 1.0 } else { 0.0 };
 		u.sun_q[3] = crate::retail::pcext::texfilter::enabled(post_on) as u8 as f32;
 		// [PC] Volumetric fog (volfog/frame.rs `Plan`): decided here, from the inputs the pass is drawn with, so retail's own fog is faded
 		// exactly while the pass draws (Classic, under water, a level without a volume: 1.0 = the retail picture, the same frame).
+		let sp_fog = super::profile::span("d_fog");
 		let fog_active = post_on && !scene.warp_shown && !self.ship_fight && !(gfx.water && self.under_flag) && !self.under.active()
 			&& super::super::volfog::soft::fits((self.config.width, self.config.height), super::super::volfog::soft::buffer_limit(&self.device.limits()));
 		let fog = super::super::volfog::Plan::new(&gfx, self.level, u.fog, fog_active, &self.volfog.ocean_heights);
@@ -44,6 +47,7 @@ impl Gpu {
 		}
 		crate::retail::pcext::fogopt::set_gs_scale(super::super::volfog::retail_fog_scale(fog));
 		self.queue.write_buffer(&self.ubuf, 0, bytemuck::bytes_of(&super::super::volfog::fade_retail_fog(u)));
+		drop(sp_fog);
 		// [PC] PREVIEW (vegfx.rs, RAC_VEG): more vegetation with Lighting Enhanced.
 		let sp_veg = super::profile::span("d_veg");
 		self.veg.prepare(&self.queue, scene, post_on && !super::super::pipe_guard::off(super::super::pipe_guard::Effect::Veg) && !scene.warp_shown && !self.ship_fight, cam.pos, &u.view_proj);
@@ -59,19 +63,25 @@ impl Gpu {
 		let mut wrec: Vec<super::waterfx::WaterDraw> = Vec::new();
 		let strips_water = water_on && super::waterfx::strips_are_water(self.level);
 		self.waterfx.clear_falls();
+		let sp_strip = super::profile::span("d_fx_strip");
 		let strip_flows = if strips_water { self.waterfx.strip_flows(&self.strip_draws) } else { Vec::new() };
+		drop(sp_strip);
 		// [PC] Water Enhanced: a river drawn as effect quads (Batalia) goes to the water pass, grouped by its flow downstream.
+		let sp_river = super::profile::span("d_fx_river");
 		let river: Vec<usize> = match super::waterfx::river_fx_tex(self.level).filter(|t| water_on && self.fx_tex.contains_key(t)) {
 			Some(t) => (0..self.fx_quads.len()).filter(|&i| !self.fx_quads[i].additive && crate::retail::efx_draw::plain_tex(self.fx_quads[i].tex) == t).collect(),
 			None => Vec::new(),
 		};
 		let river_groups = if river.is_empty() { Vec::new() } else { self.waterfx.quad_flows(&river.iter().map(|&i| (self.fx_quads[i].pos, self.fx_quads[i].uv)).collect::<Vec<_>>()) };
+		drop(sp_river);
 		// [PC] Water Enhanced: waterfall sheets drawn as effect quads (Pokitaru) churn the water at their feet.
+		let sp_falls = super::profile::span("d_fx_falls");
 		let fall_tex = super::waterfx::fall_fx_tex(self.level);
 		if water_on && !fall_tex.is_empty() {
 			use crate::retail::efx_draw::{plain_tex, FX_REFILL};
 			self.waterfx.sheet_falls(self.level, self.fx_quads.iter().filter(|q| fall_tex.contains(&(plain_tex(q.tex) & !FX_REFILL))).map(|q| (q.pos, q.uv, q.colour, q.tex & FX_REFILL != 0)));
 		}
+		drop(sp_falls);
 		// [PC] Graphics -> Particles Enhanced (partfx.rs): the level pass keeps its MSAA colour for the particle pass.
 		let part_on = post_on && gfx.particles && !scene.warp_shown;
 		// [PC] Graphics -> Sun rays On (post.rs `fs_rays`): from the sun the level's sky paints (`sky_sun`); off in ship fights.
@@ -79,7 +89,13 @@ impl Gpu {
 			true => super::post::sky_sun(self.level).and_then(|to| super::post::sun_on_screen(&u.view_proj, cam.pos, to.map(|c| -c), 1.0)),
 			false => None,
 		};
+		// Dev only (RAC_TUNE=sun_x=0.6,sun_y=0.3): the sun at a fixed screen uv, to time the ray passes without aiming the camera at it.
+		let rays = match (post_on && gfx.sun_rays, crate::devtune::f32("sun_x", -1.0)) {
+			(true, x) if x >= 0.0 => Some(([x, crate::devtune::f32("sun_y", 0.3)], 1.0)),
+			_ => rays,
+		};
 		self.post.rays_tight = self.volclouds.sky.skip() != 0;
+		let sp_wf = super::profile::span("d_fx_wf");
 		let water_frame = water_on.then(|| {
 			let rows = self.light_rows();
 			let (a, b, t, _) = self.hero_env;
@@ -94,14 +110,17 @@ impl Gpu {
 				waves: gfx.waves,
 			}
 		});
+		drop(sp_wf);
 		Some(DrawFx { water_on, wrec, strips_water, strip_flows, river, river_groups, part_on, rays, water_frame })
 	}
 
 	pub(super) fn frame_target(&mut self, cam: &Camera, dc: &DrawFrame) -> Option<(DrawTarget, Vec<Quad>)> {
 		let scene = self.scene.as_ref()?;
 		let (aspect, post_on, gfx, sun) = (dc.aspect, dc.post_on, dc.gfx, &dc.sun);
+		let sp_warp = super::profile::span("d_warp");
 		self.write_warp_uniforms(cam, aspect);
 		let warp_hud = self.warp_hud(self.config.width as f32, self.config.height as f32);
+		drop(sp_warp);
 		super::profile::lap(super::profile::Phase::Cull);
 		// [PC] Split view (split.rs): the Classic pass draws into the offscreen target and acquires / presents nothing.
 		let frame = match crate::retail::splitview::classic() {

@@ -244,7 +244,10 @@ impl SceneCtx {
 	/// `batch` with buffers `spare` (vertices, indices) larger than the data: the prop slots append grown retail pools
 	/// there (`append_props`).
 	pub(super) fn batch_spare(&self, meshes: &[&Mesh], colours: Option<&[Vec<[f32; 4]>]>, ordered: bool, textures: &HashMap<u32, Texture>, bind: &mut Vec<wgpu::BindGroup>, slots: &mut HashMap<u32, usize>, spare: (usize, usize)) -> (Batch, [f32; 3], [f32; 3], Vec<Vertex>) {
-		let mut verts: Vec<Vertex> = Vec::new();
+		// [PC] perf (lane P7): the props batch (`spare` > 0) is returned as `Scene::props_model`, which `append_props` extends: room
+		// for a quarter more vertices, so a pool growth (a respawn adds ~15 %) appends in place instead of copying the whole array
+		// (130 MB, ~20 ms on the render thread). The room is address space until it is written.
+		let mut verts: Vec<Vertex> = Vec::with_capacity(if spare.0 > 0 { meshes.iter().map(|m| m.positions.len()).sum::<usize>() * 5 / 4 } else { 0 });
 		let mut runs: Vec<(u32, Vec<u32>)> = Vec::new();
 		let mut by_tex: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
 		let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);

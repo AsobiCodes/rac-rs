@@ -5,6 +5,7 @@ use super::*;
 
 impl Gpu {
 	pub(super) fn pass_oceans(&self, pass: &mut wgpu::RenderPass<'_>, scene: &Scene, warp: bool, water_on: bool, wrec: &mut Vec<super::waterfx::WaterDraw>) {
+		crate::viewer::passtime::lap(pass, "world rest"); // [probe] RAC_GPU_PASSES lap (passtime.rs)
 			pass.set_bind_group(0, &self.ubind, &[]);
 			// ARI-49b (BRIDGE-63): the Aridia ocean, opaque and Z-writing after the world and mobies, before the
 			// translucent passes; every patch strip as triangles (i, i+1, i+2), one draw.
@@ -91,6 +92,7 @@ impl Gpu {
 	}
 
 	pub(super) fn pass_world_quads(&self, mut pass: &mut wgpu::RenderPass<'_>, cam: &Camera, warp: bool, water_on: bool, mut wrec: &mut Vec<super::waterfx::WaterDraw>, river: &Vec<usize>, river_groups: &Vec<(u32, Vec<usize>)>, strips_water: bool, strip_flows: &Vec<u32>) {
+		crate::viewer::passtime::lap(pass, "oceans"); // [probe] RAC_GPU_PASSES lap (passtime.rs)
 			// Textured world quads, one draw per run of the same texture and blend.
 			for fogged in [false, true].into_iter().filter(|_| !dskip("quads")) {
 				let quads = if fogged { &self.water_quads } else { &self.fx_quads };
@@ -189,6 +191,7 @@ impl Gpu {
 	}
 
 	pub(super) fn pass_pools(&self, mut pass: &mut wgpu::RenderPass<'_>, warp: bool, metal: Option<(&Batch, &[wgpu::BindGroup; 2])>, water_on: bool, mut wrec: &mut Vec<super::waterfx::WaterDraw>) {
+		crate::viewer::passtime::lap(pass, "ties lt"); // [probe] RAC_GPU_PASSES lap (passtime.rs)
 			if let Some((batch, tex)) = metal.filter(|_| !dskip("metal")) {
 				pass.set_vertex_buffer(0, batch.vbuf.slice(..));
 				pass.set_index_buffer(batch.ibuf.slice(..), wgpu::IndexFormat::Uint32);

@@ -36,7 +36,7 @@ The settings are saved in the game's `mods\settings.json` under `"arsenal-master
 ```
 A setting you leave out, or a value of the wrong kind or outside its range, uses its default.
 
-Presets: **Up Your Arsenal** (the defaults), **Just the XP** (bars and XP only, nothing in the game changes, the game's own orbs), **Survival** (Hard enemies and Survival ammo), **Endless** (V99 cap).
+Presets: **Default** (the defaults), **Just the XP** (bars and XP only, nothing in the game changes, the game's own orbs), **Survival** (Hard enemies and Survival ammo), **Endless** (V99 cap).
 
 ## Gold weapons (V5)
 With "Gold version at V5" on, an owned weapon that has a gold version in the game turns gold when it reaches V5: gold icon, gold name, gold glow and the game's own gold stats, all together. A gold version earned this way costs no gold bolts, so every gold bolt you found stays free for Mega. Gold weapons you bought in the game yourself are never touched. Turn the setting off and the gold the mod gave is taken back (the ones you bought stay).

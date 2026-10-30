@@ -358,7 +358,7 @@ impl App {
 			}) };
 			if !hero_hit {
 				hero_gen = next_gen();
-				let fresh = HeroCache { key: hero_key, pose_gen: hero_gen, skinned: skinned.clone(), ghost_ranges, bomb_range, light_at, held_rows, muzzle_model, held_muzzle_model, held_joint0_model, held_xform_model };
+				let fresh = HeroCache { key: hero_key, pose_gen: hero_gen, skinned: herocache::copy_posed((!hero_cand).then(|| self.hero_cache.take()).flatten(), &skinned), ghost_ranges, bomb_range, light_at, held_rows, muzzle_model, held_muzzle_model, held_joint0_model, held_xform_model };
 				if hero_cand {
 					hero_check_compare(self.hero_cache.as_ref().expect("hero_cand needs the cache"), &fresh);
 				}

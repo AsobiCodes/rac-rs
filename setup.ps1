@@ -2459,11 +2459,11 @@ function Install-Dxc([string]$exeDir) {
 # title-screen Options > Mods, which write mods\active.txt); mods\active.txt, mods\settings.json and the mods' save data (player\omni) are
 # never touched. Runs at the end of every setup/update/repair build. A problem is a warning, never a failed setup.
 
-# Mod versions: MAJOR.MINOR.PATCH with an optional -suffix, a leading v is dropped (the rules of the mod loader and of the launcher's
-# updater). Gives $null for anything else, else an object with Num (3 numbers) and Pre (the suffix or $null).
+# Mod and loader versions: MAJOR.MINOR.PATCH with an optional -suffix (letters, digits, dashes, dot parts that are not empty), a leading
+# v is dropped (the rules of the mod loader, of setup.sh and of the launcher's updater). Gives $null for anything else, else an object with Num (3 numbers) and Pre (the suffix or $null).
 function ConvertTo-ModVersion([string]$text) {
     if (-not $text) { return $null }
-    $m = [regex]::Match($text.Trim(), '^[vV]?(0|[1-9][0-9]{0,17})\.(0|[1-9][0-9]{0,17})\.(0|[1-9][0-9]{0,17})(?:-([A-Za-z0-9.-]+))?$')
+    $m = [regex]::Match($text.Trim(), '^[vV]?(0|[1-9][0-9]{0,17})\.(0|[1-9][0-9]{0,17})\.(0|[1-9][0-9]{0,17})(?:-([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*))?$')
     if (-not $m.Success) { return $null }
     $pre = $null
     if ($m.Groups[4].Success) { $pre = $m.Groups[4].Value }
@@ -2585,19 +2585,79 @@ function Install-BundledMod([System.IO.DirectoryInfo]$m) {
     Write-Host "  bundled mod: $($m.Name) $newVer replaces $haveVer in mods\$($have.Name); the old one is kept in mod_backups\$(Split-Path -Leaf $bk)"
 }
 
+# The sidecar of a loader file ("omniloader.dll.json": {version, abi, sha256}, written by this setup and by the launcher's loader update).
+# $null when there is none, it cannot be read, or it has no sha256 equal to the SHA-256 of the file next to it (it names another file:
+# the file was replaced by hand, so its version is not believed).
+function Read-LoaderMeta([string]$file) {
+    $j = "$file.json"
+    if (-not (Test-Path -LiteralPath $j -PathType Leaf)) { return $null }
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { return $null }
+    try {
+        $o = Get-Content -LiteralPath $j -Raw -Encoding UTF8 | ConvertFrom-Json
+        if (-not $o.sha256) { return $null }
+        if ((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ne [string]$o.sha256) { return $null }
+        return $o
+    } catch { return $null }
+}
+
+# The known version of a loader file, '' when unknown: its sidecar belongs to it (Read-LoaderMeta) and the version is readable.
+function Get-LoaderVersion([string]$file) {
+    $meta = Read-LoaderMeta $file
+    if ($meta -and ($null -ne (ConvertTo-ModVersion ([string]$meta.version)))) { return [string]$meta.version }
+    return ''
+}
+
+# One rule for the loader library, the same in setup.sh (InstallBundledLoader) and the launcher's loader update. Known version =
+# MAJOR.MINOR.PATCH[-pre] AND a sidecar with a sha256 equal to the file's; a missing or stale sidecar or an unreadable version = unknown.
+# 1 not installed: install. 2 same SHA-256: nothing (the bundled sidecar is written when the installed one is missing or stale).
+# 3 bundled version unknown: leave. 4 installed known: the same or newer stays, older is replaced. 5 installed unknown (the v0.4.0 file
+# without a sidecar, a hand-placed file): replaced. 6 every replacement keeps the old file as omniloader.dll.prev, and its sidecar as
+# omniloader.dll.json.prev only when the sidecar belonged to it (else a leftover .json.prev is deleted), so the launcher can put it back.
+function Install-BundledLoader([string]$exeDir) {
+    $src = Join-Path $root 'bundled\omniloader.dll'
+    if (-not (Test-Path -LiteralPath $src -PathType Leaf)) { return }
+    $dst = Join-Path $exeDir 'omniloader.dll'
+    $srcJson = "$src.json"
+    $dstJson = "$dst.json"
+    if (-not (Test-Path -LiteralPath $dst -PathType Leaf)) {
+        Copy-Item -LiteralPath $src -Destination $dst -Force
+        if (Test-Path -LiteralPath $srcJson -PathType Leaf) { Copy-Item -LiteralPath $srcJson -Destination $dstJson -Force }
+        Write-Host '  mod loader: omniloader.dll installed next to rac-rs.exe'
+        return
+    }
+    $haveMeta = Read-LoaderMeta $dst
+    if ((Get-FileHash -LiteralPath $dst -Algorithm SHA256).Hash -eq (Get-FileHash -LiteralPath $src -Algorithm SHA256).Hash) {
+        if ((-not $haveMeta) -and (Test-Path -LiteralPath $srcJson -PathType Leaf)) { Copy-Item -LiteralPath $srcJson -Destination $dstJson -Force }
+        Write-Host '  mod loader: omniloader.dll is already there'
+        return
+    }
+    $haveVer = Get-LoaderVersion $dst
+    $newVer = Get-LoaderVersion $src
+    if (-not $newVer) {
+        $raw = ''
+        $srcMeta = Read-LoaderMeta $src
+        if ($srcMeta) { $raw = [string]$srcMeta.version }
+        Write-Host "  mod loader: omniloader.dll left as it is (the bundled version '$raw' cannot be compared)" -ForegroundColor Yellow
+        return
+    }
+    if ($haveVer -and ((Compare-ModVersion $haveVer $newVer) -ge 0)) {
+        Write-Host "  mod loader: omniloader.dll $newVer not copied (the installed one is $haveVer, the same or newer)"
+        return
+    }
+    Copy-Item -LiteralPath $dst -Destination "$dst.prev" -Force
+    if ($haveMeta) { Copy-Item -LiteralPath $dstJson -Destination "$dst.json.prev" -Force }
+    else { Remove-Item -LiteralPath "$dst.json.prev" -Force -ErrorAction SilentlyContinue }
+    Copy-Item -LiteralPath $src -Destination $dst -Force
+    if (Test-Path -LiteralPath $srcJson -PathType Leaf) { Copy-Item -LiteralPath $srcJson -Destination $dstJson -Force }
+    else { Remove-Item -LiteralPath $dstJson -Force -ErrorAction SilentlyContinue }
+    if ($haveVer) { Write-Host "  mod loader: omniloader.dll $newVer replaces $haveVer (the old one is kept as omniloader.dll.prev)" }
+    else { Write-Host "  mod loader: omniloader.dll $newVer replaces a loader of unknown version (the old one is kept as omniloader.dll.prev)" }
+}
+
 function Install-Bundled([string]$exeDir) {
     $b = Join-Path $root 'bundled'
     try {
-        $src = Join-Path $b 'omniloader.dll'
-        if (Test-Path -LiteralPath $src -PathType Leaf) {
-            $dst = Join-Path $exeDir 'omniloader.dll'
-            if ((Test-Path -LiteralPath $dst -PathType Leaf) -and ((Get-FileHash -LiteralPath $dst -Algorithm SHA256).Hash -eq (Get-FileHash -LiteralPath $src -Algorithm SHA256).Hash)) {
-                Write-Host '  mod loader: omniloader.dll is already there'
-            } else {
-                Copy-Item -LiteralPath $src -Destination $dst -Force
-                Write-Host '  mod loader: omniloader.dll installed next to rac-rs.exe'
-            }
-        }
+        try { Install-BundledLoader $exeDir } catch { Write-Host "  mod loader: $($_.Exception.Message); the installed loader stays (is the game running?)" -ForegroundColor Yellow }
         $bm = Join-Path $b 'mods'
         if (Test-Path -LiteralPath $bm -PathType Container) {
             foreach ($m in @(Get-ChildItem -LiteralPath $bm -Directory)) {

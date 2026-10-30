@@ -26,6 +26,7 @@ use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use crate::retail::disc::va;
+mod lock;
 
 const HERO_YAW: u32 = 0x13f3e8;
 /// The hero's heading vector (cos yaw, sin yaw, 0, 0): the direction the Pyrocitor flame leaves along.
@@ -250,6 +251,7 @@ fn aim_point(c: &mut Cpu) -> Option<Aim> {
 	if let Ok(mut s) = ST.lock() {
 		s.field = cam.field;
 		s.aim = Some(aim);
+		lock::note(cam.field, dist);
 		let line = format!(
 			"aim field {} eye {:.2} {:.2} {:.2} fwd {:.3} {:.3} {:.3} t0 {t0:.2} hit {} pos {:.2} {:.2} {:.2} moby {:#x} class {class}{probe}",
 			cam.field, cam.eye[0], cam.eye[1], cam.eye[2], cam.fwd[0], cam.fwd[1], cam.fwd[2], aim.hit, aim.pos[0], aim.pos[1], aim.pos[2], aim.moby
@@ -801,7 +803,14 @@ fn strafe_lock(c: &mut Cpu) {
 	let Some(cam) = modcam::aim_cam() else { return };
 	let mp = rv(c, ptr(c.g(5)));
 	let mu = drawn_point(c, mp);
-	let f = cam.fwd;
+	// Shoulder aim: the muzzle is off the view axis, so the search looks from it toward the point under the reticle (parallel to the view it
+	// would miss a close target on the centre line). Raised / Off: the camera's forward direction, as ever.
+	let toward = |p: [f32; 3]| {
+		let d = [p[0] - mu[0], p[1] - mu[1], p[2] - mu[2]];
+		let l = dot(d, d).sqrt();
+		(l > 1.0 && dot(d, cam.fwd) > 0.3 * l).then(|| [d[0] / l, d[1] / l, d[2] / l])
+	};
+	let f = if cam.shoulder { lock::point(c, &cam).and_then(toward).unwrap_or(cam.fwd) } else { cam.fwd };
 	let (yaw, elev) = (f[1].fatan2(f[0]), f[2].fatan2((f[0] * f[0] + f[1] * f[1]).sqrt()));
 	// The search adds half the hero's floor tilt to the pitch it is given: take it off, so the ray is the camera's.
 	let floor = rf(c, 0x13f634);

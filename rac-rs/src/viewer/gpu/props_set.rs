@@ -1,6 +1,9 @@
 //! Per-frame prop slot rebuild (set_props): slot jobs and sources, GPU records, preview and panel poses, debris.
 
 use super::*;
+use super::pose_reuse::{old_path, PoseJob, PoseSink};
+
+mod debris;
 
 impl Gpu {
 	/// Registers the debris classes: unposed vertices and faces by texture slot per class, and the per-frame
@@ -69,7 +72,7 @@ impl Gpu {
 	/// model-space (positions, normals) per class, shared by all its instances.
 	/// `actors` fills the scene-actor slots after the props: a skinned pose (root-relative, facing
 	/// baked in) at a world position, or None to hide.
-	pub(in crate::viewer) fn set_props(&mut self, props: Option<&[Prop]>, posed: &HashMap<PoseKey, Posed>, fx_posed: &HashMap<usize, Posed>, actors: &[Option<(Posed, [f32; 3])>], debris: &[particles::Debris], insts: &[particles::WorldInst], centres: &[[f32; 3]], radii: &[Option<f32>]) {
+	pub(in crate::viewer) fn set_props(&mut self, props: Option<&[Prop]>, posed: &HashMap<PoseKey, Posed>, fx_posed: &HashMap<usize, std::sync::Arc<Posed>>, born: &crate::viewer::handler::pose_born::PoseBorn, actors: &[Option<(Posed, [f32; 3])>], debris: &[particles::Debris], insts: &[particles::WorldInst], centres: &[[f32; 3]], radii: &[Option<f32>]) {
 		let _s = super::profile::span("set_props");
 		if let Some(props) = props {
 			if !crate::retail::splitview::redo() { self.waterfx.track_props(props); } // [PC] split view: a re-run (frame_split.rs) counts no second still frame
@@ -99,7 +102,7 @@ impl Gpu {
 		let mut metal_jobs = Vec::new();
 		// [PC] perf: what each slot's vertices are built from this frame, in slot order: written by the CPU path below
 		// or posed by `vs_props` from one record per slot (gpuskin.rs).
-		let mut srcs: Vec<SlotSrc> = Vec::with_capacity(n_slots);
+		let (mut srcs, mut pose_memo): (Vec<SlotSrc>, PoseMemo) = (Vec::with_capacity(n_slots), None);
 		for (pi, (p, r)) in props.iter().zip(&scene.props_ranges).enumerate() {
 			// REN-CULL-OCC-MOBY: a prop whose occlusion bytes fail this frame's mask is not drawn (no view: nothing is tested).
 			// [PC] Culling Off: an occluded prop is drawn too (unless no camera cell sees it, `Occlusion::ever_visible`); retail's verdict for it stays "not drawn" (no side test, no list entry).
@@ -108,7 +111,7 @@ impl Gpu {
 				srcs.push(SlotSrc::Hidden);
 				continue;
 			};
-			let (ps, ns) = slot_pose(fx_posed, posed, pi, p, r.len());
+			let (ps, ns) = slot_pose(fx_posed, posed, &mut pose_memo, pi, p, r.len());
 			if !(p.draw_shown() && (!occluded || !cull)) || past.get(pi) == Some(&true) {
 				srcs.push(culled_src(pi, p, ps, ns, alpha, cull, self.class_uv.get(&(p.class_id as u32)).copied().unwrap_or([0.0; 2])));
 				continue;
@@ -146,64 +149,7 @@ impl Gpu {
 			log_uv(p, pi, &m, scale, cuv);
 			srcs.push(SlotSrc::Prop(SlotJob { ps, ns, m, scale, light, alpha_code, prop_tint: p.tint, tint, alpha, dv, du }));
 		}
-		// Debris: every live piece is instanced into the per-frame debris batch (the moby pool bounds the count).
-		if let Some(batch) = &mut scene.debris {
-			let (mut dv, mut by_tex): (Vec<Vertex>, BTreeMap<usize, Vec<u32>>) = (Vec::new(), BTreeMap::new());
-			let mut di = 0;
-			// NOV-10.5a-draw: game-owned instances (teleporter rings) ride the same batch.
-			for (class, pos, mm, sc, draw) in debris.iter().map(|l| (l.class, l.pos, l.m, l.scale, Some(l.draw))).chain(insts.iter().map(|i| (i.class, i.pos, i.m, i.scale, None))) {
-				let Some((model, faces, phases)) = scene.debris_model.get(&class) else { continue };
-				// SCH-6b: past the piece's draw distance it is not drawn (the opaque batch carries no fade).
-				if cull && effect_fade(view, draw, pos).is_none() {
-					continue;
-				}
-				let n_idx: usize = faces.iter().map(|f| f.1.len()).sum();
-				if dv.len() + model.len() > scene.debris_cap.0 || di + n_idx > scene.debris_cap.1 {
-					break;
-				}
-				di += n_idx;
-				let base = dv.len() as u32;
-				// The crate sink fade (alpha -4 per tick) is not drawn: the batch is opaque, and the 0.9 per tick
-				// shrink hides the piece first [P].
-				let (c, p) = (mm, pos);
-				let m = [c[0][0], c[0][1], c[0][2], 0.0, c[1][0], c[1][1], c[1][2], 0.0, c[2][0], c[2][1], c[2][2], 0.0, p[0], p[1], p[2], 1.0];
-				let light = Self::moby_light(None);
-				let id = dyn_id(&self.table, &mut self.moby_dyn, p);
-				for v in model {
-					let mut v = *v;
-					v.colour[3] = id;
-					v.light = light;
-					let (a, n) = (v.pos.map(|c| c * sc), v.normal);
-					for j in 0..3 {
-						v.pos[j] = m[j] * a[0] + m[4 + j] * a[1] + m[8 + j] * a[2] + m[12 + j];
-						v.normal[j] = m[j] * n[0] + m[4 + j] * n[1] + m[8 + j] * n[2];
-					}
-					dv.push(v);
-				}
-				for (k, (t, idx)) in faces.iter().enumerate() {
-					for (fi, f) in idx.chunks_exact(3).enumerate() {
-						let phase = phases[k].1[fi];
-						let tri = [f[0], f[1], f[2]].map(|i| dv[(i + base) as usize]);
-						// NOV-5.9d path 1: a face the retail clipper takes leaves the batch; its polygon goes to the overlay.
-						if let Some(poly) = scene.clip_view.filter(|_| phase != crate::mesh::NO_PHASE).and_then(|view| super::clip::clip_face(&view, tri, phase, *t, 0)) {
-							scene.clip_queue.push(poly);
-						} else {
-							by_tex.entry(*t).or_default().extend(f.iter().map(|i| i + base));
-						}
-					}
-				}
-			}
-			let (mut indices, mut draws) = (Vec::new(), Vec::new());
-			for (texture, idx) in by_tex {
-				draws.push(Draw { inst: 0, cull: 0, texture, start: indices.len() as u32, count: idx.len() as u32 });
-				indices.extend(idx);
-			}
-			if !dv.is_empty() {
-				self.queue.write_buffer(&batch.vbuf, 0, bytemuck::cast_slice(&dv));
-				self.queue.write_buffer(&batch.ibuf, 0, bytemuck::cast_slice(&indices));
-			}
-			batch.draws = draws;
-		}
+		debris::build(scene, &self.queue, &self.table, &mut self.moby_dyn, cull, view, debris, insts);
 		for (i, r) in scene.props_ranges.iter().enumerate().skip(props.len()) {
 			match actors.get(i - props.len()).and_then(|a| a.as_ref()).filter(|((ps, _), _)| ps.len() == r.len()) {
 				Some(((ps, ns), at)) => {
@@ -220,28 +166,41 @@ impl Gpu {
 		{
 			let pg = &mut self.props_gpu;
 			// [PC] perf round 3: one record per slot and each distinct pose once; `vs_props` poses the static model.
-			let (mut inst, mut pose, mut rad) = (std::mem::take(&mut scene.props_inst), std::mem::take(&mut scene.props_pose), Vec::new());
-			{
+			// [PC] lane nprops: the poses are not copied to a CPU mirror: `jobs` lists them and `upload_direct` converts their
+			// sources into the upload's staging memory (RAC_PROPS_SET_OLD=1: the mirror `props_pose`, as before).
+			let old = old_path();
+			let (mut inst, mut rad) = (std::mem::take(&mut scene.props_inst), std::mem::take(&mut scene.sun_rad));
+			let (mut pose, mut jobs): (Vec<super::gpuskin::PoseEntry>, Vec<PoseJob>) = (if old { std::mem::take(&mut scene.props_pose) } else { Vec::new() }, Vec::new());
+			let total = {
 				let _s = super::profile::span("props_slots");
-				build_records(&srcs, &scene.props_ranges, &scene.props_rad, &mut inst, &mut pose, &mut rad);
-			}
+				if !old && inst.is_empty() {
+					pg.reuse.forget(); // a new scene or a layout rebuild: the GPU buffer's entries are no longer the last build's
+				}
+				let sink = if old { PoseSink::Mirror(&mut pose) } else { PoseSink::Jobs(&mut jobs) };
+				build_records(&srcs, &scene.props_ranges, &scene.props_rad, &|si| props.get(si).map_or(0, |p| born.of(fx_posed.contains_key(&si), si, || pose_key(p))), &mut pg.reuse, &mut inst, sink, &mut rad)
+			};
+			let jobs = (!old).then_some(&jobs[..]);
 			// BRIDGE-36 (c2): with a HUD split the posed prompt goes to its own batch and leaves the props batch (and the clip overlay).
 			if let (Some(_), Some(pi), Some(prompt)) = (self.hud_split, scene.prompt_slot, scene.prompt.as_ref()) {
 				if pi < props.len() {
 					let r = scene.props_ranges[pi].clone();
-					let vs: Vec<Vertex> = scene.props_model[r].iter().enumerate().map(|(j, m0)| super::gpuskin::emulate(&inst[pi], &pose, m0, j)).collect();
+					let (rec, entries) = super::pose_reuse::slot_pose(&pose, jobs, &inst[pi]);
+					let vs: Vec<Vertex> = scene.props_model[r].iter().enumerate().map(|(j, m0)| super::gpuskin::emulate(&rec, &entries, m0, j)).collect();
 					self.queue.write_buffer(&prompt.vbuf, 0, bytemuck::cast_slice(&vs));
 					inst[pi].k[0] |= super::gpuskin::FLAG_PROMPT;
 				}
 			}
 			{
 				let _s = super::profile::span("props_clip");
-				clip_props(&self.queue, scene, ClipSrc::Gpu(&inst, &pose, &rad), &shown);
+				clip_props(&self.queue, scene, ClipSrc::Gpu(&inst, &pose, jobs, &rad), &shown);
 				flush_clip(&self.device, &self.queue, scene);
 			}
 			let _u = super::profile::span("props_upload");
-			pg.upload(&self.device, &self.queue, &inst, &pose);
-			(scene.props_inst, scene.props_pose) = (inst, pose);
+			match jobs {
+				None => pg.upload(&self.device, &self.queue, &inst, &pose),
+				Some(jobs) => pg.upload_direct(&self.device, &self.queue, &inst, jobs, total),
+			}
+			(scene.props_inst, scene.props_pose, scene.sun_rad) = (inst, pose, rad); // [PC] lane v042_shadow: sun_rad = the slots' sphere radii for the sun shadow cull (sunshadow/props.rs)
 			scene.props_shown = true;
 		}
 		let _m = super::profile::span("props_metal");
@@ -328,8 +287,26 @@ enum SlotSrc<'a> {
 /// infinite for an actor with unposed vertices).
 /// NOV-35b: the pose of slot `pi` (`len` model vertices; none = the static model). A pose may carry the class's metal vertices
 /// after the LOD ones (`anim::skin_all`): its first positions and normals replace the model's.
-fn slot_pose<'a>(fx_posed: &'a HashMap<usize, Posed>, posed: &'a HashMap<PoseKey, Posed>, pi: usize, p: &Prop, len: usize) -> (&'a [[f32; 3]], &'a [[f32; 3]]) {
-	let pose = fx_posed.get(&pi).or_else(|| posed.get(&pose_key(p))).filter(|(ps, _)| ps.len() >= len);
+/// [PC] perf: the last `posed` lookup (pool slots of one class are contiguous and share a pose key; `posed` does not change during
+/// `set_props`, so the memo gives the lookup's own answer).
+type PoseMemo<'a> = Option<(PoseKey, Option<&'a Posed>)>;
+
+fn slot_pose<'a>(fx_posed: &'a HashMap<usize, std::sync::Arc<Posed>>, posed: &'a HashMap<PoseKey, Posed>, memo: &mut PoseMemo<'a>, pi: usize, p: &Prop, len: usize) -> (&'a [[f32; 3]], &'a [[f32; 3]]) {
+	let pose = fx_posed
+		.get(&pi)
+		.map(|a| &**a)
+		.or_else(|| {
+			let key = pose_key(p);
+			match *memo {
+				Some((k, found)) if k == key => found,
+				_ => {
+					let found = posed.get(&key);
+					*memo = Some((key, found));
+					found
+				}
+			}
+		})
+		.filter(|(ps, _)| ps.len() >= len);
 	pose.map_or((&[], &[]), |(ps, ns)| (&ps[..ps.len().min(ns.len())], &ns[..ps.len().min(ns.len())]))
 }
 
@@ -366,25 +343,46 @@ fn culled_src<'a>(pi: usize, p: &Prop, ps: &'a [[f32; 3]], ns: &'a [[f32; 3]], a
 	}
 }
 
-fn build_records(srcs: &[SlotSrc], ranges: &[std::ops::Range<usize>], model_rad: &[f32], inst: &mut Vec<super::gpuskin::PropInst>, pose: &mut Vec<super::gpuskin::PoseEntry>, rad: &mut Vec<f32>) {
+/// [PC] perf: the largest squared length of `ps`. `sqrt` is monotonic and correctly rounded, so its root is exactly the largest
+/// root `fold(0.0, f32::max)` over per-vertex roots gave (a NaN length is skipped by both; `max` is order-free), without a `sqrt` and a
+/// serial `max` chain per vertex.
+fn max_len2(ps: &[[f32; 3]]) -> f32 {
+	let len2 = |p: &[f32; 3]| p[0] * p[0] + p[1] * p[1] + p[2] * p[2];
+	let up = |m: f32, x: f32| if x > m { x } else { m };
+	let mut acc = [0.0f32; 4];
+	let mut quads = ps.chunks_exact(4);
+	for q in &mut quads {
+		for (a, p) in acc.iter_mut().zip(q) {
+			*a = up(*a, len2(p));
+		}
+	}
+	let tail = quads.remainder().iter().fold(0.0, |m, p| up(m, len2(p)));
+	acc.iter().fold(tail, |m, &a| up(m, a))
+}
+
+/// [PC] perf: `tok(slot)` is the token of the slot's pose (handler/pose_born.rs; 0 = none): `reuse` (gpu/pose_reuse.rs) keeps
+/// the entries of a pose with last build's token and place instead of writing them again, and lists the ranges it wrote.
+/// [PC] nprops: `sink` takes the poses (the CPU mirror, or the direct mode's job list); gives the entries placed.
+#[allow(clippy::too_many_arguments)]
+fn build_records<'a>(srcs: &[SlotSrc<'a>], ranges: &[std::ops::Range<usize>], model_rad: &[f32], tok: &dyn Fn(usize) -> u64, reuse: &mut super::pose_reuse::PoseReuse, inst: &mut Vec<super::gpuskin::PropInst>, mut sink: PoseSink<'_, 'a>, rad: &mut Vec<f32>) -> usize {
 	use super::gpuskin::{PropInst, KIND_ACTOR, KIND_CAST, KIND_DEFERRED, KIND_PROP};
-	inst.clear();
-	pose.clear();
+	// [PC] perf: `inst` still holds last upload's records; `put_inst` overwrites them in place and lists the changed slots.
 	rad.clear();
-	let mut bases: HashMap<(usize, usize, usize), (u32, f32)> = HashMap::new();
-	let mut add = |ps: &[[f32; 3]], ns: &[[f32; 3]], n: usize| -> (u32, f32) {
-		*bases.entry((ps.as_ptr() as usize, ns.as_ptr() as usize, n)).or_insert_with(|| {
-			let b = pose.len() as u32;
-			pose.extend(ps[..n].iter().zip(&ns[..n]).map(|(p, q)| [p[0], p[1], p[2], q[0], q[1], q[2]]));
-			(b, ps[..n].iter().map(|p| (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt()).fold(0.0, f32::max))
-		})
+	reuse.begin_in(&sink);
+	let mut idirty = std::mem::take(&mut reuse.inst_dirty);
+	let full = super::super::gpuskin::full_pose_upload();
+	// [PC] perf: lookup only (the pose order follows `srcs`), so the cheap hasher instead of SipHash; kept across frames for its capacity (emptied here).
+	let mut bases = std::mem::take(&mut reuse.bases);
+	bases.clear();
+	let mut add = |ps: &'a [[f32; 3]], ns: &'a [[f32; 3]], n: usize, si: usize| -> (u32, f32) {
+		*bases.entry((ps.as_ptr() as usize, ns.as_ptr() as usize, n)).or_insert_with(|| reuse.place_in(&mut sink, if full { 0 } else { tok(si) }, ps, ns, n, || max_len2(&ps[..n]).sqrt()))
 	};
 	for (si, (src, r)) in srcs.iter().zip(ranges).enumerate() {
 		let len = r.len();
 		let mrad = model_rad.get(si).copied().unwrap_or(f32::INFINITY);
 		let mut bound = mrad;
-		let mut add = |ps: &[[f32; 3]], ns: &[[f32; 3]], n: usize, actor: bool| -> u32 {
-			let (b, pr) = add(ps, ns, n);
+		let mut add = |ps: &'a [[f32; 3]], ns: &'a [[f32; 3]], n: usize, actor: bool| -> u32 {
+			let (b, pr) = add(ps, ns, n, si);
 			bound = match (n == len, actor) {
 				(true, _) => pr,
 				(false, false) => pr.max(mrad),
@@ -392,11 +390,11 @@ fn build_records(srcs: &[SlotSrc], ranges: &[std::ops::Range<usize>], model_rad:
 			};
 			b
 		};
-		inst.push(match src {
+		let rec = match src {
 			SlotSrc::Hidden => PropInst::hidden(),
 			SlotSrc::Deferred { ps, ns } => {
 				let n = ps.len().min(ns.len()).min(len);
-				PropInst { k: [KIND_DEFERRED, u32::MAX, add(ps, ns, n, false), n as u32], ..PropInst::hidden() }
+				PropInst { k: [KIND_DEFERRED, u32::MAX, add(*ps, *ns, n, false), n as u32], ..PropInst::hidden() }
 			}
 			SlotSrc::Prop(job) | SlotSrc::Cast(job) => {
 				let kind = if matches!(src, SlotSrc::Cast(_)) { KIND_CAST } else { KIND_PROP };
@@ -420,10 +418,51 @@ fn build_records(srcs: &[SlotSrc], ranges: &[std::ops::Range<usize>], model_rad:
 					tint: tint.map_or([0.0; 4], |(c, _)| [c[0], c[1], c[2], -2.0]),
 					ptint: [0.0; 4],
 					a: [0.0, *id, 0.0, 0.0],
-					k: [KIND_ACTOR, tint.map_or(u32::MAX, |(_, s)| s.min(u32::MAX as usize) as u32), add(ps, ns, n, true), n as u32],
+					k: [KIND_ACTOR, tint.map_or(u32::MAX, |(_, s)| s.min(u32::MAX as usize) as u32), add(*ps, *ns, n, true), n as u32],
 				}
 			}
-		});
+		};
+		super::pose_reuse::put_inst(&mut idirty, inst, si, rec);
 		rad.push(bound);
+	}
+	inst.truncate(srcs.len());
+	reuse.inst_dirty = idirty;
+	reuse.bases = bases;
+	reuse.finish_in(sink)
+}
+
+#[cfg(test)]
+mod max_len2_tests {
+	use super::*;
+
+	/// What `build_records` computed before: the largest per-vertex root, with `fold(0.0, f32::max)`.
+	fn old_radius(ps: &[[f32; 3]]) -> f32 {
+		ps.iter().map(|p| (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt()).fold(0.0, f32::max)
+	}
+
+	#[test]
+	fn radius_matches_the_per_vertex_root_fold() {
+		let mut seed = 0x1234_5678_9abc_def0u64;
+		let mut next = || {
+			seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+			((seed >> 33) as u32 as f32 / 2147483648.0 - 1.0) * 37.5
+		};
+		for n in 0..40 {
+			for round in 0..20 {
+				let mut ps: Vec<[f32; 3]> = (0..n).map(|_| [next(), next(), next()]).collect();
+				if n > 2 && round % 4 == 1 {
+					ps[n / 2][1] = f32::NAN;
+				}
+				if n > 3 && round % 4 == 2 {
+					ps[n - 1][0] = f32::INFINITY;
+					ps[1][2] = f32::NAN;
+				}
+				if n > 0 && round % 4 == 3 {
+					ps[0] = [-0.0, 0.0, -0.0];
+				}
+				assert_eq!(max_len2(&ps).sqrt().to_bits(), old_radius(&ps).to_bits(), "n {n} round {round}");
+			}
+		}
+		assert_eq!(max_len2(&[]).sqrt().to_bits(), 0.0f32.to_bits());
 	}
 }

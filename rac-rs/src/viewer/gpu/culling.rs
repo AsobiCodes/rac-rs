@@ -304,7 +304,13 @@ impl Gpu {
 		let mut draws = Vec::new();
 		let mut st = [0u32; 4];
 		// [PC] perf: (fragment, LOD code, LOD) of the drawn fragments; the posing and the vertex compare run on the frame worker pool.
-		let mut jobs: Vec<(usize, u8, usize)> = Vec::new();
+		// [PC] perf (ncull, tfrag_memo.rs): the 4th field marks a pose the memo says can be skipped (posed anyway in check mode).
+		let mut jobs: Vec<(usize, u8, usize, bool)> = Vec::new();
+		let (memo_on, check) = (super::tfrag_memo::on(), super::gpucache::cull_check_on());
+		if scene.tfrag_memo.len() != scene.tfrag_set.len() {
+			scene.tfrag_memo = vec![[0; 3]; scene.tfrag_set.len()];
+		}
+		let sp_pick = super::profile::span("ctf_pick");
 		for i in 0..scene.tfrag_set.len() {
 			let l = &scene.tfrag_set[i];
 			let c = &l.cull;
@@ -343,12 +349,13 @@ impl Gpu {
 					if !scene.occ.passes(c.occ) && (cull || !scene.occ.ever_visible(c.occ)) { st[2] += 1; continue; }
 					let mut near_only = false;
 					if !v.sphere_wholly_inside(p, r) {
-						let flags: Vec<u8> = c.corners.iter().map(|&k| v.viewport().flags(v.view(k))).collect();
-						if cull && flags.iter().fold(0x3f, |a, f| a & f) != 0 {
+						// [PC] perf (ncull): no flag vectors; the same ANDed / ORed corner flags.
+						let (vp, bd) = (v.viewport(), v.band());
+						if cull && c.corners.iter().fold(0x3f, |a, &k| a & vp.flags(v.view(k))) != 0 {
 							st[3] += 1;
 							continue;
 						}
-						near_only = c.corners.iter().any(|&k| v.band().flags(v.view(k)) != 0);
+						near_only = c.corners.iter().any(|&k| bd.flags(v.view(k)) != 0);
 					}
 					// [PC] Draw distance Medium / High: the full-detail near mesh unmorphed (a forced-far fragment keeps its far mesh).
 					if near_only || (far.is_some() && !c.force_far) {
@@ -365,14 +372,22 @@ impl Gpu {
 			};
 			draws.extend_from_slice(&scene.tfrag_draws[scene.tfrag_ranges[i][lod].start as usize..scene.tfrag_ranges[i][lod].end as usize]);
 			scene.tfrag_lod[i] = lod as u8;
-			jobs.push((i, code, lod));
+			let hit = memo_on && super::tfrag_memo::skip(&scene.tfrag_memo, i, lod, code);
+			if !hit || check {
+				jobs.push((i, code, lod, hit));
+			}
 		}
-		if std::env::var_os("RAC_TFRAG_STATS").is_some() { eprintln!("TFSTATS total={} cap={} near={} occ={} frustum={} drawn={} occ_enabled={}", scene.tfrag_set.len(), st[0], st[1], st[2], st[3], jobs.len(), scene.occ.enabled); }
-		let ranges: Vec<std::ops::Range<usize>> = jobs.iter().map(|&(i, _, lod)| scene.tfrag_vranges[i][lod].clone()).collect();
+		if std::env::var_os("RAC_TFRAG_STATS").is_some() { eprintln!("TFSTATS total={} cap={} near={} occ={} frustum={} drawn={} occ_enabled={}", scene.tfrag_set.len(), st[0], st[1], st[2], st[3], scene.tfrag_lod.iter().filter(|&&l| l != u8::MAX).count(), scene.occ.enabled); }
+		drop(sp_pick);
+		let ranges: Vec<std::ops::Range<usize>> = jobs.iter().map(|&(i, _, lod, _)| scene.tfrag_vranges[i][lod].clone()).collect();
+		let sp_pose = super::profile::span("ctf_pose");
 		let dirty = {
 			let (set, cols, view) = (&scene.tfrag_set, &scene.tfrag_cols, scene.clip_view);
-			par_ranges(&mut scene.tfrag_verts, &ranges, |j, verts| {
-				let (i, code, _) = jobs[j];
+			// [PC] perf (ncull): a few small jobs run here, not through the frame worker pool's fork and join (on a loaded CPU that
+			// wait is far longer than the work).
+			let serial = ranges.iter().map(|r| r.len()).sum::<usize>() < SERIAL_VERTS;
+			let run = |j: usize, verts: &mut [Vertex]| {
+				let (i, code, _, _) = jobs[j];
 				let posed = match &view {
 					Some(v) => terrain::pose(&set[i], code, t, cc60, &cols[i], &|p| v.view(p)[2]),
 					None => terrain::pose(&set[i], code, t, cc60, &cols[i], &|_| 0.0),
@@ -387,14 +402,38 @@ impl Gpu {
 					}
 				}
 				changed
-			})
+			};
+			if serial {
+				ranges.iter().enumerate().map(|(j, r)| run(j, &mut scene.tfrag_verts[r.clone()])).collect::<Vec<bool>>()
+			} else {
+				par_ranges(&mut scene.tfrag_verts, &ranges, run)
+			}
 		};
+		if check {
+			let bad = jobs.iter().zip(&dirty).filter(|(j, d)| j.3 && **d).count();
+			super::profile::span_add("ctf_memo_bad", bad as f32 * 1e-3);
+		}
+		for &(i, code, lod, _) in &jobs {
+			super::tfrag_memo::record(&mut scene.tfrag_memo, i, lod, code);
+		}
+		drop(sp_pose);
+		let sp_wr = super::profile::span("ctf_write");
+		let (mut n_w, mut n_v) = (0usize, 0usize);
 		for (vr, _) in ranges.into_iter().zip(&dirty).filter(|(_, d)| **d) {
+			n_w += 1;
+			n_v += vr.len();
 			self.queue.write_buffer(&scene.tfrags.vbuf, (vr.start * std::mem::size_of::<Vertex>()) as u64, bytemuck::cast_slice(&scene.tfrag_verts[vr]));
 		}
+		drop(sp_wr);
+		// [PC] profile only (ncull, 2026-10-29): writes and vertices written this frame, as counts shown in "us" (1 us = 1 write / 1 vertex).
+		super::profile::span_add("ctf_n_writes", n_w as f32 * 1e-3);
+		super::profile::span_add("ctf_n_verts", n_v as f32 * 1e-3);
 		scene.tfrags.draws = draws;
 	}
 }
+
+/// [PC] perf (ncull): below this many vertices of pose jobs `cull_tfrags` poses on the render thread.
+const SERIAL_VERTS: usize = 3000;
 
 /// The vertex colour alpha to write when a shrub's fade state changes from `cached` to `a` (0x80 = opaque), None when unchanged.
 pub(super) fn shrub_rewrite(cached: u8, a: u8) -> Option<f32> {

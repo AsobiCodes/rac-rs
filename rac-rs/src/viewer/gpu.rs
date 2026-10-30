@@ -5,9 +5,12 @@
 //! - `scene_ctx`:    SceneCtx (the device handles of the scene build) and its texture upload and batching, with the Gpu wrappers around it.
 //! - `scene_build`:  Level scene build (terrain, ties, shrubs, sky) on the build context, and its parallel vertex helpers.
 //! - `props_layout`: Prop slot layout: class faces, draw layout, slot allocation, and growing the props batch (append / regrow).
+//! - `props_append`: The per-class work of a pool growth (`append_props`): vertices, radius and clippable faces built once per class.
 //! - `props_set`:    Per-frame prop slot rebuild (set_props): slot jobs and sources, GPU records, preview and panel poses, debris.
 //! - `prop_clip`:    Retail polygon clipper for props: draw-distance alphas, per-prop verdicts and the clipped polygon queue.
 //! - `marker`:       The posed hero marker model (set_marker) and its clipped polygons.
+//! - `marker_ctx`:   The hero marker's inputs, its per-vertex CPU build and the GPU build's parameter block.
+//! - `marker_clip`:  The hero marker's guard-band clipper on the faces that may cross it (chunk spheres), and the mask diff.
 //! - `item_panel`:   Shop portrait pose and the item panel render targets.
 //! - `metal`:        Metal (chrome) mobys: view and palette rows, packet to vertex conversion, upload and the per-frame metal props.
 //! - `lighting`:     Frame uniforms and fog, dynamic light rows, relight of the scene vertices, and the moby / hero light words.
@@ -31,16 +34,23 @@ pub(in crate::viewer) mod repl_upload;
 pub(in crate::viewer) mod split_orig;
 mod scene_build;
 mod props_layout;
+mod props_append;
+mod props_live;
 mod props_set;
+pub(in crate::viewer) mod pose_reuse;
 mod prop_clip;
 mod marker;
+pub(in crate::viewer) mod marker_ctx;
+pub(in crate::viewer) mod marker_clip;
 mod item_panel;
 mod metal;
 mod lighting;
 mod culling;
+mod tfrag_memo;
 mod particle_fx;
 mod sky_water;
 mod hud_art;
+pub(in crate::viewer) mod ovwrite;
 pub(in crate::viewer) mod reshade;
 pub(in crate::viewer) mod rscale;
 mod warp_actors;

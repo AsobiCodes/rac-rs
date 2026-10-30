@@ -42,7 +42,7 @@ That's all. Setup downloads anything else it needs into its own folder.
 
 ## Setup
 
-1. Download **rac-rs-0.4.1.zip** from the [latest release](https://github.com/AsobiCodes/rac-rs/releases/latest) (or click the green **Code** button above and choose **Download ZIP**), and unzip it anywhere. Drives formatted as exFAT, USB sticks and SD cards work too.
+1. Download **rac-rs-0.4.2.zip** from the [latest release](https://github.com/AsobiCodes/rac-rs/releases/latest) (or click the green **Code** button above and choose **Download ZIP**), and unzip it anywhere. Drives formatted as exFAT, USB sticks and SD cards work too.
 2. Double-click **Setup.cmd**. A window opens (no black console window).
 3. Click **Browse** and pick your `.iso` file. The window checks it and shows a green **Disc OK**. Two boxes below choose whether to also install the **RAC-RS Launcher** and whether to **add the game to Steam** (close Steam first). Then click **Install**.
 4. Wait. The window shows the steps and a progress bar (about 15 minutes; you can keep using your PC). When it says **Ready to play**, click **Play**.
@@ -62,7 +62,7 @@ Your saves are kept in the `player` folder.
 
 ## Linux
 
-Since v0.4.1, rac-rs also runs on Linux (x86-64). It is the same game code as on Windows, built from your own disc, and a recorded fight gives identical game memory on both. **Linux support is new**: it has been tested on Ubuntu 24.04 and Arch Linux (under WSL, with software Vulkan). Real graphics drivers and other distributions are not tested yet, so please report what you find.
+Since v0.4.1, rac-rs also runs on Linux (x86-64). It is the same game code as on Windows, built from your own disc, and a recorded fight gives identical game memory on both. **Linux support is new**: it has been tested on Ubuntu 24.04 and Arch Linux (under WSL, with software Vulkan). Real graphics drivers and other distributions are not tested yet, so please report what you find. The double-click launcher folder, the keep-awake, Add to Steam and script mods on Linux are new in v0.4.2 and not yet tried on a real desktop or a real Steam Deck.
 
 The Linux port was set up by **[DeSynkro](https://github.com/DeSynkro)** ([pull request #38](https://github.com/AsobiCodes/rac-rs/pull/38)): building and running the game on Linux, Linux gamepads, the Linux run and crash logs and the exact maths that give Linux the same game memory as Windows. Thank you!
 
@@ -70,12 +70,14 @@ Like on Windows, you do not install any programming tools. `setup.sh` downloads 
 
 - A 64-bit Intel/AMD Linux with glibc 2.28 or newer (every mainstream distribution since 2019, SteamOS 3 included), about 7 GB of free space on a Linux drive (ext4, btrfs, ...; not an SD card formatted as FAT or exFAT, which cannot run programs or make links; `setup.sh` checks this) and an internet connection for the first setup.
 - A Vulkan-capable graphics driver (Mesa for AMD/Intel, the NVIDIA driver for NVIDIA). On Linux the game uses Vulkan only; there is no Renderer row in the Options menu.
-- Ordinary run-time libraries, which any desktop install already has (a minimal or server install may not): ALSA (sound), udev (it is what lets the game see gamepads), the Vulkan loader, the keyboard library xkbcommon and the X11 window libraries (Xlib, Xcursor, Xi; on a pure Wayland desktop `libwayland-client` instead). `setup.sh` looks for them first and prints the install line for your distribution if one is missing. Without one of the window libraries the game stops at start with "Failed to load one of xlib's shared libraries". The packages:
+- Ordinary run-time libraries, which any desktop install already has (a minimal or server install may not): ALSA (sound), udev (it is what lets the game see gamepads), the Vulkan loader and the X11 window libraries (Xlib, Xcursor, Xi and the keyboard library xkbcommon-x11; on a pure Wayland desktop `libwayland-client` instead). `setup.sh` looks for them first and prints the install line for your distribution if one is missing. Without one of the window libraries the game stops at start with "Failed to load one of xlib's shared libraries". The packages:
   - Debian / Ubuntu: `sudo apt install libasound2t64 libudev1 libvulkan1 libxkbcommon-x11-0 libx11-6 libx11-xcb1 libxcursor1 libxi6` (`libasound2` instead of `libasound2t64` on Ubuntu 22.04, Debian 12 and older)
   - Arch: `sudo pacman -S alsa-lib systemd-libs vulkan-icd-loader libxkbcommon-x11 libx11 libxcursor libxi`
   - Fedora: `sudo dnf install alsa-lib systemd-libs vulkan-loader libxkbcommon-x11 libX11 libX11-xcb libXcursor libXi`
-  - SteamOS has all of them.
+  - SteamOS normally has all of them. If the launcher says one is missing on a Steam Deck, start it in Desktop Mode and install the latest SteamOS update.
 - Your Ratchet & Clank disc image: PAL/Europe v1.00 (SCES-50916) or USA v1.00 (SCUS-97199). Put it in the `rom` folder, or give its path.
+
+The launcher for Linux is a `.tar.gz` download (`rac-rs-launcher-linux-x64.tar.gz`): extract it and double-click the launcher inside, no `chmod` needed. On a Steam Deck, `sh setup.sh --add-to-steam` (or Settings > Advanced > Steam in the launcher) adds the game to your Steam library as a non-Steam game; close Steam first. This is not yet tried on a real Steam Deck.
 
 Build and play (in the unzipped game folder; the Launcher does the same with one click):
 
@@ -94,8 +96,7 @@ Gamepads: Xbox-style controllers, DualShock 4 and DualSense are read through the
 Differences from Windows, for now:
 
 - The Linux build has no profile-guided speed boost (PGO), so it can run slower than the Windows build on the same machine.
-- Mods written as scripts (the OmniLoader mods, for example Arsenal Mastery) need the OmniLoader library, which only exists for Windows so far. Without it the game hides those mod rows; texture packs work as before.
-- The update window and the Windows-only options (Renderer, RivaTuner, ReShade) do not exist. To update, use the Launcher, or unpack the new release over the game folder and run `sh setup.sh` again (it notices the new version and rebuilds what changed).
+- There is no Update-now window and no Windows-only option (Renderer, RivaTuner, ReShade). The game shows a notice window when a newer version is out; to update, use the Launcher, or unpack the new release over the game folder and run `sh setup.sh` again (it notices the new version and rebuilds what changed).
 - The game writes `player/log.txt` (the run log when started from a menu or file manager) and `player/crash.log` (panics) next to the saves.
 
 ## Launcher
@@ -111,7 +112,7 @@ The game works the same without the launcher; everything it changes can also be 
 
 ## Mods and texture packs
 
-- **Script mods** run through **OmniLoader**, this project's own mod loader, which comes with the game (`bundled\omniloader.dll`). Turn mods on or off in the launcher's Mods page or on the title screen under Options > Mods. With no mod switched on, the game plays exactly as before.
+- **Script mods** run through **OmniLoader**, this project's own mod loader, which comes with the game (`bundled\omniloader.dll` on Windows, `bundled/libomniloader.so` on Linux). Turn mods on or off in the launcher's Mods page or on the title screen under Options > Mods. With no mod switched on, the game plays exactly as before.
 - **The mod format comes from OpenRAC.** OmniLoader is this project's own code, written from the public, MIT-licensed mod SDK of [OpenRAC](https://github.com/OpenRAC/OpenRAC) (another Ratchet & Clank PC project). It follows OpenRAC's script-mod format and Luau API, so a mod folder with OpenRAC's `openrac-mod.json` is read too. No code of OpenRAC's game port is used. Credit and the SDK licence are in [NOTICE.md](NOTICE.md).
 - **Arsenal Mastery** is preinstalled and switched off: a fan-remaster style mod where weapons level up like in Ratchet & Clank 3, Nanotech levels raise Ratchet's health and enemies are rebalanced to match. Switch it on in the launcher when you want it.
 - **PCSX2 texture packs:** add a pack made for PCSX2 (a folder or a .zip) in the launcher, or import it from your PCSX2 texture folder. Packs cover world textures, water, sky, chrome and glass, the ship, particles, grass, and the HUD and menus. A pack made for the other disc region mostly works too. Turn packs on or off on the title screen under Options > Mods; while one is on, Pause > Options > Mods has the switches in game too.
@@ -124,7 +125,7 @@ The game works the same without the launcher; everything it changes can also be 
 
 ## Updating
 
-When you start the game, it checks online whether a newer version is out. If there is one, a window shows what is new. Click **Update now** to update, or **Not now** to just play. With the launcher, updates also show up there, and the launcher backs up your current version first. Your saves, your settings, your disc setting and the downloaded tools are kept, and only the parts that changed are rebuilt. Most updates take a few minutes; a few take about as long as the first build (about 15 minutes). You can also check by hand: open Setup.cmd and click **Check for updates**. The check only downloads a small version file from GitHub; nothing about you or your game is sent.
+When you start the game, it checks online whether a newer version is out. If there is one, a window shows what is new. Click **Update now** to update, or **Not now** to just play. With the launcher, updates also show up there, and the launcher backs up your current version first. Your saves, your settings, your disc setting and the downloaded tools are kept, and only the parts that changed are rebuilt. Most updates take a few minutes; a few take about as long as the first build (about 15 minutes). You can also check by hand: open Setup.cmd and click **Check for updates**. The check only downloads a small version file from GitHub; nothing about you or your game is sent. On Linux the window is a notice only: update with the launcher.
 
 If you downloaded v0.1.0, it has no automatic updates. Download the new ZIP, unzip it over your old folder (replace the files) and double-click **Setup.cmd**. If the window says "Finish the update", click **Update**; otherwise click **Repair / rebuild**. Either way the game is rebuilt once, completely, and your saves and disc settings are kept.
 
@@ -132,7 +133,7 @@ What changed in each version is in [CHANGELOG.md](CHANGELOG.md).
 
 ## Controls
 
-The game's own button prompts show the keyboard and mouse keys. You can change the camera style, the language and every button in the game's Options menu (Pause > Options > Controls for the buttons; Camera speed and Mouse speed are separate rows). Controllers work too: Xbox-style controllers (XInput) and PlayStation controllers (PS4 DualShock 4 and PS5 DualSense, over USB or Bluetooth), also when you switch one on or plug it in after the game has started. With the modern camera on, hold R2 to strafe.
+The game's own button prompts show the keyboard and mouse keys. You can change the camera style, the language and every button in the game's Options menu (Pause > Options > Controls for the buttons; Camera speed and Mouse speed are separate rows). Controllers work too: Xbox-style controllers (XInput) and PlayStation controllers (PS4 DualShock 4 and PS5 DualSense, over USB or Bluetooth), also when you switch one on or plug it in after the game has started. With the modern camera on, hold R2 to strafe (Options > Camera > Strafe aiming: Raised, Shoulder or Off). Tutorial pop-ups show your keyboard keys when you play on keyboard. Pause > Options > Graphics, page System, has Quick Select mouse (off by default: hold Triangle, T or the middle mouse button and point at a weapon), Stick dead zone and Button glyphs.
 
 ## Known issues
 
@@ -142,7 +143,7 @@ The game's own button prompts show the keyboard and mouse keys. You can change t
 
 ## Reporting a problem
 
-If the game freezes, crashes or looks wrong, please [open an issue](https://github.com/AsobiCodes/rac-rs/issues) and attach the file `player\log.txt` from your rac-rs folder. The game writes it every time it runs. It lists your Windows version, processor and graphics card, and what the game did up to the problem. If the game froze, wait about 15 seconds before you close it: the log then also says where it got stuck. The previous run is kept as `player\log.prev.txt`, so if you already restarted the game, attach that file instead. If you use mods or a texture pack, say which ones, and try once with them switched off. The log stays on your PC; the game sends it nowhere.
+If the game freezes, crashes or looks wrong, please [open an issue](https://github.com/AsobiCodes/rac-rs/issues) and attach the file `player\log.txt` from your rac-rs folder. The game writes it every time it runs. It lists your Windows version, processor and graphics card, and what the game did up to the problem. If the game froze, wait about 15 seconds before you close it: the log then also says where it got stuck. The previous run is kept as `player\log.prev.txt`, so if you already restarted the game, attach that file instead. If you use mods or a texture pack, say which ones, and try once with them switched off. The log stays on your PC; the game sends it nowhere. On Linux the file is `player/log.txt` in the game folder; the launcher's Open log folder opens it.
 
 ## Contributors
 

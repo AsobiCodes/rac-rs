@@ -28,6 +28,8 @@ pub struct Snap {
 	pub mobys: Vec<Moby>,
 	/// The page menu on screen (mode 3), for the mouse (retail/mouse_menu.rs).
 	pub menu: Option<mouse_menu::MenuSnap>,
+	/// The vendor's shop as a one-item menu for the mouse while its screen is up (retail/mouse_vendor.rs).
+	pub vend: Option<mouse_menu::MenuSnap>,
 	/// The front end (frontbin: title, main menu, New / Load Game) runs instead of a level: nothing of a level is mirrored,
 	/// `mode` is the front end's mode word 0x15f5e4 and the picture is the GS's own (title_boot.rs).
 	/// A ship fight is on (retail/shipmouse.rs): the left mouse button fires with Cross there.
@@ -37,6 +39,8 @@ pub struct Snap {
 	/// Retail's own occlusion mask of this field (128 bytes at 0x174100 + the level shift; None while loading / outside a level).
 	pub occ_mask: Option<[u8; 128]>,
 	pub front: bool,
+	/// Quick Select wheel is up (its HUD element's fade byte is not 0; `wheel_mouse::open_in`).
+	pub wheel_up: bool,
 	/// The front end is inside the level-load loop of FUN_00231b00 or its frontbin copy (`in_load_loop`): the main thread runs its
 	/// fields unthrottled.
 	pub turbo: bool,
@@ -88,7 +92,8 @@ pub struct Snap {
 	/// display showed, a held movie picture too.
 	pub(super) ov_disp: bool,
 	/// The overlay of this field, not taken yet (in-game only): the worker hands the field over without waiting for the GS
-	/// capture thread; `Retail::tick` resolves it after it has sent the next field's pad (`ov` / `ov_disp` then hold it).
+	/// capture thread; `Retail::resolve_ov` resolves it at its first reader, after `tick` has sent the next field's pad (`ov` / `ov_disp`
+	/// then hold it).
 	pub(super) ov_late: Option<OvLate>,
 	pub(super) fx_late: Option<FxLate>,
 	/// Game mode 0x15f5a4 (0 gameplay, 3 pause menu; ingame_pause_menu.md): the menu saves the camera and points
@@ -319,6 +324,7 @@ fn read_words(m: &ee_oracle::Machine, mode: u32, level: u32) -> Snap {
 		form: m.rd8(0x1413f4),
 		last: m.rd32(0x141660) as u8,
 		pad: [m.rd32(0x13cae0), m.rd32(0x13cae4), m.rd32(0x13cb00), m.rd32(0x13cb04)],
+		wheel_up: super::wheel_mouse::enabled() && super::wheel_mouse::open_in(level, |a| m.rd8(a)),
 		..Snap::default()
 	}
 }
@@ -376,10 +382,10 @@ pub fn snap(m: &ee_oracle::Machine) -> Snap {
 	out.orbs = Some(orb_draws(m, level));
 	out.fx = Some(queue_fx(m, level));
 	out.shop = shop_snap(m, level);
-	// The vendor's shop is no page menu but its keys and prompts work the menu way (menu_keys::VENDOR).
+	// The vendor's shop is no page menu but its keys, prompts and mouse work the menu way (menu_keys::VENDOR, mouse_vendor.rs).
 	if out.menu.is_none() && out.shop.is_some() {
-		prompts::set_menu(true);
-		menu_keys::publish(Some(menu_keys::VENDOR));
+		out.vend = super::mouse_vendor::read(&|a| m.rd32(a), level);
+		prompts::set_menu(true); menu_keys::publish(Some(menu_keys::VENDOR));
 	}
 	let hp = m.rd32(HELD_MOBY) & 0x01ff_ffff;
 	let view = DrawView::read(m, level);

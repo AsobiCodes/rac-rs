@@ -364,57 +364,7 @@ fn vs_main(p: vec3<f32>, uv: vec2<f32>, n: vec3<f32>, c: vec4<f32>, l: vec4<f32>
 	return o;
 }
 
-// [PC] Dynamic shadows (sunshadow.rs; u.sun.w = 0 when off, and nothing below runs).
-
-// One map layer at map point uv, receiver depth z: the blocked fraction (High: 4x4 hardware PCF taps half a texel off the grid: a
-// smooth 5-texel edge instead of 3x3's stair steps; Medium 3x3, Low 2x2: u.sun_q.x is the kernel side).
-fn sun_pcf(uv: vec2<f32>, layer: i32, z: f32) -> f32 {
-	let ts = 1.0 / u.sun_bias.w;
-	let n = i32(u.sun_q.x);
-	let h = (u.sun_q.x - 1.0) * 0.5;
-	var lit = 0.0;
-	for (var y = 0; y < n; y++) {
-		for (var x = 0; x < n; x++) {
-			lit += textureSampleCompareLevel(sun_map, sun_cmp, uv + (vec2<f32>(f32(x), f32(y)) - h) * ts, layer, z);
-		}
-	}
-	return 1.0 - lit / (u.sun_q.x * u.sun_q.x);
-}
-
-// The first cascade whose map holds p answers, every caster at full strength however far it stands (no fade by blocker
-// distance: a fade cut shadows off halfway, stacked half shadows under whole ones and lit odd patches of rooms; a roof darkens
-// what it covers, indoors are dark). p moves 2 texels towards the light first (no acne under the 4x4 kernel); the last
-// cascade fades out at its rim.
-fn sun_occ(p: vec3<f32>) -> f32 {
-	let nc = i32(u.sun_q.z);
-	for (var k = 0; k < nc; k++) {
-		let q = u.sun_vp[k] * vec4<f32>(p - u.sun.xyz * (u.sun_texel[k] * 2.0), 1.0);
-		let e = max(abs(q.x), abs(q.y));
-		if (e < 0.98 && q.z > 0.0 && q.z < 1.0) {
-			let uv = vec2<f32>(q.x * 0.5 + 0.5, 0.5 - q.y * 0.5) * u.sun_q.y;
-			let z = q.z - u.sun_bias[k];
-			var occ = sun_pcf(uv, k, z);
-			if (k == nc - 1) { occ *= 1.0 - smoothstep(0.8, 0.98, e); }
-			return occ;
-		}
-	}
-	return 0.0;
-}
-
-// Baked world colour under a dynamic shadow: 2002's vertex colours already hold the painted shadows, so the shadow takes
-// STRENGTH x how lit the colour is (a painted shadow takes none).
-fn sun_baked(shade: vec3<f32>, p: vec3<f32>) -> vec3<f32> {
-	if (u.sun.w <= 0.0) { return shade; }
-	let lum = dot(shade, vec3<f32>(0.2126, 0.7152, 0.0722));
-	return shade * (1.0 - sun_occ(p) * u.sun.w * smoothstep(0.3, 0.8, lum));
-}
-
-// Lit moby under a dynamic shadow: it keeps its ambient and loses its directional light.
-fn sun_lit(i: VOut) -> vec3<f32> {
-	if (u.sun.w <= 0.0) { return i.lit; }
-	return i.amb + (i.lit - i.amb) * (1.0 - sun_occ(i.w) * min(u.sun.w * 1.4, 1.0));
-}
-
+"#, include_str!("viewer/sunrecv.wgsl"), r#"
 // One light slot: colour * max(q, q * wrap) for both of its directions (prog11).
 fn slot(k: u32, n: vec3<f32>) -> vec3<f32> {
 	let l = u.lights[k];
@@ -554,14 +504,19 @@ fn ice_look(i: VOut, rgb: vec3<f32>) -> vec3<f32> {
 
 // Shrub fragments with alpha (faded mesh, billboards): the baked world colour of `fs` with the GS alpha As = texel alpha x A >> 7,
 // A carried below -2 in the colour alpha (-2 - A / 256). The entries choose the Z-write split of the GS alpha test.
-fn shrub_rgba(i: VOut, c: vec4<f32>) -> vec4<f32> {
+// [PC] speed (exact): the alpha is its own function, so the entries test it before the colour (the shadow's PCF) is computed.
+fn shrub_alpha(i: VOut, c: vec4<f32>) -> f32 {
+	let a = round((-2.0 - i.c.a) * 256.0);
+	let ta = floor(c.a * 128.0 + 0.5);
+	return floor(ta * a / 128.0) / 128.0;
+}
+
+fn shrub_rgb(i: VOut, c: vec4<f32>) -> vec3<f32> {
 	let d = distance(i.w, u.eye.xyz);
 	var f = clamp(u.fog.z + (d - u.fog.x) * (u.fog.w - u.fog.z) / max(u.fog.y - u.fog.x, 0.001), min(u.fog.z, u.fog.w), 255.0) / 255.0;
 	if (i.fogf >= 0.0) { f = i.fogf / 255.0; }
 	let shade = sun_baked(min(i.c.rgb, vec3<f32>(255.0 / 128.0)), i.w);
-	let a = round((-2.0 - i.c.a) * 256.0);
-	let ta = floor(c.a * 128.0 + 0.5);
-	return vec4<f32>(mix(u.fog_colour.rgb, ice_look(i, c.rgb * shade), f), floor(ta * a / 128.0) / 128.0);
+	return mix(u.fog_colour.rgb, ice_look(i, c.rgb * shade), f);
 }
 
 // Billboard texel: the GS picks the mip from LOD = log2(32 vz) + K (Q = 1 / (32 vz)); K and the top level ride in the vertex normal.
@@ -574,26 +529,33 @@ fn shrub_bb_texel(i: VOut) -> vec4<f32> {
 // Terrain fragment: the baked world colour of `fs` with the level-chosen texel (GS LOD = log2(32 vz) + K; REN-TEX-RESIDENCY).
 // GS ALPHA 0x44 (Cs - Cd) * As + Cd with As = the texel alpha (vertex alpha 128) and TEST 0x5360b (ATE GEQUAL AREF 0x60, AFAIL
 // RGB_ONLY): texels below alpha 0x60 still blend (colour only, no z), the rest blend and write z (fx_census_late.md, run 19).
-fn tfrag_rgba(i: VOut) -> vec4<f32> {
-	let c = shrub_bb_texel(i);
+// [PC] speed (exact): the texel alpha is read first and the entries test it before the colour (fog, the shadow's PCF) is computed.
+fn world_alpha(c: vec4<f32>) -> f32 {
+	return min(floor(c.a * 128.0 + 0.5), 128.0) / 128.0;
+}
+
+fn tfrag_rgb(i: VOut, c: vec4<f32>) -> vec3<f32> {
 	let d = distance(i.w, u.eye.xyz);
 	var f = clamp(u.fog.z + (d - u.fog.x) * (u.fog.w - u.fog.z) / max(u.fog.y - u.fog.x, 0.001), min(u.fog.z, u.fog.w), 255.0) / 255.0;
 	if (i.fogf >= 0.0) { f = i.fogf / 255.0; }
 	let shade = sun_baked(min(i.c.rgb, vec3<f32>(255.0 / 128.0)), i.w);
-	return vec4<f32>(mix(u.fog_colour.rgb, c.rgb * shade, f), min(floor(c.a * 128.0 + 0.5), 128.0) / 128.0);
+	return mix(u.fog_colour.rgb, c.rgb * shade, f);
 }
 
 @fragment fn fs_tfrag(i: VOut) -> @location(0) vec4<f32> {
 	if (i.c.a < -2.0005) { discard; }
-	let r = tfrag_rgba(i);
-	if (r.a * 128.0 < 96.0) { discard; }
-	return r;
+	let c = shrub_bb_texel(i);
+	let ra = world_alpha(c);
+	if (ra * 128.0 < 96.0) { discard; }
+	return vec4<f32>(tfrag_rgb(i, c), ra);
 }
 
 @fragment fn fs_tfrag_lt96(i: VOut) -> @location(0) vec4<f32> {
 	if (i.c.a < -2.0005) { discard; }
-	let r = tfrag_rgba(i);
-	if (r.a * 128.0 >= 96.0 || r.a <= 0.0) { discard; }
+	let c = shrub_bb_texel(i);
+	let ra = world_alpha(c);
+	if (ra * 128.0 >= 96.0 || ra <= 0.0) { discard; }
+	let r = vec4<f32>(tfrag_rgb(i, c), ra);
 	soft_mark(i, r.a); return r; // [PC] the fog's no-Z texel (volfog/soft.rs)
 }
 
@@ -601,27 +563,29 @@ fn tfrag_rgba(i: VOut) -> vec4<f32> {
 // draw packet (Pokitaru FUN_002b87c8, data 0x1c33b0) sets TEST_1 0x5340b (ATE GEQUAL AREF 0x40, AFAIL RGB_ONLY, ZTST GEQUAL) under
 // ALPHA_1 0x44 (Cs - Cd) * As + Cd, As = texel alpha (vertex alpha 0x80): every texel blends, from alpha 0x40 it also writes Z.
 // Drawn opaque, the fading feet of the Pokitaru shoal mounds were hard flat silhouettes (decomp/notes/fx_census_late.md).
-fn tie_rgba(i: VOut) -> vec4<f32> {
-	let c = world_texel(i);
+fn tie_rgb(i: VOut, c: vec4<f32>) -> vec3<f32> {
 	let d = distance(i.w, u.eye.xyz);
 	var f = clamp(u.fog.z + (d - u.fog.x) * (u.fog.w - u.fog.z) / max(u.fog.y - u.fog.x, 0.001), min(u.fog.z, u.fog.w), 255.0) / 255.0;
 	if (i.fogf >= 0.0) { f = i.fogf / 255.0; }
 	// [PC] Lighting Enhanced: the sun shadow / AO term of the other baked paths (`sun_baked`; identity in Classic).
 	let shade = sun_baked(min(i.c.rgb, vec3<f32>(255.0 / 128.0)), i.w);
-	return vec4<f32>(mix(u.fog_colour.rgb, ice_look(i, c.rgb * shade), f), min(floor(c.a * 128.0 + 0.5), 128.0) / 128.0);
+	return mix(u.fog_colour.rgb, ice_look(i, c.rgb * shade), f);
 }
 
 @fragment fn fs_tie(i: VOut) -> @location(0) vec4<f32> {
 	if (i.c.a < -2.0005) { discard; }
-	let r = tie_rgba(i);
-	if (r.a * 128.0 < 64.0) { discard; }
-	return r;
+	let c = world_texel(i);
+	let ra = world_alpha(c);
+	if (ra * 128.0 < 64.0) { discard; }
+	return vec4<f32>(tie_rgb(i, c), ra);
 }
 
 @fragment fn fs_tie_lt64(i: VOut) -> @location(0) vec4<f32> {
 	if (i.c.a < -2.0005) { discard; }
-	let r = tie_rgba(i);
-	if (r.a * 128.0 >= 64.0 || r.a <= 0.0) { discard; }
+	let c = world_texel(i);
+	let ra = world_alpha(c);
+	if (ra * 128.0 >= 64.0 || ra <= 0.0) { discard; }
+	let r = vec4<f32>(tie_rgb(i, c), ra);
 	soft_mark(i, r.a); return r; // [PC] the fog's no-Z texel (volfog/soft.rs)
 }
 
@@ -641,31 +605,38 @@ fn crisp_leaf(i: VOut, c: vec4<f32>) -> vec4<f32> {
 }
 
 @fragment fn fs_shrub_ge12(i: VOut) -> @location(0) vec4<f32> {
-	let r = shrub_rgba(i, crisp_leaf(i, shrub_mesh_texel(i)));
-	if (r.a * 128.0 < 12.0) { discard; }
-	return r;
+	let c = crisp_leaf(i, shrub_mesh_texel(i));
+	let ra = shrub_alpha(i, c);
+	if (ra * 128.0 < 12.0) { discard; }
+	return vec4<f32>(shrub_rgb(i, c), ra);
 }
 
 @fragment fn fs_shrub_lt12(i: VOut) -> @location(0) vec4<f32> {
-	let r = shrub_rgba(i, crisp_leaf(i, shrub_mesh_texel(i)));
-	if (r.a * 128.0 >= 12.0) { discard; }
+	let c = crisp_leaf(i, shrub_mesh_texel(i));
+	let ra = shrub_alpha(i, c);
+	if (ra * 128.0 >= 12.0) { discard; }
+	let r = vec4<f32>(shrub_rgb(i, c), ra);
 	soft_mark(i, r.a); return r; // [PC] the fog's no-Z texel (volfog/soft.rs)
 }
 
 @fragment fn fs_shrub_ge96(i: VOut) -> @location(0) vec4<f32> {
-	let r = shrub_rgba(i, shrub_bb_texel(i));
-	if (r.a * 128.0 < 96.0) { discard; }
-	return r;
+	let c = shrub_bb_texel(i);
+	let ra = shrub_alpha(i, c);
+	if (ra * 128.0 < 96.0) { discard; }
+	return vec4<f32>(shrub_rgb(i, c), ra);
 }
 
 @fragment fn fs_shrub_lt96(i: VOut) -> @location(0) vec4<f32> {
-	let r = shrub_rgba(i, shrub_bb_texel(i));
-	if (r.a * 128.0 >= 96.0) { discard; }
+	let c = shrub_bb_texel(i);
+	let ra = shrub_alpha(i, c);
+	if (ra * 128.0 >= 96.0) { discard; }
+	let r = vec4<f32>(shrub_rgb(i, c), ra);
 	soft_mark(i, r.a); return r; // [PC] the fog's no-Z texel (volfog/soft.rs)
 }
 
 @fragment fn fs_shrub_all(i: VOut) -> @location(0) vec4<f32> {
-	return shrub_rgba(i, shrub_bb_texel(i));
+	let c = shrub_bb_texel(i);
+	return vec4<f32>(shrub_rgb(i, c), shrub_alpha(i, c));
 }
 
 fn moby_alpha(i: VOut) -> f32 {
@@ -679,8 +650,11 @@ fn moby_texel(i: VOut) -> vec4<f32> {
 	return c;
 }
 
-fn moby_rgba(i: VOut) -> vec4<f32> {
-	let c = moby_texel(i);
+fn moby_a(i: VOut, c: vec4<f32>) -> f32 {
+	return floor(floor(c.a * 128.0 + 0.5) * moby_alpha(i) / 128.0) / 128.0;
+}
+
+fn moby_rgb(i: VOut, c: vec4<f32>) -> vec3<f32> {
 	var rgb = c.rgb * i.c.rgb * sun_lit(i);
 	if (i.c.a < -1.5) {
 		// Tinted tail packet: constant unlit colour, same alpha as the lit packets.
@@ -688,24 +662,25 @@ fn moby_rgba(i: VOut) -> vec4<f32> {
 	}
 	let d = distance(i.w, u.eye.xyz);
 	let f = clamp(u.fog.z + (d - u.fog.x) * (u.fog.w - u.fog.z) / max(u.fog.y - u.fog.x, 0.001), min(u.fog.z, u.fog.w), 255.0) / 255.0;
-	let a = floor(floor(c.a * 128.0 + 0.5) * moby_alpha(i) / 128.0) / 128.0;
-	return vec4<f32>(mix(u.fog_colour.rgb, rgb, f), a);
+	return mix(u.fog_colour.rgb, rgb, f);
 }
 
 @fragment fn fs_moby_a(i: VOut) -> @location(0) vec4<f32> {
 	let ta = floor(moby_texel(i).a * 128.0 + 0.5);
 	if (moby_alpha(i) == 128.0 && (ta >= 128.0 || i.c.a < 0.0)) { discard; }
-	let r = moby_rgba(i);
-	if (r.a * 128.0 < 96.0) { discard; }
-	return r;
+	let c = moby_texel(i);
+	let ra = moby_a(i, c);
+	if (ra * 128.0 < 96.0) { discard; }
+	return vec4<f32>(moby_rgb(i, c), ra);
 }
 
 @fragment fn fs_moby_b(i: VOut) -> @location(0) vec4<f32> {
 	let ta = floor(moby_texel(i).a * 128.0 + 0.5);
 	if (moby_alpha(i) == 128.0 && (ta >= 128.0 || i.c.a < 0.0)) { discard; }
-	let r = moby_rgba(i);
-	if (r.a * 128.0 >= 96.0) { discard; }
-	return r;
+	let c = moby_texel(i);
+	let ra = moby_a(i, c);
+	if (ra * 128.0 >= 96.0) { discard; }
+	return vec4<f32>(moby_rgb(i, c), ra);
 }
 
 // Particles: billboards and ribbons built on the CPU, texture times vertex colour.
@@ -1069,9 +1044,9 @@ struct Scene {
 	tfrag_verts: Vec<Vertex>,
 	tfrag_cols: Vec<Vec<[f32; 4]>>,
 	tfrag_b: f32,
-	/// [PC] Dynamic shadows (sunshadow.rs): the LOD `Gpu::cull_tfrags` drew each fragment with this frame (u8::MAX = not drawn):
-	/// a fragment casts with the mesh it receives on (a coarser LOD above the drawn one shadowed the ground under it).
+	/// [PC] Dynamic shadows (sunshadow.rs): the LOD `cull_tfrags` drew each fragment with (u8::MAX = not drawn); it casts with that mesh (a coarser one shadowed the ground under it).
 	tfrag_lod: Vec<u8>,
+	tfrag_memo: Vec<[u8; 3]>, // [PC] perf (ncull, gpu/tfrag_memo.rs): per fragment and LOD range the plain code (6 / 0x14) last posed into it, else 0
 	sky: Option<Batch>,
 	/// NOV-31: the vertices of `sky` with each shell's range and unturned positions (`Gpu::set_sky_spin`).
 	sky_shells: Option<SkyShells>,
@@ -1170,7 +1145,7 @@ struct Scene {
 	tex_slots: HashMap<u32, usize>,
 	/// [PC] Dynamic shadows: per texture slot, whether most of its texels blend (PS2 alpha below 0x60, `fs_moby_b`): see-through
 	/// effect shells (blast domes, glows) cast no sun shadow (sunshadow.rs).
-	clear_tex: Vec<bool>,
+	clear_tex: Vec<bool>, /** [PC] lane v042_shadow: per texture slot the smallest texel alpha (texture value 0..255; 0 = unknown, and all 0 when built with a textures mod): a caster whose slot never goes below the cut casts depth-only (sunshadow.rs) */ sun_alpha: Vec<u8>, /** [PC] lane v042_shadow: per props slot the radius of its sphere, parallel to `props_inst` (the records the GPU holds; infinite = unbounded; shorter or empty = no per-slot test), for the cascade cull (sunshadow/props.rs) */ sun_rad: Vec<f32>, /** [PC] lane v042_shadow: tight boxes of the tie LODs and shrubs, built with the scene (sunshadow/bounds.rs) */ sun_bb: sunshadow::bounds::Boxes,
 	/// `bind_groups` index -> the first-instance word of a moby draw with that slot (TEX1 K and chain top level; 0 = plain sample).
 	slot_words: Vec<u32>,
 	/// [PC] perf round 3: `bind_groups` as one texture array (bindless.rs; None = per-draw bind groups).
@@ -1200,13 +1175,13 @@ struct CkptEnv {
 }
 
 struct Gpu {
+	/// [PC] Presents on a worker thread (presenter.rs); flush() before the surface is reconfigured. Before `surface`: fields drop in order, so the thread is joined before the surface goes (else a window close destroyed it under the thread's SurfaceTexture: wgpu panic, exit 101).
+	presenter: presenter::Presenter,
 	window: Arc<Window>,
 	surface: wgpu::Surface<'static>,
 	device: wgpu::Device,
 	/// [PC] Gated on the deferred submit of the previous frame (presenter.rs `GatedQueue`): every use waits for it.
 	queue: presenter::GatedQueue,
-	/// [PC] Presents on a worker thread (presenter.rs); flush() before the surface is reconfigured.
-	presenter: presenter::Presenter,
 	config: wgpu::SurfaceConfiguration,
 	pipeline: wgpu::RenderPipeline,
 	pipeline_cull: [wgpu::RenderPipeline; 2],
@@ -1278,8 +1253,8 @@ struct Gpu {
 	nearest: wgpu::Sampler,
 	/// This frame's overlay, in window pixels.
 	pub hud: Vec<Quad>,
-	/// Retail mode: the GS overlay texture (width, rows) and its bind group (`RETAIL_OV_TEX`).
-	retail_ov: Option<(wgpu::Texture, wgpu::BindGroup, u32, u32)>,
+	/// Retail mode: the GS overlay texture (width, rows), its bind group (`RETAIL_OV_TEX`) and the persistent staging buffer of its upload (gpu/ovwrite.rs).
+	retail_ov: Option<(wgpu::Texture, wgpu::BindGroup, u32, u32, Option<wgpu::Buffer>)>,
 	ubuf: wgpu::Buffer,
 	ubind: wgpu::BindGroup,
 	tex_layout: wgpu::BindGroupLayout,

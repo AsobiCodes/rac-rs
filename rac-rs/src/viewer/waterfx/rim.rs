@@ -5,14 +5,17 @@
 pub(super) const RIM_WGSL: &str = r#"
 // Back to the frame: a pixel with little water around blends towards what is next to the water (never retail's water picture),
 // and particles over the water (a blast, smoke, splashes) stay as drawn.
-fn finish(c: vec2<i32>, orig: vec3<f32>, shaded: vec3<f32>, geo: bool) -> vec4<f32> {
+fn finish(c: vec2<i32>, shaded: vec3<f32>, geo: bool) -> vec4<f32> {
 	var around = 0.0;
 	var land = vec3<f32>(0.0);
 	let uv0 = (vec2<f32>(c) + 0.5) * w.size.zw;
 	let ring = array<vec2<i32>, 8>(vec2<i32>(-1, -1), vec2<i32>(0, -1), vec2<i32>(1, -1), vec2<i32>(-1, 0), vec2<i32>(1, 0), vec2<i32>(-1, 1), vec2<i32>(0, 1), vec2<i32>(1, 1));
+	// [PC] perf (lane nwater, 2026-10-29): the eight wpos reads first (all in flight at once), then the same tests in the same order.
+	var wa = array<f32, 8>();
+	for (var k = 0; k < 8; k++) { wa[k] = wpos_at(c + ring[k]).a; }
 	for (var k = 0; k < 8; k++) {
 		// [PC] Geometric sea: a hole of the grid (`geo_gap`) is water too.
-		if (wpos_at(c + ring[k]).a > 0.5 || (geo && geo_gap(c + ring[k]).a > 0.5)) { around += 1.0; } else {
+		if (wa[k] > 0.5 || (geo && geo_gap(c + ring[k]).a > 0.5)) { around += 1.0; } else {
 			land += to_linear(textureSampleLevel(scene, lsamp, uv0 + vec2<f32>(ring[k]) * w.size.zw, 0.0).rgb);
 		}
 	}
@@ -21,7 +24,9 @@ fn finish(c: vec2<i32>, orig: vec3<f32>, shaded: vec3<f32>, geo: bool) -> vec4<f
 	let nl = 8.0 - around;
 	let rim = select(shaded, land / max(nl, 1.0), nl > 0.5);
 	var col = mix(rim, shaded, smoothstep(2.0, 7.0, around));
-	col = mix(col, orig, clamp(textureLoad(glow, c, 0).a * w.mirror.z * 1.5, 0.0, 1.0));
+	// [PC] perf (nwater): retail's picture on this pixel is read only under particles (mix(col, orig, 0.0) is col, exactly).
+	let cover = clamp(textureLoad(glow, c, 0).a * w.mirror.z * 1.5, 0.0, 1.0);
+	if (cover > 0.0) { col = mix(col, to_linear(textureSampleLevel(scene, lsamp, uv0, 0.0).rgb), cover); }
 	return vec4<f32>(pow(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(1.0 / 2.2)), 1.0);
 }
 
@@ -35,9 +40,12 @@ fn wet_px(q: vec2<i32>) -> bool {
 }
 fn mirror_push(c: vec2<i32>) -> vec2<f32> {
 	let ring = array<vec2<i32>, 8>(vec2<i32>(-1, -1), vec2<i32>(0, -1), vec2<i32>(1, -1), vec2<i32>(-1, 0), vec2<i32>(1, 0), vec2<i32>(-1, 1), vec2<i32>(0, 1), vec2<i32>(1, 1));
+	// [PC] perf (lane nwater, 2026-10-29): the eight wpos reads first (independent: all in flight at once), then the same wet_px tests.
+	var wa = array<f32, 8>();
+	for (var k = 0; k < 8; k++) { wa[k] = wpos_at(c + ring[k] * MIRROR_RIM).a; }
 	var near = false;
 	for (var k = 0; k < 8; k++) {
-		if (!wet_px(c + ring[k] * MIRROR_RIM)) { near = true; }
+		if (!(wa[k] > 0.5 || geo_gap(c + ring[k] * MIRROR_RIM).a > 0.5)) { near = true; }
 	}
 	if (!near) { return vec2<f32>(0.0); }
 	var push = vec2<f32>(0.0);

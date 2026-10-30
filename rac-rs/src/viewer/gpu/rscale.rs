@@ -190,7 +190,7 @@ impl Gpu {
 		let (Some(t), Some(p)) = (&self.rscale.target, &self.rscale.pipe) else { return };
 		let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
 			label: Some("render scale"),
-			color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: dst, depth_slice: None, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store } })],
+			color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: dst, depth_slice: None, resolve_target: None, ops: wgpu::Operations { load: crate::viewer::post::overwrite(), store: wgpu::StoreOp::Store } })],
 			depth_stencil_attachment: None,
 			timestamp_writes: None,
 			occlusion_query_set: None,

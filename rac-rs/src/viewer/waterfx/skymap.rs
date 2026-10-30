@@ -33,6 +33,9 @@ struct SkyU { a: vec4<f32>, b: vec4<f32>, c: vec4<f32> };
 // The share (0..1) of the sun that reaches the world point `p` (a point of the water surface) along the sky map's sun ray; `jit` 0..1
 // moves the sample positions (a different value per pixel hides the steps).
 fn sky_vis(p: vec3<f32>, jit: f32) -> f32 {
+	return sky_vis_n(p, jit, 10.0);
+}
+fn sky_vis_n(p: vec3<f32>, jit: f32, nf: f32) -> f32 {
 	let l = sky.c.xyz;
 	if (sky.a.w < 0.5 || sky.c.w < 0.5 || l.z < 0.08) { return 1.0; }
 	let n = sky.b.z;
@@ -40,8 +43,8 @@ fn sky_vis(p: vec3<f32>, jit: f32) -> f32 {
 	let len = min((sky.b.x - p.z) / l.z, 90.0 / hz);
 	if (len < 0.7) { return 1.0; }
 	var occ = 0.0;
-	for (var i = 0; i < 10; i++) {
-		let f = (f32(i) + jit) / 10.0;
+	for (var i = 0; i < i32(nf); i++) {
+		let f = (f32(i) + jit) / nf;
 		let q = p + l * (0.5 + (len - 0.5) * f * f);
 		let ux = ((q.x - sky.a.x) / sky.a.z + 1.0) * 0.5 * n;
 		let uy = (1.0 - (q.y - sky.a.y) / sky.a.z) * 0.5 * n;

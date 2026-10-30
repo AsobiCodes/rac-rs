@@ -168,4 +168,10 @@ impl Retail {
 	pub fn set_smooth(&mut self, d: Option<SmoothDraw>) {
 		self.snap.smooth = d.map(Box::new);
 	}
+
+	/// [PC] Frame smoothing: the blended effect lists `set_smooth` gave this display frame, for the queue-A / queue-B blend that
+	/// waits for the effects layer (viewer/interp/late.rs).
+	pub fn smooth_fx_mut(&mut self) -> Option<&mut RetailFx> {
+		self.snap.smooth.as_mut().and_then(|d| d.fx.as_mut())
+	}
 }

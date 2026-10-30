@@ -5,38 +5,40 @@
 //! looser test than `edge_calm`'s and without its hero exception, so a superset); `dry_near` asks the 43 px neighbourhood of a vertex
 //! and `calm_edge` skips `edge_calm` when no tile in it is marked. Also marks where `fs_grid` can keep a fragment (the sea mask,
 //! the hero): a grid vertex with no such tile near (`sea_near`) feeds no kept fragment and `vs_grid` skips its waves altogether. Same
-//! picture, the skipped work was a no-op.
+//! picture, the skipped work was a no-op. [PC] (speed) The heights are made once per vertex by `cs_wave` (grid_waves.rs).
 
 use super::*;
 
-/// Tile size in px (`DRY_T` in the WGSL: one workgroup of 8 x 8 threads x 4 x 4 px).
+/// Tile size in px (`DRY_T` in the WGSL: one workgroup of 16 x 16 threads x 2 x 2 px).
 const TILE: u32 = 32;
 
-/// WGSL appended to the water shader. Group 1: `dry_in` (grid vertex stage) or `dry_out` (`cs_dry`), never both in one pipeline.
+/// WGSL appended to the water shader. Group 1: `dry_in` (`cs_wave`) or `dry_out` (`cs_dry`), never both in one pipeline.
 pub(super) const DRY_WGSL: &str = r#"
 @group(1) @binding(0) var dry_in: texture_2d<u32>;
 @group(1) @binding(1) var dry_out: texture_storage_2d<r32uint, write>;
 const DRY_T: i32 = 32;
 var<workgroup> dry_acc: atomic<u32>;
 
-// One workgroup = one 32 px tile (8 x 8 threads, 4 x 4 px each). Bits 0..3 (plane k): a bank pixel (`edge_calm`'s test, looser, no
+// One workgroup = one 32 px tile (16 x 16 threads, 2 x 2 px each: [PC] (speed) was 8 x 8 x 4 x 4, the same pixels and test; more
+// threads hide the loads' latency on a small GPU). Bits 0..3 (plane k): a bank pixel (`edge_calm`'s test, looser, no
 // hero exception); bits 4..7: `fs_grid` could keep a fragment whose flat point is a pixel of this tile for plane k (sea mask of
 // the plane, or the hero's body in the water).
-@compute @workgroup_size(8, 8, 1)
+@compute @workgroup_size(16, 16, 1)
 fn cs_dry(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) li: vec3<u32>, @builtin(local_invocation_index) lidx: u32) {
 	if (lidx == 0u) { atomicStore(&dry_acc, 0u); }
 	workgroupBarrier();
 	let dim = vec2<i32>(textureDimensions(depth_ms));
-	let base = vec2<i32>(wg.xy) * DRY_T + vec2<i32>(li.xy) * 4;
+	let base = vec2<i32>(wg.xy) * DRY_T + vec2<i32>(li.xy) * 2;
 	var bits = 0u;
-	for (var j = 0; j < 4; j++) {
-		for (var i = 0; i < 4; i++) {
+	for (var j = 0; j < 2; j++) {
+		for (var i = 0; i < 2; i++) {
 			let q = base + vec2<i32>(i, j);
 			if (any(q >= dim)) { continue; }
 			let m = textureLoad(seamask, q, 0).r;
 			if (m != m) { bits |= 0xF0u; }
 			if (m > -1e8) {
 				for (var k = 0; k < 4; k++) {
+					if (w.geo[k].y < 0.5) { break; } // (the planes are packed first: no plane k, none after it, `positions`; no reader asks its bits)
 					if (abs(m - w.geo[k].x) <= GEO_MATCH) { bits |= 16u << u32(k); }
 				}
 				continue;
@@ -44,11 +46,13 @@ fn cs_dry(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) li
 			let zs = linear_depth(textureLoad(depth_ms, q, 0));
 			if (w.hero.w >= 0.5) {
 				for (var k = 0; k < 4; k++) {
+					if (w.geo[k].y < 0.5) { break; }
 					if (hero_pixel(q, zs, w.geo[k].x)) { bits |= 16u << u32(k); }
 				}
 			}
 			if (zs >= w.proj.w * 0.98) { continue; }
 			for (var k = 0; k < 4; k++) {
+				if (w.geo[k].y < 0.5) { break; }
 				if ((bits & (1u << u32(k))) != 0u) { continue; }
 				let zp = plane_depth(vec2<f32>(q) + 0.5, w.geo[k].x);
 				if (zs < zp * 0.9905 - 0.04) { bits |= 1u << u32(k); }
@@ -99,17 +103,16 @@ fn grid_wave(f: vec3<f32>, ndc: vec2<f32>, z0: f32, gi: u32, fpg: f32) -> f32 {
 pub(super) struct DryTiles {
 	c0: wgpu::BindGroupLayout,
 	out_l: wgpu::BindGroupLayout,
-	in_l: wgpu::BindGroupLayout,
 	pipe: wgpu::ComputePipeline,
-	/// The grid pass's pipeline layout: the water group plus the tiles (group 1).
-	pub(super) grid_pl: wgpu::PipelineLayout,
+	/// The grid's wave heights (`cs_wave`, which reads the tiles) and the grid pass's pipeline layout.
+	pub(super) waves: GridWaves,
 }
 
 /// The tile texture's groups, made with the targets (they follow the window size).
 pub(super) struct DryGroups {
 	g_c0: wgpu::BindGroup,
 	g_out: wgpu::BindGroup,
-	pub(super) g_in: wgpu::BindGroup,
+	pub(super) waves: GridGroups,
 	tiles: (u32, u32),
 }
 
@@ -126,15 +129,14 @@ impl DryTiles {
 			entry(10, tex(wgpu::TextureSampleType::Float { filterable: false }, false), c),
 		]);
 		let out_l = layout("water dry tiles out", &[entry(1, wgpu::BindingType::StorageTexture { access: wgpu::StorageTextureAccess::WriteOnly, format: wgpu::TextureFormat::R32Uint, view_dimension: wgpu::TextureViewDimension::D2 }, c)]);
-		let in_l = layout("water dry tiles in", &[entry(0, tex(wgpu::TextureSampleType::Uint, false), wgpu::ShaderStages::VERTEX)]);
 		let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("water dry tiles"), bind_group_layouts: &[Some(&c0), Some(&out_l)], immediate_size: 0 });
 		let pipe = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some("water dry tiles"), layout: Some(&pl), module: shader, entry_point: Some("cs_dry"), compilation_options: Default::default(), cache: None });
-		let grid_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("water sea grid"), bind_group_layouts: &[Some(main), Some(&in_l)], immediate_size: 0 });
-		DryTiles { c0, out_l, in_l, pipe, grid_pl }
+		DryTiles { c0, out_l, pipe, waves: GridWaves::new(device, shader, main) }
 	}
 
-	/// The tile texture for a (w x h) scene and the groups on it: `ubuf` = the water uniforms, `depth` = the scene depth (depth aspect), `seamask` = the sea mask.
-	pub(super) fn groups(&self, device: &wgpu::Device, (w, h): (u32, u32), ubuf: &wgpu::Buffer, depth: &wgpu::TextureView, seamask: &wgpu::TextureView) -> DryGroups {
+	/// The tile texture for a (w x h) scene and the groups on it: `ubuf` = the water uniforms, `depth` = the scene depth (depth aspect),
+	/// `seamask` = the sea mask; plus the grid heights' (`shore` = the shore map).
+	pub(super) fn groups(&self, device: &wgpu::Device, (w, h): (u32, u32), (ubuf, shore): (&wgpu::Buffer, &wgpu::Buffer), depth: &wgpu::TextureView, seamask: &wgpu::TextureView) -> DryGroups {
 		let tiles = (w.div_ceil(TILE).max(1), h.div_ceil(TILE).max(1));
 		let tex = device.create_texture(&wgpu::TextureDescriptor {
 			label: Some("water dry tiles"),
@@ -155,7 +157,7 @@ impl DryTiles {
 				wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(seamask) },
 			]),
 			g_out: group("water dry tiles out", &self.out_l, &[wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) }]),
-			g_in: group("water dry tiles in", &self.in_l, &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) }]),
+			waves: self.waves.groups(device, (w, h), (ubuf, shore), depth, seamask, &view),
 			tiles,
 		}
 	}

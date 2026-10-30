@@ -108,3 +108,13 @@ pub(super) fn hero_check_compare(old: &HeroCache, new: &HeroCache) {
 pub(super) fn hero_check_frame() {
 	FRAMES.fetch_add(1, Ordering::Relaxed);
 }
+
+/// A copy of `src` made in the allocations of `spare`'s posed bundle (`Vec::clone_from` keeps the capacity): the bundle is ~1.25 MB and a
+/// fresh Vec of that size page-faults on every game tick. Same values as `src.clone()` (no spare: a plain clone).
+pub(super) fn copy_posed(spare: Option<HeroCache>, src: &Option<Posed>) -> Option<Posed> {
+	let src = src.as_ref()?;
+	let (mut a, mut b) = spare.and_then(|c| c.skinned).unwrap_or_default();
+	a.clone_from(&src.0);
+	b.clone_from(&src.1);
+	Some((a, b))
+}

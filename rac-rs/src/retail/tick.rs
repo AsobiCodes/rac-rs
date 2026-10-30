@@ -18,6 +18,19 @@ fn snap_lockstep(s: &Snap, off: bool) -> bool {
 	off || s.front || s.frozen || s.turbo
 }
 
+/// [PC] Nanoseconds the render thread has waited for the capture thread's overlay (`ov_late`, in `resolve_ov`, usually from the
+/// frame's HUD upload) and `tick` for the VU1 thread's effects layer (`fx_late`, only when nothing read it since the tick before:
+/// viewer/interp/late.rs waits for it and counts that wait itself) since the viewer last read them (`take_late_waits`;
+/// RAC_FRAME_PROFILE spans t_wov / t_wfx: an overlay wait shows in the next tick frame's t_wov, and as a `T` row in RAC_FRAME_CSV).
+static WAIT_OV_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static WAIT_FX_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// [PC] The two late waits of `Retail::tick` in milliseconds (overlay, effects layer) since the last call; resets both.
+pub fn take_late_waits() -> (f32, f32) {
+	use std::sync::atomic::Ordering::Relaxed;
+	(WAIT_OV_NS.swap(0, Relaxed) as f32 / 1e6, WAIT_FX_NS.swap(0, Relaxed) as f32 / 1e6)
+}
+
 impl Retail {
 	/// One PAL field: takes the field the thread finished, then hands it this tick's pad.
 	/// The sound requests of the field `tick` just took (each field's list is handed out once).
@@ -32,27 +45,58 @@ impl Retail {
 
 
 	pub fn tick(&mut self, buttons: u16, sticks: [u8; 4]) {
+		// The overlay and the effects layer of the field the last tick took, if nothing has read them since (`resolve_ov`, `resolve_fx`).
+		self.resolve_ov();
+		let ns = self.resolve_fx();
+		WAIT_FX_NS.fetch_add(ns, std::sync::atomic::Ordering::Relaxed);
 		self.tick_inner(buttons, sticks);
-		// The next field's pad is out (the worker runs it now): only then wait for the capture thread's overlay of the field just taken.
+		// The next field's pad is out (the worker runs it now). The capture thread's overlay of the field just taken is waited for
+		// only when it is first read (`resolve_ov`): the frame's HUD upload in `frame_render`, or the next tick. The effects layer
+		// of the field just taken (built on the VU1 thread meanwhile) likewise (`resolve_fx`): the frame's queue-A upload
+		// (viewer/interp/late.rs `fx_late`), or the next tick. The render thread's work in between (hero, props, upload) overlaps
+		// both waits.
+	}
+
+	/// [PC] The effects layer of the last field taken is still on the VU1 thread (`resolve_fx` would wait).
+	pub fn fx_pending(&self) -> bool {
+		self.snap.fx_late.is_some()
+	}
+
+	/// [PC] Waits for the VU1 thread's effects layer of the last field taken if it is still out (`Snap::fx_late`) and puts it on
+	/// the end of `fx.qa` / `fx.pools` (after the ported quads). `fx()` does NOT wait: the viewer calls this (viewer/interp/late.rs
+	/// `fx_late`) before its first read of `qa` / `qb` / `pools` in a frame (the upload phase) and before every tick, and `tick`
+	/// calls it too. A new reader of those lists earlier in the frame (hero, props, HUD) must call `fx_late` first, or it sees
+	/// them without the layer and unblended. Returns the wait in ns.
+	pub fn resolve_fx(&mut self) -> u64 {
+		let Some(l) = self.snap.fx_late.take() else {
+			return 0;
+		};
+		let t_w = std::time::Instant::now();
+		let w = crate::runlog::waiting("the effects (VU1) thread's layer of the last field");
+		let got = l.get();
+		drop(w);
+		let ns = t_w.elapsed().as_nanos() as u64;
+		efx_vu::prof_wait(ns);
+		if let (Some((qa, pools)), Some(fx)) = (got, self.snap.fx.as_mut()) {
+			fx.qa.extend(qa);
+			fx.pools.extend(pools);
+		}
+		ns
+	}
+
+	/// [PC] Waits for the GS capture thread's overlay of the last field taken if it is still pending (`Snap::ov_late`) and stores
+	/// it in `ov` / `ov_disp`. Every reader of those calls this first (`tick`, `present.rs`), so each sees what it saw when `tick`
+	/// waited right after taking the field; only the moment the render thread blocks moved.
+	pub(crate) fn resolve_ov(&mut self) {
 		if let Some(l) = self.snap.ov_late.take() {
+			let t_ov = std::time::Instant::now();
 			let w = crate::runlog::waiting("the GS capture thread's overlay of the last field");
 			let got = (l.0)();
 			drop(w);
+			WAIT_OV_NS.fetch_add(t_ov.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
 			if let Some((w, rows, px, disp, guard)) = got {
 				self.snap.ov = Some((w, rows, px, guard));
 				self.snap.ov_disp = disp;
-			}
-		}
-		// The effects layer of the field just taken (built on the VU1 thread meanwhile): the quads follow the ported ones.
-		if let Some(l) = self.snap.fx_late.take() {
-			let t_w = std::time::Instant::now();
-			let w = crate::runlog::waiting("the effects (VU1) thread's layer of the last field");
-			let got = l.get();
-			drop(w);
-			efx_vu::prof_wait(t_w.elapsed().as_nanos() as u64);
-			if let (Some((qa, pools)), Some(fx)) = (got, self.snap.fx.as_mut()) {
-				fx.qa.extend(qa);
-				fx.pools.extend(pools);
 			}
 		}
 	}

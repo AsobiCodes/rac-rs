@@ -7,9 +7,8 @@
 //! corners, colours and texture coordinates are drawn between the two. Texture coordinates of a repeating texture blend by
 //! their change modulo one texture (retail wraps its scroll); a change of more than `UV_MAX` (after the wrap) is left as it
 //! is (a fast scroll can not be told from one going the other way).
-use super::{FxMap, STILL_EPS, V3, kind_of};
+use super::kind_of;
 use crate::particles::{FX_CLAMP, WorldQuad};
-use crate::retail::RetailFx;
 use std::collections::HashSet;
 
 /// One standing quad: (index in this field's list, index in last field's, last field's corner for each corner of this one).
@@ -44,60 +43,6 @@ pub(super) fn hold(prev: &[WorldQuad], cur: &mut Vec<WorldQuad>, standing: &Hash
 	gone
 }
 
-/// The quads of `cur` of the standing kinds `still` with their partner in `prev` (`StillPair`). Once per field.
-pub(super) fn still_pairs(prev: &[WorldQuad], cur: &[WorldQuad], still: &HashSet<(usize, bool)>) -> Vec<StillPair> {
-	if still.is_empty() {
-		return Vec::new();
-	}
-	let cell = |q: &WorldQuad| {
-		let m: V3 = std::array::from_fn(|c| (q.pos[0][c] + q.pos[1][c] + q.pos[2][c] + q.pos[3][c]) * 0.25);
-		((m[0] / 0.5).floor() as i32, (m[1] / 0.5).floor() as i32, (m[2] / 0.5).floor() as i32)
-	};
-	let mut grid: FxMap<((usize, bool), (i32, i32, i32)), Vec<u32>> = FxMap::default();
-	for (j, q) in prev.iter().enumerate() {
-		let k = kind_of(q);
-		if still.contains(&k) {
-			grid.entry((k, cell(q))).or_default().push(j as u32);
-		}
-	}
-	let close = |a: V3, b: V3| (0..3).all(|c| (a[c] - b[c]).abs() < STILL_EPS);
-	let corners = |a: &WorldQuad, b: &WorldQuad| -> Option<[u8; 4]> {
-		let mut m = [0u8; 4];
-		for (k, &p) in a.pos.iter().enumerate() {
-			let d = |q: V3| (0..3).map(|c| (p[c] - q[c]).abs()).sum::<f32>();
-			let best = (0..4).min_by(|&x, &y| d(b.pos[x]).total_cmp(&d(b.pos[y])))?;
-			if !close(p, b.pos[best]) {
-				return None;
-			}
-			m[k] = best as u8;
-		}
-		b.pos.iter().all(|&q| a.pos.iter().any(|&p| close(p, q))).then_some(m)
-	};
-	let mut out = Vec::new();
-	for (i, q) in cur.iter().enumerate() {
-		let k = kind_of(q);
-		if !still.contains(&k) {
-			continue;
-		}
-		let (cx, cy, cz) = cell(q);
-		// The quad's own cell first, then the 26 around it.
-		let found = (0..27).map(|n| if n == 0 { (0, 0, 0) } else { let n = if n <= 13 { n - 1 } else { n }; (n / 9 - 1, n / 3 % 3 - 1, n % 3 - 1) }).find_map(|(dx, dy, dz)| {
-			grid.get(&(k, (cx + dx, cy + dy, cz + dz)))?.iter().find_map(|&j| corners(q, &prev[j as usize]).map(|m| (j, m)))
-		});
-		if let Some((j, m)) = found {
-			out.push((i as u32, j, m));
-		}
-	}
-	out
-}
-
-/// `o` (`blend_fx` of last field `a` and this one) with its standing queue-A / queue-B quads drawn at `t` (`pairs`).
-pub(super) fn blend(mut o: RetailFx, a: &RetailFx, t: f32, pairs: &[Vec<StillPair>; 2]) -> RetailFx {
-	lerp_still(&a.qa, &mut o.qa, t, &pairs[0]);
-	lerp_still(&a.qb, &mut o.qb, t, &pairs[1]);
-	o
-}
-
 /// `cur` (a copy of this field's quads) drawn at `t` between last field's `prev` (t = 0) and them (t = 1): colours and texture
 /// coordinates (the corners move by their welded vertex, `weld::apply`).
 pub(super) fn lerp_still(prev: &[WorldQuad], cur: &mut [WorldQuad], t: f32, pairs: &[StillPair]) {
@@ -125,6 +70,7 @@ pub(super) fn lerp_still(prev: &[WorldQuad], cur: &mut [WorldQuad], t: f32, pair
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::viewer::interp::index::partners_of as still_pairs;
 
 	fn quad(x: f32, u: f32) -> WorldQuad {
 		WorldQuad { pos: [[x, 0.0, 0.0], [x + 1.0, 0.0, 0.0], [x + 1.0, 1.0, 0.0], [x, 1.0, 0.0]], uv: [[u, 0.0], [u + 1.0, 0.0], [u + 1.0, 1.0], [u, 1.0]], colour: [[1.0; 4]; 4], tex: 3, additive: false }

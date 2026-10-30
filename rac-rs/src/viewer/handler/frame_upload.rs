@@ -18,6 +18,8 @@ impl App {
 		let actors = std::mem::take(&mut f.actors); let fx_posed = std::mem::take(&mut f.fx_posed); let title = std::mem::take(&mut f.title);
 		if let (Some(game), Some(w)) = (&mut self.game, &self.world) {
 			if let Some(g) = &mut self.gpu {
+				// [PC] perf (frame_upload_props.rs): the CPU-only prop inputs first, overlapping the wait of the first queue use.
+				let (fade_c, fade_r) = frame_upload_props::prop_inputs(g, game, &self.prop_anims, self.retail.as_ref());
 				g.points = [[0.0; 4]; 16];
 				// Retail mode: the slots come from retail RAM (retail.rs `dyn_lights`). A slot keeps its serial while it
 				// stays used; one freed and re-allocated between two snapshots keeps it too [I: not seen by the mirror].
@@ -59,26 +61,8 @@ impl App {
 				// NOV-10.5a-draw: the teleporter rings as debris-batch instances, the beams as additive fx quads.
 				let rings: Vec<particles::WorldInst> = Vec::new();
 				g.scene_actor_start(actors.iter().any(|a| a.is_some()), game.player.pos);
-				PROP_TINTS.with(|t| {
-					*t.borrow_mut() = (0..game.props.len())
-						.map(|i| {
-							let Some((class, _)) = self.prop_anims.get(&game.props[i].class_id) else {
-								// Retail mode: a static class (no animation, so not in `prop_anims`) takes the tail colour too.
-								let start = crate::retail::queue_q2::static_tint_start(game.props[i].class_id as u32)?;
-								return game.props[i].retail_tint().flatten().map(|c| (c, start));
-							};
-							// Retail mode: the moby's own +0x90 word (class +0x40 at init, actor overrides) when +0x34 & 0x10.
-							if let Some(t) = game.props[i].retail_tint() {
-								return t.map(|c| (c, class.colour_start));
-							}
-							Some((mobies::glow_rgb(class.glow)?, class.colour_start))
-						})
-						.collect();
-				});
 				g.prop_v = None;
-				g.class_uv = self.retail.as_ref().and_then(|r| r.fx()).map(|fx| fx.class_uv.iter().copied().collect()).unwrap_or_default();
-				let (fade_c, fade_r) = (game.fade_centres(), game.fade_radii());
-				g.set_props(Some(&game.props), self.smooth.posed(), &fx_posed, &actors, &self.debris, &rings, &fade_c, &fade_r); (f.actors, f.fx_posed) = (actors, fx_posed); // [PC] split view: kept for the Classic half's props re-run (frame_split.rs)
+				g.set_props(Some(&game.props), self.smooth.posed(), &fx_posed, &self.smooth.fx_skins.born, &actors, &self.debris, &rings, &fade_c, &fade_r); (f.actors, f.fx_posed) = (actors, fx_posed); // [PC] split view: kept for the Classic half's props re-run (frame_split.rs)
 				// BRIDGE-64a: each caster's sphere primitives with their joint applied (model space, class scale).
 				let casters: Vec<_> = Vec::<(usize, [f32; 2], u8)>::new()
 					.into_iter()
@@ -119,7 +103,7 @@ impl App {
 				world_quads.extend(game::reticle_quads(&game.reticles, self.cam.pos, game.frames));
 				world_quads.extend(game::reticle_quads(&game.mine_reticles, self.cam.pos, game.frames));
 				world_quads.extend(game::reticle_quads(&game.doom_reticles, self.cam.pos, game.frames));
-				// Retail mode: retail's queued landing markers and the queue-A / queue-B callbacks (retail.rs `queue_fx`).
+				if let Some(r) = self.retail.as_mut() { super::interp::fx_late(r); } // [PC] the effects layer is waited for only here (interp/late.rs). Retail mode: retail's queued landing markers and the queue-A / queue-B callbacks (retail.rs `queue_fx`).
 				if let Some(fx) = self.retail.as_ref().and_then(|r| r.fx()) {
 					world_quads.extend(game::reticle_quads_placed(&fx.reticles, fx.frames));
 					for s in &fx.ship_shadows {

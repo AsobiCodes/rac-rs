@@ -24,9 +24,9 @@ impl App {
 						g.set_retail_overlay(f.w, f.h, bytemuck::cast_slice(&f.rgba), Default::default(), false);
 					}
 				} else if let Some((w, rows, px, guard)) = r.take_overlay() {
-					g.set_retail_overlay(w, rows, &px, guard, hud_place::live(r));
+					g.set_retail_overlay_async(w, rows, px, guard, hud_place::live(r));
 				}
-				g.hud.clear();
+				g.hud.clear(); crate::viewer::hudart::glyphtex::refresh(g);
 				g.hud_split = None;
 				if g.has_retail_overlay() {
 					let (sw, sh) = (g.config.width as f32, g.config.height as f32);

@@ -181,6 +181,9 @@ pub const HOST_SIZE_V1_3: usize = 312;
 pub const HOST_SIZE_V1_4: usize = 352;
 /// ABI 1.6: through `pose_follow` (one more entry: 352 + 8; ABI 1.5 added no entry and kept 352). The size a host sets when the DLL's `omni_abi_minor` is 6 or more.
 pub const HOST_SIZE_V1_6: usize = 360;
+/// The highest minor ABI step this game's host serves (`host_size_for` gives `HOST_SIZE_V1_6` from here on). `rac-rs omni-host-abi` prints it
+/// (omni/hostabi.rs) so the launcher installs only a loader whose ABI this host can serve.
+pub const HOST_ABI_MINOR: u32 = 6;
 pub const VALUE_SIZE: usize = 24;
 /// ABI 1.5: bit 0 of `OmniValue.reserved` on the value `call_original` returns = the original gave no result (no struct size change).
 pub const OMNI_VALUE_NO_RESULT: i32 = 1;
@@ -444,7 +447,7 @@ impl Loader {
 	/// `omni_set_setting` (ABI 1.2): `value_json` is the JSON text of the new value. What `omni.setting(key)` returns changes at once and
 	/// the mod's `"setting"` callbacks run. Err = no such export, or the loader's reason.
 	pub fn set_setting(&self, mod_id: &str, key: &str, value_json: &str) -> Result<(), String> {
-		let Some(f) = self.dll.set_setting else { return Err("this omniloader.dll has no omni_set_setting".to_string()) };
+		let Some(f) = self.dll.set_setting else { return Err(format!("this {} has no omni_set_setting", super::load::lib_name())) };
 		let (Ok(m), Ok(k), Ok(v)) = (CString::new(mod_id), CString::new(key), CString::new(value_json)) else { return Err("a NUL byte in the setting".to_string()) };
 		// SAFETY: valid loader and C strings.
 		match unsafe { f(self.ptr, m.as_ptr(), k.as_ptr(), v.as_ptr()) } {

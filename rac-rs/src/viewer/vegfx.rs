@@ -2193,7 +2193,7 @@ impl Gpu {
 		let (owned, world, src) = (TfOwned::of(scene), world.clone(), src.clone());
 		let copy_ms = t.elapsed().as_secs_f64() * 1e3;
 		let (tx, rx) = std::sync::mpsc::channel();
-		let started = std::thread::Builder::new().name("veg plan".into()).stack_size(16 << 20).spawn(move || {
+		let started = super::startup::bgpool::spawn("veg plan", 16 << 20, move || { // [PC] its par_iters on a pool of its own (bgpool.rs)
 			// Background work: below-normal priority, so a 4-core PC keeps its game and render threads first.
 			crate::retail::hot::idle();
 			let view = owned.view();

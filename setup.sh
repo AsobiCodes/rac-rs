@@ -45,6 +45,10 @@
 #   --apply-update --new-version X  download and apply release X over this folder, then rebuild
 #                  (used by the launcher; --finish-only skips the download, --test-update-base D
 #                  takes the update from a folder or URL for tests)
+#   --add-to-steam      put the game into Steam's list of non-Steam games (for the Steam Deck and Big Picture), then exit.
+#                  Steam must be closed; shortcuts.vdf is copied to shortcuts.vdf.bak first (tools/steam_shortcut.py)
+#   --remove-from-steam  take the game out of Steam's list again, then exit
+#   --steam-status print "found=1 has=0" (Steam found / the game is in its list), then exit
 #   -h, --help     this text
 #
 # The environment:
@@ -53,6 +57,7 @@
 #   RAC_SYSTEM_TOOLCHAIN=1   the same as --system-toolchain
 #
 # Exit codes: 0 done, 1 failed (an "ERROR:" line says why), 3 the update could not be downloaded.
+# With --add-to-steam / --remove-from-steam (the same codes as setup.ps1): 0 done, 1 error, 2 Steam not found, 3 Steam is running.
 #
 
 # Steam (Game Mode) preloads its overlay into everything it starts; a 32-bit one makes every program print an ld.so "ERROR:"
@@ -164,6 +169,7 @@ new_version=''
 finish_only=0
 test_update_base=''
 expect_compiles=''
+steam_mode=''         # add | remove | status ('' = a normal run)
 
 while [ $# -gt 0 ]; do
     case $1 in
@@ -230,6 +236,15 @@ while [ $# -gt 0 ]; do
             [ $# -ge 2 ] || Fail '--expect-compiles needs a number'
             expect_compiles=$2
             shift 2 ;;
+        --add-to-steam)
+            steam_mode=add
+            shift ;;
+        --remove-from-steam)
+            steam_mode=remove
+            shift ;;
+        --steam-status)
+            steam_mode=status
+            shift ;;
         --skip-unblock|--no-shortcut|--no-pgo)
             # Windows-only switches the launcher passes to both scripts; nothing to do here.
             shift ;;
@@ -250,6 +265,32 @@ gen=generated
 romdir=rom
 # The private tools (step a).
 tc=$root/toolchain
+
+# "Add to Steam" / "Remove from Steam" / status: tools/steam_shortcut.py does the work, with the private Python when it is there, else the
+# system's. It needs no set-up step. Its output and exit code (0 done, 1 error, 2 Steam not found, 3 Steam running) are passed on.
+SteamShortcut() {
+    if [ -x "$tc/python/bin/python3" ]; then
+        ss_py=$tc/python/bin/python3
+    elif Have python3; then
+        ss_py=$(command -v python3)
+    else
+        Fail 'python3 not found (the Steam shortcut tool needs it)'
+    fi
+    [ -f "$root/tools/steam_shortcut.py" ] || Fail 'tools/steam_shortcut.py is missing from this folder'
+    unset PYTHONHOME PYTHONPATH PYTHONSTARTUP PYTHONPYCACHEPREFIX PYTHONUSERBASE
+    case ${LD_LIBRARY_PATH:-} in
+        *[Ss]team*) unset LD_LIBRARY_PATH ;;
+    esac
+    "$ss_py" -I "$root/tools/steam_shortcut.py" "$1" --root "$root"
+    ss_rc=$?
+    trap - EXIT
+    exit "$ss_rc"
+}
+
+# ---------------------------------------------------------------- Steam shortcut (only this, then exit)
+if [ -n "$steam_mode" ]; then
+    SteamShortcut "$steam_mode"
+fi
 
 # ---------------------------------------------------------------- toolchain mode
 # pinned (default) or system. The choice is remembered in toolchain/system.txt, so an update or a repair
@@ -400,8 +441,8 @@ PkgHint() {
         _like=$(sed -n 's/^ID_LIKE=//p' /etc/os-release | tr -d '"' | head -n 1)
     fi
     case " $_id $_like " in
-        # SteamOS has these already; its system folder is read-only until steamos-readonly is switched off
-        *" steamos "*) printf 'sudo steamos-readonly disable && sudo pacman -S %s' "$3" ;;
+        # SteamOS ships these libraries and its system folder is read-only: no package command, a way to the right place instead
+        *" steamos "*) printf 'nothing (SteamOS ships it: use Desktop Mode and the latest SteamOS update, and report it at github.com/AsobiCodes/rac-rs if it is still missing)' ;;
         *" arch "*|*" manjaro "*) printf 'sudo pacman -S %s' "$3" ;;
         *" fedora "*|*" rhel "*|*" centos "*) printf 'sudo dnf install %s' "$2" ;;
         *" debian "*|*" ubuntu "*) printf 'sudo apt install %s' "$1" ;;
@@ -489,7 +530,6 @@ Preflight() {
     CheckLib 'libudev.so.1|libudev1|systemd-libs|systemd-libs|controllers' ERROR || pf_bad=1
     [ "$pf_bad" -eq 0 ] || exit 1
     CheckLib 'libvulkan.so.1|libvulkan1|vulkan-loader|vulkan-icd-loader|graphics (the Vulkan loader; your graphics driver brings it)' WARNING
-    CheckLib 'libxkbcommon-x11.so.0|libxkbcommon-x11-0|libxkbcommon-x11|libxkbcommon-x11|the window (keyboard)' WARNING
     CheckLib 'libxkbcommon.so.0|libxkbcommon0|libxkbcommon|libxkbcommon|the window (keyboard)' WARNING
     # The window library (winit) opens these with dlopen when the game starts (x11-dl: libX11, libX11-xcb, libXcursor, libXi, all four
     # needed on X11; xkbcommon-dl: the two above; wayland-sys: libwayland-client). A missing one stops the game with "Failed to
@@ -498,6 +538,8 @@ Preflight() {
         CheckLib 'libX11-xcb.so.1|libx11-xcb1|libX11-xcb|libx11|the window (X11)' WARNING
         CheckLib 'libXcursor.so.1|libxcursor1|libXcursor|libxcursor|the window (X11, mouse pointer)' WARNING
         CheckLib 'libXi.so.6|libxi6|libXi|libxi|the window (X11, mouse and keyboard input)' WARNING
+        # winit loads libxkbcommon-x11 for X11 only: a Wayland-only PC without it must not be told it is missing
+        CheckLib 'libxkbcommon-x11.so.0|libxkbcommon-x11-0|libxkbcommon-x11|libxkbcommon-x11|the window (keyboard)' WARNING
     elif ! FindLibDir libwayland-client.so.0 >/dev/null; then
         printf 'WARNING: neither the X11 window libraries nor libwayland-client.so.0 are installed; the game needs a desktop. Install: %s\n' \
             "$(PkgHint 'libx11-6 libx11-xcb1 libxcursor1 libxi6 (or libwayland-client0)' 'libX11 libX11-xcb libXcursor libXi (or libwayland-client)' 'libx11 libxcursor libxi (or wayland)')"
@@ -515,6 +557,21 @@ AutoCargoJobs() {
     [ "$ac_j" -le "$ac_by_mem" ] || ac_j=$ac_by_mem
     [ "$ac_j" -ge 1 ] || ac_j=1
     printf '%s' "$ac_j"
+}
+
+# One line about how long the compile takes: measured 15 minutes with 5 compiler processes, about half an hour with 4 (the same numbers
+# as the launcher's install page: launcher/src/linuxenv.rs build_minutes). $1 = compiler processes. Whole numbers only (no bc/awk float).
+BuildEstimate() {
+    be_j=$1
+    case $be_j in ''|*[!0-9]*) return 0 ;; esac
+    [ "$be_j" -ge 1 ] || return 0
+    be_est=$((20 + 650 / be_j))          # tenths of a minute: 2 + 65 / jobs
+    be_lo=$(((be_est + 25) / 50 * 5))
+    be_hi=$(((be_est * 16 / 10 + 25) / 50 * 5))
+    [ "$be_lo" -ge 5 ] || be_lo=5
+    [ "$be_hi" -gt "$be_lo" ] || be_hi=$((be_lo + 5))
+    printf '  This takes about %s to %s minutes on this PC. Keep it plugged in and awake until it is done (sleep would stop the build).
+' "$be_lo" "$be_hi"
 }
 
 # ---------------------------------------------------------------- the update (-ApplyUpdate of setup.ps1)
@@ -1065,11 +1122,12 @@ fi
 # Differences from setup.ps1 step d: no PGO (the speed profiles in pgo/ are recorded with the Windows toolchain), so the Linux build
 # can be slower than the Windows player build.
 # --features rac-rs-exe/windows_gui is the public build: it also writes panics and the final error to player/crash.log
-# (the feature name is historical; on Linux it opens no window and changes nothing else).
+# (the feature name is historical; on Linux it also turns on the update notice window and the crash/panic message windows).
 if [ -z "$cargo_jobs" ] && [ -z "$CARGO_BUILD_JOBS" ]; then
     cargo_jobs=$(AutoCargoJobs)
     printf '  compiling with %s parallel jobs (the cores and the free memory decide; --cargo-jobs N changes it)\n' "$cargo_jobs"
 fi
+BuildEstimate "${cargo_jobs:-$CARGO_BUILD_JOBS}"
 set -- cargo build --release --manifest-path rac-rs/Cargo.toml --target-dir build \
     -p rac-rs-exe --bin rac-rs --features rac-rs-exe/windows_gui --config "$prof"
 [ "$tc_mode" != pinned ] || set -- "$@" --config "$linkcfg"
@@ -1087,6 +1145,278 @@ exe=build/release/rac-rs
 [ -f "$exe" ] || Fail "build finished but $exe is missing"
 printf '  built %s\n' "$exe"
 printf '%s\n' "$build_version" >"$gen/built_version.txt"
+
+# ---------------------------------------------------------------- (d2) the bundled mod loader and mods
+# The Linux counterpart of setup.ps1 Install-Bundled: bundled/libomniloader.so goes next to the game (build/release, where
+# the game looks for it), bundled/mods/<id> go into mods/. A loader or a mod with a known version that is the same or newer
+# stays, an older one is replaced; an installed one whose version cannot be known is replaced too, the old one kept
+# (loader: libomniloader.so.prev, mod: mod_backups/). A bundled version that cannot be read changes nothing. mods/active.txt and
+# mods/settings.json (which mods are on, and their settings) are never touched. Bundled mods start switched off.
+# One rule for the loader, the same as setup.ps1 (Install-BundledLoader) and the launcher's loader update:
+#   known version = MAJOR.MINOR.PATCH[-pre] AND a sidecar <file>.json with a sha256 equal to the file's (a missing sidecar, a
+#   sidecar of another file or an unreadable version = unknown). 1 not installed: install. 2 same SHA-256: nothing (the bundled
+#   sidecar is written when the installed one is missing or stale). 3 bundled version unknown: leave. 4 installed known:
+#   same or newer stays, older is replaced. 5 installed unknown: replaced. 6 every replacement keeps the old file as .prev, and
+#   its sidecar as .json.prev only when the sidecar belonged to it (else a leftover .json.prev is deleted).
+# Any trouble here is only said: the game itself is built and runs without mods.
+
+# First string value of a key in a small JSON file ("" when the file or the key is missing).
+JsonStr() {
+    [ -f "$1" ] || return 0
+    grep -o "\"$2\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "$1" 2>/dev/null | head -n 1 | cut -d'"' -f4
+}
+
+# VerClean V prints V without surrounding blanks and without a leading v.
+VerClean() {
+    printf '%s' "$1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^[vV]//'
+}
+
+# VerIsNum S: success when S is 0 or a number without leading zeros of at most 18 digits.
+VerIsNum() {
+    case $1 in
+        0) return 0 ;;
+        '' | *[!0-9]* | 0*) return 1 ;;
+    esac
+    [ "${#1}" -le 18 ]
+}
+
+# VerOk V: success when V is a version: MAJOR.MINOR.PATCH (numbers as VerIsNum) with an optional -pre of letters, digits, dots
+# and dashes without empty dot parts. A leading v and surrounding blanks are ignored.
+VerOk() (
+    set -f
+    v=$(VerClean "$1")
+    core=${v%%-*}
+    case $v in
+        *-*)
+            case ${v#*-} in
+                '' | *[!A-Za-z0-9.-]* | .* | *. | *..*) exit 1 ;;
+            esac
+            ;;
+    esac
+    case $core in
+        '' | *[!0-9.]* | .* | *. | *..* | *.*.*.*) exit 1 ;;
+        *.*.*) ;;
+        *) exit 1 ;;
+    esac
+    IFS=.
+    set -- $core
+    for p in "$@"; do
+        VerIsNum "$p" || exit 1
+    done
+    exit 0
+)
+
+# VerCmp A B prints -1, 0 or 1 when version A is below, equal to or above B, and x when either is not a version (VerOk). A pre-release
+# is below the plain version; pre parts are compared as numbers when both are numbers (rc.2 < rc.10), a number is below a word, words
+# compare as bytes. The same rules as setup.ps1 (Compare-ModVersion) and the launcher.
+VerCmp() (
+    LC_ALL=C
+    export LC_ALL
+    set -f
+    if ! VerOk "$1" || ! VerOk "$2"; then printf 'x'; exit 0; fi
+    a=$(VerClean "$1")
+    b=$(VerClean "$2")
+    pa=
+    pb=
+    case $a in *-*) pa=${a#*-}; a=${a%%-*} ;; esac
+    case $b in *-*) pb=${b#*-}; b=${b%%-*} ;; esac
+    IFS=.
+    set -- $a
+    a1=$1; a2=$2; a3=$3
+    set -- $b
+    b1=$1; b2=$2; b3=$3
+    unset IFS
+    for pair in "$a1 $b1" "$a2 $b2" "$a3 $b3"; do
+        set -- $pair
+        if [ "$1" -lt "$2" ]; then printf -- '-1'; exit 0; fi
+        if [ "$1" -gt "$2" ]; then printf '1'; exit 0; fi
+    done
+    if [ -z "$pa" ] && [ -z "$pb" ]; then printf '0'; exit 0; fi
+    if [ -z "$pa" ]; then printf '1'; exit 0; fi
+    if [ -z "$pb" ]; then printf -- '-1'; exit 0; fi
+    while :; do
+        if [ -z "$pa" ] && [ -z "$pb" ]; then printf '0'; exit 0; fi
+        if [ -z "$pa" ]; then printf -- '-1'; exit 0; fi
+        if [ -z "$pb" ]; then printf '1'; exit 0; fi
+        ia=${pa%%.*}
+        ib=${pb%%.*}
+        case $pa in *.*) pa=${pa#*.} ;; *) pa= ;; esac
+        case $pb in *.*) pb=${pb#*.} ;; *) pb= ;; esac
+        na=0
+        nb=0
+        if VerIsNum "$ia"; then na=1; fi
+        if VerIsNum "$ib"; then nb=1; fi
+        if [ "$na" = 1 ] && [ "$nb" = 1 ]; then
+            if [ "$ia" -lt "$ib" ]; then printf -- '-1'; exit 0; fi
+            if [ "$ia" -gt "$ib" ]; then printf '1'; exit 0; fi
+        elif [ "$na" = 1 ]; then
+            printf -- '-1'; exit 0
+        elif [ "$nb" = 1 ]; then
+            printf '1'; exit 0
+        elif [ "$ia" != "$ib" ]; then
+            if [ "x$ia" \< "x$ib" ]; then printf -- '-1'; exit 0; fi
+            printf '1'; exit 0
+        fi
+    done
+)
+
+# SidecarOwns FILE: success when FILE.json holds a sha256 equal to the SHA-256 of FILE (a sidecar of another file, or one without
+# a sha256, is stale and is not believed).
+SidecarOwns() {
+    [ -f "$1" ] && [ -f "$1.json" ] || return 1
+    _sc=$(JsonStr "$1.json" sha256 | tr '[:upper:]' '[:lower:]')
+    [ -n "$_sc" ] && [ "$_sc" = "$(Sha256 "$1")" ]
+}
+
+# LoaderVersion FILE prints the known version of a loader file (its sidecar belongs to it and the version is readable), else nothing.
+LoaderVersion() {
+    SidecarOwns "$1" || return 0
+    _lv=$(JsonStr "$1.json" version)
+    if VerOk "$_lv"; then printf '%s' "$_lv"; fi
+    return 0
+}
+
+# Copy FILE to DEST through a temporary name and a rename, so a game that is running keeps the file it has mapped.
+SafeCopy() {
+    cp -f "$1" "$2.new" && mv -f "$2.new" "$2"
+}
+
+InstallBundledLoader() {
+    src=$root/bundled/libomniloader.so
+    if [ ! -f "$src" ]; then
+        printf '  mod loader: this release has no libomniloader.so (script mods stay off)\n'
+        return 0
+    fi
+    dst=$root/build/release/libomniloader.so
+    mkdir -p "$root/build/release" || return 1
+    if [ ! -f "$dst" ]; then
+        SafeCopy "$src" "$dst" || return 1
+        [ ! -f "$src.json" ] || SafeCopy "$src.json" "$dst.json"
+        printf '  mod loader: libomniloader.so installed next to the game\n'
+        return 0
+    fi
+    # rule 2: the same file; the bundled sidecar is written when the installed one is missing or names another file
+    if [ "$(Sha256 "$src")" = "$(Sha256 "$dst")" ]; then
+        if [ -f "$src.json" ] && ! SidecarOwns "$dst"; then SafeCopy "$src.json" "$dst.json"; fi
+        printf '  mod loader: libomniloader.so is already there\n'
+        return 0
+    fi
+    have_v=$(LoaderVersion "$dst")
+    new_v=$(LoaderVersion "$src")
+    # rule 3: the bundled version cannot be known, so nothing can be compared
+    if [ -z "$new_v" ]; then
+        printf '  mod loader: libomniloader.so left as it is (the bundled version "%s" cannot be compared)\n' "$(JsonStr "$src.json" version)"
+        return 0
+    fi
+    # rule 4: a known installed version that is the same or newer stays (rule 5: an unknown one is replaced)
+    if [ -n "$have_v" ] && [ "$(VerCmp "$have_v" "$new_v")" != '-1' ]; then
+        printf '  mod loader: libomniloader.so %s not copied (the installed one is %s, the same or newer)\n' "$new_v" "$have_v"
+        return 0
+    fi
+    # rule 6: keep the old file as .prev (the launcher can put it back), its sidecar as .json.prev only when it belongs to it
+    SafeCopy "$dst" "$dst.prev" || return 1
+    if SidecarOwns "$dst"; then
+        SafeCopy "$dst.json" "$dst.json.prev" || return 1
+    else
+        rm -f "$dst.json.prev"
+    fi
+    SafeCopy "$src" "$dst" || return 1
+    if [ -f "$src.json" ]; then SafeCopy "$src.json" "$dst.json"; else rm -f "$dst.json"; fi
+    if [ -n "$have_v" ]; then
+        printf '  mod loader: libomniloader.so %s replaces %s (the old one is kept as libomniloader.so.prev)\n' "$new_v" "$have_v"
+    else
+        printf '  mod loader: libomniloader.so %s replaces a loader of unknown version (the old one is kept as libomniloader.so.prev)\n' "$new_v"
+    fi
+    return 0
+}
+
+# The manifest file of a mod folder: omni-mod.json, else openrac-mod.json ("" when there is none).
+ModManifest() {
+    if [ -f "$1/omni-mod.json" ]; then printf '%s' "$1/omni-mod.json"
+    elif [ -f "$1/openrac-mod.json" ]; then printf '%s' "$1/openrac-mod.json"
+    fi
+}
+
+InstallBundledMod() {
+    m=$1
+    name=$(basename "$m")
+    mods=$root/mods
+    new_mf=$(ModManifest "$m")
+    new_id=$(JsonStr "$new_mf" id)
+    new_v=$(JsonStr "$new_mf" version)
+    # the installed copy: the folder of the same name, unless it holds another mod; else the folder with the same id
+    have=
+    have_id=
+    have_v=
+    if [ -d "$mods/$name" ]; then
+        have=$mods/$name
+        hm=$(ModManifest "$have")
+        have_id=$(JsonStr "$hm" id)
+        have_v=$(JsonStr "$hm" version)
+    fi
+    if [ -n "$new_id" ] && [ "$have_id" != "$new_id" ] && [ -d "$mods" ]; then
+        for d in "$mods"/*/; do
+            [ -d "$d" ] || continue
+            d=${d%/}
+            [ "$d" != "$have" ] || continue
+            hm=$(ModManifest "$d")
+            if [ -n "$hm" ] && [ "$(JsonStr "$hm" id)" = "$new_id" ]; then
+                have=$d
+                have_id=$new_id
+                have_v=$(JsonStr "$hm" version)
+                break
+            fi
+        done
+    fi
+    if [ -z "$have" ]; then
+        mkdir -p "$mods" && cp -R "$m" "$mods/$name" || return 1
+        printf '  bundled mod: %s in mods/%s (off until you turn it on)\n' "$name" "$name"
+        return 0
+    fi
+    if [ -n "$new_id" ] && [ -n "$have_id" ] && [ "$have_id" != "$new_id" ]; then
+        printf '  bundled mod: %s not copied (mods/%s holds another mod, %s)\n' "$name" "$(basename "$have")" "$have_id"
+        return 0
+    fi
+    # never replace what is not clearly older: an equal or higher version, or a bundled version that cannot be read; an installed
+    # version that cannot be read (and a readable bundled one) is replaced, the old folder is kept in mod_backups
+    c=$(VerCmp "$have_v" "$new_v")
+    if [ "$c" = x ]; then
+        if ! VerOk "$new_v"; then
+            printf '  bundled mod: %s not copied (its version "%s" cannot be read, so mods/%s is left as it is)\n' "$name" "$new_v" "$(basename "$have")"
+            return 0
+        fi
+    elif [ "$c" != '-1' ]; then
+        printf '  bundled mod: %s %s not copied (mods/%s has %s, which is the same or newer)\n' "$name" "$new_v" "$(basename "$have")" "$have_v"
+        return 0
+    fi
+    # older (or an installed version that cannot be read): move the installed folder whole to mod_backups, then copy the bundled one
+    tag=$(printf '%s' "$have_v" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-40)
+    [ -n "$tag" ] || tag=unknown
+    bk=$root/mod_backups/$(basename "$have")-$tag
+    n=2
+    while [ -e "$bk" ]; do bk=$root/mod_backups/$(basename "$have")-$tag-$n; n=$((n + 1)); done
+    mkdir -p "$root/mod_backups" && mv "$have" "$bk" || return 1
+    if ! cp -R "$m" "$have"; then
+        rm -rf "$have"
+        mv "$bk" "$have"
+        return 1
+    fi
+    printf '  bundled mod: %s %s replaces %s in mods/%s; the old one is kept in mod_backups/%s\n' "$name" "$new_v" "${have_v:-an unreadable version}" "$(basename "$have")" "$(basename "$bk")"
+    return 0
+}
+
+InstallBundled() {
+    InstallBundledLoader || printf '  mod loader: could not be installed; the game still runs, without mod support\n'
+    [ -d "$root/bundled/mods" ] || return 0
+    for md in "$root/bundled/mods"/*/; do
+        [ -d "$md" ] || continue
+        InstallBundledMod "${md%/}" || printf '  bundled mod %s: could not be installed; the game still runs, without that mod\n' "$(basename "$md")"
+    done
+    return 0
+}
+
+Step '(d2) mod loader and bundled mods'
+InstallBundled
 
 # ---------------------------------------------------------------- (e) play
 Step '(e) play.cfg'

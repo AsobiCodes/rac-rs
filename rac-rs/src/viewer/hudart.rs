@@ -1,6 +1,7 @@
 //! Decodes the HUD art from the level data (bolt icon, counter bar, nanotech orb, default font) into textures and the `HudArt`
 //! slot table; a missing piece falls back to a plain shape.
 use super::*;
+pub(super) mod glyphtex;
 
 /// Decodes the HUD sprites (bolt icon 0x754f, counter bar 0x7580, nanotech orb 0x7536) and the
 /// default font; returns the textures in slot order. Missing pieces fall back to plain shapes.
@@ -164,20 +165,22 @@ pub(super) fn hud_art(l: &Level, disc: &mut iso::Disc) -> (Vec<Texture>, HudArt)
 
 /// The level's fonts (default, font 3, the shop panels' font 2) into `tex` and the slot table.
 fn load_fonts(l: &Level, disc: &mut iso::Disc, tex: &mut Vec<Texture>, a: &mut HudArt) {
+	crate::retail::glyphs::set_patch_for(l);
+	glyphtex::begin();
 	match art::font_glyph_tables(disc).and_then(|g| art::level_fonts(l, &g)) {
 		Ok(mut fonts) if !fonts.is_empty() => {
 			let f = fonts.remove(0);
 			a.font = Some((1 + tex.len(), f.glyphs));
-			tex.push(f.tex);
+			tex.push(glyphtex::dress(1 + tex.len(), f.tex));
 			// NOV-14.2b: font 3 (the last of the three level fonts).
 			if let Some(f3) = fonts.pop() {
 				a.font3 = Some((1 + tex.len(), f3.glyphs));
-				tex.push(f3.tex);
+				tex.push(glyphtex::dress(1 + tex.len(), f3.tex));
 			}
 			// Font 2 (the shop panels' text).
 			if let Some(f2) = fonts.pop() {
 				a.font2 = Some((1 + tex.len(), f2.glyphs));
-				tex.push(f2.tex);
+				tex.push(glyphtex::dress(1 + tex.len(), f2.tex));
 			}
 		}
 		r => eprintln!("hud font: {:?}", r.err()),

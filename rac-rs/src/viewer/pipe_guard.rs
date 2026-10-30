@@ -35,6 +35,7 @@ pub(crate) enum Effect {
 	RenderScale,
 	Reshade,
 	TieGpu,
+	WaterBedMin,
 }
 
 impl Effect {
@@ -59,6 +60,7 @@ impl Effect {
 			Effect::RenderScale => "render scale",
 			Effect::Reshade => "reshade passes",
 			Effect::TieGpu => "GPU tie rewrite (CPU path stays)",
+			Effect::WaterBedMin => "water bed minimum (the full shore fade stays)",
 		}
 	}
 }
@@ -174,7 +176,7 @@ Caused by:
 
 	#[test]
 	fn bits_are_distinct_and_marking_is_once() {
-		let all = [Effect::VolFog, Effect::VolClouds, Effect::Water, Effect::Underwater, Effect::Veg, Effect::SunShadow, Effect::ShadowVol, Effect::Post, Effect::Star, Effect::Starfield, Effect::HudSharp, Effect::RenderScale, Effect::Reshade, Effect::TieGpu];
+		let all = [Effect::VolFog, Effect::VolClouds, Effect::Water, Effect::Underwater, Effect::Veg, Effect::SunShadow, Effect::ShadowVol, Effect::Post, Effect::Star, Effect::Starfield, Effect::HudSharp, Effect::RenderScale, Effect::Reshade, Effect::TieGpu, Effect::WaterBedMin];
 		let mut seen = 0u32;
 		for e in all {
 			assert_eq!(seen & e.bit(), 0, "{e:?} shares a bit");

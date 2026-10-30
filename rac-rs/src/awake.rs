@@ -4,7 +4,8 @@
 //! the focus and is not minimised (`Awake::focus` / `minimise`, from the window events), so a game left in the background or
 //! minimised lets the screen sleep again. The guard clears the request when it drops (a thread's request also ends with the thread).
 //! A pad keeps working without the focus, so real pad input (`pad_input`) also resets the idle timers once a second, like a key press.
-//! No-op off Windows and in the hidden-window test runs (RAC_TEST_WINDOW), which must not keep a dev PC awake.
+//! Linux holds an idle lock for the same rule through `awake_linux.rs` (`set_state` hands the request over); other systems do nothing.
+//! No hold in the hidden-window test runs (RAC_TEST_WINDOW), which must not keep a dev PC awake.
 
 const ES_SYSTEM_REQUIRED: u32 = 0x1;
 const ES_DISPLAY_REQUIRED: u32 = 0x2;
@@ -24,9 +25,10 @@ pub fn set_state(flags: u32) -> u32 {
 	unsafe { SetThreadExecutionState(flags) }
 }
 
+/// Linux: the same request becomes an idle lock held by a spawned program (`awake_linux.rs`); other systems have none (0).
 #[cfg(not(windows))]
-pub fn set_state(_flags: u32) -> u32 {
-	0
+pub fn set_state(flags: u32) -> u32 {
+	crate::awake_linux::set_state(flags)
 }
 
 /// The request follows the game window: held while `wanted`, cleared otherwise and when this drops. It lives on the thread that runs

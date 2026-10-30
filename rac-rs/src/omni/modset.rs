@@ -127,9 +127,9 @@ mod tests {
 		let b = row("m", &setting(r#"{"key":"perks","name":"Extra projectiles and perks","type":"bool","default":true}"#), None).unwrap();
 		assert_eq!((b.values.len(), b.cur, b.name.as_str()), (2, 1, "Extra projectiles and perks"));
 		assert_eq!(row("m", &setting(r#"{"key":"k","type":"bool","default":true}"#), Some(&Json::Bool(false))).unwrap().cur, 0);
-		let c = setting(r#"{"key":"cap","name":"Level cap","type":"choice","default":"uya","choices":[{"value":"uya","name":"Up Your Arsenal (V5, V8 in New Game+)"},{"value":"endless","name":"Endless (V99)"}]}"#);
+		let c = setting(r#"{"key":"cap","name":"Level cap","type":"choice","default":"uya","choices":[{"value":"uya","name":"Standard (V5, V8 in New Game+)"},{"value":"endless","name":"Endless (V99)"}]}"#);
 		let r = row("m", &c, Some(&Json::Str("endless".into()))).unwrap();
-		assert_eq!((r.cur, r.values[0].1.as_str(), r.values[1].1.as_str()), (1, "Up Your Ars", "Endless"));
+		assert_eq!((r.cur, r.values[0].1.as_str(), r.values[1].1.as_str()), (1, "Standard", "Endless"));
 		assert_eq!(row("m", &c, None).unwrap().cur, 0);
 		assert_eq!(row("m", &c, Some(&Json::Str("bogus".into()))).unwrap().cur, 0, "an unknown stored value shows the first choice");
 	}

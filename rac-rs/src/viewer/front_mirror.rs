@@ -242,7 +242,7 @@ impl App {
 				fe.text.insert(id, s);
 			}
 		}
-		// The title's Mods page (retail/pcmods.rs): its texts follow the mods and settings, so they are refreshed while it is open.
+		crate::retail::pcext::titlegfx::put_texts(&mut fe.text, lang); // the title Graphics page's stepper, rows and live values (titlegfx.rs); the Mods page's texts (retail/pcmods.rs) follow the mods and settings, refreshed while it is open
 		if crate::retail::pcmods::title_open() || fe.text.get(crate::retail::pcmods::ID_MODS).is_empty() {
 			for (id, s) in crate::retail::pcmods::texts(lang) {
 				fe.text.insert(id, s);
@@ -307,7 +307,7 @@ impl App {
 			}
 		}
 		if let Some(g) = &mut self.gpu {
-			g.hud.clear();
+			g.hud.clear(); hudart::glyphtex::refresh(g);
 			g.hud_split = None;
 			// A front-end frame draws no sharp overlay: the sharp HUD target of the last level would make a New Game caption
 			// (mode 6, the capture's picture) wait for a plane that is never drawn.
@@ -352,7 +352,7 @@ impl App {
 			}
 			g.set_clip_view(None);
 			g.set_marker(at, skinned.as_ref(), None);
-			g.set_props(Some(&[]), &HashMap::new(), &HashMap::new(), &actors, &[], &[], &[], &[]);
+			g.set_props(Some(&[]), &HashMap::new(), &HashMap::new(), &Default::default(), &actors, &[], &[], &[], &[]);
 			g.set_particles(&[], &[], &[], &[], &self.cam, None);
 		}
 	}

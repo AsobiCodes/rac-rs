@@ -309,7 +309,14 @@ pub fn glyph_draw_hook(c: &mut Cpu) -> bool {
 
 /// Keyboard: a3 -> a pool copy of the string with its glyphs spelled out (nothing when it holds no glyph).
 fn spell_glyphs(c: &mut Cpu) {
-	let p = c.g(7) as u32;
+	spell_arg(c, 7);
+}
+
+/// Argument register `reg` (4 = a0 .. 7 = a3) holds a string pointer: points it at a pool copy with the glyphs spelled out
+/// (nothing changes when the string holds no glyph or is not in RAM). Used by the font line wrapper and the box text hook
+/// (`prompts_box`).
+pub(super) fn spell_arg(c: &mut Cpu, reg: usize) {
+	let p = c.g(reg) as u32;
 	if !(0x10_0000..0x0200_0000).contains(&p) {
 		return;
 	}
@@ -320,11 +327,16 @@ fn spell_glyphs(c: &mut Cpu) {
 			b => s.push(b),
 		}
 	}
+	// A string the read window cut, or whose spelled-out copy does not fit a pool slot (a mod's or translation's long text): left as it is,
+	// like the lookup path (`.filter(|n| n.len() < SLOT - 1)`).
+	if s.len() >= SLOT as usize - 1 {
+		return;
+	}
 	let ctx = ctx_now();
-	let Some(n) = substitute_text(&s, ctx, 0) else { return };
+	let Some(n) = substitute_text(&s, ctx, 0).filter(|n| n.len() < SLOT as usize - 1) else { return };
 	let at = place(&mut c.mem, (p, fnv(&s), ctx.modern_camera, ctx.menu.map_or(0, super::menu_keys::pack) ^ fnv(&n)), &n);
 	if at != 0 {
-		c.s(7, at as u64);
+		c.s(reg, at as u64);
 	}
 }
 
@@ -453,6 +465,9 @@ pub(crate) fn real_pads_off() -> bool {
 
 /// Start of the run (Retail::load): says which pad is there (the device stays the keyboard until the pad is used).
 pub fn init() {
+	if super::pcext::enabled() {
+		super::prompts_box::register();
+	}
 	if super::pcext::enabled() && !real_pads_off() && (xinput::connected() | super::hidpad::connected()) {
 		eprintln!("retail: prompts: gamepad found, keyboard prompts until it is used");
 	}
@@ -726,7 +741,8 @@ pub fn map_xinput(r: &XRaw) -> PadState {
 	// remapped it on Pause -> Options -> Controls).
 	let b = super::binds::pad_buttons(phys_mask(r), &super::binds::pad_map());
 	let (rx, ry) = stick(r.rx, r.ry, DZ_RIGHT);
-	let (lx, ly) = stick(r.lx, r.ly, DZ_LEFT);
+	let ((x, y), dz) = super::pcinput::left_stick(r.lx, r.ly, DZ_LEFT); // Stick dead zone row (High = retail, unchanged)
+	let (lx, ly) = stick(x, y, dz);
 	PadState { buttons: b, sticks: [rx, ry, lx, ly] }
 }
 

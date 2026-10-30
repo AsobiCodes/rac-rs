@@ -25,7 +25,10 @@ use ee_oracle::rec::{register_hand, Hand};
 use std::sync::{atomic::{AtomicBool, Ordering}, Mutex};
 use crate::{fmath::Fm, retail::disc::va};
 pub mod classic;
+pub mod shoulder;
+mod stamps;
 pub mod sticks;
+use stamps::{seg_clean, seg_mask};
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static IN: AtomicBool = AtomicBool::new(false);
@@ -95,7 +98,7 @@ static FEED: Mutex<Option<Vec<(u32, u32, Input)>>> = Mutex::new(None);
 
 /// Mouse motion while the cursor is captured.
 pub fn ui_mouse(dx: f32, dy: f32) {
-	if let Ok(mut u) = UI.lock() {
+	if let (false, Ok(mut u)) = (super::wheel_mouse::owns_motion(), UI.lock()) { // quick select wheel up: the mouse picks, no camera
 		u.look[0] += dx;
 		u.look[1] += dy;
 	}
@@ -434,6 +437,8 @@ struct St {
 	aim_t: u32,
 	lift_cap: f32,
 	lift: f32,
+	/// Strafe aiming Shoulder (shoulder.rs): the sideways shift in force.
+	sh: shoulder::Sh,
 	level: u32,
 	/// Hero position at the last hand run (respawn / teleport detection).
 	hero_last: [f32; 3],
@@ -472,6 +477,7 @@ static ST: Mutex<St> = Mutex::new(St {
 	aim_t: 0,
 	lift_cap: AIM_LIFT,
 	lift: 0.0,
+	sh: shoulder::Sh::ZERO,
 	level: 0,
 	hero_last: [0.0; 3],
 	tr: [0.0; 3],
@@ -669,12 +675,12 @@ fn seg(c: &mut Cpu, lv: &Lv, a: [f32; 3], b: [f32; 3]) -> Option<[f32; 3]> {
 	seg_mask(c, lv, a, b, 0xb4)
 }
 
-/// `seg` with the line-test mask as a parameter (aim.rs casts the crosshair ray with it).
-fn seg_mask(c: &mut Cpu, lv: &Lv, a: [f32; 3], b: [f32; 3], mask: u32) -> Option<[f32; 3]> {
+/// The line test with a mask (`stamps::seg_mask`, also the crosshair cast); `keep` puts the mobys' query stamps back (`stamps.rs`).
+fn seg_raw(c: &mut Cpu, lv: &Lv, a: [f32; 3], b: [f32; 3], mask: u32, keep: bool) -> Option<[f32; 3]> {
 	let res = ram(c, lv.res, 0x80);
 	let ring = ram(c, lv.ring, 0x1000);
 	let ms = mobys(c, lv.level);
-	let touch: Vec<u8> = ms.iter().map(|&m| c.mem.rd8(m + 0xa4)).collect();
+	let touch = stamps::save(c, &ms);
 	let sp = c.g(29) as u32;
 	let buf = (sp.wrapping_sub(0x200)) & !0xf;
 	let stack = ram(c, buf.wrapping_sub(0x400), 0x600);
@@ -708,12 +714,10 @@ fn seg_mask(c: &mut Cpu, lv: &Lv, a: [f32; 3], b: [f32; 3], mask: u32) -> Option
 	}
 	let hit = c.g(2) as u32 & 1 != 0;
 	let p = rv(c, lv.res + 0x20);
-	HIT_MOBY.store(if hit { c.mem.rd32(lv.res + 0x18) } else { 0 }, Ordering::Relaxed);
+	shoulder::note_hit(c, lv, hit);
 	put(c, lv.res, &res);
 	put(c, lv.ring, &ring);
-	for (&m, &t) in ms.iter().zip(&touch) {
-		c.mem.wr8(m + 0xa4, t);
-	}
+	stamps::restore(c, &ms, &touch, keep);
 	put(c, buf.wrapping_sub(0x400), &stack);
 	c.s(29, sp as i32 as i64 as u64);
 	hit.then_some(p)
@@ -1334,7 +1338,7 @@ fn step(c: &mut Cpu, lv: &'static Lv, rec: u32, st: &mut St) {
 	let why = classic::why(c, lv, rec, st);
 	if let Some(why) = why {
 		st.aiming = false;
-		(st.aim_t, st.lift, st.lift_cap) = (0, 0.0, AIM_LIFT);
+		shoulder::reset(st);
 		if st.live {
 			st.live = false;
 			st.blend = BLEND;
@@ -1394,7 +1398,7 @@ fn step(c: &mut Cpu, lv: &'static Lv, rec: u32, st: &mut St) {
 		}
 		st.live = true;
 		st.blend = 0;
-		(st.aim_t, st.lift, st.lift_cap) = (0, 0.0, AIM_LIFT);
+		shoulder::reset(st);
 		st.dy = Dy::ZERO;
 		st.dy.hero_prev = hero;
 		st.dy.field = st.field.wrapping_sub(1);
@@ -1475,24 +1479,8 @@ fn step(c: &mut Cpu, lv: &'static Lv, rec: u32, st: &mut St) {
 	// (boom under RISE_MIN) the camera rises over him (pitch up in 0.3 rad steps, the first that gives room) instead of
 	// sitting in his head; the rise ends once the boom has RISE_BAND more room (hysteresis), and it moves on a critically
 	// damped spring (no bobbing at the threshold, no jolt when it starts or ends).
-	// Aim lift: the camera orbits a pivot AIM_LIFT above Ratchet's chest (blended in and out over AIM_BLEND fields, limited by a
-	// ceiling over him: retail's segment test up from the chest), so the centre ray clears his head. Released: lift 0, the same pose.
-	if !flat {
-		(st.aim_t, st.lift, st.lift_cap) = (0, 0.0, AIM_LIFT);
-	}
-	st.aim_t = if st.aiming { (st.aim_t + 1).min(AIM_BLEND) } else { st.aim_t.saturating_sub(1) };
-	if st.aim_t > 0 {
-		let up = [st.dy.pivc[0], st.dy.pivc[1], st.dy.pivc[2] + AIM_LIFT + AIM_CEIL];
-		let goal = match seg(c, lv, st.dy.pivc, up) {
-			Some(h) => (h[2] - st.dy.pivc[2] - AIM_CEIL).clamp(0.0, AIM_LIFT),
-			None => AIM_LIFT,
-		};
-		st.lift_cap += (goal - st.lift_cap).clamp(-AIM_CAP_STEP, AIM_CAP_STEP);
-		let t = st.aim_t as f32 / AIM_BLEND as f32;
-		st.lift = (AIM_LIFT * t * t * (3.0 - 2.0 * t)).min(st.lift_cap);
-	} else {
-		st.lift = 0.0;
-	}
+	// Aim lift (shoulder.rs `lift`): the camera orbits a pivot lifted above Ratchet's chest (Raised: AIM_LIFT; Shoulder: less, plus a sideways shift below), blended in and out over AIM_BLEND fields and limited by a ceiling over him, so the centre ray clears his head.
+	shoulder::lift(c, lv, st, flat);
 	let mut pivot_r = fr.lift(st.dy.pivc, st.lift);
 	if dynamic {
 		dyn_probe(c, lv, st, &fr, hero);
@@ -1502,6 +1490,7 @@ fn step(c: &mut Cpu, lv: &'static Lv, rec: u32, st: &mut St) {
 		pivot_r = add3(pivot_r, st.dy.frame_off);
 		goal_len = (st.dist * st.dy.dist_f + st.dy.frame_len).clamp(ZOOM.0, ZOOM.1);
 	}
+	(pivot_r, goal_len) = shoulder::apply(c, lv, st, &fr, pivot_r, goal_len, dynamic);
 	let (pivot, yaw) = (pivot_r, st.yaw);
 	let reach = |c: &mut Cpu, p: f32| match seg(c, lv, pivot, fr.eye(pivot, yaw, p, goal_len)) {
 		// Dynamic: never past the contact itself (the floor of MIN_LEN would put the eye in the wall when the contact is closer).
@@ -1547,7 +1536,7 @@ fn step(c: &mut Cpu, lv: &'static Lv, rec: u32, st: &mut St) {
 		st.dy.len_v = v;
 		(safe + y).min(safe)
 	} else {
-		(st.len + RELEASE).min(safe)
+		(st.len + shoulder::release(st)).min(safe)
 	};
 	st.tr = [base, safe, rise_goal];
 	let e = fr.eye(pivot_r, st.yaw, pitch, st.len);
@@ -1621,6 +1610,8 @@ pub struct AimCam {
 	pub fwd: [f32; 3],
 	pub pivot: [f32; 3],
 	pub field: u32,
+	/// Shoulder aim: the camera is off Ratchet's centre line (the muzzle is not on the view axis).
+	pub shoulder: bool,
 }
 
 /// None unless `aim_yaw()` is Some (the same state: modern camera driving, RMB held).
@@ -1631,7 +1622,9 @@ pub fn aim_cam() -> Option<AimCam> {
 	}
 	let (eye, yaw, pitch) = st.last;
 	let o = st.dy.frame_off;
-	Some(AimCam { eye, fwd: rows(yaw, pitch)[0], pivot: [st.dy.pivc[0] + o[0], st.dy.pivc[1] + o[1], st.dy.pivc[2] + st.lift + o[2]], field: st.field })
+	let mut cam = AimCam { eye, fwd: rows(yaw, pitch)[0], pivot: [st.dy.pivc[0] + o[0], st.dy.pivc[1] + o[1], st.dy.pivc[2] + st.lift + o[2]], field: st.field, shoulder: st.sh.shift != [0.0; 3] };
+	cam.pivot = [cam.pivot[0] + st.sh.shift[0], cam.pivot[1] + st.sh.shift[1], cam.pivot[2] + st.sh.shift[2]];
+	Some(cam)
 }
 
 /// Retail's segment test (seg_collide of the running level) from `a` to `b` with `mask`: the contact point and the moby hit

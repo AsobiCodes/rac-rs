@@ -347,7 +347,7 @@ impl VolClouds {
 		let pass = |enc: &mut wgpu::CommandEncoder, i: u32, label: &'static str, target: &wgpu::TextureView, pipeline: &wgpu::RenderPipeline, g: &wgpu::BindGroup| {
 			let mut p = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
 				label: Some(label),
-				color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: target, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store } })],
+				color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: target, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: super::post::overwrite(), store: wgpu::StoreOp::Store } })],
 				depth_stencil_attachment: None,
 				timestamp_writes: tm.and_then(|tm| tm.writes(i)).or_else(|| crate::viewer::passtime::rw(label)),
 				occlusion_query_set: None,

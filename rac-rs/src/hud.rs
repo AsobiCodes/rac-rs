@@ -222,6 +222,17 @@ pub fn font_glyph_tables(disc: &mut Disc) -> R<Vec<Vec<Glyph>>> {
 /// The three text fonts (core fx_textures records 1..=3, 256x128 PSMT8), paired with `glyphs`
 /// from `font_glyph_tables`. Font ids in the game are 1-based, so font 1 is element 0.
 pub fn level_fonts(level: &Level, glyphs: &[Vec<Glyph>]) -> R<Vec<Font>> {
+	Ok(level_fonts_raw(level)?
+		.into_iter()
+		.zip(glyphs)
+		.map(|((px, colours), g)| Font { tex: Texture { w: 256, h: 128, rgba: px.iter().map(|&v| colours[v as usize]).collect() }, glyphs: g.clone() })
+		.collect())
+}
+
+/// The three text fonts as the GS holds them: the 256x128 PSMT8 index bytes and the 256-colour palette in index order (`palette_rgba`),
+/// for the Button glyphs option (retail/glyphs.rs), which needs the sheet's indices to recognise its upload and the palette to
+/// quantise its pictures into.
+pub fn level_fonts_raw(level: &Level) -> R<Vec<(Vec<u8>, Vec<[u8; 4]>)>> {
 	let count = u32_at(&level.index, 0x58)? as usize;
 	let table = u32_at(&level.index, 0x5c)? as usize;
 	let base = u32_at(&level.index, 0x68)? as usize;
@@ -235,12 +246,7 @@ pub fn level_fonts(level: &Level, glyphs: &[Vec<Glyph>]) -> R<Vec<Font>> {
 		if (w, h) != (256, 128) {
 			return Err(format!("font record {k} is {w}x{h}"));
 		}
-		let colours = palette_rgba(span(&level.core, base + pal, 1024)?);
-		let px = span(&level.core, base + pix, w * h)?;
-		out.push(Font {
-			tex: Texture { w, h, rgba: px.iter().map(|&v| colours[v as usize]).collect() },
-			glyphs: glyphs[k - 1].clone(),
-		});
+		out.push((span(&level.core, base + pix, w * h)?.to_vec(), palette_rgba(span(&level.core, base + pal, 1024)?)));
 	}
 	Ok(out)
 }

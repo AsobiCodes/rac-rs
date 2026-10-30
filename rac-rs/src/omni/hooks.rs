@@ -173,14 +173,9 @@ unsafe extern "C" fn install_cb(user: *mut c_void, index: u32, id: *const c_char
 	0
 }
 
-/// `Table::build` installs relocatable hands only when RAC_HS is not 0 and ORACLE_HAND is not 0 (oracle/src/rec/mod.rs): mod hooks
-/// must not depend on the speed-hand A/B switch, so RAC_HS=0 is overridden while mods hook the game (this also keeps the speed
-/// hands on; oracle_req.patch in the lane adds a separate registry that ignores RAC_HS).
+/// `Table::build` installs REGISTERED relocatable hands (mod hooks, PC hooks) regardless of RAC_HS (only the built-in speed hands
+/// follow it), so RAC_HS=0 no longer needs overriding; ORACLE_HAND=0 still switches every hand off.
 pub(super) fn allow_reloc_hands() {
-	if !ee_oracle::rec::speed_hands_on() {
-		eprintln!("omni: RAC_HS=0 would switch the mod hooks off; the speed hands stay on while mods hook the game");
-		ee_oracle::rec::speed_hands_force(Some(true));
-	}
 	if std::env::var("ORACLE_HAND").is_ok_and(|v| v == "0") {
 		eprintln!("omni: ORACLE_HAND=0 switches every hand off, mod hooks included; the hooks will not run");
 	}

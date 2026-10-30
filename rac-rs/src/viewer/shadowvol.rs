@@ -152,36 +152,6 @@ pub(super) fn slot_runs(meshes: &[&Mesh]) -> Vec<Vec<(u32, u32, u32)>> {
 		.collect()
 }
 
-/// The props batch's draws split into the main pass (every face but the late slots') and the late redraw (the late slots'
-/// runs), each keeping its draw's texture, cull and instance word.
-pub(super) fn split_late(draws: &[Draw], runs: &[Vec<(u32, u32, u32)>], late: &[usize]) -> (Vec<Draw>, Vec<Draw>) {
-	let mut cut: Vec<(u32, u32, u32)> = late.iter().filter_map(|&s| runs.get(s)).flatten().copied().collect();
-	cut.sort_unstable();
-	let (mut main, mut tail) = (Vec::with_capacity(draws.len()), Vec::with_capacity(cut.len()));
-	let mut k = 0;
-	for (di, d) in draws.iter().enumerate() {
-		let mut from = d.start;
-		while k < cut.len() && cut[k].0 < di as u32 {
-			k += 1;
-		}
-		while k < cut.len() && cut[k].0 == di as u32 {
-			let (_, start, count) = cut[k];
-			if start > from {
-				main.push(Draw { start: from, count: start - from, ..*d });
-			}
-			if count > 0 {
-				tail.push(Draw { start, count, ..*d });
-			}
-			from = from.max(start + count);
-			k += 1;
-		}
-		if d.start + d.count > from {
-			main.push(Draw { start: from, count: d.start + d.count - from, ..*d });
-		}
-	}
-	(main, tail)
-}
-
 /// SCH-6b for one caster: the fade (0 = not in the list) and the straddle flag from the view-space depth of the draw
 /// sphere (centre and radius in 1/1024 m).
 pub(super) fn caster_fade(view: &super::clip::ClipView, dist: u8, centre: [f32; 3], w: f32) -> Option<(i32, bool)> {
@@ -350,13 +320,6 @@ mod tests {
 		let (a, b, c) = (mesh(&[1, 1]), mesh(&[5]), mesh(&[5, 1]));
 		let runs = slot_runs(&[&a, &b, &c]);
 		assert_eq!(runs, vec![vec![(0, 0, 6)], vec![(1, 9, 3)], vec![(0, 6, 3), (1, 12, 3)]]);
-		let draws = [Draw { inst: 0, cull: 0, texture: 7, start: 0, count: 9 }, Draw { inst: 0, cull: 1, texture: 8, start: 9, count: 6 }];
-		let (main, late) = split_late(&draws, &runs, &[2]);
-		let r = |v: &[Draw]| v.iter().map(|d| (d.texture, d.cull, d.start, d.count)).collect::<Vec<_>>();
-		assert_eq!(r(&main), vec![(7, 0, 0, 6), (8, 1, 9, 3)]);
-		assert_eq!(r(&late), vec![(7, 0, 6, 3), (8, 1, 12, 3)]);
-		let (main, late) = split_late(&draws, &runs, &[]);
-		assert_eq!((r(&main), late.len()), (r(&draws), 0));
 	}
 
 	#[test]

@@ -3,7 +3,7 @@
   "update": { "github": "AsobiCodes/arsenal-mastery" },
   "id": "arsenal-mastery",
   "name": "Arsenal Mastery",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "author": "rac-rs",
   "description": "Ratchet & Clank 3 style weapon levels for Ratchet & Clank 1. Every weapon, and the wrench, earns XP from the damage it deals and grows from V1 to V5 (V8 in New Game+, V99 in Endless); enemies are rebalanced to match. XP is kept per save slot. Needs the rac-rs OmniLoader extension.",
   "license": "MIT",
@@ -55,7 +55,7 @@
     { "key": "xp_rate", "name": "XP rate", "type": "float", "default": 1.0, "min": 0.5, "max": 3.0, "step": 0.1,
       "description": "How fast weapons earn XP (x1.0 = 10 XP per point of health taken off an enemy)." },
     { "key": "level_cap", "name": "Level cap", "type": "choice", "default": "uya",
-      "choices": [ { "value": "uya", "name": "Up Your Arsenal (V5, V8 in New Game+)" }, { "value": "endless", "name": "Endless (V99)" } ],
+      "choices": [ { "value": "uya", "name": "Standard (V5, V8 in New Game+)" }, { "value": "endless", "name": "Endless (V99)" } ],
       "description": "How high weapons can level." },
     { "key": "rebalance", "name": "Enemy rebalance", "type": "choice", "default": "standard",
       "choices": [ { "value": "off", "name": "Off" }, { "value": "standard", "name": "Standard" }, { "value": "hard", "name": "Hard" } ],
@@ -85,7 +85,7 @@
       "description": "Multiplies the damage enemy hits do to Ratchet. With Nanotech levels: the health a hit takes. Without: x0.5 = every second hit costs no orb, x2 = two orbs a hit." }
   ],
   "presets": [
-    { "id": "up_your_arsenal", "name": "Up Your Arsenal",
+    { "id": "up_your_arsenal", "name": "Default",
       "values": { "xp_rate": 1.0, "level_cap": "uya", "rebalance": "standard", "level_power": true, "gold_at_v5": true, "perks": true, "ammo_mode": "normal", "xp_display": true, "start_level": "off", "nanotech": true, "nanotech_xp_rate": 1.0, "weapon_damage": 1.0, "enemy_damage": 1.0 } },
     { "id": "just_xp", "name": "Just the XP",
       "values": { "xp_rate": 1.0, "level_cap": "uya", "rebalance": "off", "level_power": false, "gold_at_v5": false, "perks": false, "ammo_mode": "normal", "xp_display": true, "start_level": "off", "nanotech": false, "nanotech_xp_rate": 1.0, "weapon_damage": 1.0, "enemy_damage": 1.0 } },

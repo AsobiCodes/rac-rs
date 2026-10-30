@@ -26,6 +26,10 @@
 
 use super::*;
 
+mod props;
+pub(super) mod bounds;
+mod view;
+
 pub(super) const CASCADES: usize = 3;
 /// Shadow map size per cascade (the allocation; Low and Medium draw into the corner of it, see `Quality`).
 pub(super) const RES: u32 = 2048;
@@ -247,6 +251,8 @@ pub(super) struct SunFrame {
 	pub strength: f32,
 	pub cascades: [Cascade; CASCADES],
 	pub q: Quality,
+	/// RAC_SUN_FRUSTUM: the view pyramid casters are tested against (view.rs); None = off.
+	pub view: Option<view::View>,
 }
 
 /// Writes this frame's shadow uniforms (`Uniforms::sun_*`): cascade matrices, (dir, strength), per cascade the receiver depth
@@ -324,6 +330,50 @@ enum Src {
 	Clip,
 	Debris,
 	Shrubs,
+	/// Terrain, ties and shrubs whose texture never goes below the cut: the depth-only pipeline (`plain_ok`).
+	TfragsPlain,
+	TiesPlain,
+	ShrubsPlain,
+}
+
+impl Src {
+	/// [probe] The batch's name in the RAC_GPU_PASSES lap rows.
+	fn name(self) -> &'static str {
+		match self {
+			Src::World => "world",
+			Src::Tfrags => "tfrags",
+			Src::Ties => "ties",
+			Src::Props => "props",
+			Src::Marker => "marker",
+			Src::Clip => "clip",
+			Src::Debris => "debris",
+			Src::Shrubs => "shrubs",
+			Src::TfragsPlain => "tfrags_plain",
+			Src::TiesPlain => "ties_plain",
+			Src::ShrubsPlain => "shrubs_plain",
+		}
+	}
+}
+
+/// The smallest texel alpha (texture value, 0..255) at which a caster of each kind still casts: the cuts of `shrub_shader`
+/// (terrain: alpha x 128 >= 95.5, tie: >= 63.5, shrub: >= 0.375) rounded up to whole texture values. A slot whose smallest
+/// texel (`Scene::sun_alpha`) is at least this never discards, so its draws need no alpha test.
+const TFRAG_OPAQUE: u8 = 191;
+const TIE_OPAQUE: u8 = 127;
+const SHRUB_OPAQUE: u8 = 96;
+
+/// The draw lists of `SunShadow::lists` and the vectors it builds them from.
+#[derive(Default)]
+struct Scratch {
+	/// Indirect-draw arguments, and the runs over them (cascade, batch, byte offset of the first argument, number of draws).
+	args: Vec<[u32; 5]>,
+	runs: Vec<(usize, Src, u64, u32)>,
+	/// One batch's draws that keep the alpha test / that cast depth-only (`(first index, index count, slot word)`).
+	cut_l: Vec<(u32, u32, u32)>,
+	plain_l: Vec<(u32, u32, u32)>,
+	/// `props::draws`: the slots' index runs, and the merged draws.
+	props_runs: Vec<(u32, u32, u32)>,
+	props_out: Vec<(u32, u32, u32)>,
 }
 
 pub(super) struct SunShadow {
@@ -340,6 +390,11 @@ pub(super) struct SunShadow {
 	pipeline_shrub: Option<wgpu::RenderPipeline>,
 	pipeline_tfrag: Option<wgpu::RenderPipeline>,
 	pipeline_tie: Option<wgpu::RenderPipeline>,
+	/// [PC] lane v042_shadow: the texel-alpha casters' own vertex entry (`vs_sh_shrub`) without a fragment stage, for the draws
+	/// whose texture never goes below the cut (`Scene::sun_alpha`): the depth is the alpha-tested pipelines' by construction.
+	pipeline_plain: Option<wgpu::RenderPipeline>,
+	/// Per-frame draw-list buffers, kept between frames (no allocation per cascade).
+	scratch: Scratch,
 	indirect: Option<wgpu::Buffer>,
 	cap: usize,
 	/// The eased key light (direction before `raise`, strength) and the scene it belongs to (a new level snaps), and when it
@@ -444,7 +499,30 @@ impl SunShadow {
 			})
 		});
 		let (pipeline_shrub, pipeline_tfrag, pipeline_tie) = (make_cut("fs_sh_shrub"), make_cut("fs_sh_tfrag"), make_cut("fs_sh_tie"));
-		SunShadow { tex, layers, array, cmp, ubuf, ubind, pipeline, pipeline_props, pipeline_shrub, pipeline_tfrag, pipeline_tie, indirect: None, cap: 0, dir: None, scene_id: 0, last: None, soft_off: super::volfog::soft::off_buffer(device) }
+		// Depth-only twin of the three: the same module, vertex entry and vertex layout, no fragment stage (the group-1 texture array
+		// is not in its layout: `vs_sh_shrub` does not touch it).
+		let pipeline_plain = cut.as_ref().map(|(module, _)| {
+			let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("sun shadow depth only"), bind_group_layouts: &[Some(&ulayout)], immediate_size: 0 });
+			let vu = wgpu::VertexBufferLayout { array_stride: std::mem::size_of::<Vertex>() as u64, step_mode: wgpu::VertexStepMode::Vertex, attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2] };
+			device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+				label: Some("vs_sh_shrub depth only"),
+				layout: Some(&pl),
+				vertex: wgpu::VertexState { module, entry_point: Some("vs_sh_shrub"), compilation_options: Default::default(), buffers: &[Some(vu)] },
+				fragment: None,
+				primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+				depth_stencil: Some(wgpu::DepthStencilState {
+					format: wgpu::TextureFormat::Depth32Float,
+					depth_write_enabled: Some(true),
+					depth_compare: Some(wgpu::CompareFunction::Less),
+					stencil: Default::default(),
+					bias: wgpu::DepthBiasState { constant: 0, slope_scale: 1.5, clamp: 0.0 },
+				}),
+				multisample: Default::default(),
+				multiview_mask: None,
+				cache: None,
+			})
+		});
+		SunShadow { tex, layers, array, cmp, ubuf, ubind, pipeline, pipeline_props, pipeline_shrub, pipeline_tfrag, pipeline_tie, pipeline_plain, scratch: Scratch::default(), indirect: None, cap: 0, dir: None, scene_id: 0, last: None, soft_off: super::volfog::soft::off_buffer(device) }
 	}
 
 	/// The level's group-0 entries: `ubuf` at binding 0, the cascades and their compare sampler at 1 and 2, at 3 the fog's no-Z
@@ -495,7 +573,7 @@ impl SunShadow {
 		if s <= 0.0 {
 			return None;
 		}
-		Some(SunFrame { dir, strength: s, cascades: fit_all(cam, aspect, dir, q), q })
+		Some(SunFrame { dir, strength: s, cascades: fit_all(cam, aspect, dir, q), q, view: super::gfxq::sun_frustum().then(|| view::View::new(cam, aspect, dir)).flatten() })
 	}
 
 	/// The cascades `frame` fits for `cam` while the light holds still (the eased key light of this level already is its target, so
@@ -507,19 +585,20 @@ impl SunShadow {
 		(key == target).then(|| fit_all(cam, aspect, raise(key), q))
 	}
 
-	/// Renders the three cascades of `f` from the scene's casters.
-	/// `skin` is the GPU-posed props batch's bind group and slot attribute (None: the CPU poses the props in world space).
-	pub(super) fn encode(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, enc: &mut wgpu::CommandEncoder, scene: &Scene, f: &SunFrame, skin: Option<(&wgpu::BindGroup, Option<&wgpu::Buffer>)>) {
-		let _s = super::profile::span("sun_shadow");
-		for (k, c) in f.cascades.iter().enumerate().take(f.q.cascades) {
-			queue.write_buffer(&self.ubuf[k], 0, bytemuck::bytes_of(&c.vp));
-		}
-		// Draw lists: per cascade, per batch, the merged index ranges of the casters.
-		let mut args: Vec<[u32; 5]> = Vec::new();
-		let mut runs: Vec<(usize, Src, u64, u32)> = Vec::new();
-		let push = |args: &mut Vec<[u32; 5]>, runs: &mut Vec<(usize, Src, u64, u32)>, k: usize, src: Src, draws: &mut dyn Iterator<Item = (u32, u32, u32)>| {
+	/// Whether terrain and ties cast by texel alpha (their texture slot in the first instance) this frame.
+	fn cuts(&self, scene: &Scene) -> bool {
+		self.pipeline_tfrag.is_some() && scene.tex_array.is_some() && !super::gfxq::sun_plain()
+	}
+
+	/// The draw lists of this frame into `sc`: per cascade, per batch (`Src`), the merged index ranges of the casters as indirect-draw
+	/// arguments, and the runs (cascade, batch, first argument's byte offset, number of draws).
+	fn lists(&self, scene: &Scene, f: &SunFrame, sc: &mut Scratch) {
+		let Scratch { args, runs, cut_l, plain_l, props_runs, props_out } = sc;
+		args.clear();
+		runs.clear();
+		let push = |args: &mut Vec<[u32; 5]>, runs: &mut Vec<(usize, Src, u64, u32)>, k: usize, src: Src, draws: &[(u32, u32, u32)]| {
 			let first = args.len();
-			for (start, count, fi) in draws {
+			for &(start, count, fi) in draws {
 				// Adjacent ranges (texture runs of one mesh) merge when they cast alike: depth only, or the same slot for texel alpha.
 				let n = args.len();
 				match args.last_mut().filter(|a| n > first && a[2] + a[0] == start && a[4] == fi) {
@@ -531,9 +610,33 @@ impl SunShadow {
 				runs.push((k, src, (first * 20) as u64, (args.len() - first) as u32));
 			}
 		};
+		// A whole batch's draws (no slot word), into `v`.
+		let whole = |v: &mut Vec<(u32, u32, u32)>, draws: &[Draw], solid: &dyn Fn(&Draw) -> bool| {
+			v.clear();
+			v.extend(draws.iter().filter(|d| solid(d)).map(|d| (d.start, d.count, 0)));
+		};
 		// Terrain and ties carry their texture slot when they cast by texel alpha (`shrub_shader`).
-		let cut = self.pipeline_tfrag.is_some() && scene.tex_array.is_some() && !super::gfxq::sun_plain();
-		let fi = |d: &Draw| if cut { super::bindless::first_instance(d) } else { 0 };
+		let cut = self.cuts(scene);
+		// [PC] lane v042_shadow: a draw whose texture never goes below its cut (`Scene::sun_alpha`) casts depth-only (no texture fetch,
+		// early depth test); the same vertex entry as the alpha-tested draw. `scene.sun_alpha` is all zeros when the scene was built with
+		// a textures mod. `with_slot`: the batch casts by texel alpha (else everything keeps the one plain pipeline).
+		let nocull = super::gfxq::sun_nocull();
+		let plain_ok = !nocull && self.pipeline_plain.is_some();
+		let split = |draws: &mut dyn Iterator<Item = &Draw>, min: u8, with_slot: bool, cut_l: &mut Vec<(u32, u32, u32)>, plain_l: &mut Vec<(u32, u32, u32)>| {
+			cut_l.clear();
+			plain_l.clear();
+			for d in draws {
+				if plain_ok && with_slot && scene.sun_alpha.get(d.texture).is_some_and(|&a| a >= min) {
+					plain_l.push((d.start, d.count, 0));
+				} else {
+					cut_l.push((d.start, d.count, if with_slot { super::bindless::first_instance(d) } else { 0 }));
+				}
+			}
+		};
+		// RAC_SUN_FRUSTUM: a caster whose shadow cannot enter the camera's view pyramid (view.rs).
+		let seen_out = |c: [f32; 3], r: f32| f.view.is_some_and(|v| v.rejects_sphere(c, r));
+		// A tie / shrub box (bounds.rs) that cannot reach the cascade (not with RAC_SUN_NOCULL) or the view (RAC_SUN_FRUSTUM).
+		let box_out = |c: &Cascade, b: Option<&bounds::Aabb>| b.is_some_and(|b| (!nocull && !c.reaches(b)) || f.view.is_some_and(|v| v.rejects_box(b)));
 		for (k, c) in f.cascades.iter().enumerate().take(f.q.cascades) {
 			// tfrag_ranges[i]: 0 far, 1 mid, 2 near. A fragment casts with the LOD `Gpu::cull_tfrags` drew it with this frame (its
 			// receiving surface: a coarser mesh lying above the drawn one shadowed it in dots and jagged bands that came and went as
@@ -542,38 +645,72 @@ impl SunShadow {
 				Some(l) if l < 3 => l as usize,
 				_ => 2,
 			};
-			let tf = scene.tfrag_set.iter().enumerate().filter(|(_, t)| c.touches(t.cull.centre, t.cull.radius)).flat_map(|(i, _)| {
+			let tf = scene.tfrag_set.iter().enumerate().filter(|(_, t)| c.touches(t.cull.centre, t.cull.radius) && !seen_out(t.cull.centre, t.cull.radius)).flat_map(|(i, _)| {
 				let lod = tlod(i);
-				scene.tfrag_draws[scene.tfrag_ranges[i][lod].start as usize..scene.tfrag_ranges[i][lod].end as usize].iter().map(|d| (d.start, d.count, fi(d)))
+				scene.tfrag_draws[scene.tfrag_ranges[i][lod].start as usize..scene.tfrag_ranges[i][lod].end as usize].iter()
 			});
-			push(&mut args, &mut runs, k, Src::Tfrags, &mut tf.collect::<Vec<_>>().into_iter());
+			split(&mut { tf }, TFRAG_OPAQUE, cut, cut_l, plain_l);
+			push(args, runs, k, Src::Tfrags, cut_l);
+			push(args, runs, k, Src::TfragsPlain, plain_l);
 			// Ties likewise: the LOD `Gpu::cull_ties` drew, LOD 0 when undrawn.
 			let ilod = |i: usize| match scene.tie_lod.get(i).copied() {
 				Some(l) if l < 3 => l as usize,
 				_ => 0,
 			};
-			let ties = scene.tie_cull.iter().enumerate().filter(|(_, t)| c.touches(t.centre, t.radius)).flat_map(|(i, _)| {
+			let ties = scene.tie_cull.iter().enumerate().filter(|(i, t)| c.touches(t.centre, t.radius) && !seen_out(t.centre, t.radius) && !box_out(c, scene.sun_bb.ties.get(*i).and_then(|b| b[ilod(*i)].as_ref()))).flat_map(|(i, _)| {
 				let lod = ilod(i);
-				scene.tie_draws[scene.tie_ranges[i][lod].start as usize..scene.tie_ranges[i][lod].end as usize].iter().map(|d| (d.start, d.count, fi(d)))
+				scene.tie_draws[scene.tie_ranges[i][lod].start as usize..scene.tie_ranges[i][lod].end as usize].iter()
 			});
-			push(&mut args, &mut runs, k, Src::Ties, &mut ties.collect::<Vec<_>>().into_iter());
-			push(&mut args, &mut runs, k, Src::World, &mut scene.world.draws.iter().map(|d| (d.start, d.count, 0)));
+			split(&mut { ties }, TIE_OPAQUE, cut, cut_l, plain_l);
+			push(args, runs, k, Src::Ties, cut_l);
+			push(args, runs, k, Src::TiesPlain, plain_l);
+			whole(cut_l, &scene.world.draws, &|_| true);
+			push(args, runs, k, Src::World, cut_l);
 			if self.pipeline_shrub.is_some() && scene.tex_array.is_some() {
-				let sh = scene.shrub_cull.iter().enumerate().filter(|(_, s)| c.touches(s.centre, s.radius)).flat_map(|(i, _)| scene.shrubs.draws[scene.shrub_ranges[i].0.clone()].iter().map(|d| (d.start, d.count, super::bindless::first_instance(d))));
-				push(&mut args, &mut runs, k, Src::Shrubs, &mut sh.collect::<Vec<_>>().into_iter());
+				let sh = scene.shrub_cull.iter().enumerate().filter(|(i, s)| c.touches(s.centre, s.radius) && !seen_out(s.centre, s.radius) && !box_out(c, scene.sun_bb.shrubs.get(*i).and_then(|b| b.as_ref()))).flat_map(|(i, _)| scene.shrubs.draws[scene.shrub_ranges[i].0.clone()].iter());
+				split(&mut { sh }, SHRUB_OPAQUE, true, cut_l, plain_l);
+				push(args, runs, k, Src::Shrubs, cut_l);
+				push(args, runs, k, Src::ShrubsPlain, plain_l);
 			}
 			if scene.props_shown && !super::gfxq::sun_nodyn() {
 				// See-through shells (blast domes, glows) cast nothing (`clear_tex`).
-				let solid = |d: &&Draw| !scene.clear_tex.get(d.texture).copied().unwrap_or(false);
-				push(&mut args, &mut runs, k, Src::Props, &mut scene.props.draws.iter().filter(solid).map(|d| (d.start, d.count, 0)));
-				push(&mut args, &mut runs, k, Src::Clip, &mut scene.clip_batch.draws.iter().filter(solid).map(|d| (d.start, d.count, 0)));
+				let solid = |d: &Draw| !scene.clear_tex.get(d.texture).copied().unwrap_or(false);
+				// [PC] lane v042_shadow: only the slots that can reach this cascade (props.rs); the whole batch with RAC_SUN_NOCULL.
+				if nocull {
+					whole(props_out, &scene.props.draws, &solid);
+				} else {
+					props::draws(scene, c, f.view.as_ref(), &solid, props_runs, props_out);
+				}
+				push(args, runs, k, Src::Props, props_out);
+				whole(cut_l, &scene.clip_batch.draws, &solid);
+				push(args, runs, k, Src::Clip, cut_l);
 				if let Some(b) = &scene.debris {
-					push(&mut args, &mut runs, k, Src::Debris, &mut b.draws.iter().filter(solid).map(|d| (d.start, d.count, 0)));
+					whole(cut_l, &b.draws, &solid);
+					push(args, runs, k, Src::Debris, cut_l);
 				}
 			}
 			if scene.marker_shown {
-				push(&mut args, &mut runs, k, Src::Marker, &mut scene.marker.draws.iter().map(|d| (d.start, d.count, 0)));
+				whole(cut_l, &scene.marker.draws, &|_| true);
+				push(args, runs, k, Src::Marker, cut_l);
 			}
+		}
+	}
+
+	/// Renders the three cascades of `f` from the scene's casters.
+	/// `skin` is the GPU-posed props batch's bind group and slot attribute (None: the CPU poses the props in world space).
+	pub(super) fn encode(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, enc: &mut wgpu::CommandEncoder, scene: &Scene, f: &SunFrame, skin: Option<(&wgpu::BindGroup, Option<&wgpu::Buffer>)>) {
+		let _s = super::profile::span("sun_shadow");
+		let mut sc = std::mem::take(&mut self.scratch);
+		self.lists(scene, f, &mut sc);
+		self.encode_lists(device, queue, enc, scene, f, skin, &sc.args, &sc.runs);
+		self.scratch = sc;
+	}
+
+	#[allow(clippy::too_many_arguments)]
+	fn encode_lists(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, enc: &mut wgpu::CommandEncoder, scene: &Scene, f: &SunFrame, skin: Option<(&wgpu::BindGroup, Option<&wgpu::Buffer>)>, args: &[[u32; 5]], runs: &[(usize, Src, u64, u32)]) {
+		let cut = self.cuts(scene);
+		for (k, c) in f.cascades.iter().enumerate().take(f.q.cascades) {
+			queue.write_buffer(&self.ubuf[k], 0, bytemuck::bytes_of(&c.vp));
 		}
 		if args.len() > self.cap {
 			self.cap = args.len().next_power_of_two().max(4096);
@@ -581,7 +718,7 @@ impl SunShadow {
 		}
 		let Some(ind) = &self.indirect else { return };
 		if !args.is_empty() {
-			queue.write_buffer(ind, 0, bytemuck::cast_slice(&args));
+			queue.write_buffer(ind, 0, bytemuck::cast_slice(args));
 		}
 		for k in 0..f.q.cascades {
 			let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -597,15 +734,16 @@ impl SunShadow {
 				pass.set_viewport(0.0, 0.0, f.q.res as f32, f.q.res as f32, 0.0, 1.0);
 			}
 			pass.set_bind_group(0, &self.ubind[k], &[]);
+			crate::viewer::passtime::lap(&mut pass, "start"); // [probe] RAC_GPU_PASSES laps: one row per caster batch of each cascade
 			for &(_, src, off, n) in runs.iter().filter(|r| r.0 == k) {
 				let batch = match src {
 					Src::World => &scene.world,
-					Src::Tfrags => &scene.tfrags,
-					Src::Ties => &scene.ties,
+					Src::Tfrags | Src::TfragsPlain => &scene.tfrags,
+					Src::Ties | Src::TiesPlain => &scene.ties,
 					Src::Props => &scene.props,
 					Src::Marker => &scene.marker,
 					Src::Clip => &scene.clip_batch,
-					Src::Shrubs => &scene.shrubs,
+					Src::Shrubs | Src::ShrubsPlain => &scene.shrubs,
 					Src::Debris => match &scene.debris {
 						Some(b) => b,
 						None => continue,
@@ -619,6 +757,10 @@ impl SunShadow {
 					}
 					// GPU-posed props without their slot attribute: model space, nothing to cast.
 					(Src::Props, _, Some(_)) => continue,
+					(Src::TfragsPlain | Src::TiesPlain | Src::ShrubsPlain, _, _) => match &self.pipeline_plain {
+						Some(p) => pass.set_pipeline(p),
+						None => continue,
+					},
 					(Src::Shrubs, _, _) => match (&self.pipeline_shrub, &scene.tex_array) {
 						(Some(p), Some(arr)) => {
 							pass.set_pipeline(p);
@@ -638,6 +780,7 @@ impl SunShadow {
 				pass.set_vertex_buffer(0, batch.vbuf.slice(..));
 				pass.set_index_buffer(batch.ibuf.slice(..), wgpu::IndexFormat::Uint32);
 				pass.multi_draw_indexed_indirect(ind, off, n);
+				crate::viewer::passtime::lap_with(&mut pass, || format!("sun c{k} {}", src.name()));
 			}
 		}
 		let _ = &self.tex;

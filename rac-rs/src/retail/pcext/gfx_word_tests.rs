@@ -48,8 +48,8 @@ fn gfx_word_packs_levels_and_reads_the_old_packing() {
 	assert_eq!(slots.len(), NEW_IDS.len(), "no id twice");
 	assert_eq!(NEW_IDS.len(), TEXTS.len());
 	assert!(POOL + 0x40 * POOL_SLOTS as u32 <= OPT_RECS, "the string pool ends before the Graphics page copies");
-	// The title's table holds the first 13 rows (+ the zero record); the pause page's table has `pcctl::TABLE_RECS` records.
-	assert!(TGTAB + 20 * (fogopt::TITLE_ROWS as u32 + 1) <= POOL2 && GTAB + 24 * super::super::pcctl::TABLE_RECS as u32 <= TRECS, "the row tables end before the next copies");
+	// The title's table holds the stepper and a section's rows (+ the zero record, `titlegfx::TAB_RECS` records); the pause page's table has `pcctl::TABLE_RECS` records.
+	assert!(TGTAB + 20 * super::titlegfx::TAB_RECS as u32 <= POOL2 && GTAB + 24 * super::super::pcctl::TABLE_RECS as u32 <= TRECS, "the row tables end before the next copies");
 	assert!(pool_slot(POOL_SLOTS + POOL2_SLOTS - 1) + 0x40 <= BASE + 0x1000, "the second pool ends before the camopts block");
 	assert!(pool_slot(NEW_IDS.len() - 1) + 0x40 <= camopts::CO_POOL_END && POOL3 >= TAB + 9 * 24, "the third pool is inside the camopts block, after the row table copy");
 }

@@ -39,6 +39,7 @@ impl Gpu {
 			if r.kind == crate::mesh::LitKind::Tfrag {
 				// REN-CULL-TFRAG: per position record colours; `cull_tfrags` recolours the drawn LOD from them (after the morph).
 				scene.tfrag_cols[r.at] = r.colours;
+				super::tfrag_memo::forget(&mut scene.tfrag_memo, r.at); // [PC] perf (ncull): the fragment's ranges are posed again
 				continue;
 			}
 			let (space, first) = relight_space(r.first, scene.tie_first, scene.shrub_first);

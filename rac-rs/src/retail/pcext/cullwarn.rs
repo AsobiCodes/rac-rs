@@ -4,8 +4,8 @@
 //! engine cannot add one at run time (a panel's rectangle comes from an animation chosen when the page opens, so an extra panel would
 //! be an empty box with Culling On); the title item's text id is a plain RAM word, so `sync` swaps it.
 //!
-//! Pause page: the notice is up while Culling is Off and the Screen section (the one with the Culling row) is shown. Title page: while
-//! Culling is Off (all rows are on one page; the viewer's front-end mirror draws that page and asks `title_header_id`). The text has
+//! Pause page: the notice is up while Culling is Off and the Screen section (the one with the Culling row) is shown. Title page: the same
+//! (Culling Off and the Screen section shown; the viewer's front-end mirror draws that page and asks `title_header_id`). The text has
 //! two lines (byte 1 = new line, like the Buy plate) in a pool of its own (`POOL`, inside the camopts block BASE + 0x1000..0x1800,
 //! which prompts.rs' canary skips).
 //! Culling Off also needs the marker key `culling_off=kept` in the options file (`pcopts.rs` header); Culling is On after any preset.
@@ -35,7 +35,7 @@ pub(super) static TEXT: [&[u8]; 5] = [
 /// The title page's heading text id (the front-end mirror, `frontend.rs` `header`, draws the title page natively and does not read the
 /// RAM item): the notice while Culling is Off, else "Graphics Options".
 pub fn title_header_id() -> u32 {
-	header_id(unpack_gfx(GFX.load(Ordering::Relaxed))[9] == 1, true)
+	header_id(unpack_gfx(GFX.load(Ordering::Relaxed))[9] == 1, super::titlegfx::section() == pcctl::SEC_SCREEN)
 }
 
 /// The notice as the front-end mirror's text entry (id, string in font bytes as chars), like `pcext::texts`.
@@ -57,7 +57,7 @@ pub(super) fn header_id(culling_off: bool, row_shown: bool) -> u32 {
 pub(super) fn sync(mem: &mut Mem) {
 	let off = mem.rd8(CULL) == 1;
 	let pause_shown = pcctl::gfx_built(mem) && pcctl::gfx_sec() == pcctl::SEC_SCREEN;
-	for (item, shown) in [(GHDR, pause_shown), (TGHDR, true)] {
+	for (item, shown) in [(GHDR, pause_shown), (TGHDR, super::titlegfx::section() == pcctl::SEC_SCREEN)] {
 		let now = mem.rd32(item + 0x34);
 		let want = header_id(off, shown);
 		if (now == ID_GRAPHICS_HDR || now == ID) && now != want {
@@ -107,13 +107,20 @@ mod tests {
 		mem.wr8(CULL, 1);
 		sync(&mut mem);
 		assert_eq!((mem.rd32(GHDR + 0x34), mem.rd32(TGHDR + 0x34)), (0, 0));
-		// The title page holds its title: Off brings the notice, On takes it away.
+		// The title page holds its title: Off brings the notice while its Screen section is shown (as on the pause page), On or
+		// another section takes it away.
 		mem.wr32(TGHDR + 0x34, ID_GRAPHICS_HDR);
+		super::titlegfx::test_section(0);
+		sync(&mut mem);
+		assert_eq!(mem.rd32(TGHDR + 0x34), ID_GRAPHICS_HDR, "Picture section: no notice");
+		assert_eq!(title_header_id(), ID_GRAPHICS_HDR);
+		super::titlegfx::test_section(pcctl::SEC_SCREEN);
 		sync(&mut mem);
 		assert_eq!(mem.rd32(TGHDR + 0x34), ID);
 		mem.wr8(CULL, 0);
 		sync(&mut mem);
 		assert_eq!(mem.rd32(TGHDR + 0x34), ID_GRAPHICS_HDR);
+		super::titlegfx::test_section(0);
 	}
 
 	/// The pause page: the notice swaps in only while the Screen section (the one that shows the Culling row) is shown, a step to

@@ -182,7 +182,7 @@ impl App {
 			self.retail = None;
 			if let Some(g) = &mut self.gpu {
 				g.set_marker(None, None, None);
-				g.set_props(None, &HashMap::new(), &HashMap::new(), &[], &[], &[], &[], &[]);
+				g.set_props(None, &HashMap::new(), &HashMap::new(), &Default::default(), &[], &[], &[], &[], &[]);
 			}
 			return;
 		}
@@ -1334,7 +1334,7 @@ crate::loadlog::say(|| "host: (rest) before metal textures".into());
 			let (tx_order, rx_order) = std::sync::mpsc::channel::<(Vec<u32>, bool)>();
 			let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 			let done_t = DoneGuard(done.clone());
-			let h = std::thread::Builder::new().name("level-prefetch".into()).stack_size(64 << 20).spawn(move || {
+			let h = super::startup::bgpool::spawn("level-prefetch", 64 << 20, move || { // [PC] its par_iters on a pool of its own (bgpool.rs)
 				crate::retail::defer_begin();
 				let (mut fa, mut ext) = (None, LevelExt::default());
 				let mut r = job(&mut fa, &mut ext);
@@ -1499,7 +1499,7 @@ crate::loadlog::say(|| "host: t lighting".into());
 				old.push(Box::new(std::mem::replace(&mut self.menu_actor_classes, menu_actor_classes)));
 				old.push(Box::new(std::mem::replace(&mut self.menu_clip_base, menu_clip_base)));
 				self.hero_preview_clip = None;
-				old.push(Box::new(std::mem::replace(&mut self.prop_anims, prop_anims)));
+				old.push(Box::new(std::mem::replace(&mut self.prop_anims, prop_anims))); self.smooth.fx_skins.forget(); // [PC] perf: no kept skinning outlives its class (handler/fx_skin.rs)
 				old.push(Box::new(std::mem::replace(&mut self.actor_slots, actor_slots)));
 				self.debris.clear();
 				old.push(Box::new(std::mem::replace(&mut self.debris_bspheres, debris_bspheres)));

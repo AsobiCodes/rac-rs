@@ -22,7 +22,7 @@
 //! its `Deref` waits until the pending submit has returned, so a `write_buffer` / `submit` of frame N+1 can never land before
 //! the command buffers of frame N (wgpu applies `write_buffer`s at the next submit). RAC_SUBMIT_DEFER=0 submits inline (old).
 use std::ops::Deref;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::Instant;
@@ -41,9 +41,13 @@ pub(super) struct Presenter {
 struct Job {
 	parts: Vec<mpsc::Receiver<wgpu::CommandBuffer>>,
 	last: Option<wgpu::CommandBuffer>,
+	/// true: submit the parts (and `last`); false: present only (`Presenter::present`).
+	submit: bool,
 	frame: wgpu::SurfaceTexture,
 	/// [PC] ReShade add-on: where the frame's submit is split and the hook that runs there (`Cuts::split`).
 	mid: Option<(usize, Hook)>,
+	/// [PC] Overlay writes (gpu/ovwrite.rs) issued up to this frame's hand-over: `submit_parts` waits for exactly these.
+	ov: u64,
 }
 
 /// [PC] ReShade add-on (gpu/reshade.rs): runs on the submitting thread between the two halves of a frame's submit.
@@ -57,7 +61,9 @@ fn present_timed(q: &wgpu::Queue, frame: wgpu::SurfaceTexture) {
 }
 
 /// Submits `cmds`; with `mid` = (n, hook): the first n, then the hook, then the rest (the hook's work lands between them on the queue).
-fn submit_parts(q: &wgpu::Queue, mut cmds: Vec<wgpu::CommandBuffer>, mid: Option<(usize, Hook)>) {
+fn submit_parts(q: &wgpu::Queue, mut cmds: Vec<wgpu::CommandBuffer>, mid: Option<(usize, Hook)>, ov: u64) {
+	// The frame's overlay texture write (a helper thread's, see gpu/ovwrite.rs) must be staged before this submit executes it.
+	super::gpu::ovwrite::join_to(ov);
 	let Some((n, hook)) = mid else {
 		q.submit(cmds);
 		return;
@@ -111,11 +117,84 @@ mod tests {
 		}
 		panic!("the lock was not released after the hook");
 	}
+
+	fn gate() -> Arc<super::Gate> {
+		use std::sync::atomic::AtomicU64;
+		use std::sync::{Condvar, Mutex};
+		Arc::new(super::Gate { pending: AtomicBool::new(false), issued: AtomicU64::new(0), done: AtomicU64::new(0), lock: Mutex::new(()), cv: Condvar::new() })
+	}
+
+	/// Runs `m.wait()` on a thread and gives its "returned" flag after `ms` milliseconds (only for checks that it has NOT returned:
+	/// a slow machine can make those pass wrongly, never fail wrongly).
+	fn waits_for(m: super::GateMark, ms: u64) -> (Arc<AtomicBool>, std::thread::JoinHandle<()>) {
+		let returned = Arc::new(AtomicBool::new(false));
+		let r = returned.clone();
+		let h = std::thread::spawn(move || {
+			m.wait();
+			r.store(true, Ordering::SeqCst);
+		});
+		std::thread::sleep(std::time::Duration::from_millis(ms));
+		(returned, h)
+	}
+
+	/// A mark taken before a hand-over never waits for it (a helper must not wait on the frame being built); the counters are equal
+	/// exactly when nothing is pending. No timing: `wait` is called on the test thread (a wrong wait would hang the test).
+	#[test]
+	fn a_mark_does_not_include_a_later_hand_over() {
+		let g = gate();
+		let m0 = g.mark(); // frame N-1's hand-over is not made yet: n = 0
+		assert_eq!(m0.n, 0);
+		g.set();
+		assert_eq!((g.issued.load(Ordering::SeqCst), g.done.load(Ordering::SeqCst)), (1, 0));
+		m0.wait(); // the hand-over above is still pending, and this returns
+		g.clear();
+		assert_eq!((g.issued.load(Ordering::SeqCst), g.done.load(Ordering::SeqCst)), (1, 1));
+		assert!(!g.pending.load(Ordering::SeqCst));
+	}
+
+	/// A mark taken after a hand-over waits until that submit has returned (`clear`), and not longer.
+	#[test]
+	fn a_mark_waits_until_its_hand_over_is_submitted() {
+		let g = gate();
+		g.set();
+		let m1 = g.mark();
+		assert_eq!(m1.n, 1);
+		let (returned, h) = waits_for(m1, 100);
+		assert!(!returned.load(Ordering::SeqCst), "the mark returned before the submit");
+		g.clear();
+		h.join().unwrap();
+		assert!(returned.load(Ordering::SeqCst));
+		// The next hand-over is not in the old mark's way, a new mark of it is.
+		g.set();
+		let m2 = g.mark();
+		assert_eq!(m2.n, 2);
+		let (returned2, h2) = waits_for(m2, 100);
+		assert!(!returned2.load(Ordering::SeqCst));
+		g.clear();
+		h2.join().unwrap();
+	}
+
+	/// When the present thread ends (also by a panic) `Release` counts every hand-over as done: no mark waits forever.
+	#[test]
+	fn release_frees_the_marks() {
+		let g = gate();
+		g.set();
+		g.set(); // cannot happen with the real flush, but the counter logic must still end
+		let m = g.mark();
+		let (returned, h) = waits_for(m, 100);
+		assert!(!returned.load(Ordering::SeqCst));
+		drop(super::Release(Arc::new((std::sync::Mutex::new(true), std::sync::Condvar::new())), g.clone()));
+		h.join().unwrap();
+		assert!(returned.load(Ordering::SeqCst) && !g.pending.load(Ordering::SeqCst));
+	}
 }
 
 /// True while a frame's command buffers are handed over but not yet submitted.
 struct Gate {
 	pending: AtomicBool,
+	/// Hand-overs made (`set`) and hand-overs whose submit has returned (`clear`): `done == issued` exactly when `pending` is false.
+	issued: AtomicU64,
+	done: AtomicU64,
 	lock: Mutex<()>,
 	cv: Condvar,
 }
@@ -134,13 +213,31 @@ impl Gate {
 	}
 
 	fn set(&self) {
+		self.issued.fetch_add(1, Ordering::AcqRel);
 		self.pending.store(true, Ordering::Release);
 	}
 
 	fn clear(&self) {
 		let _g = self.lock.lock().unwrap();
+		self.done.store(self.issued.load(Ordering::Acquire), Ordering::Release);
 		self.pending.store(false, Ordering::Release);
 		self.cv.notify_all();
+	}
+
+	/// The gate now: every hand-over made so far (`GateMark`).
+	fn mark(self: &Arc<Self>) -> GateMark {
+		GateMark { gate: self.clone(), n: self.issued.load(Ordering::Acquire) }
+	}
+
+	/// Waits until the hand-over numbered `n` (`GateMark`) has been submitted (or the present thread is gone).
+	fn wait_done(&self, n: u64) {
+		if self.done.load(Ordering::Acquire) >= n {
+			return;
+		}
+		let mut g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+		while self.done.load(Ordering::Acquire) < n {
+			g = self.cv.wait(g).unwrap_or_else(|e| e.into_inner());
+		}
 	}
 }
 
@@ -154,6 +251,7 @@ impl Drop for Release {
 		*self.0 .0.lock().unwrap_or_else(|e| e.into_inner()) = false;
 		self.0 .1.notify_all();
 		let _g = self.1.lock.lock().unwrap_or_else(|e| e.into_inner());
+		self.1.done.store(self.1.issued.load(Ordering::Acquire), Ordering::Release);
 		self.1.pending.store(false, Ordering::Release);
 		self.1.cv.notify_all();
 	}
@@ -173,10 +271,35 @@ impl Deref for GatedQueue {
 	}
 }
 
+/// [PC] The gate's state at one moment: every deferred submit handed over before it. `wait` returns once those have all returned
+/// from `Queue::submit`, without waiting for a LATER hand-over (a helper thread must not wait on the frame that is being built).
+pub(super) struct GateMark {
+	gate: Arc<Gate>,
+	n: u64,
+}
+
+impl GateMark {
+	pub(super) fn wait(&self) {
+		self.gate.wait_done(self.n);
+	}
+}
+
+impl GatedQueue {
+	/// The gate now (see `GateMark`), for a helper that uses `raw` instead of this queue.
+	pub(super) fn mark(&self) -> GateMark {
+		self.gate.mark()
+	}
+
+	/// The queue without the gate wait: only after `GateMark::wait` of a mark taken on the render thread.
+	pub(super) fn raw(&self) -> wgpu::Queue {
+		self.q.clone()
+	}
+}
+
 impl Presenter {
 	/// `vendor`: the adapter's PCI vendor id (the thread's default, see the module doc).
 	pub(super) fn new(queue: wgpu::Queue, vendor: u32) -> Presenter {
-		let gate = Arc::new(Gate { pending: AtomicBool::new(false), lock: Mutex::new(()), cv: Condvar::new() });
+		let gate = Arc::new(Gate { pending: AtomicBool::new(false), issued: AtomicU64::new(0), done: AtomicU64::new(0), lock: Mutex::new(()), cv: Condvar::new() });
 		let defer = std::env::var("RAC_SUBMIT_DEFER").map_or(true, |v| v != "0");
 		let busy = Arc::new((Mutex::new(false), Condvar::new()));
 		let on = std::env::var("RAC_PRESENT_THREAD").map_or(vendor == 0x10de, |v| v != "0");
@@ -192,13 +315,13 @@ impl Presenter {
 					let (mut n, mut ns) = (0u64, 0u64);
 					let mut sub = (0u64, 0u64);
 					while let Ok(job) = rx.recv() {
-						let Job { parts, last, frame, mid } = job;
-						if let Some(last) = last {
+						let Job { parts, last, submit, frame, mid, ov } = job;
+						if submit {
 							let t0 = Instant::now();
 							let mut cmds: Vec<wgpu::CommandBuffer> = parts.into_iter().filter_map(|rx| rx.recv().ok()).collect();
-							cmds.push(last);
+							cmds.extend(last);
 							let t1 = t0.elapsed().as_nanos() as u64;
-							submit_parts(&q, cmds, mid);
+							submit_parts(&q, cmds, mid, ov);
 							sub = (sub.0 + t1, sub.1 + t0.elapsed().as_nanos() as u64 - t1);
 							g.clear();
 						}
@@ -246,7 +369,7 @@ impl Presenter {
 			self.flush();
 		}
 		*self.busy.0.lock().unwrap() = true;
-		if let Err(mpsc::SendError(job)) = tx.send(Job { parts: Vec::new(), last: None, frame, mid: None }) {
+		if let Err(mpsc::SendError(job)) = tx.send(Job { parts: Vec::new(), last: None, submit: false, frame, mid: None, ov: 0 }) {
 			*self.busy.0.lock().unwrap() = false;
 			present_timed(&self.queue, job.frame);
 		}
@@ -267,11 +390,44 @@ impl Presenter {
 		}
 		*self.busy.0.lock().unwrap() = true;
 		self.gate.set();
-		let job = Job { parts: cuts.parts, last: Some(last), frame, mid: cuts.mid };
-		if let Err(mpsc::SendError(Job { parts, last, frame, mid, .. })) = tx.send(job) {
+		let job = Job { parts: cuts.parts, last: Some(last), submit: true, frame, mid: cuts.mid, ov: super::gpu::ovwrite::issued() };
+		if let Err(mpsc::SendError(Job { parts, last, frame, mid, ov, .. })) = tx.send(job) {
 			let mut cmds: Vec<wgpu::CommandBuffer> = parts.into_iter().filter_map(|rx| rx.recv().ok()).collect();
 			cmds.extend(last);
-			submit_parts(&self.queue, cmds, mid);
+			submit_parts(&self.queue, cmds, mid, ov);
+			self.gate.clear();
+			*self.busy.0.lock().unwrap() = false;
+			present_timed(&self.queue, frame);
+		}
+	}
+}
+
+impl Presenter {
+	/// True when `present_frame_enc` can hand the final encoder to the present thread (worker on, deferred submit, parallel finish).
+	pub(super) fn defers_finish(&self, cuts: &Cuts) -> bool {
+		self.worker.is_some() && self.defer && cuts.mode == 2
+	}
+
+	/// Like `present_frame`, but the frame's final encoder is finished on an enc-finish thread too (it was the one `finish` left on
+	/// the render thread, ~1.1 ms a frame): same command buffers in the same order, so the GPU work and the picture are unchanged.
+	/// Only when `defers_finish`; the caller finishes `enc` itself otherwise.
+	pub(super) fn present_frame_enc(&self, mut cuts: Cuts, enc: wgpu::CommandEncoder, frame: wgpu::SurfaceTexture) {
+		let Some((tx, _)) = self.worker.as_ref() else { unreachable!("checked by defers_finish") };
+		let (ctx, crx) = mpsc::channel();
+		finish_pool().spawn(move || {
+			let _ = ctx.send(enc.finish());
+		});
+		cuts.parts.push(crx);
+		{
+			let _t = super::profile::span("pflush");
+			self.flush();
+		}
+		*self.busy.0.lock().unwrap() = true;
+		self.gate.set();
+		let job = Job { parts: cuts.parts, last: None, submit: true, frame, mid: cuts.mid, ov: super::gpu::ovwrite::issued() };
+		if let Err(mpsc::SendError(Job { parts, last, frame, mid, ov, .. })) = tx.send(job) {
+			let cmds: Vec<wgpu::CommandBuffer> = parts.into_iter().filter_map(|rx| rx.recv().ok()).chain(last).collect();
+			submit_parts(&self.queue, cmds, mid, ov);
 			self.gate.clear();
 			*self.busy.0.lock().unwrap() = false;
 			present_timed(&self.queue, frame);
@@ -328,7 +484,7 @@ impl Cuts {
 	/// Submits the frame's command buffers (`take`), in two halves with the hook between them when `split` was used.
 	pub(super) fn submit(mut self, q: &wgpu::Queue, last: wgpu::CommandBuffer) {
 		let mid = self.mid.take();
-		submit_parts(q, self.take(last), mid);
+		submit_parts(q, self.take(last), mid, super::gpu::ovwrite::issued());
 	}
 
 	/// Ends the current encoder (no open pass allowed) and continues with a fresh one in `enc`.

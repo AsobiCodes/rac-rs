@@ -1,5 +1,6 @@
 //! Prop slot layout: class faces, draw layout, slot allocation, and growing the props batch (append / regrow).
 
+use super::props_append::{class_prop_faces, faces_at, meshes_known, new_slot_faces, new_slots, NewSlots};
 use super::*;
 
 impl Gpu {
@@ -67,19 +68,16 @@ impl Gpu {
 		let meshes = slot_meshes(classes, prop_meshes, &empty);
 		let (n0, m) = (scene.props_ranges.len(), classes.len());
 		let n = n0 + m;
-		if at > n0 || scene.props_class.len() != n0 || order.len() != n || classes.contains(&game::vendor::PROMPT_CLASS) || !meshes.iter().all(|m| m.faces.iter().all(|&(t, _)| scene.tex_slots.contains_key(&(t & crate::mobies::SLOT_MASK)))) {
+		if at > n0 || scene.props_class.len() != n0 || order.len() != n || classes.contains(&game::vendor::PROMPT_CLASS) || !meshes_known(&meshes, &scene.tex_slots) {
 			return false;
 		}
 		let mut all_classes = scene.props_class.clone();
 		all_classes.splice(at..at, classes.iter().copied());
 		let v0 = scene.props_model.len();
-		let (mut verts, mut ranges) = (Vec::new(), Vec::new());
-		let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
-		for (mi, m) in meshes.iter().enumerate() {
-			let base = v0 + verts.len();
-			push_mesh_vertices(m, mi, None, &mut verts, &mut lo, &mut hi);
-			ranges.push(base..v0 + verts.len());
-		}
+		let NewSlots { verts, ranges, rad } = {
+			let _v = super::profile::span("ap_verts");
+			new_slots(&meshes, v0)
+		};
 		for (&c, &mesh) in classes.iter().zip(&meshes) {
 			scene.class_faces.entry(c).or_insert_with(|| ClassFaces::of(mesh));
 		}
@@ -171,14 +169,8 @@ impl Gpu {
 		let _s = super::profile::span("ap_pfaces");
 		let mut prop_faces = prop_faces;
 		let (cf, tex_slots) = (&scene.class_faces, &scene.tex_slots);
-		let faces_of = |s: usize| {
-			let (cf, base) = (&cf[&all_classes[s]], all_ranges[s].start as u32);
-			cf.clipped.iter().map(|&(g, rank, idx, phase)| {
-				let key = cf.groups[g].0;
-				super::clip::PropFace { slot: rank * 3, run: g as u32, idx: idx.map(|i| i + base), phase, tex: tex_slots.get(&(key & crate::mobies::SLOT_MASK)).copied().unwrap_or(0), cull: ((key >> 24) & 3) as u8 }
-			}).collect::<Vec<_>>()
-		};
-		prop_faces.splice(at..at, (at..at + m).map(faces_of));
+		let faces_of = |s: usize| faces_at(all_ranges[s].start as u32, &class_prop_faces(&cf[&all_classes[s]], tex_slots));
+		prop_faces.splice(at..at, new_slot_faces(cf, tex_slots, &all_classes, &all_ranges, at, m));
 		if !inserted {
 			prop_faces.par_iter_mut().enumerate().filter(|(s, faces)| faces.len() != cf[&all_classes[*s]].clipped.len()).for_each(|(s, faces)| *faces = faces_of(s));
 		}
@@ -208,11 +200,13 @@ impl Gpu {
 			put(&mut scene.props_ranges.iter().enumerate().skip(at).map(|(s, r)| (s + m, r)));
 		}
 		drop(_s);
-		let rad: Vec<f32> = ranges.iter().map(|r| verts[r.start - v0..r.end - v0].iter().map(|v| (v.pos[0] * v.pos[0] + v.pos[1] * v.pos[1] + v.pos[2] * v.pos[2]).sqrt()).fold(0.0, f32::max)).collect();
 		scene.props_rad.splice(at..at, rad);
 		scene.prop_faces = prop_faces;
 		scene.clip_masked = clip_masked;
-		scene.props_model.extend(verts);
+		{
+			let _e = super::profile::span("ap_extend");
+			scene.props_model.extend(verts);
+		}
 		scene.props_ranges = all_ranges;
 		scene.props_class = all_classes;
 		scene.props_order = order.to_vec();

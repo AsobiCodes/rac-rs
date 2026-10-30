@@ -142,6 +142,24 @@ static HANDS: [Hand; 38] = [
 	Hand { entry: 0x29db98, end: 0x29ddf0, hash: 0xee3015a510bd5f9e, est: 0, f: panel_any }, // 18 veldin_finale
 ];
 
+/// The shop's state words the mouse reads (mouse_vendor.rs): `sel` = the highlighted row, `stage` = sel + 4 (0 browse, 1 start, 2 prompt,
+/// 3 animation, 4 resolve), `count` rows (stride 0x14 from `rows`), `phase` (1 = shop on), `exitp` (leaving).
+#[derive(Clone, Copy)]
+pub(super) struct Words {
+	pub sel: u32,
+	pub stage: u32,
+	pub count: u32,
+	pub rows: u32,
+	pub phase: u32,
+	pub exitp: u32,
+}
+
+/// `Words` of `level` on the disc that runs (PAL or USA).
+pub(super) fn words(level: u32) -> Option<Words> {
+	let v = (*crate::retail::disc::pick(&LV, &LV_USA)).get(level as usize)?;
+	Some(Words { sel: v.sel, stage: v.stage, count: v.count, rows: v.rows, phase: v.phase, exitp: v.exitp })
+}
+
 /// Registers the hooks (Retail::load, after pcext's text hand). RAC_VENDOR_OFF=1 (tests): none, retail's own shop.
 pub fn register() {
 	if pcext::enabled() && std::env::var_os("RAC_VENDOR_OFF").is_none() {

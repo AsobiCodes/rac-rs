@@ -1,7 +1,7 @@
 //! The Graphics page's Volumetric clouds row (dynamic 3D sky clouds, viewer/volclouds.rs; lane ycld, 2026-10-24): Classic / High /
 //! Medium / Low like the Fog row (menu byte: 0 Classic = the retail sky only, 1 High, 2 Medium, 3 Low; `swap_level` turns it into
 //! the level 0 Classic .. 3 High that the file's `clouds` key and the renderer use). Like the other effects it only acts with
-//! Lighting Enhanced. Like Fog it lives on the pause page only (Pause -> Options -> Graphics -> Effects), and its level is kept in
+//! Lighting Enhanced. Like Fog it is on the Effects section of both Graphics pages (pause and title), and its level is kept in
 //! an AtomicU8 because `pack_gfx` has no free bit: `apply_graphics` and `init` store it, `graphics()` reads it into `Graphics::clouds_q`.
 use super::*;
 use std::sync::atomic::AtomicU8;

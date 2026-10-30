@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.4.2
+
+- Updating from v0.4.1 keeps your saves and settings.
+- Speed: v0.4.2 is a speed update for weaker PCs and laptops. The graphics card has much less work in the busy parts of every planet, and the frame rate holds steadier (fewer single slow frames). The picture and the game itself stay exactly as before.
+- Speed: the game no longer draws what you cannot see. Hidden and far-away objects used to be sent to the graphics card as millions of invisible, squashed triangles, in the main view, in the water reflection and under the water. The sun shadows (Enhanced lighting) now only draw objects that can cast into each shadow area, the water skips steps whose result was thrown away anyway, and a few picture effects skip work that cannot change a pixel. The picture is the same, pixel for pixel, and the game plays exactly the same.
+- Speed: fewer stutters. The HUD picture (health, bolts, menus) is sent to the graphics card by a helper thread, on NVIDIA cards the last steps of each frame also run on a helper thread (AMD and Intel graphics, and so the Steam Deck, do not get that part), Ratchet's drawing no longer stalls a frame when the camera comes very close to him or in the first seconds after the game starts, and the frames that also run a game step are cheaper in busy fights.
+- Speed: steadier frames on slower PCs and laptops. A frame no longer stops to wait for the effects (water, sparks, smoke) of the last game step before it starts its own drawing work, and Pokitaru's waterfalls cost less to shade. The picture and the game stay exactly as before.
+- Speed: less work in every frame with water, waterfalls or many moving objects. On open water the game no longer works out the shoreline fade for every pixel (far from the shore it always comes out the same), Pokitaru's waterfalls are matched up from frame to frame with much cheaper maths (their cost per frame went down by about 40% on a test laptop), the poses of the moving objects go to the graphics card in one copy instead of three, Ratchet's occasional self-check no longer holds up a frame, and the ground is not re-posed when it cannot have changed. The picture and the game stay exactly as before. On a test laptop (RTX 3060) the average frame rate on Pokitaru's sea went from about 94 to about 96 fps.
+- Fixed: on NVIDIA graphics the game could crash while closing (the helper thread that shows the frames was stopped after the window was already gone).
+- New: Linux launcher download that starts with a double-click. The RAC-RS Launcher for Linux now comes as a .tar.gz folder: extract it and double-click the launcher (no chmod, no "allow executing as program"). Installing the game is still one click in the launcher. The launcher copies itself to a safe place, so its application-menu entry keeps working when you delete the download. Linux support is still new, so please report what you find.
+- New: Linux, "Add to Steam" (for the Steam Deck). Settings > Advanced > Steam in the launcher (or "sh setup.sh --add-to-steam") puts the game into your Steam library as a non-Steam game, so it starts from Gaming Mode with the controller; the same button takes it out again. Steam must be closed first. It is written but not yet tried on a real Steam Deck.
+- New: Linux, script mods (like Arsenal Mastery) now work. The mod loader for Linux comes with the game.
+- New: Linux, the game now tells you when a newer version is out (a notice window; update with the launcher).
+- Fixed: Linux, a game that did not start gave no sign of why. The launcher now checks the system libraries the game needs before Play and names a missing one with the install line for your distribution, and the game shows a window with the reason when it stops at start (when zenity, kdialog or xmessage is installed). The launcher starts the game with its run log on, so "Open log folder" always finds the log.
+- New: Linux, while the launcher builds or updates the game it keeps the PC from going to sleep, the install page estimates the build time from your processor and memory, and the screen stays on while you play. Not yet tried on every desktop.
+- New: Linux, the launcher's Mods > "Import from PCSX2" now also looks in PCSX2's Linux texture folders, the Flatpak one included.
+- New: "Strafe aiming" (Pause or title > Options > Camera): Raised, Shoulder or Off. Raised is the strafe aim of today and stays the default. Shoulder aims over Ratchet's shoulder. Off turns strafing off.
+- New: "Quick Select mouse" (Pause > Options > Graphics, page System), off by default. Hold Triangle (T or the middle mouse button), point the mouse toward a weapon on the wheel and let go to equip it. All eight directions work and the highlight follows the mouse smoothly (issue #13).
+- New: "Stick dead zone" (Pause > Options > Graphics, page System): High, Medium or Low. High is the game's own; Medium and Low react to smaller stick pushes (issue #30).
+- New: "Button glyphs" (Pause > Options > Graphics, page System): the button pictures in the game's text can show PlayStation symbols (the default, as in the original), Letters (A, B, X, Y) or Letters (Switch). The pictures are drawn for this project.
+- New: the title screen's Graphics page now has the same sections and rows as the pause menu's.
+- New: Esc, Space, Enter or a controller's Start skip the boot logo movies at the start. A key you are already holding when the game starts does not count.
+- Fixed: tutorial pop-ups show your keyboard keys when you play on keyboard (for example "C" in the camera pop-up on Kerwan), not controller buttons (issue #36). With a controller they show the controller buttons as before.
+- Fixed: Load Game showed 95/00/00 as the date of every save. Saves you make from now on show the PC's date and time.
+- Changed: the mouse in the pause menu. The highlight on its pages (Options, Help, Camera, Sound, Subtitles, Weapons, Items and Gadgets) follows the pointer at once instead of crawling there row by row, a click acts at once, and the Sound sliders can be clicked or dragged.
+- Changed: in shops with eight or more icons the mouse does not pick items for now (use the keys or a controller); smaller shops and the pause menu pages work with the mouse.
+- Fixed: a stray mouse click can no longer answer the Quit Game or the save-overwrite question by accident.
+- Changed: Arsenal Mastery 0.3.4 (preinstalled, off): the setting and the preset called "Up Your Arsenal" are now called "Standard" and "Default". Nothing else changes.
+
 ## v0.4.1
 
 - Updating from v0.4.0 takes about 2 to 10 minutes (only the parts that changed are rebuilt). Your saves and settings are kept.
@@ -14,7 +43,6 @@
 - Fixed: German and Spanish were swapped in the title screen's Language list (issue #26).
 - Fixed: the language you choose is remembered. Before, the game started in English every time (issue #11).
 - Changed: Culling is On for everyone: it is reset to On once with this update, every Graphics Preset now sets it On, and turning it off shows a warning (it gives no gameplay benefit and puts a heavy load on your hardware). You can still switch it off.
-- Fixed: with Culling Off, objects the game hides on purpose stay hidden (on Veldin, grey wall blocks appeared).
 - Fixed: with the Classic camera, aiming while strafing turned the view the opposite way from normal play; both now match the original. With the Modern camera the right stick no longer flips direction in free look or after the game's own camera takes over, and it no longer zooms the pause map the wrong way (issues #25 and #24).
 - Fixed: remapping a button no longer moves other actions to other buttons. One button can now do several things, the Controls page shows both names (for example "B / Circle"), and fire on the R2 trigger still works while aiming (issue #24).
 - Fixed: controller sticks no longer need a big push before Ratchet moves (the PC dead zone and the game's own were stacked on each other). Walking starts with a small push and running with a bit over half, like in PCSX2 (issue #30).
@@ -68,6 +96,7 @@
 - Speed: the busiest game functions run as native PC code: the game logic needs about 9% less CPU time. It plays exactly the same.
 - Speed: the graphics need less GPU time: the sea skips wave work far from any shore (Umbris about 30% more fps), the HUD capture no longer waits for the GPU, High fog and clouds use a cheaper grid with the same look (about 10-15 fps more), and fog no longer shades plants hidden behind walls (Vulkan).
 - Thank you: the garage on Veldin shows drawings for the project's first supporters.
+- Fixed: with Culling Off, objects the game hides on purpose stay hidden (on Veldin, grey wall blocks appeared).
 
 ## v0.3.1
 

@@ -30,6 +30,27 @@ impl Gpu {
 	/// Retail mode: replaces the GS overlay image (`w` x `rows` RGBA8) and takes the guard measured on it (`retail_ov_guard`). `live` =
 	/// the picture is gameplay's (`hud_place::live`); any other picture (menus, shop, cutscenes, front end) holds no guard (hud_hold.rs).
 	pub(in crate::viewer) fn set_retail_overlay(&mut self, w: u32, rows: u32, px: &[[u8; 4]], guard: crate::retail::HudGuard, live: bool) {
+		let tex = self.overlay_texture(w, rows, guard, live);
+		let _sw = super::profile::span("ov_write");
+		self.queue.write_texture(
+			tex.as_image_copy(),
+			bytemuck::cast_slice(px),
+			wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(rows) },
+			wgpu::Extent3d { width: w, height: rows, depth_or_array_layers: 1 },
+		);
+	}
+
+	/// Like `set_retail_overlay`, but the texture write runs on the `ov-write` helper (ovwrite.rs: staged before this frame's final
+	/// submit, which waits for it); RAC_OV_ASYNC=0 writes here.
+	pub(in crate::viewer) fn set_retail_overlay_async(&mut self, w: u32, rows: u32, px: Vec<[u8; 4]>, guard: crate::retail::HudGuard, live: bool) {
+		let tex = self.overlay_texture(w, rows, guard, live);
+		self.write_overlay(&tex, w, rows, px);
+	}
+
+	/// Takes the guard, (re)creates the overlay texture when the size changed and returns it (a cheap handle clone).
+	fn overlay_texture(&mut self, w: u32, rows: u32, guard: crate::retail::HudGuard, live: bool) -> wgpu::Texture {
+		// A write still on the helper (an earlier frame's) must be staged before the sync path or a new texture goes on.
+		ovwrite::join_to(ovwrite::issued());
 		self.retail_ov_guard.next(guard, crate::retail::disc::usa(), live);
 		if !self.retail_ov.as_ref().is_some_and(|o| o.2 == w && o.3 == rows) {
 			let tex = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -51,15 +72,9 @@ impl Gpu {
 					wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.clamp_sampler) },
 				],
 			});
-			self.retail_ov = Some((tex, bind, w, rows));
+			self.retail_ov = Some((tex, bind, w, rows, None));
 		}
-		let tex = &self.retail_ov.as_ref().unwrap().0;
-		self.queue.write_texture(
-			tex.as_image_copy(),
-			bytemuck::cast_slice(px),
-			wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(rows) },
-			wgpu::Extent3d { width: w, height: rows, depth_or_array_layers: 1 },
-		);
+		self.retail_ov.as_ref().unwrap().0.clone()
 	}
 
 	/// Whether a retail overlay image has arrived.

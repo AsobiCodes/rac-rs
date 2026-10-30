@@ -7,11 +7,13 @@
 //! - frame_hud.rs: HUD state, HUD and pause menu draw
 //! - frame_post.rs: shadows, sound events collected from the field's ticks (`frame_sound_events`), camera
 //! - frame_props.rs: prop poses
+//! - fx_skin.rs: the skinning of the joint-record props kept between frames
 //! - frame_render.rs: final draw, capture, present
 //! - frame_start.rs: Frame (locals shared by the steps), frame start, input
 //! - frame_switch.rs: level switch, travel, messages, free camera keys
 //! - frame_ticks.rs: the game ticks, per-tick render state
 //! - frame_upload.rs: upload phase, scene camera put back, water hold
+//! - frame_upload_props.rs: the props' CPU-only draw inputs of the upload phase (tints, class UV, fade spheres)
 //! - hero_rows.rs: hero rows (tilt), joint override records
 //! - play_input.rs: mouse button / key state changes
 //! - ship_shadows.rs: ship pad / flight shadow quads
@@ -24,6 +26,8 @@ mod display;
 mod edge_fill;
 pub(in crate::viewer) mod frame_clock;
 mod frame_audio;
+pub(in crate::viewer) mod fx_skin;
+pub(in crate::viewer) mod pose_born;
 mod frame_hero;
 mod frame_hud;
 mod frame_post;
@@ -34,6 +38,7 @@ mod frame_start;
 mod frame_switch;
 mod frame_ticks;
 mod frame_upload;
+mod frame_upload_props;
 mod hero_rows;
 pub(in crate::viewer) mod hud_hold;
 pub(in crate::viewer) mod hud_place;
@@ -117,6 +122,10 @@ impl ApplicationHandler for App {
 			if self.focused && self.retail.is_some() && crate::retail::devtools::ui_mouse(delta.0 as f32, delta.1 as f32) {
 				return;
 			}
+			// Quick Select wheel by mouse (RAC_WHEEL_MOUSE=1, retail/wheel_mouse.rs): after the mod and dev-camera owners above.
+			if self.retail.is_some() {
+				crate::retail::wheel_mouse::motion(delta.0, delta.1);
+			}
 			if self.grabbed {
 				if self.retail.is_some() {
 					crate::retail::modcam::ui_mouse(delta.0 as f32, delta.1 as f32);
@@ -159,11 +168,7 @@ impl ApplicationHandler for App {
 				// Retail play: a key released while another window had the focus never reports its release here, so it
 				// would stay held in every recorded field. Losing the focus lets go of every key and mouse button.
 				if !f && crate::retail::active() {
-					self.keys.clear();
-					self.attack_mouse = false;
-					self.fire_mouse = false;
-					self.quick_mouse = false;
-					crate::retail::modcam::ui_release();
+					self.lose_focus(); // play_input.rs: every key and mouse button let go, a Sound Options bar drag ends
 				}
 			}
 			WindowEvent::CursorMoved { position, .. } => {

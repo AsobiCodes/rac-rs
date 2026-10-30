@@ -474,8 +474,11 @@ pub(crate) fn message_box(text: &str, caption: &str, kind: u32) {
 	unsafe { MessageBoxW(std::ptr::null_mut(), wide(text).as_ptr(), wide(caption).as_ptr(), kind) };
 }
 
+/// [PC] Linux: a zenity / kdialog / xmessage window (`dialog_linux.rs`); blocks this thread until it is closed, like the Windows box.
 #[cfg(not(windows))]
-pub(crate) fn message_box(_text: &str, _caption: &str, _kind: u32) {}
+pub(crate) fn message_box(text: &str, caption: &str, kind: u32) {
+	crate::dialog_linux::show(caption, text, crate::dialog_linux::kind_from_flags(kind));
+}
 
 #[cfg(test)]
 mod tests {

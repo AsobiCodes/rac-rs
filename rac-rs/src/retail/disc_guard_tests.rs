@@ -668,6 +668,8 @@ const ALLOWED: &[(&str, &str, usize, Why)] = &[
 	("retail/title_boot.rs", "REQ_FLAG", 1, ViaVa),
 	("retail/title_boot.rs", "REQ_LEVEL", 1, ViaVa),
 	("retail/warp.rs", "expr", 8, Other("0x1f0000..0x280000 is a content-hash window of RAM (no address meaning), 0x166c00 / 0x166c40 are gp values, 0x15f424 / 0x15f3fc core counters, 0x308000 / 0x2058b0 colours")),
+	("retail/wheel_mouse.rs", "ELEM_PAL", 19, Other("per-disc table: fade_byte reads ELEM_PAL only when disc::usa() is false; the USA disc takes the twin table ELEM_USA (each disc's HUD element array per level, omni/tests.rs)")),
+	("retail/wheel_mouse.rs", "ELEM_USA", 19, Other("per-disc table: the USA disc's HUD element array per level, read by fade_byte only when disc::usa() is true (PAL takes ELEM_PAL)")),
 	("shipgloss.rs", "COLOURS", 1, Via(&["u32_at", "vecs"])),
 	("shipgloss.rs", "COUNTS", 1, Via(&["u32_at", "vecs"])),
 	("shipgloss.rs", "IMAGE_BASE", 1, Core),

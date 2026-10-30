@@ -22,20 +22,34 @@ impl Gpu {
 		});
 		super::profile::lap(super::profile::Phase::Encode);
 		super::passtime::frame_end(&mut enc); // [PC] RAC_GPU_PASSES (passtime.rs)
-		let _t = super::profile::span("finish");
-		let cmd = enc.finish();
-		drop(_t);
-		// [PC] The present thread collects the finished parts, submits and presents (presenter.rs `present_frame`); a screenshot
-		// frame needs its readback at once and submits here.
-		let _t = super::profile::span("submit");
-		if capture {
-			cuts.submit(&self.queue, cmd);
-			self.presenter.present(frame);
+		// [PC] perf (P9d): on the deferred path the final encoder is finished on an enc-finish thread as well. A screenshot frame
+		// takes the old path unless RAC_FINISH_DEFER_SHOT=1 (proof aid: --shot then exercises the deferred path too).
+		if self.presenter.defers_finish(&cuts) && (!capture || shot_defer()) {
+			let _t = super::profile::span("submit");
+			self.presenter.present_frame_enc(cuts, enc, frame);
+			drop(_t);
+			super::profile::lap(super::profile::Phase::Present);
+			if !capture {
+				return None;
+			}
+			eprintln!("finish: screenshot frame took the deferred path (RAC_FINISH_DEFER_SHOT=1)");
+			let _gate = &*self.queue; // the readback below needs the submit: wait for the present thread's submit
 		} else {
-			self.presenter.present_frame(cuts, cmd, frame);
+			let _t = super::profile::span("finish");
+			let cmd = enc.finish();
+			drop(_t);
+			// [PC] The present thread collects the finished parts, submits and presents (presenter.rs `present_frame`); a screenshot
+			// frame needs its readback at once and submits here.
+			let _t = super::profile::span("submit");
+			if capture {
+				cuts.submit(&self.queue, cmd);
+				self.presenter.present(frame);
+			} else {
+				self.presenter.present_frame(cuts, cmd, frame);
+			}
+			drop(_t);
+			super::profile::lap(super::profile::Phase::Present);
 		}
-		drop(_t);
-		super::profile::lap(super::profile::Phase::Present);
 		let buf = readback?;
 		buf.slice(..).map_async(wgpu::MapMode::Read, |_| {});
 		self.device.poll(wgpu::PollType::wait_indefinitely()).ok()?;
@@ -49,4 +63,10 @@ impl Gpu {
 		}
 		Some(crate::render::Image { w: w as usize, h: h as usize, rgb })
 	}
+}
+
+/// RAC_FINISH_DEFER_SHOT=1: screenshot frames also finish their last encoder on the enc-finish pool (picture proof of the deferred path).
+fn shot_defer() -> bool {
+	static S: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+	*S.get_or_init(|| std::env::var("RAC_FINISH_DEFER_SHOT").is_ok_and(|v| v == "1"))
 }

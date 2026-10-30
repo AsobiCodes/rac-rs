@@ -60,6 +60,8 @@ pub(super) struct WaterU {
 	pub(super) wgeo: [f32; 4],
 	/// [PC] The 2nd and 3rd mirrored planes (Water High; `mirror` holds the 1st): their heights, the number of planes mirrored.
 	pub(super) mirror2: [f32; 4],
+	/// [PC] The far-sea look (`far_lod.rs`): near edge and far edge of the blend (units), on, the near-identical switches.
+	pub(super) lod: [f32; 4],
 }
 
 /// The look's numbers (one tuning for every level).

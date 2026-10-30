@@ -10,6 +10,8 @@
 
 use super::*;
 
+mod copy_cull; // [PC] speed (lane water2): the ties a bed / mirror pass cannot show are not drawn in it
+
 /// A water draw's flat plane (`plane_of`), as [height, x0, y0, x1, y1].
 pub(super) type Plane = Option<[f32; 5]>;
 
@@ -165,13 +167,15 @@ pub(super) fn view_stats(draws: &[super::waterfx::WaterDraw], eye: [f32; 3], ivp
 pub(super) struct Mirror {
 	ubuf: wgpu::Buffer,
 	bind: wgpu::BindGroup,
+	/// This pass's own indirect arguments for the ties it keeps (copy_cull.rs).
+	args: copy_cull::TieArgs,
 }
 
 impl Mirror {
 	pub(super) fn new(device: &wgpu::Device, ulayout: &wgpu::BindGroupLayout, sun: &super::sunshadow::SunShadow) -> Mirror {
 		let ubuf = buffer(device, "mirror uniforms", bytemuck::bytes_of(&Uniforms::zeroed()), wgpu::BufferUsages::UNIFORM);
 		let bind = device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("mirror uniforms"), layout: ulayout, entries: &sun.entries(&ubuf) });
-		Mirror { ubuf, bind }
+		Mirror { ubuf, bind, args: copy_cull::TieArgs::new() }
 	}
 }
 
@@ -238,7 +242,8 @@ impl Gpu {
 			mu.sky_view_proj[2][r] = -u.sky_view_proj[2][r];
 		}
 		mu.eye[2] = 2.0 * h - u.eye[2];
-		self.draw_copy(enc, scene, &self.mirror[k], &mu, target, ties, true, Part::All);
+		let live = scene.props_live_draws(|_| true); // [PC] speed (props_live.rs): the dead slots out of the mirror's props draws
+		self.draw_copy(enc, scene, &self.mirror[k], &mu, target, ties, true, Part::All(&live));
 	}
 
 	/// The water bed: the level as the camera sees it, without its water (sky, world, ties, tfrags, hero, mobies), into
@@ -248,10 +253,14 @@ impl Gpu {
 	/// every frame); the bed itself is the same.
 	pub(super) fn draw_bed(&self, enc: &mut wgpu::CommandEncoder, scene: &Scene, u: &Uniforms, target: (&wgpu::TextureView, &wgpu::TextureView, &wgpu::TextureView), ties: Option<&super::bindless::Runs>) {
 		let movers = self.waterfx.shore_movers();
-		let split = (scene.props_shown && !movers.is_empty()).then(|| super::shadowvol::split_late(&scene.props.draws, &scene.slot_runs, movers)).filter(|(_, moving)| !moving.is_empty());
+		// [PC] speed (props_live.rs): only the live prop slots are drawn (the dead ones collapse to a point in `vs_props`). Whether the
+		// bed splits (a mover with faces, or the hero) is decided as before from the movers' runs, live or not.
+		let is_mover = |s: usize| movers.contains(&s);
+		let has_moving = scene.props_shown && movers.iter().filter_map(|&s| scene.slot_runs.get(s)).flatten().any(|r| r.2 > 0);
+		let split = has_moving.then(|| (scene.props_live_draws(|s| !is_mover(s)), scene.props_live_draws(is_mover)));
 		// [PC] The hero (the marker batch, drawn in the second pass) stays out of the shore map too: as ground at the surface he
 		// calmed the sea for SHORE_D1 round him wherever no bed is seen, so no wave ever reached him (Pokitaru, user 2026-10-24).
-		let split = split.or_else(|| (scene.marker_shown && self.waterfx.shore_split()).then(|| (if scene.props_shown { scene.props.draws.clone() } else { Vec::new() }, Vec::new())));
+		let split = split.or_else(|| (scene.marker_shown && self.waterfx.shore_split()).then(|| (if scene.props_shown { scene.props_live_draws(|_| true) } else { Vec::new() }, Vec::new())));
 		match &split {
 			Some((still, moving)) => {
 				self.draw_copy(enc, scene, &self.bed, u, target, ties, false, Part::Still(still));
@@ -259,7 +268,8 @@ impl Gpu {
 				self.draw_copy(enc, scene, &self.bed, u, target, ties, false, Part::Moving(moving));
 			}
 			None => {
-				self.draw_copy(enc, scene, &self.bed, u, target, ties, false, Part::All);
+				let live = scene.props_live_draws(|_| true);
+				self.draw_copy(enc, scene, &self.bed, u, target, ties, false, Part::All(&live));
 				self.waterfx.sea_waves(enc);
 			}
 		}
@@ -273,6 +283,9 @@ impl Gpu {
 		let (colour, resolve, depth) = target;
 		// The second pass of a split bed goes on with the first's colour, depth and stencil.
 		let (first, last) = (!matches!(part, Part::Moving(_)), !matches!(part, Part::Still(_)));
+		// [PC] speed (copy_cull.rs): the ties this pass's view-projection can show (the ties go in the first pass of a split bed only).
+		let multi = ties.is_some() && scene.tex_array.is_some() && self.bindless.as_ref().is_some_and(|b| b.indirect.is_some());
+		let kept = (first && !probe("ties")).then(|| self.kept_ties(scene, with, &mu.view_proj, multi, mirror)).flatten();
 		let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
 			label: Some(if mirror { "water mirror" } else { "water bed" }),
 			color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: colour, resolve_target: last.then_some(resolve), depth_slice: None, ops: wgpu::Operations { load: if first { wgpu::LoadOp::Clear(scene.clear) } else { wgpu::LoadOp::Load }, store: if last { wgpu::StoreOp::Discard } else { wgpu::StoreOp::Store } } })],
@@ -288,7 +301,7 @@ impl Gpu {
 		pass.set_bind_group(0, &with.bind, &[]);
 		// The mirror flips the winding: front-face culling becomes back-face culling and back.
 		let flip = |c: u8| if mirror { 2 - c as usize } else { c as usize - 1 };
-		if first {
+		if first && !probe("sky") {
 			self.pass_sky(&mut pass, scene, false, self.volclouds.sky.skip(), false);
 		}
 		let marker = scene.marker_shown.then_some(&scene.marker);
@@ -296,8 +309,22 @@ impl Gpu {
 		let skinned = scene.props_sj.as_ref().map(|sj| (&self.props_gpu, sj));
 		let array = self.bindless.as_ref().zip(scene.tex_array.as_ref());
 		// (Which pass draws it: 1 the first, 2 the second, 3 both: the props split into the still and the moving.)
-		for (pipeline, batch, when) in [(&self.pipeline, Some(&scene.world), 1), (&self.pipeline, Some(&scene.ties), 1), (&self.tfrag_pipeline, Some(&scene.tfrags), 1), (&self.pipeline, marker, 2), (&self.pipeline, props, 3), (&self.tfrag_pipeline_lt, Some(&scene.tfrags), 2)] {
+		for (gi, (pipeline, batch, when)) in [(&self.pipeline, Some(&scene.world), 1), (&self.pipeline, Some(&scene.ties), 1), (&self.tfrag_pipeline, Some(&scene.tfrags), 1), (&self.pipeline, marker, 2), (&self.pipeline, props, 3), (&self.tfrag_pipeline_lt, Some(&scene.tfrags), 2)].into_iter().enumerate() {
 			let Some(batch) = batch else { continue };
+			if probe(["world", "ties", "tfrags", "marker", "props", "tfrags_lt"][gi]) {
+				continue;
+			}
+			// The draws of the group this pass issues: the props' part, the ties the pass keeps (copy_cull.rs), else the whole batch.
+			let draws: &[Draw] = match part {
+				Part::Still(d) | Part::Moving(d) | Part::All(d) if std::ptr::eq(batch, &scene.props) => d,
+				_ => match &kept {
+					Some(k) if std::ptr::eq(batch, &scene.ties) => &k.draws,
+					_ => &batch.draws,
+				},
+			};
+			if stats() {
+				eprintln!("copystat {} {} draws {} tris {}", if mirror { "mirror" } else { "bed" }, ["world", "ties", "tfrags", "marker", "props", "tfrags_lt"][gi], draws.len(), draws.iter().map(|d| d.count as u64 / 3).sum::<u64>());
+			}
 			if !((first || when & 2 != 0) && (last || when & 1 != 0)) {
 				continue;
 			}
@@ -306,14 +333,18 @@ impl Gpu {
 				pass.set_vertex_buffer(0, batch.vbuf.slice(..));
 				pass.set_index_buffer(batch.ibuf.slice(..), wgpu::IndexFormat::Uint32);
 				// One indirect draw per cull run, as the level pass (thousands of ties otherwise cost milliseconds to encode).
-				if let (Some(runs), Some((buf, _))) = (ties, bl.indirect.as_ref()) {
+				let (list, indirect): (&[Draw], Option<(&super::bindless::Runs, &wgpu::Buffer)>) = match &kept {
+					Some(k) => (&k.draws, k.args.as_ref().map(|(b, r)| (r, b))),
+					None => (&batch.draws, ties.zip(bl.indirect.as_ref().map(|(b, _)| b))),
+				};
+				if let Some((runs, buf)) = indirect {
 					for &(cull, off, n) in runs {
 						pass.set_pipeline(if cull != 0 { &bl.pipeline_cull[flip(cull)] } else { &bl.pipeline });
 						pass.multi_draw_indexed_indirect(buf, off, n);
 					}
 					continue;
 				}
-				for d in &batch.draws {
+				for d in list {
 					pass.set_pipeline(if d.cull != 0 { &bl.pipeline_cull[flip(d.cull)] } else { &bl.pipeline });
 					pass.draw_indexed(d.start..d.start + d.count, 0, d.texture as u32..d.texture as u32 + 1);
 				}
@@ -327,10 +358,6 @@ impl Gpu {
 				}
 				None => (pipeline, &self.pipeline_cull),
 			};
-			let draws: &[Draw] = match part {
-				Part::Still(d) | Part::Moving(d) if std::ptr::eq(batch, &scene.props) => d,
-				_ => &batch.draws,
-			};
 			pass.set_vertex_buffer(0, batch.vbuf.slice(..));
 			pass.set_index_buffer(batch.ibuf.slice(..), wgpu::IndexFormat::Uint32);
 			for d in draws {
@@ -342,11 +369,24 @@ impl Gpu {
 	}
 }
 
-/// Which of the level `Gpu::draw_copy` draws: all of it, or the bed's first pass (all but the moving props' `Draw`s and the
+/// [probe] RAC_COPYSKIP=a,b,.. leaves those groups out of the bed and mirror passes (world ties tfrags marker props tfrags_lt sky); measures
+/// what each group costs there.
+fn probe(name: &str) -> bool {
+	static S: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+	S.get_or_init(|| std::env::var("RAC_COPYSKIP").map(|v| v.split(',').map(str::to_owned).collect()).unwrap_or_default()).iter().any(|s| s == name)
+}
+
+/// [probe] RAC_COPY_STATS=1: draws and triangles of every group of every bed and mirror pass (stderr, `copystat`).
+fn stats() -> bool {
+	static S: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+	*S.get_or_init(|| std::env::var("RAC_COPY_STATS").is_ok())
+}
+
+/// Which of the level `Gpu::draw_copy` draws: all of it (the props' draws given), or the bed's first pass (all but the moving props' `Draw`s and the
 /// translucent tfrags: the still props' draws given) or its second (the moving props' draws given, the translucent tfrags).
 #[derive(Clone, Copy)]
 enum Part<'a> {
-	All,
+	All(&'a [Draw]),
 	Still(&'a [Draw]),
 	Moving(&'a [Draw]),
 }

@@ -6,6 +6,9 @@
 
 use super::*;
 use super::gpu::HIDDEN_POS;
+use super::gpu::pose_reuse::{entry, pose_runs, PoseJob};
+
+pub(in crate::viewer) mod check;
 
 /// Slot record kinds (`PropInst::k[0]` low byte) and the prompt flag (BRIDGE-36 c2: the slot's vertices sit at
 /// `HIDDEN_POS` after the pose, the prompt batch drawing them).
@@ -169,9 +172,21 @@ pub(super) struct PropsGpu {
 	/// Capacities in records and pose entries.
 	cap: (usize, usize),
 	pub bind: wgpu::BindGroup,
+	/// [PC] perf: which pose entries the last build left as they were (gpu/pose_reuse.rs).
+	pub(super) reuse: super::gpu::pose_reuse::PoseReuse,
 }
 
 const INST_MIN: usize = 1024;
+/// [PC] perf: changed pose ranges closer than this many entries go up in one write (gpu/pose_reuse.rs `spans`).
+const POSE_GAP: usize = 64;
+/// Instance records (144 bytes each) written together when this few unchanged ones lie between two changed ones.
+const INST_GAP: usize = 8;
+
+/// RAC_POSE_FULL=1: every pose written and uploaded each frame, as before the pose tokens (A/B and fault isolation).
+pub(super) fn full_pose_upload() -> bool {
+	static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+	*ON.get_or_init(|| std::env::var("RAC_POSE_FULL").is_ok_and(|v| v == "1"))
+}
 const POSE_MIN: usize = 16384;
 
 impl PropsGpu {
@@ -188,11 +203,11 @@ impl PropsGpu {
 	pub(super) fn new(device: &wgpu::Device, layout: wgpu::BindGroupLayout, pipeline: wgpu::RenderPipeline, pipeline_cull: [wgpu::RenderPipeline; 2], moby_pipelines: [wgpu::RenderPipeline; 2], moby_cull: [wgpu::RenderPipeline; 4]) -> PropsGpu {
 		let cap = (INST_MIN, POSE_MIN);
 		let (insts, pose, bind) = Self::buffers(device, &layout, cap);
-		PropsGpu { pipeline, pipeline_cull, moby_pipelines, moby_cull, layout, insts, pose, cap, bind }
+		PropsGpu { pipeline, pipeline_cull, moby_pipelines, moby_cull, layout, insts, pose, cap, bind, reuse: Default::default() }
 	}
 
 	fn buffers(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, cap: (usize, usize)) -> (wgpu::Buffer, wgpu::Buffer, wgpu::BindGroup) {
-		let make = |label, size: usize| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: size as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+		let make = |label, size: usize| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: size as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | if check::on() { wgpu::BufferUsages::COPY_SRC } else { wgpu::BufferUsages::empty() }, mapped_at_creation: false });
 		let insts = make("props records", cap.0 * std::mem::size_of::<PropInst>());
 		let pose = make("props poses", cap.1 * std::mem::size_of::<PoseEntry>());
 		let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -203,21 +218,99 @@ impl PropsGpu {
 		(insts, pose, bind)
 	}
 
-	/// Writes this frame's records and poses (growing the buffers first when needed).
-	pub(super) fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, insts: &[PropInst], pose: &[PoseEntry]) {
-		if insts.len() > self.cap.0 || pose.len() > self.cap.1 {
-			self.cap = (insts.len().next_power_of_two().max(self.cap.0), pose.len().next_power_of_two().max(self.cap.1));
+	/// Grows the buffers to hold `insts` records and `poses` pose entries when they do not (their next power of two); true then:
+	/// the new buffers are empty, so the caller writes everything.
+	fn grow(&mut self, device: &wgpu::Device, insts: usize, poses: usize) -> bool {
+		let grown = insts > self.cap.0 || poses > self.cap.1;
+		if grown {
+			self.cap = (insts.next_power_of_two().max(self.cap.0), poses.next_power_of_two().max(self.cap.1));
 			(self.insts, self.pose, self.bind) = Self::buffers(device, &self.layout, self.cap);
 		}
-		if !insts.is_empty() {
-			queue.write_buffer(&self.insts, 0, bytemuck::cast_slice(insts));
+		grown
+	}
+
+	/// The record half of an upload: all of `insts` (`whole`) or the slots `reuse.inst_dirty` lists.
+	fn upload_insts(&self, queue: &wgpu::Queue, insts: &[PropInst], whole: bool) {
+		let _s = super::profile::span("pw_inst");
+		if whole {
+			if !insts.is_empty() {
+				queue.write_buffer(&self.insts, 0, bytemuck::cast_slice(insts));
+			}
+		} else {
+			let size = std::mem::size_of::<PropInst>();
+			for r in super::gpu::pose_reuse::spans(&self.reuse.inst_dirty, INST_GAP) {
+				queue.write_buffer(&self.insts, (r.start * size) as u64, bytemuck::cast_slice(&insts[r]));
+			}
 		}
-		if !pose.is_empty() {
-			queue.write_buffer(&self.pose, 0, bytemuck::cast_slice(pose));
+	}
+
+	/// Writes this frame's records and poses (growing the buffers first when needed). [PC] perf: of the poses only the ranges
+	/// the build wrote (`reuse.dirty`, gpu/pose_reuse.rs); all of them into a new buffer.
+	pub(super) fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, insts: &[PropInst], pose: &[PoseEntry]) {
+		let grown = self.grow(device, insts.len(), pose.len());
+		self.upload_insts(queue, insts, grown || full_pose_upload());
+		let _s = super::profile::span("pw_pose");
+		if grown || full_pose_upload() {
+			if !pose.is_empty() {
+				queue.write_buffer(&self.pose, 0, bytemuck::cast_slice(pose));
+			}
+		} else {
+			for r in super::gpu::pose_reuse::spans(&self.reuse.dirty, POSE_GAP) {
+				queue.write_buffer(&self.pose, (r.start * std::mem::size_of::<PoseEntry>()) as u64, bytemuck::cast_slice(&pose[r]));
+			}
 		}
+		drop(_s);
+		if check::on() {
+			self.check(device, queue, insts, None, pose, pose.len());
+		}
+	}
+
+	/// [PC] nprops: `upload` for the direct mode (gpu/pose_reuse.rs): the same buffers, writes and bytes, but the pose entries are
+	/// converted from their sources (`jobs`: every distinct pose in entry order, `total` entries) straight into the writes' staging
+	/// memory, with no CPU copy in between. The runs are `upload`'s `spans` (`pose_runs`); the unwritten poses a run spans
+	/// (< POSE_GAP entries) are converted from their sources too: their token says they are bit-equal to what the GPU holds.
+	pub(super) fn upload_direct(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, insts: &[PropInst], jobs: &[PoseJob], total: usize) {
+		let grown = self.grow(device, insts.len(), total);
+		let whole = grown || full_pose_upload();
+		self.upload_insts(queue, insts, whole);
+		let _s = super::profile::span("pw_pose");
+		if whole {
+			if total > 0 {
+				self.write_jobs(queue, jobs);
+			}
+		} else {
+			for r in pose_runs(jobs, POSE_GAP) {
+				self.write_jobs(queue, &jobs[r]);
+			}
+		}
+		drop(_s);
+		if check::on() {
+			self.check(device, queue, insts, Some(jobs), &[], total);
+		}
+	}
+
+	/// One write of the consecutive `jobs` (each n > 0, gapless) into the pose buffer, converted into the staging memory.
+	fn write_jobs(&self, queue: &wgpu::Queue, jobs: &[PoseJob]) {
+		let (first, last) = (jobs[0].base, jobs[jobs.len() - 1].base + jobs[jobs.len() - 1].n);
+		let size = std::mem::size_of::<PoseEntry>();
+		let Some(mut view) = std::num::NonZeroU64::new(((last - first) * size) as u64).and_then(|len| queue.write_buffer_with(&self.pose, (first * size) as u64, len)) else {
+			// No staging view (the write is refused or the allocation failed): the plain write reports it as before.
+			let all: Vec<PoseEntry> = jobs.iter().flat_map(|j| j.ps[..j.n].iter().zip(&j.ns[..j.n]).map(|(p, q)| entry(p, q))).collect();
+			queue.write_buffer(&self.pose, (first * size) as u64, bytemuck::cast_slice(&all));
+			return;
+		};
+		fill_jobs(view.slice(..), jobs);
 	}
 }
 
+/// The consecutive `jobs`' entries converted into `rest` back to back (`rest` holds exactly their bytes).
+fn fill_jobs(mut rest: wgpu::WriteOnly<'_, [u8]>, jobs: &[PoseJob]) {
+	for j in jobs {
+		let (dst, tail) = rest.split_at(j.n * std::mem::size_of::<PoseEntry>());
+		rest = tail;
+		dst.into_chunks::<24>().0.write_iter(j.ps[..j.n].iter().zip(&j.ns[..j.n]).map(|(p, q)| bytemuck::cast::<PoseEntry, [u8; 24]>(entry(p, q))));
+	}
+}
 
 /// The static per-vertex (slot, index in slot) attribute of the props batch.
 pub(super) fn slot_attr(ranges: &[std::ops::Range<usize>]) -> Vec<[u32; 2]> {
@@ -263,6 +356,21 @@ mod tests {
 		assert_eq!((d.pos, d.normal, d.uv), (HIDDEN_POS, [0.0, 1.0, 0.0], [0.25, 0.5]));
 		let a = emulate(&PropInst { m: { let mut m = [0.0; 16]; m[12] = 1.0; m }, a: [0.0, 4.0, 0.0, 0.0], tint: [0.5, 0.5, 0.5, -2.0], k: [KIND_ACTOR | FLAG_PROMPT, 0, 0, 1], ..PropInst::hidden() }, &pose, &model(), 0);
 		assert_eq!((a.pos, a.normal, a.colour), (HIDDEN_POS, [0.0, 1.0, 0.0], [0.5, 0.5, 0.5, -2.0]));
+	}
+
+	#[test]
+	fn fill_jobs_writes_the_entries_back_to_back() {
+		let pos: Vec<[f32; 3]> = (0..9).map(|i| [i as f32, 0.5, -2.0]).collect();
+		let nrm: Vec<[f32; 3]> = (0..9).map(|i| [0.25, i as f32 + 0.75, 1.0]).collect();
+		let jobs = [
+			PoseJob { base: 4, n: 3, ps: &pos[..3], ns: &nrm[..3], write: true },
+			PoseJob { base: 7, n: 1, ps: &pos[3..5], ns: &nrm[3..5], write: false },
+			PoseJob { base: 8, n: 5, ps: &pos[4..], ns: &nrm[4..], write: true },
+		];
+		let want: Vec<PoseEntry> = jobs.iter().flat_map(|j| (0..j.n).map(|k| entry(&j.ps[k], &j.ns[k]))).collect();
+		let mut got = vec![0xAAu8; want.len() * std::mem::size_of::<PoseEntry>()];
+		fill_jobs(wgpu::WriteOnly::from_mut(&mut got[..]), &jobs);
+		assert_eq!(got, bytemuck::cast_slice::<PoseEntry, u8>(&want));
 	}
 
 	#[test]

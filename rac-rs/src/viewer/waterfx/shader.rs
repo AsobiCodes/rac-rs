@@ -1,8 +1,8 @@
-//! The water shader (WGSL, one string): the sea, wave, lava, mud, sludge and waterfall looks, `fs_pos`, `fs_water` and
-//! `fs_fall`. It is a single string literal (assembled in `setup::new`, checked by the `tests` below).
+//! The water shader (WGSL, one string): the sea, wave, lava, mud and sludge looks, `fs_pos` and `fs_water`. The waterfall
+//! sheets (`fs_fall`) are in `fall_wgsl.rs`. A single string literal (assembled in `setup::new`, checked by `water_shader_parses`).
 
 pub(super) const SHADER: &str = r#"
-struct WU { vp: mat4x4<f32>, eye: vec4<f32>, sun: vec4<f32>, proj: vec4<f32>, size: vec4<f32>, look: vec4<f32>, fog: vec4<f32>, mirror: vec4<f32>, flows: array<vec4<f32>, 64>, rn: vec4<f32>, rings: array<vec4<f32>, 32>, trail: array<vec4<f32>, 96>, wbox: vec4<f32>, churn: array<vec4<f32>, 24>, hero: vec4<f32>, wave: vec4<f32>, ivp: mat4x4<f32>, geo: array<vec4<f32>, 4>, gmap: vec4<f32>, ggrid: vec4<f32>, gridb: vec4<f32>, wgeo: vec4<f32>, mirror2: vec4<f32> };
+struct WU { vp: mat4x4<f32>, eye: vec4<f32>, sun: vec4<f32>, proj: vec4<f32>, size: vec4<f32>, look: vec4<f32>, fog: vec4<f32>, mirror: vec4<f32>, flows: array<vec4<f32>, 64>, rn: vec4<f32>, rings: array<vec4<f32>, 32>, trail: array<vec4<f32>, 96>, wbox: vec4<f32>, churn: array<vec4<f32>, 24>, hero: vec4<f32>, wave: vec4<f32>, ivp: mat4x4<f32>, geo: array<vec4<f32>, 4>, gmap: vec4<f32>, ggrid: vec4<f32>, gridb: vec4<f32>, wgeo: vec4<f32>, mirror2: vec4<f32>, lod: vec4<f32> };
 @group(0) @binding(0) var<uniform> w: WU;
 @group(0) @binding(1) var depth_ms: texture_depth_multisampled_2d;
 @group(0) @binding(2) var scene: texture_2d<f32>;
@@ -158,16 +158,18 @@ fn dither(c: vec2<f32>) -> f32 {
 // angle and 1.33 times finer than the last, on a slowly drifting warped domain (no grid, no repeat on screen). `fp` is the
 // world size of one pixel there: a train finer than about 12-50 pixels fades out (not 3-8: those shimmered when the view moved).
 fn ripple(p: vec2<f32>, t: f32, fp: f32) -> vec2<f32> {
+	if (1.0 - smoothstep(0.02, 0.08, fp * 1.6 * 0.159) <= 0.0) { return vec2<f32>(0.0); } // every train has faded out: exactly 0
 	let warp = vec2<f32>(vnoise(p * 0.09 + vec2<f32>(t * 0.02, 0.0)), vnoise(p * 0.09 + vec2<f32>(5.2, 1.3 - t * 0.015))) * 3.0;
 	let q = p + warp;
 	var g = vec2<f32>(0.0);
 	var f = 1.6;
 	var a = 0.055;
 	for (var k = 0; k < 10; k++) {
+		let keep = 1.0 - smoothstep(0.02, 0.08, fp * f * 0.159);
+		if (keep <= 0.0) { break; } // this and every finer train add exactly 0
 		let ang = f32(k) * 2.39996 + 0.4;
 		let d = vec2<f32>(cos(ang), sin(ang));
 		let ph = dot(d, q) * f + t * sqrt(9.8 * f) * 0.35 + f32(k) * 1.7;
-		let keep = 1.0 - smoothstep(0.02, 0.08, fp * f * 0.159);
 		g += d * cos(ph) * a * f * keep;
 		f *= 1.33;
 		a *= 0.72;
@@ -182,8 +184,10 @@ fn sparkle_slope(p: vec2<f32>, t: f32, fp: f32) -> vec2<f32> {
 	for (var k = 0; k < 4; k++) {
 		let ang = f32(k) * 2.39996 + 1.1;
 		let d = vec2<f32>(cos(ang), sin(ang));
+		let keep = 1.0 - smoothstep(0.12, 0.35, fp * f * 0.159);
+		if (keep <= 0.0) { break; }
 		let ph = dot(d, p) * f + t * (3.1 + f32(k) * 0.9);
-		g += d * cos(ph) * 0.05 * (1.0 - smoothstep(0.12, 0.35, fp * f * 0.159));
+		g += d * cos(ph) * 0.05 * keep;
 		f *= 1.41;
 	}
 	return g;
@@ -214,6 +218,7 @@ fn cells(p: vec2<f32>, t: f32) -> f32 {
 
 // Animated caustic light on world XY `p` (mean about 0.35); `fp` = world size of a pixel (lines widen with it, then fade to their mean).
 fn caustic(p: vec2<f32>, t: f32, fp: f32) -> f32 {
+	if (fp >= 0.16) { return 0.35; } // the lines have faded to their mean: mix(c, 0.35, 1)
 	let q = p * 0.75 + (vec2<f32>(vnoise(p * 0.45 + t * 0.1), vnoise(p * 0.45 + vec2<f32>(3.7, 9.1) - t * 0.1)) - 0.5) * 0.8;
 	let a = 1.0 - smoothstep(0.0, sqrt(0.04 + 20.25 * fp * fp), cells(q, t));
 	let b = 1.0 - smoothstep(0.0, sqrt(0.0576 + 38.07 * fp * fp), cells(q * 1.37 + vec2<f32>(4.1, 7.3), t * 1.2));
@@ -446,7 +451,12 @@ fn sea_w(p0: vec2<f32>, t: f32, fpp: f32, fpg: f32, an: vec3<f32>, n: i32) -> SW
 	var j1 = vec2<f32>(0.0, 1.0);
 	var len = w.wgeo.w;
 	var sig = w.wgeo.x;
-	for (var k = 0; k < n; k++) {
+	var k = 0;
+	for (; k < n; k++) {
+		// [PC] perf (lane nwater, 2026-10-29): a train whose length is under 2.86 pixel footprints weighs 0 exactly (`kp` = `kg` = 0:
+		// `st` >= 1 / len, so `fpp * st` >= 0.3501 and the smoothstep is 1), and so does every shorter one after it (len only falls,
+		// by at most 0.86 a train). Only the `hw` sum goes on (the tail loop below, the same expressions).
+		if (fpp >= 0.3501 * len && fpg >= 0.3501 * len) { break; }
 		let kk = 6.2832 / len;
 		// Close to the wind for the long trains (long crests), wider for the chop.
 		let ang = WAVE_WIND + (fract(f32(k) * 0.618034 + 0.31) - 0.5) * 2.0 * (GEO_SPREAD + GEO_SPREAD_K * f32(k));
@@ -479,6 +489,12 @@ fn sea_w(p0: vec2<f32>, t: f32, fpp: f32, fpg: f32, an: vec3<f32>, n: i32) -> SW
 		p += d * m;
 		j0 += d * dm.x;
 		j1 += d * dm.y;
+		len *= GEO_RATIO * (1.0 + GEO_LEN_JIT * (fract(f32(k) * 0.7549 + 0.17) - 0.5));
+		sig *= w.wgeo.y;
+	}
+	for (; k < n; k++) {
+		let kk = 6.2832 / len;
+		o.hw += sig / kk;
 		len *= GEO_RATIO * (1.0 + GEO_LEN_JIT * (fract(f32(k) * 0.7549 + 0.17) - 0.5));
 		sig *= w.wgeo.y;
 	}
@@ -579,26 +595,16 @@ fn calm(f: vec3<f32>) -> vec2<f32> {
 // raised by the waves there. `flat_px`: the pixel of that flat point (`fs_grid` keeps only what lies over the visible flat sea).
 struct GO { @builtin(position) pos: vec4<f32>, @location(0) world: vec3<f32>, @location(1) flat_px: vec2<f32>, @location(2) h: f32, @location(3) @interpolate(flat) g: u32 };
 @vertex fn vs_grid(@builtin(vertex_index) vi: u32, @builtin(instance_index) gi: u32) -> GO {
-	let vc = u32(w.ggrid.x) + 1u;
-	let ndc = w.gridb.xy + vec2<f32>(f32(vi % vc), f32(vi / vc)) * w.gridb.zw;
-	let z0 = w.geo[gi].x;
-	let eye = w.eye.xyz;
-	let a = w.ivp * vec4<f32>(ndc, 0.5, 1.0);
-	let dir = normalize(a.xyz / a.w - eye);
-	let down = z0 - eye.z;
-	var f = vec3<f32>(eye.xy + normalize(dir.xy + vec2<f32>(1e-6, 0.0)) * GEO_FAR_T, z0);
-	if (dir.z * down > 0.0) {
-		let t = down / dir.z;
-		if (t < GEO_FAR_T) { f = vec3<f32>(eye.xy + dir.xy * t, z0); }
-	}
-	let dist = max(length(f - eye), 1e-3);
-	let fpg = dist * 2.0 * w.proj.y * w.size.w * w.ggrid.w;
-	let h = grid_wave(f, ndc, z0, gi, fpg); // [PC] 0 for a vertex no kept fragment depends on (dry_tiles.rs)
-	let pw = vec3<f32>(f.xy, z0 + h);
+	let g = grid_flat(vi, gi); // (grid_waves.rs)
+	let h = grid_wave(g.f, g.ndc, w.geo[gi].x, gi, g.fpg); // [PC] 0 for a vertex no kept fragment depends on (dry_tiles.rs)
+	return grid_out(g, h, gi);
+}
+fn grid_out(g: GF, h: f32, gi: u32) -> GO {
+	let pw = vec3<f32>(g.f.xy, w.geo[gi].x + h);
 	var o: GO;
 	o.pos = w.vp * vec4<f32>(pw, 1.0);
 	o.world = pw;
-	o.flat_px = (ndc * vec2<f32>(0.5, -0.5) + 0.5) * w.size.xy;
+	o.flat_px = (g.ndc * vec2<f32>(0.5, -0.5) + 0.5) * w.size.xy;
 	o.h = h;
 	o.g = gi;
 	return o;
@@ -620,9 +626,9 @@ fn plane_depth(px: vec2<f32>, z0: f32) -> f32 {
 @fragment fn fs_grid(v: GO) -> @location(0) vec4<f32> {
 	let gz = w.geo[v.g];
 	let dim = vec2<i32>(textureDimensions(seamask)); let fc = clamp(vec2<i32>(v.flat_px), vec2<i32>(0), dim - vec2<i32>(1));
-	let m = textureLoad(seamask, fc, 0).r; let zp0 = plane_depth(v.flat_px, gz.x); let zf = linear_depth(textureLoad(depth_ms, fc, 0));
-	// (Retail's sea: long triangles up to about a unit apart, Pokitaru.) A stander: before the flat point, its point there under 2 GEO_HMAX over the plane.
-	if (abs(m - gz.x) > GEO_MATCH && !(m < -1e8 && hero_pixel(fc, zf, gz.x))) { discard; }
+	let m = textureLoad(seamask, fc, 0).r;
+	// (Retail's sea: long triangles up to about a unit apart, Pokitaru.) A stander: before the flat point, its point there under 2 GEO_HMAX over the plane. [PC] (speed) The depth load only where it is asked.
+	if (abs(m - gz.x) > GEO_MATCH && !(m < -1e8 && hero_pixel(fc, linear_depth(textureLoad(depth_ms, fc, 0)), gz.x))) { discard; }
 	let zs = linear_depth(textureLoad(depth_ms, vec2<i32>(v.pos.xy), 0));
 	let zw = linear_depth(v.pos.z);
 	if (zw > zs * 1.004 + 0.03) {
@@ -763,7 +769,7 @@ fn reflect_ray(p: vec3<f32>, r: vec3<f32>, jit: f32) -> vec4<f32> {
 	var t = 0.12 * (1.0 + jit);
 	var prev = 0.0;
 	// w.rn.w = steps (32 = High; fewer steps grow faster, 1.3^(32/n) per step, so the ray still reaches as far).
-	let n = i32(w.rn.w);
+	let n = select(i32(w.rn.w), min(i32(w.rn.w), 20), (u32(w.lod.w) & 1u) != 0u);
 	var grow = 1.3;
 	var add = 0.05;
 	if (n < 32) {
@@ -1208,9 +1214,8 @@ fn sludge(c: vec2<i32>, p: vec3<f32>, view: vec3<f32>, dist: f32, fp: f32, jit: 
 	let fw = w.flows[slot].w;
 	let frozen = fw < -0.5 && fw > -1.5;
 	let time = select(w.eye.w, 0.0, frozen);
-	let jit = dither(v.pos.xy); let svis = sky_vis(pf, jit);
+	let jit = dither(v.pos.xy);
 	let uv0 = (vec2<f32>(c) + 0.5) * w.size.zw;
-	let orig = to_linear(textureSampleLevel(scene, lsamp, uv0, 0.0).rgb);
 	// Where the picture under the surface is read (geometric sea: at the flat point). A trough by the shore can have its flat point
 	// behind the rock standing at the waterline: the picture there is the rock, and the water showed dark specks along every shore
 	// (user screenshot 2026-10-19); the pixel's own picture then.
@@ -1218,16 +1223,16 @@ fn sludge(c: vec2<i32>, p: vec3<f32>, view: vec3<f32>, dist: f32, fp: f32, jit: 
 	let uvb = sea_pic(select(uv0, uvf, geo && wet(uvf, true)), geo);
 	// World size of one pixel here (wider on a grazing view of the surface).
 	let fdist = far_dist(dist, view.z, geo);
-	let ds = smoothstep(FAR_FROM, FAR_TO, fdist);
+	let ds = smoothstep(FAR_FROM, FAR_TO, fdist); let lod = far_lod(fdist, geo); let svis = sky_vis_lod(pf, jit, lod);
 	let fp = dist * 2.0 * w.proj.y * w.size.w / max(view.z, mix(0.2, FAR_GRAZE, ds));
 	if (fw < -1.5 && fw > -2.5) {
-		return finish(c, orig, lava(c, p, view, dist, fp, jit, uv0), false);
+		return finish(c, lava(c, p, view, dist, fp, jit, uv0), false);
 	}
 	if (fw < -3.5 && fw > -4.5) {
-		return finish(c, orig, mud(c, p, view, dist, fp, uv0), false);
+		return finish(c, mud(c, p, view, dist, fp, uv0), false);
 	}
 	if (fw < -4.5 && fw > -5.5) {
-		return finish(c, orig, sludge(c, p, view, dist, fp, jit, uv0), false);
+		return finish(c, sludge(c, p, view, dist, fp, jit, uv0), false);
 	}
 	let phased = fw < -2.5;
 	// Flowing water (a river's scrolling texture, `WaterFx::strip_flows`): the ripples and caustics drift downstream with it.
@@ -1241,7 +1246,8 @@ fn sludge(c: vec2<i32>, p: vec3<f32>, view: vec3<f32>, dist: f32, fp: f32, jit: 
 	// The caustics of a phased river stay in place (they would jump with the phases).
 	let ft = select(flow * time, vec2<f32>(0.0), phased);
 	let q = p.xy - ft;
-	let rg = select(rings_at(p, fp), vec3<f32>(0.0), frozen);
+	var rg = vec3<f32>(0.0); var wk = vec3<f32>(0.0); var ch = 0.0; // (frozen sheets and the far sea: none; faded out over the LOD blend)
+	if (!frozen && lod < 1.0) { rg = rings_at(p, fp) * (1.0 - lod); wk = wake_at(p, fp, select(flow, vec2<f32>(0.0), phased), time) * (1.0 - lod); ch = churn_at(p) * (1.0 - lod); }
 	let iced = cold > 0.0;
 	let sc = select(1.0, COLD_SCALE, iced);
 	let rfp = max(fp * sc * (1.0 + FAR_RIPPLE * ds), select(0.0, COLD_CALM, iced));
@@ -1258,8 +1264,6 @@ fn sludge(c: vec2<i32>, p: vec3<f32>, view: vec3<f32>, dist: f32, fp: f32, jit: 
 	// [PC] Livelier water: wakes behind movers, turbulence where spray keeps falling (churn) and in fast flows (rapids), long
 	// swells on open sea.
 	// A phased river's flow jumps between its quads and phases: its wakes stay put.
-	let wk = select(wake_at(p, fp, select(flow, vec2<f32>(0.0), phased), time), vec3<f32>(0.0), frozen);
-	let ch = select(churn_at(p), 0.0, frozen);
 	let rapid = smoothstep(RAPID_FROM, RAPID_TO, length(flow));
 	rs += wk.xy;
 	if (ch + rapid > 0.01) {
@@ -1275,7 +1279,7 @@ fn sludge(c: vec2<i32>, p: vec3<f32>, view: vec3<f32>, dist: f32, fp: f32, jit: 
 		let am = calm(pf);
 		let df = max(length(eye - pf), 1e-3);
 		let fpi = df * 2.0 * w.proj.y * w.size.w;
-		let sw = sea_w(p.xy, time, fpi * (1.0 + select(3.0, SEA_TRAIN_FAR, geo) * smoothstep(15.0, 40.0, fdist)), fpi * (1.0 + 3.0 * smoothstep(15.0, 40.0, fdist)) * w.ggrid.w, geo_an(pf - eye), i32(w.wave.x));
+		let sw = sea_w(p.xy, time, fpi * (1.0 + select(3.0, SEA_TRAIN_FAR, geo) * smoothstep(15.0, 40.0, fdist)), select(fpi * (1.0 + 3.0 * smoothstep(15.0, 40.0, fdist)) * w.ggrid.w, 1e9, mirror_layer(pf.z, 1.0) >= 0), geo_an(pf - eye), i32(w.wave.x)); // [PC] perf (nwater): `gpart` is read only by the reflection march, which a mirror layer replaces
 		wsd = sw.g * am.y;
 		gpart = sw.gg * am.x;
 		rs += wsd;
@@ -1313,7 +1317,8 @@ fn sludge(c: vec2<i32>, p: vec3<f32>, view: vec3<f32>, dist: f32, fp: f32, jit: 
 	let bed = bed_at(eye, pf, zs, zw, geo);
 	let depth = select(0.0, clamp(pf.z - bed.z, 0.0, 40.0), blended);
 	let thick = depth * bk;
-	let sfade = select(1.0, shore_fade(project(pf).xy, pf, zw), w.mirror.w > 0.0 && fl.z > 0.5 && geo);
+	var sfade = 1.0;
+	if (w.mirror.w > 0.0 && fl.z > 0.5 && geo && lod < 1.0) { sfade = shore_fade_lod(pf, zw, lod); }
 
 	// Refraction: the picture under the surface, shifted by the ripple slope (more through deeper water); only from water.
 	let push = w.look.y * (0.5 + min(thick, 4.0) * 0.25) * select(1.0, COLD_PUSH, cold > 0.0);
@@ -1331,8 +1336,8 @@ fn sludge(c: vec2<i32>, p: vec3<f32>, view: vec3<f32>, dist: f32, fp: f32, jit: 
 	// Caustics: moving light lines on the bed (on the surface itself where the water hides its bed), brightening the colour
 	// already there so the water keeps its tint; strongest in sunlight and shallow water.
 	let cb = bed.xy - ft + rs * (0.6 + thick * 0.3);
-	var cl: f32;
-	if (bk >= 1.0) {
+	var cl = 0.3;
+	if (lod >= 1.0) { } else if (bk >= 1.0) {
 		cl = caustic(cb, time, fp * zs / zw);
 	} else {
 		cl = caustic(q + rs * 0.6, time, fp);
@@ -1341,7 +1346,7 @@ fn sludge(c: vec2<i32>, p: vec3<f32>, view: vec3<f32>, dist: f32, fp: f32, jit: 
 		}
 	}
 	let cstr = (0.25 + 0.75 * sun_on) * svis * select(mix(0.18, 0.8 * exp(-thick * 0.22), bk), 0.8 * exp(-thick * 0.22), bk >= 1.0);
-	base += base * (cl - 0.3) * cstr;
+	base += base * (cl - 0.3) * cstr * (1.0 - lod);
 	// Depth tint: deeper water turns towards a darker, richer version of its own colour.
 	let lb = luma(base);
 	let deep = max(vec3<f32>(lb) + (base - vec3<f32>(lb)) * 1.4, vec3<f32>(0.0)) * 0.7;
@@ -1370,7 +1375,13 @@ fn sludge(c: vec2<i32>, p: vec3<f32>, view: vec3<f32>, dist: f32, fp: f32, jit: 
 	rr = normalize(vec3<f32>(rr.xy, max(rr.z, 0.04)));
 	var r = reflect(-view, n);
 	r = normalize(vec3<f32>(r.xy, max(r.z, 0.04)));
-	let hit = reflect_ray(p + gsm * 0.02, rr, jit);
+	// Flat water on a mirrored plane (mirror.rs; w.mirror = (height, on), w.mirror2 = (2nd height, 3rd height, planes mirrored)):
+	// the true mirror image at this pixel, bent by the ripples and softened by the pixel's footprint, in place of the
+	// screen-space reflection. The layer is the one whose plane lies within 0.4 of the pixel (the nearest if two do).
+	let ml = mirror_layer(pf.z, g.z);
+	// (On a mirrored plane the mirror image below replaces the whole screen-space reflection: its march is skipped, exactly.)
+	var hit = vec4<f32>(0.5, 0.5, 0.0, 0.0);
+	if (ml < 0) { hit = reflect_ray(p + gsm * 0.02, rr, jit); }
 	var refl = env(r, base);
 	// How sure the reflection is (a mirror image or a screen-space hit): sure reflections may mirror more at grazing views.
 	var sure = hit.w;
@@ -1380,25 +1391,6 @@ fn sludge(c: vec2<i32>, p: vec3<f32>, view: vec3<f32>, dist: f32, fp: f32, jit: 
 		let huv = clamp(hit.xy + bend, vec2<f32>(0.0), vec2<f32>(1.0));
 		refl = mix(refl, soft_scene(huv, rad, jit), hit.w);
 	}
-	// Flat water on a mirrored plane (mirror.rs; w.mirror = (height, on), w.mirror2 = (2nd height, 3rd height, planes mirrored)):
-	// the true mirror image at this pixel, bent by the ripples and softened by the pixel's footprint, in place of the
-	// screen-space reflection. The layer is the one whose plane lies within 0.4 of the pixel (the nearest if two do).
-	var ml = -1;
-	var mbest = 0.4;
-	if (w.mirror.y > 0.5 && g.z > 0.96) {
-		if (abs(pf.z - w.mirror.x) < mbest) {
-			ml = 0;
-			mbest = abs(pf.z - w.mirror.x);
-		}
-		if (w.mirror2.z > 1.5 && abs(pf.z - w.mirror2.x) < mbest) {
-			ml = 1;
-			mbest = abs(pf.z - w.mirror2.x);
-		}
-		if (w.mirror2.z > 2.5 && abs(pf.z - w.mirror2.y) < mbest) {
-			ml = 2;
-			mbest = abs(pf.z - w.mirror2.y);
-		}
-	}
 	if (ml >= 0) {
 		// (Geometric sea: read at the flat point's pixel, where the mirror image of this spot lies.)
 		let muv = uvb + mirror_push(c) + project(p + vec3<f32>(-(rs + wsd * WAVE_BEND) * 0.25 * (1.0 - FAR_BEND * ds), 0.0)).xy - project(p).xy;
@@ -1407,10 +1399,13 @@ fn sludge(c: vec2<i32>, p: vec3<f32>, view: vec3<f32>, dist: f32, fp: f32, jit: 
 		let o = vec2<f32>(cos(a), sin(a));
 		var m = vec3<f32>(0.0);
 		for (var k = 0; k < 4; k++) {
+			if ((k & 1) == 0 && lod >= 1.0) { continue; } // far sea: the two taps along the crests are dropped (faded out over the blend)
 			let ok = select(o, vec2<f32>(-o.y, o.x), (k & 1) == 1) * select(1.0, -1.0, k >= 2);
-			m += to_linear(textureSampleLevel(mirror, lsamp, clamp(muv + ok * mr, vec2<f32>(0.0), vec2<f32>(1.0)), ml, 0.0).rgb);
+			let tp = textureSampleLevel(mirror, lsamp, clamp(muv + ok * mr, vec2<f32>(0.0), vec2<f32>(1.0)), ml, 0.0).rgb;
+			m += select(to_linear(tp), tp, (u32(w.lod.w) & 8u) != 0u) * select(1.0 - lod, 1.0, (k & 1) == 1);
 		}
-		refl = m * 0.25;
+		m = m / (4.0 - 2.0 * lod);
+		refl = select(m, to_linear(m), (u32(w.lod.w) & 8u) != 0u);
 		sure = 1.0;
 	}
 	if (cold > 0.0) {
@@ -1431,10 +1426,11 @@ fn sludge(c: vec2<i32>, p: vec3<f32>, view: vec3<f32>, dist: f32, fp: f32, jit: 
 	// that softens with distance instead of flickering.
 	let l = w.sun.xyz;
 	let hv = normalize(l + view);
-	let sn = normalize(n + vec3<f32>(-sparkle_slope(q, time, fp), 0.0));
+	var sn = n; if (lod < 1.0) { sn = normalize(n + vec3<f32>(-sparkle_slope(q, time, fp) * (1.0 - lod), 0.0)); }
 	let e = 900.0 / (1.0 + fp * 60.0);
-	let twinkle = 0.25 + 0.75 * smoothstep(0.7, 0.95, vnoise(q * 5.0 + vec2<f32>(time * 1.3, -time * 0.9)));
-	col += vec3<f32>(1.0, 0.97, 0.9) * pow(max(dot(sn, hv), 0.0), e) * (e + 8.0) * 0.0004 * twinkle * w.sun.w * svis;
+	// [PC] perf (nwater): no glint (the power is 0 for most pixels) adds exactly 0: the twinkle noise only where there is one.
+	let spec = pow(max(dot(sn, hv), 0.0), e);
+	if (spec > 0.0) { col += vec3<f32>(1.0, 0.97, 0.9) * spec * (e + 8.0) * 0.0004 * twinkle_at(q, time) * w.sun.w * svis; }
 	if (cold >= 2.0) {
 		// Cold water: a cool light from beyond the water, 25 degrees up along the view's heading (no light of the level reaches
 		// the cave). The swell brightens where it faces it and darkens where it turns away (its mean stays the water's colour),
@@ -1443,7 +1439,7 @@ fn sludge(c: vec2<i32>, p: vec3<f32>, view: vec3<f32>, dist: f32, fp: f32, jit: 
 		let lc = vec3<f32>(hd * 0.906, 0.423);
 		col *= max(1.0 + COLD_SHADE * (dot(n, lc) - dot(g, lc)), 0.0);
 		let ec = 60.0 / (1.0 + fp * 20.0);
-		col += vec3<f32>(0.7, 0.9, 1.0) * pow(max(dot(n, normalize(lc + view)), 0.0), ec) * (ec + 8.0) * 0.0004 * (0.5 + 0.5 * twinkle) * COLD_SHIMMER;
+		col += vec3<f32>(0.7, 0.9, 1.0) * pow(max(dot(n, normalize(lc + view)), 0.0), ec) * (ec + 8.0) * 0.0004 * (0.5 + 0.5 * twinkle_at(q, time)) * COLD_SHIMMER;
 	}
 
 	// Sea state: the wave faces turned to the light (the key light, else from behind the view) are brighter, those turned away
@@ -1461,7 +1457,7 @@ fn sludge(c: vec2<i32>, p: vec3<f32>, view: vec3<f32>, dist: f32, fp: f32, jit: 
 		// angle keeps a thin line instead of a broad band).
 		foam = 1.0 - smoothstep(0.0, 0.3, depth);
 	}
-	if (bk < 1.0) {
+	if (bk < 1.0 && (cold >= 3.0 || FOAM_SHORE > 0.0)) { // (foam feeds only the ice rim and FOAM_SHORE (0): skipped, exactly)
 		// The water wrote its own depth: geometry cutting the surface at the same depth marks the shore.
 		let px = clamp(0.18 / (zw * 2.0 * w.proj.y * w.size.w), 1.5, 9.0);
 		var hits = 0.0;
@@ -1482,7 +1478,7 @@ fn sludge(c: vec2<i32>, p: vec3<f32>, view: vec3<f32>, dist: f32, fp: f32, jit: 
 	// above it), SURF_W wide on the map whatever the slope (a gentle beach would foam far out by depth alone), reaching out and
 	// back with the waves.
 	var surf = 0.0;
-	if (geo) {
+	if (geo && FOAM_SHORE > 0.0) { // (surf feeds only FOAM_SHORE)
 		let s = shore_at(pf.xy);
 		let under = pf.z - s.x;
 		// [PC] Where no ground is seen under the water, by the distance to the shore (the seen cells' weight drew square patches).
@@ -1503,9 +1499,8 @@ fn sludge(c: vec2<i32>, p: vec3<f32>, view: vec3<f32>, dist: f32, fp: f32, jit: 
 			}
 		}
 	}
-	let bw0 = 1.0 - smoothstep(0.15, 0.5, fp);
-	let bw1 = 1.0 - smoothstep(0.06, 0.22, fp);
-	let breakup = mix(BREAKUP_MID, vnoise(p.xy * 2.7 + vec2<f32>(time * 0.35, time * -0.2)), bw0) * 0.6 + mix(BREAKUP_MID, vnoise(p.xy * 6.1 - vec2<f32>(time * 0.5, 0.0)), bw1) * 0.4;
+	var breakup = 0.0; // (read only by the ice rim, FOAM_SHORE / FOAM_WAKE and the rings' froth)
+	if (rg.z > 0.0 || cold >= 3.0 || FOAM_SHORE > 0.0 || FOAM_WAKE > 0.0) { breakup = mix(BREAKUP_MID, vnoise(p.xy * 2.7 + vec2<f32>(time * 0.35, time * -0.2)), 1.0 - smoothstep(0.15, 0.5, fp)) * 0.6 + mix(BREAKUP_MID, vnoise(p.xy * 6.1 - vec2<f32>(time * 0.5, 0.0)), 1.0 - smoothstep(0.06, 0.22, fp)) * 0.4; }
 	// Soft and in the water's own colour: a lighter froth, not a white rim.
 	// [PC] Rocks and banks in a fast flow or under falling spray foam more.
 	foam = smoothstep(0.45, 0.95, foam * sfade * (0.3 + 1.1 * breakup) * (1.0 + 0.8 * rapid + ch)) * w.look.w * 0.55;
@@ -1523,7 +1518,7 @@ fn sludge(c: vec2<i32>, p: vec3<f32>, view: vec3<f32>, dist: f32, fp: f32, jit: 
 	// [PC] Churned water: the wake's foam, whitewater lace where spray keeps falling and streaks along a fast flow; it drifts
 	// with the water and fades.
 	let fd = normalize(flow + vec2<f32>(1e-5, 0.0));
-	let streak = smoothstep(0.5, 0.85, lnoise(vec2<f32>(dot(q, fd) * 0.5, dot(q, vec2<f32>(-fd.y, fd.x)) * 3.0)));
+	var streak = 0.0; if (rapid > 0.0) { streak = smoothstep(0.5, 0.85, lnoise(vec2<f32>(dot(q, fd) * 0.5, dot(q, vec2<f32>(-fd.y, fd.x)) * 3.0))); }
 	let white = wk.z * (0.6 + 0.6 * breakup) * FOAM_WAKE + ch * CHURN_FOAM + rapid * RAPID_FOAM * streak;
 	if (white > 0.01) {
 		let lc = lace(q, time, fp);
@@ -1542,239 +1537,6 @@ fn sludge(c: vec2<i32>, p: vec3<f32>, view: vec3<f32>, dist: f32, fp: f32, jit: 
 	}
 
 	// Soft mask edge and particle cover (`finish`).
-	return finish(c, orig, col, geo);
-}
-// [PC] Waterfalls (`WaterFx::sheet_falls`, `fs_fall`), drawn over the shaded picture. Pokitaru's sheets replace retail's own
-// (additive, glassy) draw; Novalis's steep strips and Batalia's steep river quads are drawn over theirs. The body: aerated
-// white water in three layers of falling streaks (FALL_V units a second down the sheet, FALL_L1..3 cells a unit along,
-// FALL_ACROSS cells a uv unit across), thin and see-through between them (FALL_THIN), torn into strands where retail's own
-// cover fades out at a ribbon's side (FALL_FRAY); a glassy bright band where it bends over the lip (FALL_LIP); white froth
-// within FALL_FOOT units above a churning foot, and foam where the sheet spreads flat over the water. At each foot: a
-// boiling foam disc drifting outward (FALL_BOIL), mist rising and drifting away (FALL_MIST) and spray drops thrown out in
-// arcs (FALL_DROP_*).
-const FALL_ACROSS: f32 = 40.0;
-const FALL_V: f32 = 7.0;
-const FALL_L1: f32 = 0.22;
-const FALL_L2: f32 = 0.6;
-const FALL_L3: f32 = 1.6;
-const FALL_THIN: f32 = 0.35;
-const FALL_THICK: f32 = 0.97;
-const FALL_AER: vec2<f32> = vec2<f32>(0.3, 0.75);
-const FALL_FRAY: f32 = 0.3;
-const FALL_LIP: f32 = 0.35;
-const FALL_FOOT: f32 = 3.0;
-const FALL_MIST: f32 = 0.1;
-const FALL_MIST_LIFE: f32 = 4.5;
-const FALL_MIST_RISE: f32 = 5.0;
-const FALL_MIST_DRIFT: f32 = 3.0;
-const FALL_BOIL: f32 = 0.8;
-const FALL_BOIL_RATE: f32 = 0.35;
-const FALL_DROP_LIFE: f32 = 0.9;
-const FALL_DROP_SPEED: f32 = 2.0;
-const FALL_DROP_UP: f32 = 3.5;
-const FALL_DROP_BLUR: f32 = 0.02;
-const FALL_DROP_A: f32 = 0.5;
-const FALL_G: f32 = 9.8;
-const FALL_NEAR: vec2<f32> = vec2<f32>(3.0, 10.0);
-const FALL_WHITE: vec3<f32> = vec3<f32>(0.88, 0.95, 1.0);
-const FALL_CLEAR: vec3<f32> = vec3<f32>(0.5, 0.68, 0.72);
-const FALL_TEX_V: f32 = 0.45;
-const FALL_TEX_GAIN: f32 = 1.3;
-const FALL_GLOW: f32 = 0.15;
-// [PC] Pokitaru's sheets (`shape_sheets`): retail's own flat look FALL_BRINK units (from..to) above the brink; thick smooth
-// water bending over it (FALL_TONGUE colour, FALL_GLASS cover, FALL_SHEEN streaks of light, a FALL_CREST bright crest on
-// the bend) that tears into white by FALL_ONSET units below it.
-const FALL_BRINK: vec2<f32> = vec2<f32>(0.6, 2.0);
-const FALL_TONGUE: vec3<f32> = vec3<f32>(0.42, 0.72, 0.7);
-const FALL_GLASS: f32 = 0.7;
-const FALL_SHEEN: f32 = 0.35;
-const FALL_CREST: f32 = 0.45;
-const FALL_ONSET: f32 = 1.2;
-
-struct FO { @builtin(position) pos: vec4<f32>, @location(0) world: vec3<f32>, @location(1) uv: vec2<f32>, @location(2) col: vec4<f32>, @location(3) @interpolate(flat) kind: vec3<f32>, @location(4) shape: vec4<f32> };
-// Retail's waterfall texture (`fall_fx_tex`; a blank one elsewhere).
-@group(1) @binding(0) var fall_tex: texture_2d<f32>;
-@group(1) @binding(1) var fall_smp: sampler;
-
-// A sheet vertex as retail draws it (n.x = 0; n.z = 1: its fall runs along u, not v), or a corner (uv -1..1) of one of a
-// foot's quads at p (n.x = 1 mist puff, 2 spray drop, 3 boil disc; n.y its size, n.z its seed 0..1). Puffs and drops move
-// here, looping on the clock: puffs rise and drift away growing, drops fly out and fall back, stretched along their motion.
-// sh: a sheet vertex's shape (`shape_sheets`; z = 0 where unknown).
-@vertex fn vs_fall(@location(0) p: vec3<f32>, @location(1) uv: vec2<f32>, @location(2) n: vec3<f32>, @location(3) c: vec4<f32>, @location(4) sh: vec4<f32>) -> FO {
-	var q = p;
-	var o: FO;
-	o.col = c;
-	let t = w.eye.w;
-	if (n.x > 2.5) {
-		q = p + vec3<f32>(uv * n.y, 0.03);
-	} else if (n.x > 0.5) {
-		let d = normalize(p - w.eye.xyz);
-		var r = normalize(cross(d, vec3<f32>(0.0, 0.0, 1.0)) + vec3<f32>(1e-4, 0.0, 0.0));
-		var up = cross(r, d);
-		let ang = n.z * 6.2831 * 7.0;
-		let dir = vec3<f32>(cos(ang), sin(ang), 0.0);
-		if (n.x < 1.5) {
-			let ph = fract(t / FALL_MIST_LIFE + n.z);
-			let size = n.y * (0.6 + 0.8 * ph);
-			q = p + dir * (0.5 + FALL_MIST_DRIFT * ph) + vec3<f32>(0.0, 0.0, FALL_MIST_RISE * ph) + (r * uv.x + up * uv.y) * size;
-			o.col = vec4<f32>(c.rgb, sin(ph * 3.14159));
-		} else {
-			let life = FALL_DROP_LIFE * (0.7 + 0.6 * fract(n.z * 13.1));
-			let ph = fract(t / life + n.z);
-			let tt = ph * life;
-			let v0 = dir * FALL_DROP_SPEED * (0.5 + fract(n.z * 7.7)) + vec3<f32>(0.0, 0.0, FALL_DROP_UP * (0.6 + 0.8 * fract(n.z * 3.3)));
-			let at = p + v0 * tt + vec3<f32>(0.0, 0.0, -0.5 * FALL_G * tt * tt);
-			let vel = v0 + vec3<f32>(0.0, 0.0, -FALL_G * tt);
-			let ax = vel - d * dot(vel, d);
-			let al = length(ax);
-			if (al > 1e-3) {
-				up = ax / al;
-				r = normalize(cross(d, up));
-			}
-			q = at + r * uv.x * n.y + up * uv.y * (n.y + al * FALL_DROP_BLUR);
-			// Gone once back under the water.
-			o.col = vec4<f32>(c.rgb, (1.0 - ph) * step(p.z - 0.1, at.z));
-		}
-	}
-	o.pos = w.vp * vec4<f32>(q, 1.0);
-	o.world = q;
-	o.uv = uv;
-	o.kind = n;
-	o.shape = sh;
-	return o;
-}
-
-// Value noise repeating every `per` cells.
-fn tnoise(p: vec2<f32>, per: vec2<f32>) -> f32 {
-	let i = floor(p);
-	let f = p - i;
-	let u = f * f * (3.0 - 2.0 * f);
-	let i0 = i - per * floor(i / per);
-	let i1 = i0 + vec2<f32>(1.0) - per * floor((i0 + vec2<f32>(1.0)) / per);
-	return mix(mix(hash(i0), hash(vec2<f32>(i1.x, i0.y)), u.x), mix(hash(vec2<f32>(i0.x, i1.y)), hash(i1), u.x), u.y);
-}
-
-// One streak layer: `l` cells a unit along, scrolling down at `v` units a second (the scroll wraps every 64 cells, where
-// the noise repeats, so the clock never grows its coordinates).
-fn fall_layer(x: f32, z: f32, l: f32, v: f32, t: f32) -> f32 {
-	return tnoise(vec2<f32>(x, z * l + fract(t * v * l / 64.0) * 64.0), vec2<f32>(4096.0, 64.0));
-}
-
-// Foam on the boil disc, drifting out from its middle (two phases of FALL_BOIL_RATE a second, crossfaded).
-fn boil_foam(xy: vec2<f32>, o: vec2<f32>, t: f32) -> f32 {
-	let f0 = fract(t * FALL_BOIL_RATE);
-	let f1 = fract(t * FALL_BOIL_RATE + 0.5);
-	let a0 = vnoise(xy * 1.5 - o * f0 * 2.5) * 0.6 + vnoise(xy * 3.4 - o * f0 * 3.0 + 7.0) * 0.4;
-	let a1 = vnoise(xy * 1.5 - o * f1 * 2.5 + 13.0) * 0.6 + vnoise(xy * 3.4 - o * f1 * 3.0 + 21.0) * 0.4;
-	let w0 = 1.0 - abs(2.0 * f0 - 1.0);
-	return a0 * w0 + a1 * (1.0 - w0);
-}
-
-// A waterfall point under the water drawn in front of it at pixel c (the water pass's positions).
-fn fall_under(c: vec2<i32>, p: vec3<f32>, below: f32) -> bool {
-	let wp = wpos_at(c);
-	return wp.w > 0.5 && p.z < wp.z - below && distance(wp.xyz, w.eye.xyz) < distance(p, w.eye.xyz);
-}
-
-// Premultiplied over the picture.
-@fragment fn fs_fall(v: FO) -> @location(0) vec4<f32> {
-	let p = v.world;
-	let nrm = cross(dpdx(p), dpdy(p));
-	// Across the fall in cells, and how many cells / units a pixel spans (before any branch: derivatives).
-	let gx = select(v.uv.x, v.uv.y, v.kind.z > 0.5) * FALL_ACROSS;
-	let fwx = fwidth(gx);
-	let fwz = fwidth(p.z);
-	let c = vec2<i32>(v.pos.xy);
-	let zs = linear_depth(textureLoad(depth_ms, c, 0));
-	let zw = linear_depth(v.pos.z);
-	let t = w.eye.w;
-	// Retail's texture (sheets with n.y = 2) at its own scroll, and again finer and faster on top.
-	let k1 = textureSample(fall_tex, fall_smp, v.uv);
-	let k2 = textureSample(fall_tex, fall_smp, v.uv * vec2<f32>(1.6, 1.3) + vec2<f32>(0.37, fract(t * FALL_TEX_V)));
-	if (v.kind.x > 2.5) {
-		// Only on the water it lies on.
-		let r = length(v.uv);
-		let wp = wpos_at(c);
-		if (r > 1.0 || zw > zs * 1.004 + 0.05 || wp.w < 0.5 || abs(wp.z - p.z) > 1.5) { discard; }
-		let foam = smoothstep(0.4, 0.65, boil_foam(p.xy, v.uv / max(r, 1e-3), t) + (1.0 - r) * 0.45) * (1.0 - smoothstep(0.5, 1.0, r));
-		let a = foam * FALL_BOIL * (0.5 + 0.5 * (1.0 - r));
-		return vec4<f32>(FALL_WHITE * a, a);
-	}
-	if (v.kind.x > 1.5) {
-		if (zw > zs || fall_under(c, p, 0.05)) { discard; }
-		let a = (1.0 - v.uv.x * v.uv.x) * (1.0 - v.uv.y * v.uv.y) * v.col.a * FALL_DROP_A * smoothstep(1.0, 3.0, zw);
-		return vec4<f32>(FALL_WHITE * a, a);
-	}
-	if (v.kind.x > 0.5) {
-		let r2 = dot(v.uv, v.uv);
-		if (r2 > 1.0 || zw > zs || fall_under(c, p, 0.3)) { discard; }
-		// Soft where it meets the level, and gone right in front of the eye.
-		let soft = clamp((zs - zw) / 2.0, 0.0, 1.0) * smoothstep(1.5, 6.0, zw);
-		let billow = vnoise(v.uv * 1.7 + vec2<f32>(v.kind.z * 73.0, -t * 0.45)) * 0.6 + vnoise(v.uv * 3.9 + vec2<f32>(t * 0.2, v.kind.z * 31.0 - t * 0.8)) * 0.4;
-		let a = (1.0 - r2) * (1.0 - r2) * soft * smoothstep(0.25, 0.75, billow) * FALL_MIST * v.col.a;
-		return vec4<f32>(FALL_WHITE * a, a);
-	}
-	if (zw > zs * 1.004 + 0.05) { discard; }
-	// 0 on a flat stretch of the sheet, 1 where it falls straight down.
-	let s = 1.0 - abs(nrm.z) / max(length(nrm), 1e-9);
-	let fall = smoothstep(0.5, 0.85, s);
-	let flat = 1.0 - smoothstep(0.35, 0.6, s);
-	let lip = smoothstep(0.35, 0.6, s) * (1.0 - smoothstep(0.7, 0.9, s));
-	var foot = 0.0;
-	for (var k = 0; k < i32(w.rn.z); k++) {
-		let ch = w.churn[2 * k];
-		let h = p.z - ch.z;
-		let dh = length(p.xy - ch.xy);
-		foot = max(foot, w.churn[2 * k + 1].x * (1.0 - smoothstep(0.0, FALL_FOOT, h)) * step(-0.5, h) * (1.0 - smoothstep(ch.w, ch.w + 2.5, dh)));
-	}
-	// Streaks finer than about two pixels fade to their mean instead of shimmering.
-	let d2 = 1.0 - smoothstep(0.35, 0.8, max(fwx * 0.6, fwz * FALL_L2));
-	let d3 = 1.0 - smoothstep(0.35, 0.8, max(fwx * 1.5, fwz * FALL_L3));
-	let n1 = fall_layer(gx * 0.25, p.z, FALL_L1, FALL_V, t);
-	let n2 = mix(0.5, fall_layer(gx * 0.6 + 17.0, p.z, FALL_L2, FALL_V * 1.25, t), d2);
-	let n3 = mix(0.5, fall_layer(gx * 1.5 + 5.0, p.z, FALL_L3, FALL_V * 1.5, t), d3);
-	let tl = (luma(k1.rgb) * min(k1.a * 2.0, 1.0) * 0.55 + luma(k2.rgb) * min(k2.a * 2.0, 1.0) * 0.45) * FALL_TEX_GAIN;
-	// Retail's texture is mostly dark (made to be added): its streaks only shade a mostly solid body.
-	let dens = select(n1 * 0.5 + n2 * 0.33 + n3 * 0.17, clamp(0.45 + 0.55 * smoothstep(0.05, 0.6, tl) + 0.35 * (n1 - 0.5), 0.0, 1.0), v.kind.y > 1.5);
-	let a = clamp(v.col.a / 1.4, 0.0, 1.0);
-	let lit = clamp(v.col.rgb * 2.0, vec3<f32>(0.0), vec3<f32>(1.25)) * 0.95;
-	let under = select(1.0, 0.3, fall_under(c, p, 0.05));
-	let near = mix(0.35, 1.0, smoothstep(FALL_NEAR.x, FALL_NEAR.y, zw)) * under;
-	if (v.shape.z > 0.5) {
-		// Pokitaru's sheets, shaped per vertex (`shape_sheets`): steepness and distance d from the brink (< 0 on the water
-		// running to it) vary smoothly over the sheet, so its facets never show.
-		let ss = v.shape.x;
-		let d = v.shape.y;
-		let sfall = smoothstep(0.45, 0.8, ss);
-		let sflat = (1.0 - smoothstep(0.25, 0.5, ss)) * max(smoothstep(FALL_BRINK.x, FALL_BRINK.y, -d), v.shape.w);
-		// The water tears up unevenly: in some columns the white starts right at the brink, in others lower down.
-		let tear = tnoise(vec2<f32>(gx * 0.3, fract(t * 0.004) * 64.0), vec2<f32>(4096.0, 64.0));
-		let onset = smoothstep(-0.5, FALL_ONSET, d + (tear - 0.5) * FALL_ONSET);
-		// Over the brink: streaks of light running down the smooth water (along d), a bright crest on the bend.
-		let sheen = smoothstep(0.6, 0.85, fall_layer(gx * 0.7 + 3.0, -d, 0.35, FALL_V * 0.4, t)) * d2;
-		let crest = exp(-d * d * 6.0) * (0.6 + 0.4 * n2);
-		let aer = clamp(sfall * smoothstep(FALL_AER.x, FALL_AER.y, dens) * onset + foot * 0.9, 0.0, 1.0);
-		let cov = smoothstep(0.0, FALL_FRAY, a * 1.25 - (1.0 - dens) * 0.9 * onset + 0.15 + (1.0 - onset) * 0.3);
-		// Between the white streaks: the thick smooth water near the brink, thin clear water further down.
-		let glass = FALL_TONGUE * lit * (0.85 + 0.15 * n1) + FALL_WHITE * lit * (sheen * FALL_SHEEN + crest * FALL_CREST);
-		let thin = mix(glass, FALL_CLEAR * lit * (0.85 + 0.15 * dens), onset);
-		let col = mix(thin, FALL_WHITE * lit * (0.85 + 0.15 * dens), aer);
-		let alpha = cov * mix(mix(FALL_GLASS + 0.15 * sheen + 0.15 * crest, FALL_THIN, onset), FALL_THICK, aer) * near;
-		let sheet = vec4<f32>(col * alpha + FALL_WHITE * lit * dens * cov * FALL_GLOW * onset * under, alpha);
-		return mix(sheet, vec4<f32>(k1.rgb * k1.a * v.col.rgb * v.col.a, 0.0), sflat);
-	}
-	// Retail's cover (0 at a ribbon's outer side) torn by the streaks; the lip holds together.
-	let cov = smoothstep(0.0, FALL_FRAY, a * 1.25 - (1.0 - dens) * 0.9 + 0.15 + lip * 0.3);
-	let aer = clamp(fall * smoothstep(FALL_AER.x, FALL_AER.y, dens) + lip * 0.15 + foot * 0.9, 0.0, 1.0);
-	// Lit as retail tints the sheet (0x40 = 1.0, `lit`); the same on every facet, so the sheet's corners do not show.
-	var col = mix(FALL_CLEAR, FALL_WHITE, aer) * lit * (0.85 + 0.15 * dens) + FALL_WHITE * lip * FALL_LIP * smoothstep(0.5, 0.8, dens);
-	var alpha = cov * mix(FALL_THIN, FALL_THICK, aer);
-	// Thinner right in front of the eye (walking through a fall), and seen through the water below its surface.
-	alpha *= near;
-	// Premultiplied, plus a little of retail's glow; where the sheet spreads flat over the water, retail's own additive
-	// glow (`fs_part`: texture x vertex colour, added times its alpha; the foam disc covers the foot).
-	let sheet = vec4<f32>(col * alpha + FALL_WHITE * lit * dens * cov * FALL_GLOW * under, alpha);
-	let retail = vec4<f32>(select(vec3<f32>(dens * 0.5), k1.rgb * k1.a, v.kind.y > 1.5) * v.col.rgb * v.col.a, 0.0);
-	return mix(sheet, retail, flat);
+	return finish(c, col, geo);
 }
 "#;

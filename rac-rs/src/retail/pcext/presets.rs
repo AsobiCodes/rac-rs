@@ -13,6 +13,7 @@
 use super::*;
 use crate::retail::pcctl;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 /// The table: the file's text.
 const TABLE: &str = include_str!("../../../assets/gfx_presets.txt");
@@ -124,10 +125,9 @@ fn detect(g: [u8; 15], hud_sharp: bool, texfilter: bool) -> u8 {
 	[2usize, 1, 0].into_iter().find(|&p| table()[p] == v).map_or(3, |p| p as u8)
 }
 
-/// Worker, every field in `pcext::sync` before the rows are stepped: when the player chose a preset, its values go into the rows and
-/// the HUD row, and the renderer and the options file follow like for any change.
-pub(super) fn choose(mem: &mut Mem, s: &mut St) {
-	let Some(p) = pcctl::preset_chosen(mem) else { return };
+/// Applies preset `p`: its values go into the rows and the HUD row, and the renderer and the options file follow like for any
+/// change. The pause page (`choose`) and the title's page (`choose_title`) share it.
+fn apply_preset(mem: &mut Mem, s: &mut St, p: u8) {
 	let mut g = GROWS.map(|a| mem.rd8(a));
 	let v = table()[p as usize];
 	apply_to(&mut g, v);
@@ -141,6 +141,49 @@ pub(super) fn choose(mem: &mut Mem, s: &mut St) {
 	apply_graphics(s, g, true);
 	pcctl::set_hud(mem, v.hud_sharp);
 	eprintln!("retail: PC options: preset {}", NAMES[p as usize]);
+}
+
+/// Worker, every field in `pcext::sync` before the rows are stepped: when the player chose a preset on the pause page, its values
+/// go in (the pause item sets the byte itself; `pcctl::preset_chosen` reads it).
+pub(super) fn choose(mem: &mut Mem, s: &mut St) {
+	let Some(p) = pcctl::preset_chosen(mem) else { return };
+	apply_preset(mem, s, p);
+}
+
+/// The preset the applied rows match (High first, then Medium, then Low, else 3 = Custom). Fog and clouds are not in the packed
+/// word (`unpack_gfx` leaves their rows 0), so their applied levels come from their own modules.
+pub(super) fn detect_now() -> u8 {
+	let mut g = unpack_gfx(GFX.load(Ordering::Relaxed));
+	g[13] = swap_level(super::fogopt::level());
+	g[14] = swap_level(super::cloudopt::level());
+	detect(g, super::HUD_SHARP.load(Ordering::Relaxed), super::texfilter::get())
+}
+
+/// The Preset byte the title page last wrote (0xff = its page has not been opened): a press there is the value item changing that
+/// byte, not the rows changing (touching a row turns the row to Custom without touching the Preset byte).
+static TITLE_LAST: AtomicU8 = AtomicU8::new(0xff);
+
+/// The title Graphics page opens: its Preset row shows the preset the rows match.
+pub(super) fn title_open(mem: &mut Mem) {
+	let b = detect_now();
+	mem.wr8(pcctl::PRESETB, b);
+	pcctl::preset_baseline(b);
+	TITLE_LAST.store(b, Ordering::Relaxed);
+}
+
+/// The title Graphics page's Preset row: its item only flips the byte, so a press steps on from the preset the rows match
+/// (Custom -> Low, Low -> Medium, Medium -> High, High -> Low). `pcext::sync` calls it only while the title page is on screen.
+pub(super) fn choose_title(mem: &mut Mem, s: &mut St) {
+	let last = TITLE_LAST.load(Ordering::Relaxed);
+	if last > 3 || mem.rd8(pcctl::PRESETB).min(3) == last {
+		return;
+	}
+	let now = detect_now();
+	let next = if now >= 2 { 0 } else { now + 1 };
+	apply_preset(mem, s, next);
+	mem.wr8(pcctl::PRESETB, next);
+	pcctl::preset_baseline(next);
+	TITLE_LAST.store(next, Ordering::Relaxed);
 }
 
 /// Worker, the end of `pcext::sync`: the Preset row shows the preset that matches the rows now.

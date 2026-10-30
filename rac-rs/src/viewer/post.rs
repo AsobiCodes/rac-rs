@@ -232,11 +232,15 @@ struct GSO { @location(0) rad: vec4<f32>, @location(1) nrm: vec4<f32> };
 		if (ns.a < 0.5) { continue; }
 		let w = view_pos(qs * s) - P;
 		let d2 = dot(w, w);
+		let fall = clamp(1.0 - d2 / (R * R), 0.0, 1.0);
+		// A zero weight adds exactly +0 (the colours are finite and >= 0): skip the colour fetch.
+		if (fall <= 0.0) { continue; }
 		let dir = w * inverseSqrt(max(d2, 1e-6));
 		let cr = max(dot(n, dir), 0.0);
 		let cs = max(dot(ns.xyz * 2.0 - 1.0, -dir), 0.0);
-		let fall = clamp(1.0 - d2 / (R * R), 0.0, 1.0);
-		acc += textureLoad(bloom_in, qs, 0).rgb * (cr * cs * fall);
+		let wt = cr * cs * fall;
+		if (wt <= 0.0) { continue; }
+		acc += textureLoad(bloom_in, qs, 0).rgb * wt;
 	}
 	return vec4<f32>(acc * (2.0 / f32(N)), 1.0);
 }
@@ -672,6 +676,18 @@ pub(super) fn sun_on_screen(vp: &[[f32; 4]; 4], eye: [f32; 3], dir: [f32; 3], lu
 	let s = (1.0 - off / 0.6).clamp(0.0, 1.0) * ((luma - 0.1) / 0.5).clamp(0.0, 1.0) * ((-dir[2] - 0.05) / 0.15).clamp(0.0, 1.0);
 	(s > 0.0).then_some(([x * 0.5 + 0.5, 0.5 - y * 0.5], s))
 }
+/// The load op of a pass that draws one full-screen triangle without blending (it writes every pixel and sample of its target, so
+/// clearing first only costs bandwidth): `DontCare`. RAC_TUNE=dc=0 clears black as before (to A/B the saving).
+pub(super) fn overwrite() -> wgpu::LoadOp<wgpu::Color> {
+	static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+	if *ON.get_or_init(|| crate::devtune::f32("dc", 1.0) >= 0.5) {
+		// SAFETY: only used by passes whose full-screen triangle writes every pixel before anything reads or blends the target.
+		wgpu::LoadOp::DontCare(unsafe { wgpu::LoadOpDontCare::enabled() })
+	} else {
+		wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+	}
+}
+
 /// Dev only: RAC_POST_VIEW=ao shows the occlusion alone.
 fn view_ao() -> bool {
 	static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -1119,11 +1135,13 @@ impl Post {
 			pass.draw(0..3, 0..1);
 		};
 		let clear = wgpu::LoadOp::Clear(wgpu::Color::BLACK);
-		run(enc, "post depth", &t.lin, &self.p_lin, &t.g_lin, clear);
+		// Every pass below draws one full-screen triangle without blending: it writes all pixels, so the target needs no clear first.
+		let over = overwrite();
+		run(enc, "post depth", &t.lin, &self.p_lin, &t.g_lin, over);
 		if ao {
-			run(enc, "post ao", &t.ao[0], &self.p_ao, &t.g_ao, clear);
-			run(enc, "post ao across", &t.ao[1], &self.p_blur, &t.g_blur[0], clear);
-			run(enc, "post ao down", &t.ao[0], &self.p_blur, &t.g_blur[1], clear);
+			run(enc, "post ao", &t.ao[0], &self.p_ao, &t.g_ao, over);
+			run(enc, "post ao across", &t.ao[1], &self.p_blur, &t.g_blur[0], over);
+			run(enc, "post ao down", &t.ao[0], &self.p_blur, &t.g_blur[1], over);
 		}
 		// No fog cover unless the volumetric fog draws one in `mid`: cleared only for a frame where it draws, and once after the last
 		// such frame (so the composite reads zero); a fresh target is zero already.
@@ -1135,7 +1153,7 @@ impl Post {
 		mid(enc, &t.scene, ao.then_some(&t.ao[0]));
 		if let Some(g) = gi {
 			// The grid's cells (colour and normal at once), the gather, its blur across and down.
-			let at = |view| Some(wgpu::RenderPassColorAttachment { view, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: clear, store: wgpu::StoreOp::Store } });
+			let at = |view| Some(wgpu::RenderPassColorAttachment { view, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: over, store: wgpu::StoreOp::Store } });
 			let pass = |enc: &mut wgpu::CommandEncoder, label: &str, targets: &[Option<wgpu::RenderPassColorAttachment>], pipeline: &wgpu::RenderPipeline, group: &wgpu::BindGroup| {
 				let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor { label: Some(label), color_attachments: targets, depth_stencil_attachment: None, timestamp_writes: crate::viewer::passtime::rw(label), occlusion_query_set: None, multiview_mask: None });
 				pass.set_pipeline(pipeline);
@@ -1147,16 +1165,16 @@ impl Post {
 			pass(enc, "post gi across", &[at(&g.gi[1])], &self.p_giblur, &g.g_blur[0]);
 			pass(enc, "post gi down", &[at(&g.gi[0])], &self.p_giblur, &g.g_blur[1]);
 		}
-		run(enc, "post bright", &t.bloom[0], &self.p_bright, &t.g_bright, clear);
+		run(enc, "post bright", &t.bloom[0], &self.p_bright, &t.g_bright, over);
 		for m in 1..LEVELS {
-			run(enc, "post bloom down", &t.bloom[m], &self.p_down, &t.g_down[m - 1], clear);
+			run(enc, "post bloom down", &t.bloom[m], &self.p_down, &t.g_down[m - 1], over);
 		}
 		for m in (1..LEVELS).rev() {
 			run(enc, "post bloom up", &t.bloom[m - 1], &self.p_up, &t.g_up[m - 1], wgpu::LoadOp::Load);
 		}
 		if sun.is_some() {
-			run(enc, "post ray mask", &t.rays[0], &self.p_rmask, &t.g_rmask, clear);
-			run(enc, "post rays", &t.rays[1], &self.p_rays, &t.g_rays, clear);
+			run(enc, "post ray mask", &t.rays[0], &self.p_rmask, &t.g_rmask, over);
+			run(enc, "post rays", &t.rays[1], &self.p_rays, &t.g_rays, over);
 		}
 	}
 
@@ -1172,7 +1190,7 @@ impl Post {
 		};
 		let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
 			label: Some("post composite"),
-			color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: msaa, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store } })],
+			color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: msaa, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: overwrite(), store: wgpu::StoreOp::Store } })],
 			depth_stencil_attachment: None,
 			timestamp_writes: crate::viewer::passtime::rw("post composite"),
 			occlusion_query_set: None,

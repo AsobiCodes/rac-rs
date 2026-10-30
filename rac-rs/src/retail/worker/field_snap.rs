@@ -152,11 +152,15 @@ impl Worker {
 		// capture thread finishes this one. The front end and the debug dumps take it here.
 		let late = !front && !booting && !ov_sync;
 		if let (true, Some(c)) = (late, cap.as_ref()) {
-			let (h, f) = (c.handle(), field as u64);
-			s.ov_late = Some(OvLate(Box::new(move || h.take(f, ov_delay).map(|mut o| {
-				let (w, rows) = ov_dims(&o);
-				(w, rows, ov_px(&mut o), o.disp, o.guard)
-			}))));
+			let (h, f, done) = (c.handle(), field as u64, c.late(field as u64, ov_delay));
+			s.ov_late = Some(OvLate(Box::new(move || {
+				// Marks the take run (capture.rs `LateTakes`) after it; dropped with the closure if it never runs.
+				let _done = done;
+				h.take(f, ov_delay).map(|mut o| {
+					let (w, rows) = ov_dims(&o);
+					(w, rows, ov_px(&mut o), o.disp, o.guard)
+				})
+			})));
 		}
 		let taken = if late { None } else { cap.as_ref().and_then(|c| c.take(field as u64, ov_delay)) };
 		wperf.lap(7);

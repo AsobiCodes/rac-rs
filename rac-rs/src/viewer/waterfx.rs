@@ -23,8 +23,13 @@
 //!
 //! Modules (a pure move out of one file; each child starts with `use super::*;`):
 //! - `shader`: the water shader (WGSL, one string literal)
+//! - `fall_wgsl`: the waterfall sheets' WGSL (`vs_fall`, `fs_fall`), the tail of the shader moved out unchanged
+//! - `far_lod`: the far-sea look and the near-identical water savings (WGSL + switches; both off by default)
 //! - `shore_map`: the geometric sea's shore-map compute shader, its uniform and size constants, `shore_dist`
 //! - `dry_tiles`: dry tiles for the sea grid (compute pass; lets `vs_grid` skip `edge_calm` where it would return 1.0)
+//! - `bed_min`: 4 x 4 minimum of the bed depth (compute pass `cs_bedmin`): `shore_fade`'s 16 taps are skipped where all are deep
+//! - `nwater`: speed cuts of `fs_water` (`mirror_layer`, `twinkle_at`; exact, the arithmetic is unchanged)
+//! - `grid_waves`: the sea grid's wave heights, made once per vertex (compute pass `cs_wave`, read by `vs_grid`)
 //! - `hero_crest`: the geometric sea's crest in front of the swimming hero (`sea_pic`, `geo_fill`)
 //! - `looks`: look parameters: `GeoLook`, the uniform block `WaterU`, tuning constants, `march_steps`, `wave_look`
 //! - `levels`: per-level tables (sea, pond, river, waterfall, cold, frozen, lava, mud, sludge) and the flow slots
@@ -42,7 +47,12 @@ mod shader;
 mod shore_map;
 mod edge_calm;
 mod dry_tiles;
+mod bed_min;
+mod grid_waves;
 mod far_look;
+mod far_lod;
+mod nwater;
+mod fall_wgsl;
 mod steep_look;
 mod shore_fade;
 mod hero_crest;
@@ -61,6 +71,7 @@ mod skymap;
 mod flows;
 mod setup;
 mod passes;
+mod tune;
 
 use self::shader::SHADER;
 use self::shore_map::*;
@@ -73,6 +84,8 @@ use self::wakes::*;
 pub(in crate::viewer) use self::skymap::{wgsl as sky_wgsl, SkyMap};
 use self::flows::*;
 use self::dry_tiles::{DryGroups, DryTiles};
+use self::bed_min::{BedMin, BedMinGroups};
+use self::grid_waves::{grid_dims, GridGroups, GridWaves};
 
 struct Targets {
 	/// (width, height, post generation, the sky map's real targets exist).
@@ -97,6 +110,8 @@ struct Targets {
 	g_shore: wgpu::BindGroup,
 	/// [PC] The dry tiles of the sea grid (`dry_tiles.rs`).
 	dry: DryGroups,
+	/// [PC] The 4 x 4 minima of the bed depth (`bed_min.rs`), read by `fs_water` as `bedmin`.
+	bed_min: BedMinGroups,
 }
 
 
@@ -146,6 +161,7 @@ pub(super) struct WaterFx {
 	p_mask: wgpu::RenderPipeline,
 	p_grid: wgpu::RenderPipeline,
 	dry: DryTiles,
+	bed_min: BedMin,
 	p_shore: wgpu::ComputePipeline,
 	p_shore_keep: wgpu::ComputePipeline,
 	p_shore_h: wgpu::ComputePipeline,
@@ -213,10 +229,10 @@ mod tests {
 	/// The shader compiles (naga) with both entry pairs.
 	#[test]
 	fn water_shader_parses() {
-		let src = format!("{}{}{}{}{}{}{}{}{}", super::SHADER, super::skymap::wgsl(12, 13), super::edge_calm::EDGE_WGSL, super::far_look::FAR_WGSL, super::steep_look::STEEP_WGSL, super::shore_fade::SHORE_FADE_WGSL, super::shore_map::SHORE_DIST_WGSL, super::hero_crest::HERO_CREST_WGSL, super::rim::RIM_WGSL) + super::underside::UNDER_WGSL + super::dry_tiles::DRY_WGSL;
+		let src = format!("{}{}{}{}{}{}{}{}{}{}", super::SHADER, super::fall_wgsl::FALL_WGSL, super::skymap::wgsl(12, 13), super::edge_calm::EDGE_WGSL, super::far_look::FAR_WGSL, super::steep_look::STEEP_WGSL, super::shore_fade::SHORE_FADE_WGSL, super::shore_map::SHORE_DIST_WGSL, super::hero_crest::HERO_CREST_WGSL, super::rim::RIM_WGSL) + super::underside::UNDER_WGSL + super::dry_tiles::DRY_WGSL + super::grid_waves::GRID_WAVES_WGSL + super::far_lod::FAR_LOD_WGSL + super::nwater::NWATER_WGSL + super::bed_min::BED_MIN_WGSL;
 		let m = naga::front::wgsl::parse_str(&src).expect("water shader");
 		let names: Vec<_> = m.entry_points.iter().map(|e| e.name.as_str()).collect();
-		for n in ["vs_pos", "fs_pos", "vs_full", "fs_water"] {
+		for n in ["vs_pos", "fs_pos", "vs_full", "fs_water", "vs_grid", "cs_dry", "cs_wave", "cs_bedmin"] {
 			assert!(names.contains(&n), "{n}");
 		}
 		let mut v = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all());

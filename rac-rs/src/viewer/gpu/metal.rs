@@ -6,8 +6,8 @@ impl Gpu {
 	/// NOV-35b: the three light rows (world to-light direction, colour) a metal vertex of a moby sums (FUN_00210358 vf25..vf30, the
 	/// moby's own record): its light pair blended as REN-5d (`slot_blend`; colours and directions lerp by t, directions renormalised,
 	/// t = 0 uses A as is) and its dynamic third light (`dyn_id` id, 0 = none). The wrap lanes are not used.
-	fn metal_rows(&self, placed: Option<([u8; 3], u32)>, id: f32) -> [([f32; 3], [f32; 3]); 3] {
-		let lights = self.light_rows();
+	/// `lights`: `light_rows()`, taken once per `set_metal_props` (it does not change between the props).
+	fn metal_rows(&self, lights: &[[[f32; 4]; 4]; 16], placed: Option<([u8; 3], u32)>, id: f32) -> [([f32; 3], [f32; 3]); 3] {
 		let (_, word) = placed.unwrap_or((gameplay::SPAWN_AMBIENT, 0));
 		let (a, b, t) = gameplay::light_word(word);
 		let (la, lb, t) = (lights[a.min(15)], lights[b.min(15)], t.clamp(0.0, 0.999));
@@ -46,10 +46,11 @@ impl Gpu {
 	/// of every prop `set_props` drew; per prop: metal alpha from the MOBY-FADE view depth of its sphere (None: no metal part),
 	/// env matrix from the sphere centre and the camera, then the skinned metal vertices (the pose tail after the LOD vertices,
 	/// else the stored ones). Without a view (menus) nothing is built.
-	pub(super) fn set_metal_props(&mut self, props: &[Prop], jobs: &[(usize, [f32; 16], f32, f32)], posed: &HashMap<PoseKey, Posed>, fx_posed: &HashMap<usize, Posed>, centres: &[[f32; 3]], radii: &[Option<f32>]) {
+	pub(super) fn set_metal_props(&mut self, props: &[Prop], jobs: &[(usize, [f32; 16], f32, f32)], posed: &HashMap<PoseKey, Posed>, fx_posed: &HashMap<usize, std::sync::Arc<Posed>>, centres: &[[f32; 3]], radii: &[Option<f32>]) {
 		let (mut verts, mut runs) = (Vec::new(), BTreeMap::new());
 		if let Some((view, ranges)) = self.scene.as_ref().and_then(|s| Some((s.clip_view?, &s.props_ranges))) {
 			let mut todo = Vec::new();
+			let lights = self.light_rows();
 			for &(pi, m, scale, id) in jobs {
 				let p = &props[pi];
 				let (Some(packets), Some(&c), Some(r)) = (self.metal.classes.get(&p.class_id), centres.get(pi), ranges.get(pi)) else { continue };
@@ -58,9 +59,9 @@ impl Gpu {
 				let z = view.f[0] * d[0] + view.f[1] * d[1] + view.f[2] * d[2];
 				let Some(alpha) = metal_alpha(metal_byte(p.class_id), z, radii.get(pi).copied().flatten().unwrap_or(0.0)) else { continue };
 				let total: usize = packets.iter().map(|q| q.positions.len()).sum();
-				let tail = fx_posed.get(&pi).or_else(|| posed.get(&pose_key(p))).filter(|(ps, _)| ps.len() == r.len() + total).map(|(ps, ns)| (&ps[r.len()..], &ns[r.len()..]));
+				let tail = fx_posed.get(&pi).map(|a| &**a).or_else(|| posed.get(&pose_key(p))).filter(|(ps, _)| ps.len() == r.len() + total).map(|(ps, ns)| (&ps[r.len()..], &ns[r.len()..]));
 				let e = mobies::metal_env(view.e, metal_view_rows(&view), c, axes(&m));
-				todo.push((packets.as_slice(), tail, self.metal_rows(p.light, id), e, m, scale, alpha));
+				todo.push((packets.as_slice(), tail, self.metal_rows(&lights, p.light, id), e, m, scale, alpha));
 			}
 			// [PC] perf round 3: one reused vertex buffer; each prop fills its own slice (`fill_metal`) on the frame worker pool.
 			let counts: Vec<usize> = todo.iter().map(|t| metal_count(t.0)).collect();

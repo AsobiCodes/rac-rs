@@ -28,7 +28,7 @@ pub(super) struct Frame {
 	pub(super) passenger_shown: bool,
 	pub(super) eye_glows: Vec<([f32; 3], f32)>,
 	pub(super) vendor_quads: Vec<particles::WorldQuad>,
-	pub(super) fx_posed: HashMap<usize, Posed>,
+	pub(super) fx_posed: HashMap<usize, std::sync::Arc<Posed>>,
 	pub(super) flight_pose: Option<travel::FlightPose>,
 	pub(super) title: String,
 	pub(super) st: Option<HudState>,

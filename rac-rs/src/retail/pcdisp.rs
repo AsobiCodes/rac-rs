@@ -18,7 +18,7 @@
 //! block, default 0 = today's RAM), the texts are the ids 0x7fb0..0x7fbf in a pool of their own (`POOL`, BASE + 0xE000, 16 slots of
 //! 0x40; the canary of prompts.rs skips it). `%` is not a font glyph (0x25 draws the Cross button), so values carry no unit.
 //!
-//! The Display section is the pause page's only (the title's Graphics page keeps its rows, like HUD, Renderer and Preset).
+//! The Display section is on both Graphics pages (the title's page shows the same sections as the pause page, `pcext/titlegfx.rs`).
 use super::pcctl::CBASE;
 use super::pcopts::PcOptions;
 use ee_oracle::cpu::Cpu;
@@ -288,8 +288,16 @@ pub fn text(id: u32, l: usize) -> Vec<u8> {
 			let size = if w > 0 && h > 0 { format!(" - {}x{}", (w * pct + 50) / 100, (h * pct + 50) / 100) } else { String::new() };
 			stepper(format!("{pct}{size}").into_bytes())
 		}
-		_ => Vec::new(),
+		_ => super::pcinput::text(id, l),
 	}
+}
+
+/// A number that changes whenever one of `text`'s live values does (the steppers' scale, FPS limit, refresh rate, render scale and
+/// window size): the title page's text list is rebuilt only when it changes (`titlegfx::put_texts`).
+pub fn text_key() -> u64 {
+	let (w, h) = (WIN_W.load(Ordering::Relaxed) as u64, WIN_H.load(Ordering::Relaxed) as u64);
+	let a = SCALE.load(Ordering::Relaxed) as u64 | (RSCALE.load(Ordering::Relaxed) as u64) << 8 | (REFRESH.load(Ordering::Relaxed) as u64) << 16;
+	a.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ (FPS.load(Ordering::Relaxed) as u64) << 1 ^ w << 32 ^ h << 48
 }
 
 /// The text lookup hand for the ids `ID0..ID_END` (`pcctl::text_hook` hands them over): the string goes into the id's pool slot and

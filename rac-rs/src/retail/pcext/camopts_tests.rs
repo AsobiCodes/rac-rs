@@ -53,7 +53,7 @@ fn camera_rows_of_every_level_pal_and_usa() {
 			assert_eq!(rec(&mut mem, 2), [0x521b, CAMSEL, ID_PCT, ID_PCT, 0, 0], "{name} level {lv}: camera speed row (retail's label)");
 			assert_eq!(rec(&mut mem, 3), [ID_MOUSE, MOUSESEL, ID_MPCT, ID_MPCT, 0, 0], "{name} level {lv}: mouse speed row right below camera speed");
 			assert_eq!(rec(&mut mem, 4), [ID_CAMERA, CAM, ID_CLASSIC, ID_STATIC, ID_SMOOTH, 0], "{name} level {lv}");
-			assert_eq!(rec(&mut mem, 5), [ID_STRAFE, STRAFE, ID_OFF, ID_ON, 0, 0], "{name} level {lv}");
+			assert_eq!(rec(&mut mem, 5), [ID_STRAFE, STRAFE, super::super::pcinput::ID_RAISED, super::super::pcinput::ID_SHOULDER, ID_OFF, 0], "{name} level {lv}: Strafe aiming Raised / Shoulder / Off");
 			assert_eq!(rec(&mut mem, 6), [ID_BUYALL, BUYALL, ID_OFF, ID_ON, 0, 0], "{name} level {lv}");
 			assert_eq!(rec(&mut mem, 7), [ID_LOCKON, LOCKON, ID_AUTO, ID_ON, ID_OFF, 0], "{name} level {lv}: lock-on row");
 			assert_eq!(rec(&mut mem, 8), [0; 6], "{name} level {lv}: zero record");

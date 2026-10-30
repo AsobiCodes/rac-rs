@@ -4,6 +4,7 @@ use super::*;
 
 impl Gpu {
 	pub(super) fn pass_shrubs(&self, mut pass: &mut wgpu::RenderPass<'_>, scene: &Scene, warp: bool, array: Option<(&super::bindless::Bindless, &wgpu::BindGroup)>, multi: &Option<(super::bindless::Runs, super::bindless::Runs, super::bindless::Runs)>) {
+			crate::viewer::passtime::lap(pass, "pools");
 			// REN-CULL-SHRUB: the shrub meshes after the sky (they are depth tested, and the faded / billboard fragments write no Z
 			// everywhere), then the billboards: pass 1 with the Z-writing split, pass 2 never writing Z.
 			if !warp && !dskip("shrub") && (!scene.shrub_opaque.is_empty() || !scene.shrub_faded.is_empty()) {
@@ -65,6 +66,7 @@ impl Gpu {
 					}
 				}
 			}
+			crate::viewer::passtime::lap(pass, "shrub meshes");
 			if !warp && !dskip("bb") && !scene.shrub_bb_quads.is_empty() {
 				let mut verts = Vec::with_capacity(scene.shrub_bb_quads.len() * 4);
 				let mut runs: Vec<(u32, bool, u32, u32)> = Vec::new();
@@ -96,9 +98,11 @@ impl Gpu {
 					}
 				}
 			}
+			crate::viewer::passtime::lap(pass, "shrub billboards");
 			// [PC] PREVIEW (vegfx.rs): the extra plants, after the level's own shrubs.
 			if !warp && !dskip("veg") {
 				self.veg.encode(&mut pass, scene);
 			}
+			crate::viewer::passtime::lap(pass, "veg");
 	}
 }

@@ -69,8 +69,8 @@ pub fn register_reloc_hand(h: &'static crate::hs_reloc::RelocHand) {
     }
 }
 
-/// S4: are the relocatable speed hands (built-in ones in `hs_hands::reloc_all` and registered ones) installed? `RAC_HS=0` turns them all off (A/B against
-/// the recompiled code; ORACLE_HAND=0 turns off every hand incl. PC hooks). Read once per process.
+/// S4: are the relocatable speed hands (built-in ones in `hs_hands::reloc_all`) installed? `RAC_HS=0` turns them off (A/B against
+/// the recompiled code); registered relocatable hands (PC hooks) are installed regardless; ORACLE_HAND=0 turns off every hand incl. PC hooks). Read once per process.
 pub fn speed_hands_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     match HS_FORCE.load(std::sync::atomic::Ordering::Relaxed) {
@@ -201,9 +201,10 @@ impl Table {
             }
         }
         // Relocatable speed hands (S2i): every recompiled function of the sets in use whose code matches the template is a hand entry.
-        if !std::env::var("ORACLE_HAND").is_ok_and(|v| v == "0") && speed_hands_on() {
+        // RAC_HS=0 leaves out only the built-in speed hands; the REGISTERED ones (PC hooks, mods) are installed anyway.
+        if !std::env::var("ORACLE_HAND").is_ok_and(|v| v == "0") {
             let spans = t.spans.clone();
-            let mut all = crate::hs_hands::reloc_all();
+            let mut all = if speed_hands_on() { crate::hs_hands::reloc_all() } else { Vec::new() };
             for rh in reloc_hands() {
                 if !all.iter().any(|x| std::ptr::eq(*x, rh)) {
                     all.push(rh);
@@ -228,7 +229,7 @@ impl Table {
             }
             if n_hs > 0 {
                 // One line per table build, so a run log shows the speed hands are live (RAC_HS=0 turns them off).
-                eprintln!("rec: {n_hs} speed hand(s) installed (RAC_HS=0 = off)");
+                eprintln!("rec: {n_hs} speed hand(s) installed (RAC_HS=0 = built-in off, PC hooks stay)");
             }
         }
         // `stale` tests whether any probe differs: a sorted, deduplicated list gives the same answer with fewer

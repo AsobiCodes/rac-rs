@@ -9,6 +9,11 @@ pub(super) fn set(on: bool) {
     SMOOTH.store(on, Ordering::Relaxed);
 }
 
+/// The applied mode (the Preset row's detection reads it).
+pub(super) fn get() -> bool {
+    SMOOTH.load(Ordering::Relaxed)
+}
+
 /// Enhanced draw gate, including the Classic half of F10 split view.
 pub fn enabled(enhanced: bool) -> bool {
     crate::retail::splitview::fx(enhanced && SMOOTH.load(Ordering::Relaxed))

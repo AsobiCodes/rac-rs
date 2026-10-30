@@ -1,0 +1,9 @@
+{
+  "name": "libomniloader.so",
+  "version": "0.1.0",
+  "abi": "1.6",
+  "platform": "linux-x86_64",
+  "glibc": "2.31",
+  "sha256": "3ccb7463973bc44abf847b8a0c0e3670a56fca96f6684e82c51152583bf7fc3c",
+  "source": "omniloader 0.1.0 (same source as omniloader.dll), built with zig cc for glibc 2.31, without build-machine paths"
+}

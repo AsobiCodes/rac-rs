@@ -242,6 +242,18 @@ pub(super) fn lap(p: Phase) {
 	});
 }
 
+/// [PC] Adds a measured duration (e.g. a wait timed elsewhere) to the span bucket `name`.
+pub(super) fn span_add(name: &'static str, ms: f32) {
+	if !on() {
+		return;
+	}
+	STATE.with(|s| {
+		if let Some(s) = s.borrow_mut().as_mut() {
+			add_span(&mut s.cur.spans, name, Duration::from_secs_f32(ms.max(0.0) / 1000.0), 1);
+		}
+	});
+}
+
 /// Times a nested piece into its own bucket until the guard drops.
 pub(super) struct Span(Option<(&'static str, Instant)>);
 
@@ -345,6 +357,13 @@ pub(super) fn frame_end(ticks: u32) {
 		cur.ms = d.as_secs_f32() * 1000.0;
 		cur.ticks = ticks;
 		super::framecsv::frame(s.start, cur.ms, ticks, cur.phase[9].as_secs_f32() * 1000.0, cur.phase[10].as_secs_f32() * 1000.0, cur.phase[11].as_secs_f32() * 1000.0);
+		if super::framecsv::on() {
+			let ph: Vec<f32> = cur.phase.iter().map(|d| d.as_secs_f32() * 1000.0).collect();
+			let mut sp: Vec<&(&'static str, Duration, u32)> = cur.spans.iter().collect();
+			sp.sort_by(|a, b| b.1.cmp(&a.1));
+			let txt: Vec<String> = sp.iter().take(64).map(|x| format!("{}={:.0}", x.0, x.1.as_secs_f32() * 1e6)).collect();
+			super::framecsv::slow(s.start, cur.ms, ticks, &ph, &txt.join(" "));
+		}
 		let w = &mut s.window;
 		w.frames += 1;
 		w.ticks += ticks;

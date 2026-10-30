@@ -96,18 +96,28 @@ fn shore_seen(c: vec2<i32>) -> bool {
 	}
 	return true;
 }
-@compute @workgroup_size(8, 8) fn cs_shore_h(@builtin(global_invocation_id) id: vec3<u32>) {
+// [PC] (speed) The marks round a workgroup's 8 x 8 cells (12 rows x 32 columns: SHORE_R + 2 columns and 2 rows each side; 0 off
+// the map, which a max ignores), read once into workgroup memory instead of 146 buffer reads per cell. Same values, same map.
+var<workgroup> sh_marks: array<u32, 384>;
+@compute @workgroup_size(8, 8) fn cs_shore_h(@builtin(global_invocation_id) id: vec3<u32>, @builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
 	let n = i32(s.size.y);
+	let o = vec2<i32>(wg.xy) * 8 - vec2<i32>(SHORE_R + 2, 2);
+	for (var e = i32(li); e < 384; e += 64) {
+		let q = o + vec2<i32>(e % 32, e / 32);
+		var m = 0u;
+		if (all(q >= vec2<i32>(0)) && all(q < vec2<i32>(n))) { m = atomicLoad(&shore[n * n + q.y * n + q.x]); }
+		sh_marks[e] = m;
+	}
+	workgroupBarrier();
 	let c = vec2<i32>(id.xy);
 	if (any(c >= vec2<i32>(n))) { return; }
+	let l = c - o;
 	// The highest mark over 5 rows per column of the window (2 cells round it each side).
 	var cm: array<u32, 25>;
 	for (var k = 0; k < 2 * SHORE_R + 5; k++) {
-		let x = c.x + k - SHORE_R - 2;
+		let x = l.x + k - SHORE_R - 2;
 		var m = 0u;
-		if (x >= 0 && x < n) {
-			for (var j = max(c.y - 2, 0); j <= min(c.y + 2, n - 1); j++) { m = max(m, atomicLoad(&shore[n * n + j * n + x])); }
-		}
+		for (var j = l.y - 2; j <= l.y + 2; j++) { m = max(m, sh_marks[j * 32 + x]); }
 		cm[k] = m;
 	}
 	let lowk = okey(s.map.w - SHORE_LOW);
@@ -115,7 +125,7 @@ fn shore_seen(c: vec2<i32>) -> bool {
 	var low = SHORE_R + 1;
 	for (var k = -SHORE_R; k <= SHORE_R; k++) {
 		let x = c.x + k;
-		if (x >= 0 && x < n && atomicLoad(&shore[n * n + c.y * n + x]) != 0u) {
+		if (x >= 0 && x < n && sh_marks[l.y * 32 + l.x + k] != 0u) {
 			best = min(best, abs(k));
 			let q = k + SHORE_R + 2;
 			if (max(max(max(cm[q - 2], cm[q - 1]), max(cm[q], cm[q + 1])), cm[q + 2]) <= lowk && abs(k) < low && shore_seen(vec2<i32>(x, c.y))) { low = min(low, abs(k)); }
@@ -123,15 +133,26 @@ fn shore_seen(c: vec2<i32>) -> bool {
 	}
 	atomicStore(&shore[2 * n * n + c.y * n + c.x], u32(best) | (u32(low) << 16u));
 }
-@compute @workgroup_size(8, 8) fn cs_shore_v(@builtin(global_invocation_id) id: vec3<u32>) {
+// [PC] (speed) The row distances of a workgroup's 8 columns over its rows and SHORE_R more each side (28 x 8), read once.
+var<workgroup> sh_rows: array<u32, 224>;
+@compute @workgroup_size(8, 8) fn cs_shore_v(@builtin(global_invocation_id) id: vec3<u32>, @builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
 	let n = i32(s.size.y);
+	let o = vec2<i32>(wg.xy) * 8 - vec2<i32>(0, SHORE_R);
+	for (var e = i32(li); e < 224; e += 64) {
+		let q = o + vec2<i32>(e % 8, e / 8);
+		var r = 0u;
+		if (all(q >= vec2<i32>(0)) && all(q < vec2<i32>(n))) { r = atomicLoad(&shore[2 * n * n + q.y * n + q.x]); }
+		sh_rows[e] = r;
+	}
+	workgroupBarrier();
 	let c = vec2<i32>(id.xy);
 	if (any(c >= vec2<i32>(n))) { return; }
+	let l = c - o;
 	var d2 = vec2<f32>(f32((SHORE_R + 1) * (SHORE_R + 1)));
 	for (var k = -SHORE_R; k <= SHORE_R; k++) {
 		let y = c.y + k;
 		if (y >= 0 && y < n) {
-			let r = atomicLoad(&shore[2 * n * n + y * n + c.x]);
+			let r = sh_rows[(l.y + k) * 8 + l.x];
 			let h = vec2<f32>(f32(r & 0xffffu), f32(r >> 16u));
 			d2 = min(d2, h * h + f32(k * k));
 		}

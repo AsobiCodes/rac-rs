@@ -10,12 +10,12 @@
 //! its partner's move is the wrong one, a standing mesh barely moves); every quad with a corner on a moved
 //! vertex moves that corner with it, also an unpaired quad. So the drawn mesh is the field's own mesh, each vertex moved once.
 //! Each display frame only adds `d * (1 - t)` (`apply`); colours and texture coordinates still blend per quad (they do not open gaps).
-use super::{FxMap, V3};
+use super::V3;
 use super::still::StillPair;
 use crate::particles::WorldQuad;
 
 /// Paired corners of one vertex that disagree by more than this (world units) are a mispairing: the smallest move wins.
-const SNAP: f32 = 0.05;
+pub(super) const SNAP: f32 = 0.05;
 
 /// Per queue (A, B): (quad index in this field's list, displacement of each corner towards last field at t = 0).
 pub(super) type Weld = [Vec<(u32, [V3; 4])>; 2];
@@ -30,10 +30,11 @@ pub(super) struct WeldStat {
 	pub carried: u32,
 }
 
-/// One welded vertex: (paired corners seen, first displacement, sum of displacements, smallest displacement, all equal so far,
-/// corners on it, largest disagreement).
+/// One welded vertex: its position bits, (paired corners seen, first displacement, sum of displacements, smallest displacement,
+/// all equal so far, corners on it, largest disagreement).
 #[derive(Clone, Copy)]
 struct Vert {
+	key: [u32; 3],
 	n: u32,
 	first: V3,
 	sum: V3,
@@ -43,36 +44,72 @@ struct Vert {
 	spread: f32,
 }
 
+fn slot_hash(k: [u32; 3]) -> usize {
+	let mut h = (k[0] as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+	h = (h ^ k[1] as u64).wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+	h = (h ^ k[2] as u64).wrapping_mul(0xC4CE_B9FE_1A85_EC53);
+	(h >> 32) as usize
+}
+
+/// The vertices of this field's quads (every corner by its exact position bits, across both queues and every kind) and the
+/// vertex of each corner. Needs only this field's quads, so it can be made while the pairing runs; its buffers are reused
+/// from field to field.
+#[derive(Default)]
+pub(super) struct Verts {
+	vs: Vec<Vert>,
+	at: [Vec<[u32; 4]>; 2],
+	slots: Vec<u32>,
+}
+
+impl Verts {
+	/// Numbers the vertices in first-seen order (queue A quads, then queue B; corners in order), as the first version did.
+	pub(super) fn index(&mut self, cur: [&[WorldQuad]; 2]) {
+		let total: usize = cur[0].len() + cur[1].len();
+		self.vs.clear();
+		self.slots.clear();
+		self.slots.resize((4 * total).next_power_of_two().max(16), u32::MAX);
+		let mask = self.slots.len() - 1;
+		for qi in 0..2 {
+			self.at[qi].clear();
+			self.at[qi].reserve(cur[qi].len());
+			for q in cur[qi] {
+				let mut a = [0u32; 4];
+				for k in 0..4 {
+					let key = [q.pos[k][0].to_bits(), q.pos[k][1].to_bits(), q.pos[k][2].to_bits()];
+					let mut s = slot_hash(key) & mask;
+					let v = loop {
+						let h = self.slots[s];
+						if h == u32::MAX {
+							let n = self.vs.len() as u32;
+							self.slots[s] = n;
+							self.vs.push(Vert { key, n: 0, first: [0.0; 3], sum: [0.0; 3], small: [0.0; 3], same: true, corners: 0, spread: 0.0 });
+							break n;
+						}
+						if self.vs[h as usize].key == key {
+							break h;
+						}
+						s = (s + 1) & mask;
+					};
+					self.vs[v as usize].corners += 1;
+					a[k] = v;
+				}
+				self.at[qi].push(a);
+			}
+		}
+	}
+}
+
 /// The welded displacements of this field's queues `cur` against last field's `prev`, from the moving pairs `moving` (index in cur,
 /// index in prev; corner k with corner k) and the standing pairs `still` (corner k with corner m[k]). Once per field.
-pub(super) fn weld(prev: [&[WorldQuad]; 2], cur: [&[WorldQuad]; 2], moving: &[Vec<(u32, u32)>; 2], still: &[Vec<StillPair>; 2]) -> (Weld, WeldStat) {
+/// `verts` = `Verts::index(cur)`; it is used up (the displacements are summed into it).
+pub(super) fn weld_with(verts: &mut Verts, prev: [&[WorldQuad]; 2], cur: [&[WorldQuad]; 2], moving: &[Vec<(u32, u32)>; 2], still: &[Vec<StillPair>; 2]) -> (Weld, WeldStat) {
 	let mut stat = WeldStat::default();
 	if moving.iter().all(Vec::is_empty) && still.iter().all(Vec::is_empty) {
 		return (Default::default(), stat);
 	}
-	let key = |p: V3| (p[0].to_bits(), p[1].to_bits(), p[2].to_bits());
-	let mut verts: FxMap<(u32, u32, u32), u32> = FxMap::default();
-	let mut vs: Vec<Vert> = Vec::new();
-	// Vertex of every corner of every quad, per queue.
-	let mut at: [Vec<[u32; 4]>; 2] = Default::default();
-	for qi in 0..2 {
-		at[qi] = cur[qi]
-			.iter()
-			.map(|q| {
-				std::array::from_fn(|k| {
-					let n = vs.len() as u32;
-					let v = *verts.entry(key(q.pos[k])).or_insert(n);
-					if v == n {
-						vs.push(Vert { n: 0, first: [0.0; 3], sum: [0.0; 3], small: [0.0; 3], same: true, corners: 0, spread: 0.0 });
-					}
-					vs[v as usize].corners += 1;
-					v
-				})
-			})
-			.collect();
-	}
+	let Verts { vs, at, .. } = verts;
 	let mut paired: [Vec<bool>; 2] = [vec![false; cur[0].len()], vec![false; cur[1].len()]];
-	let mut add = |vs: &mut Vec<Vert>, v: u32, d: V3| {
+	let add = |vs: &mut Vec<Vert>, v: u32, d: V3| {
 		let e = &mut vs[v as usize];
 		let len = |v: V3| v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
 		if e.n == 0 || len(d) < len(e.small) {
@@ -94,14 +131,14 @@ pub(super) fn weld(prev: [&[WorldQuad]; 2], cur: [&[WorldQuad]; 2], moving: &[Ve
 			let (Some(q), Some(a)) = (cur[qi].get(i as usize), prev[qi].get(j as usize)) else { continue };
 			paired[qi][i as usize] = true;
 			for k in 0..4 {
-				add(&mut vs, at[qi][i as usize][k], std::array::from_fn(|c| a.pos[k][c] - q.pos[k][c]));
+				add(vs, at[qi][i as usize][k], std::array::from_fn(|c| a.pos[k][c] - q.pos[k][c]));
 			}
 		}
 		for &(i, j, m) in &still[qi] {
 			let (Some(q), Some(a)) = (cur[qi].get(i as usize), prev[qi].get(j as usize)) else { continue };
 			paired[qi][i as usize] = true;
 			for k in 0..4 {
-				add(&mut vs, at[qi][i as usize][k], std::array::from_fn(|c| a.pos[m[k] as usize][c] - q.pos[k][c]));
+				add(vs, at[qi][i as usize][k], std::array::from_fn(|c| a.pos[m[k] as usize][c] - q.pos[k][c]));
 			}
 		}
 	}
@@ -137,6 +174,14 @@ pub(super) fn weld(prev: [&[WorldQuad]; 2], cur: [&[WorldQuad]; 2], moving: &[Ve
 		}
 	}
 	(out, stat)
+}
+
+/// `weld_with` on a fresh `Verts` (tests).
+#[cfg(test)]
+pub(super) fn weld(prev: [&[WorldQuad]; 2], cur: [&[WorldQuad]; 2], moving: &[Vec<(u32, u32)>; 2], still: &[Vec<StillPair>; 2]) -> (Weld, WeldStat) {
+	let mut v = Verts::default();
+	v.index(cur);
+	weld_with(&mut v, prev, cur, moving, still)
 }
 
 /// This field's quads `qa` / `qb` (copies) moved to `t` (0 = last field's place, 1 = this field's): each listed corner by its

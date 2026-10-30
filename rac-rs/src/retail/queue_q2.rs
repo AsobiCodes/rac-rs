@@ -27,9 +27,12 @@ pub fn note_static_tint(class: u32, colour_start: usize) {
 	}
 }
 
-/// Draw hook (`handler.rs`, PROP_TINTS): the static class's `colour_start`, if the loader noted one.
-pub fn static_tint_start(class: u32) -> Option<usize> {
-	STATIC_TINT.lock().ok()?.as_ref()?.get(&class).copied()
+/// Draw hook (`handler.rs`, PROP_TINTS): `f` gets the lookup class -> the static class's `colour_start`, if the loader noted one;
+/// [PC] perf: many classes under one lock.
+pub fn with_static_tints<R>(f: impl FnOnce(&dyn Fn(u32) -> Option<usize>) -> R) -> R {
+	let g = STATIC_TINT.lock().ok();
+	let m = g.as_ref().and_then(|g| g.as_ref());
+	f(&|class| m?.get(&class).copied())
 }
 
 /// fx textures bound with GS CLAMP_1 = 5 here (`particles::FX_CLAMP` key variants): the lamp glow's 0xb [C: Rilgar

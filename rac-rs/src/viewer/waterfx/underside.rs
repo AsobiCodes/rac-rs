@@ -50,7 +50,6 @@ fn under_side(c: vec2<i32>, p: vec3<f32>, pf: vec3<f32>, geo: bool, sea: bool) -
 	let eye = w.eye.xyz;
 	let time = w.eye.w;
 	let uv0 = (vec2<f32>(c) + 0.5) * w.size.zw;
-	let orig = to_linear(textureSampleLevel(scene, lsamp, uv0, 0.0).rgb);
 	let jit = dither(vec2<f32>(c) + 0.5);
 	let te = p - eye;
 	let dist = max(length(te), 1e-3);
@@ -84,6 +83,6 @@ fn under_side(c: vec2<i32>, p: vec3<f32>, pf: vec3<f32>, geo: bool, sea: bool) -
 		let f = und_fresnel(ci, clamp(dot(t, nu), 0.0, 1.0));
 		col = mix(und_sky(normalize(t)), refl, f);
 	}
-	return finish(c, orig, col, geo);
+	return finish(c, col, geo);
 }
 "#;

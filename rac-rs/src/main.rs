@@ -14,6 +14,7 @@ mod camera;
 mod camgrid;
 mod collision;
 mod devtune;
+mod dialog_linux;
 mod dynlight;
 mod flow;
 mod fmv;
@@ -22,6 +23,8 @@ mod frontend;
 mod frontend_lang;
 mod frontend_lines;
 mod awake;
+mod awake_linux;
+mod update_notice_linux;
 mod gsfull;
 mod gadgets;
 mod gameplay;
@@ -99,7 +102,13 @@ fn crash_log(text: &str) {
 	}
 }
 
-/// A plain Windows message box (no console needed); on other platforms the text goes to stderr.
+/// The file that holds the details of a panic: the public build writes `crash.log`, other builds only have the run log.
+#[cfg(all(not(windows), feature = "windows_gui"))]
+const PANIC_DETAILS: &str = "player/crash.log";
+#[cfg(all(not(windows), not(feature = "windows_gui")))]
+const PANIC_DETAILS: &str = "player/log.txt";
+
+/// A plain Windows message box (no console needed); on Linux a zenity / kdialog / xmessage window (`dialog_linux.rs`) and the text on stderr.
 fn message_box(text: &str) {
 	#[cfg(windows)]
 	{
@@ -112,7 +121,10 @@ fn message_box(text: &str) {
 		unsafe { MessageBoxW(std::ptr::null_mut(), wide(text).as_ptr(), wide("Ratchet & Clank (rac-rs)").as_ptr(), 0x40) };
 	}
 	#[cfg(not(windows))]
-	eprintln!("{text}");
+	{
+		eprintln!("{text}");
+		dialog_linux::show("Ratchet & Clank (rac-rs)", text, dialog_linux::Kind::Error);
+	}
 }
 
 /// The setup script the messages name: Setup.cmd on Windows, setup.sh on Linux. A macro (not a const) so that `concat!` makes it one
@@ -288,9 +300,9 @@ pub fn main() -> ExitCode {
 	#[cfg(feature = "windows_gui")]
 	std::panic::set_hook(Box::new(|info| {
 		let thread = std::thread::current();
-		// [PC] A texture-pack decoder panic that is caught on the spot (texpack/guard.rs): one log line, no crash.log, no call trace.
-		if crate::texpack::guard::panic_expected() {
-			eprintln!("texpack: a pack file made the decoder panic (caught, the original texture stays): {info}");
+		// [PC] A panic that is caught on the spot (texture-pack decoder, overlay helper; texpack/guard.rs): one log line, no crash.log, no call trace.
+		if crate::texpack::guard::take_expected() {
+			eprintln!("{}: {info}", crate::texpack::guard::expected_note());
 			return;
 		}
 		let text = format!("panic in thread {}: {info}", thread.name().unwrap_or("?"));
@@ -306,11 +318,29 @@ pub fn main() -> ExitCode {
 		crash_log(&text);
 	}));
 	let mut args: Vec<String> = std::env::args().skip(1).collect();
+	// `rac-rs omni-host-abi`: one line about the mod loader interface, then exit (the launcher asks before it updates the loader). Before anything starts.
+	if omni::hostabi::asked(&args) {
+		return ExitCode::SUCCESS;
+	}
 	// Started by the player: double-clicked (no arguments: the desktop shortcut, Setup's Play) or by Play.cmd (the same cold boot with
 	// its arguments spelled out). Both ask about updates first; Play.cmd skipped the question up to v0.1.2.
 	#[cfg(all(windows, feature = "windows_gui"))]
 	if (args.is_empty() || args.iter().any(|a| a == "--retail-cold")) && update_check() {
 		return ExitCode::SUCCESS;
+	}
+	// [PC] Linux: a game started from the applications menu, Steam or the launcher has no terminal: a panic in the main thread shows
+	// its text in a window too (`dialog_linux.rs`; the earlier hook, or the default one, still writes it to stderr / the run log first).
+	// The public build (feature windows_gui, also on Linux) writes it to player/crash.log as well; the final error of `main` and the
+	// `launch_args` errors already reach `message_box`, which is a window on Linux now.
+	#[cfg(not(windows))]
+	if args.is_empty() {
+		let prev = std::panic::take_hook();
+		std::panic::set_hook(Box::new(move |info| {
+			prev(info);
+			if std::thread::current().name() == Some("main") && !crate::texpack::guard::panic_expected() {
+				dialog_linux::show("Ratchet & Clank (rac-rs)", &format!("The game stopped: {info}\n\nMore details are in {PANIC_DETAILS}."), dialog_linux::Kind::Error);
+			}
+		}));
 	}
 	// Double-clicked (no arguments): start the game the way Play.cmd does, from generated/play.cfg written by setup.
 	if args.is_empty() {
@@ -325,6 +355,14 @@ pub fn main() -> ExitCode {
 	// [PC] The player's run log (runlog.rs): stderr into <player dir>/log.txt when it goes nowhere (the double-clicked game).
 	// After `launch_args` (it sets RAC_PLAYER_DIR while the process is still single-threaded).
 	runlog::start(&retail::memcard::player_dir());
+	// [PC] Linux: the update notice of the Windows check (`update_notice_linux.rs`): same start (the cold boot), same skip rules, a window
+	// that points to the launcher; on a thread of its own, so it never delays the start.
+	#[cfg(all(target_os = "linux", feature = "windows_gui"))]
+	if args.iter().any(|a| a == "--retail-cold") {
+		if let Ok(root) = install_root() {
+			update_notice_linux::start(root);
+		}
+	}
 	let result = match args.first().map(String::as_str) {
 		Some("levels") if args.len() == 2 => cmd_levels(&args[1]),
 		Some("view") if args.len() >= 3 => cmd_view(&args[1..]),

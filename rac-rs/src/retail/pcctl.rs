@@ -43,6 +43,7 @@
 use super::binds::{self, Cap};
 use super::mouse_menu;
 use super::pcdisp;
+use super::{glyphs, pcinput};
 use super::pcext::{BASE, GPAGE, GVAL, ID_HIGH, ID_LOW, ID_MEDIUM};
 use ee_oracle::cpu::Cpu;
 use ee_oracle::mem::Mem;
@@ -98,7 +99,7 @@ pub const ID_DESC: u32 = 0x7f72;
 /// The stepper's label ("Page") and the dynamic values "< section name >" of the Controls and the Graphics page.
 pub(super) const ID_PAGE: u32 = 0x7f73;
 const ID_SELC: u32 = 0x7f74;
-const ID_SELG: u32 = 0x7f75;
+pub(super) const ID_SELG: u32 = 0x7f75;
 /// The HUD row: its label and its two values.
 const ID_HUD: u32 = 0x7f76;
 const ID_SHARP: u32 = 0x7f77;
@@ -133,17 +134,22 @@ const NGSEC: usize = 5;
 /// The Display section (HUD position, HUD scale, FPS limit, Render scale; pcdisp.rs): the Graphics page's 4th section, System follows.
 const SEC_DISPLAY: usize = 3;
 /// The HUD row, the Renderer row and the Preset row in `GSECS` (the 15 rows of `pcext::ROWS` are 0..=14).
-const HUD_ROW: usize = 15;
-const RENDER_ROW: usize = 16;
-const PRESET_ROW: usize = 17;
+pub(super) const HUD_ROW: usize = 15;
+pub(super) const RENDER_ROW: usize = 16;
+pub(super) const PRESET_ROW: usize = 17;
 /// The Skip intro row and the Start skips cutscenes row, the System section (the other three are full at six rows).
-const INTRO_ROW: usize = 18;
-const SKIPCUT_ROW: usize = 19;
+pub(super) const INTRO_ROW: usize = 18;
+pub(super) const SKIPCUT_ROW: usize = 19;
 /// The Display section's rows (pcdisp.rs).
-const HUDPOS_ROW: usize = 20;
-const HUDSCALE_ROW: usize = 21;
-const FPS_ROW: usize = 22;
-const RSCALE_ROW: usize = 23;
+pub(super) const HUDPOS_ROW: usize = 20;
+pub(super) const HUDSCALE_ROW: usize = 21;
+pub(super) const FPS_ROW: usize = 22;
+pub(super) const RSCALE_ROW: usize = 23;
+/// The Quick Select mouse row and the Stick dead zone row (pcinput.rs), the System section's 3rd and 4th.
+pub(super) const WHEEL_ROW: usize = 24;
+pub(super) const STICK_ROW: usize = 25;
+/// The Button glyphs row (glyphs.rs), the System section's 5th.
+pub(super) const GLYPH_ROW: usize = 26;
 /// The Screen section. The Renderer row (Vulkan / DirectX 12) is not offered on Linux: there is no DirectX 12 backend there
 /// (viewer/gpu/renderer.rs ignores a `renderer=dx12` line).
 #[cfg(not(target_os = "linux"))]
@@ -155,7 +161,7 @@ const GSCREEN: &[usize] = &[3, 7, 12, 9, HUD_ROW];
 /// Picture: Preset, Lighting, Ambient occlusion, Dynamic shadows, Global illumination, Sun rays. Effects: Water, Waves, Particles,
 /// Vegetation, Volumetric fog, Volumetric clouds. Screen: Display mode, Frame smoothing, Draw distance, Culling, Renderer, HUD. Each section is at most six rows (the
 /// panel holds the stepper and six).
-const GSECS: [&[usize]; NGSEC] = [&[PRESET_ROW, 0, 1, 2, 10, 6], &[4, 11, 5, 8, 13, 14], GSCREEN, &[HUDPOS_ROW, HUDSCALE_ROW, FPS_ROW, RSCALE_ROW], &[INTRO_ROW, SKIPCUT_ROW]];
+const GSECS: [&[usize]; NGSEC] = [&[PRESET_ROW, 0, 1, 2, 10, 6], &[4, 11, 5, 8, 13, 14], GSCREEN, &[HUDPOS_ROW, HUDSCALE_ROW, FPS_ROW, RSCALE_ROW], &[INTRO_ROW, SKIPCUT_ROW, WHEEL_ROW, STICK_ROW, GLYPH_ROW]];
 
 /// What a row does in a Controls section.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -333,6 +339,7 @@ pub fn text(id: u32, lang: usize, csec: usize, gsec: usize, playstation: bool) -
 		ID_SKIPCUT => fixed(&SKIPCUT),
 		ID_VULKAN | ID_DX12 => super::pcrender::value_text(id == ID_DX12, l),
 		ID_DBG0 => fixed(&DBG_MODE),
+		_ if glyphs::IDS.contains(&id) => glyphs::text(id, l),
 		_ if (ID_DBG_KEY..ID_DBG_KEY + NDKEYS as u32).contains(&id) => fixed(&DBG_KEYS[(id - ID_DBG_KEY) as usize]),
 		_ if (ID_DBG_VAL..ID_DBG_VAL + NDKEYS as u32).contains(&id) => DBG_VALS[(id - ID_DBG_VAL) as usize].to_vec(),
 		_ if (ID0 + 1..ID0 + ROWS as u32).contains(&id) => match target(csec, (id - ID0) as usize) {
@@ -416,23 +423,55 @@ fn table(sec: usize) -> Vec<u32> {
 	t
 }
 
-/// The Graphics row table of section `sec`: the stepper, then the section's rows of `rows` (`pcext::ROWS`), the HUD, Renderer and
-/// Preset rows. `custom`: the Preset row has its 4th choice "Custom" (the state is Custom).
+/// One of the extra Graphics rows (not in `pcext::ROWS`): label id, byte, up to four value texts (0 = no such value). The pause page
+/// and the title's copy (`pcext/titlegfx.rs`) both come from here, so the two cannot drift apart. `custom`: the Preset row's 4th choice.
+fn gfx_row_def(i: usize, custom: bool) -> [u32; 6] {
+	match i {
+		HUD_ROW => [ID_HUD, HUDB, ID_SHARP, ID_ORIGINAL, 0, 0],
+		RENDER_ROW => [ID_RENDERER, RENDB, ID_VULKAN, ID_DX12, 0, 0],
+		INTRO_ROW => [ID_INTRO, INTROB, ID_OFF, ID_ON, 0, 0],
+		SKIPCUT_ROW => [ID_SKIPCUT, SKIPB, ID_ON, ID_OFF, 0, 0],
+		HUDPOS_ROW => [pcdisp::ID_HUDPOS, pcdisp::POS_B, pcdisp::ID_P43, pcdisp::ID_CORNERS, 0, 0],
+		HUDSCALE_ROW => [pcdisp::ID_HUDSCALE, pcdisp::POS_B + 1, pcdisp::ID_VSCALE, pcdisp::ID_VSCALE, 0, 0],
+		FPS_ROW => [pcdisp::ID_FPS, pcdisp::POS_B + 2, pcdisp::ID_VFPS, pcdisp::ID_VFPS, 0, 0],
+		RSCALE_ROW => [pcdisp::ID_RSCALE, pcdisp::POS_B + 3, pcdisp::ID_VRS, pcdisp::ID_VRS, 0, 0],
+		WHEEL_ROW => [pcinput::ID_WHEEL, pcinput::WHEEL_B, ID_OFF, ID_ON, 0, 0],
+		STICK_ROW => [pcinput::ID_STICK, pcinput::STICK_B, ID_HIGH, ID_MEDIUM, ID_LOW, 0],
+		GLYPH_ROW => [glyphs::ID_GLYPHS, glyphs::GLYPH_B, glyphs::ID_PS, glyphs::ID_LETTERS, glyphs::ID_SWITCH, 0],
+		PRESET_ROW => [ID_PRESET, PRESETB, ID_LOW, ID_MEDIUM, ID_HIGH, if custom { ID_CUSTOM } else { 0 }],
+		_ => [0; 6],
+	}
+}
+
+/// A Graphics row by its index in `GSECS`: label id, byte, up to four value texts (the title's copy uses this too).
+pub(super) fn gfx_row(i: usize, custom: bool) -> [u32; 6] {
+	if i < super::pcext::ROWS.len() { super::pcext::ROWS[i] } else { gfx_row_def(i, custom) }
+}
+
+/// The Graphics page's sections (the pause page and the title's copy): how many, the rows of one and the Display one.
+pub(super) fn gfx_sections() -> usize {
+	NGSEC
+}
+pub(super) fn gfx_section(sec: usize) -> &'static [usize] {
+	GSECS[sec.min(NGSEC - 1)]
+}
+pub(super) const GFX_DISPLAY: usize = SEC_DISPLAY;
+
+/// The texts the title's Graphics mirror needs that are this file's (the pause page's come through the game's text hook): the page
+/// stepper in `lang` for section `sec`, the HUD / Renderer / Preset / Skip intro / Skip cutscenes rows and their values.
+pub(super) fn title_texts(lang: usize, sec: usize) -> Vec<(u32, String)> {
+	[ID_PAGE, ID_SELG, ID_HUD, ID_SHARP, ID_ORIGINAL, ID_PRESET, ID_CUSTOM, ID_RENDERER, ID_INTRO, ID_SKIPCUT, ID_VULKAN, ID_DX12, glyphs::ID_GLYPHS, glyphs::ID_PS, glyphs::ID_LETTERS, glyphs::ID_SWITCH]
+		.into_iter()
+		.map(|id| (id, text(id, lang, 0, sec, false).iter().map(|&b| b as char).collect()))
+		.collect()
+}
+
+/// The Graphics row table of section `sec`: the stepper, then the section's rows of `rows` (`pcext::ROWS`) and the extra rows
+/// (`gfx_row_def`). `custom`: the Preset row has its 4th choice "Custom" (the state is Custom).
 fn gfx_table(rows: &[[u32; 6]], sec: usize, custom: bool) -> Vec<u32> {
 	let mut t = vec![ID_PAGE, G_SEL, ID_SELG, ID_SELG, 0, 0];
 	for &i in GSECS[sec.min(NGSEC - 1)] {
-		t.extend(match i {
-			HUD_ROW => [ID_HUD, HUDB, ID_SHARP, ID_ORIGINAL, 0, 0],
-			RENDER_ROW => [ID_RENDERER, RENDB, ID_VULKAN, ID_DX12, 0, 0],
-			INTRO_ROW => [ID_INTRO, INTROB, ID_OFF, ID_ON, 0, 0],
-			SKIPCUT_ROW => [ID_SKIPCUT, SKIPB, ID_ON, ID_OFF, 0, 0],
-			HUDPOS_ROW => [pcdisp::ID_HUDPOS, pcdisp::POS_B, pcdisp::ID_P43, pcdisp::ID_CORNERS, 0, 0],
-			HUDSCALE_ROW => [pcdisp::ID_HUDSCALE, pcdisp::POS_B + 1, pcdisp::ID_VSCALE, pcdisp::ID_VSCALE, 0, 0],
-			FPS_ROW => [pcdisp::ID_FPS, pcdisp::POS_B + 2, pcdisp::ID_VFPS, pcdisp::ID_VFPS, 0, 0],
-			RSCALE_ROW => [pcdisp::ID_RSCALE, pcdisp::POS_B + 3, pcdisp::ID_VRS, pcdisp::ID_VRS, 0, 0],
-			PRESET_ROW => [ID_PRESET, PRESETB, ID_LOW, ID_MEDIUM, ID_HIGH, if custom { ID_CUSTOM } else { 0 }],
-			_ => rows[i],
-		});
+		t.extend(if i < rows.len() { rows[i] } else { gfx_row_def(i, custom) });
 	}
 	t
 }
@@ -487,6 +526,9 @@ pub fn build_gfx(mem: &mut Mem, gtab: u32, rows: &[[u32; 6]], hud_sharp: bool, d
 		mem.wr8(INTROB, super::pcintro::skip() as u8);
 		mem.wr8(SKIPB, !super::pcskip::skip() as u8);
 		pcdisp::build(mem);
+		mem.wr8(pcinput::WHEEL_B, pcinput::wheel_byte());
+		mem.wr8(pcinput::STICK_B, pcinput::stick_byte());
+		mem.wr8(glyphs::GLYPH_B, glyphs::byte());
 		mem.wr32(G_MAGIC_AT, MAGIC);
 	}
 	state(|st| {
@@ -543,6 +585,12 @@ pub fn preset_chosen(mem: &mut Mem) -> Option<u8> {
 		let seen = std::mem::replace(&mut st.preset_seen, b);
 		(seen != 0xff && seen != b && b < 3).then_some(b)
 	})
+}
+
+/// The title Graphics page wrote the Preset byte itself (`presets::title_open` / `choose_title`): that value is now the baseline
+/// `preset_chosen` compares with, so the next level start does not read it as a press on the pause page.
+pub fn preset_baseline(byte: u8) {
+	state(|st| st.preset_seen = byte);
 }
 
 /// The Preset row shows `byte` (0 Low, 1 Medium, 2 High, 3 Custom): writes it, and the 4th choice appears with Custom only (a
@@ -858,7 +906,7 @@ mod tests {
 				assert!(s.len() < SLOT as usize - 1, "{id:#x} {lang}");
 				assert!(s.iter().all(|&b| (0x20..0x7f).contains(&b) || (0x80..=0xb0).contains(&b)), "{id:#x} {lang}: {s:?}");
 				assert!(!s.contains(&b'%') && !s.contains(&b'+'), "{id:#x} {lang}");
-				assert_eq!(s.is_empty(), id >= ID_DBG_VAL + NDKEYS as u32, "{id:#x} {lang}: 0x7fa0..0x7faa have text, 0x7fab..0x7faf none");
+				assert_eq!(s.is_empty(), id >= ID_DBG_VAL + NDKEYS as u32 && !glyphs::IDS.contains(&id), "{id:#x} {lang}: 0x7fa0..0x7faa have text, 0x7fab..0x7fae are the glyph row's (own text), the rest none");
 				if (ID_DBG_KEY..ID_DBG_VAL).contains(&id) || id == ID_DBG0 {
 					assert!(s.len() <= 24, "a label must fit the row: {id:#x} {lang}: {s:?}");
 				}
@@ -929,7 +977,7 @@ mod tests {
 	fn graphics_sections_cover_the_rows() {
 		let mut all: Vec<usize> = GSECS.iter().flat_map(|s| s.iter().copied()).collect();
 		all.sort();
-		let want: Vec<usize> = (0..=RSCALE_ROW).filter(|&r| !cfg!(target_os = "linux") || r != RENDER_ROW).collect();
+		let want: Vec<usize> = (0..=GLYPH_ROW).filter(|&r| !cfg!(target_os = "linux") || r != RENDER_ROW).collect();
 		assert_eq!(all, want);
 		assert!(GSECS.iter().all(|s| (1..=ROWS - 1).contains(&s.len())));
 		assert!(GSECS[SEC_SCREEN].contains(&9), "SEC_SCREEN is the section of the Culling row (pcext GROWS index 9): cullwarn.rs shows its warning there");
@@ -957,7 +1005,10 @@ mod tests {
 		assert_eq!(disp.len(), 6 * 5);
 		let sys = gfx_table(&rows, NGSEC - 1, false);
 		assert_eq!(&sys[6..12], &[ID_INTRO, INTROB, ID_OFF, ID_ON, 0, 0], "System starts with the Skip intro row, Off / On");
-		assert_eq!(&sys[12..], &[ID_SKIPCUT, SKIPB, ID_ON, ID_OFF, 0, 0], "then Start skips cutscenes, On / Off (the byte is inverted)");
+		assert_eq!(&sys[12..18], &[ID_SKIPCUT, SKIPB, ID_ON, ID_OFF, 0, 0], "then Start skips cutscenes, On / Off (the byte is inverted)");
+		assert_eq!(&sys[18..24], &[pcinput::ID_WHEEL, pcinput::WHEEL_B, ID_OFF, ID_ON, 0, 0], "then Quick Select mouse, Off / On");
+		assert_eq!(&sys[24..30], &[pcinput::ID_STICK, pcinput::STICK_B, ID_HIGH, ID_MEDIUM, ID_LOW, 0], "then Stick dead zone, High / Medium / Low");
+		assert_eq!(&sys[30..], &[glyphs::ID_GLYPHS, glyphs::GLYPH_B, glyphs::ID_PS, glyphs::ID_LETTERS, glyphs::ID_SWITCH, 0], "then Button glyphs, PlayStation / Letters / Letters (Switch)");
 	}
 
 	/// The Graphics table is rewritten for the section; a shorter section leaves no stale record behind its zero record.
