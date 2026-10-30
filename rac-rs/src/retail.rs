@@ -117,6 +117,7 @@ pub mod mouse_vendor;
 mod mouse_script;
 pub mod menu_keys;
 pub mod title_boot;
+pub mod titlequit;
 pub mod disc;
 pub mod disc_hands;
 pub mod disc_map;

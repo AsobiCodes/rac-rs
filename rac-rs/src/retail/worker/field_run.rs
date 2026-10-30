@@ -62,6 +62,8 @@ impl Worker {
 			// The title's Options -> Graphics rows (pcext.rs `front_field`).
 			pcext::front_field(&mut m);
 			crate::retail::pcmods::front_field(&mut m.cpu.mem);
+			// The main menu's Quit Game row (titlequit.rs).
+			crate::retail::titlequit::front_field(&mut m.cpu.mem);
 		}
 		// Dev debug keys (retail/debugkeys.rs): inert unless RAC_DEBUG_KEYS=1; their writes happen here, between two fields.
 		debugkeys::pre_field(&mut m, field, !front && !booting);
