@@ -90,6 +90,8 @@ const SCREEN: [f32; 2] = [512.0, 448.0];
 /// (frame 0), joints projected by FUN_00237588 with the fixed menu view (cd30 0.63, PAL aspect 0.756,
 /// depth 6; notes/title_assets.md "Panel projection").
 const ROOT_PANELS: [[f32; 4]; 3] = [[155.0, 153.0, 203.0, 39.0], [155.0, 207.0, 203.0, 39.0], [155.0, 262.0, 203.0, 39.0]];
+/// [PC] The Quit Game button under them (retail/titlequit.rs): seq 0x13, the pause column's next row (`PAUSE_Y`).
+const ROOT_QUIT_PANEL: [f32; 4] = [155.0, 316.0, 203.0, 39.0];
 /// Text ids (all_text.bin).
 const NEW_GAME: u32 = 0x4f2a;
 const LOAD_GAME: u32 = 0x4f28;
@@ -527,7 +529,13 @@ pub const MAP_PANEL: [f32; 4] = [214.0, 80.0, 276.0, 341.0];
 fn layout(page: Page, n: usize, in_game: bool) -> Layout {
 	let l = |panels: &[[f32; 4]], rows: Rows| Layout { panels: panels.to_vec(), title: Some(panels[0]), rows };
 	match page {
-		Page::Root => Layout { panels: ROOT_PANELS.to_vec(), title: None, rows: Rows::Each(ROOT_PANELS.to_vec()) },
+		Page::Root => {
+			let mut b = ROOT_PANELS.to_vec();
+			if crate::retail::titlequit::row_shown() {
+				b.push(ROOT_QUIT_PANEL);
+			}
+			Layout { panels: b.clone(), title: None, rows: Rows::Each(b) }
+		}
 		Page::Pause => {
 			let b: Vec<[f32; 4]> = PAUSE_Y.iter().take(n).map(|&y| [155.0, y, 203.0, 39.0]).collect();
 			Layout { panels: b.clone(), title: None, rows: Rows::Each(b) }
@@ -594,7 +602,8 @@ fn layout(page: Page, n: usize, in_game: bool) -> Layout {
 fn slot_seqs(page: Page, in_game: bool) -> Option<([u8; 14], bool)> {
 	let park = |head: &[u8]| -> [u8; 14] { std::array::from_fn(|i| head.get(i).copied().unwrap_or(i as u8)) };
 	Some(match page {
-		Page::Root => (park(&[0, 1, 0x10, 0x11, 0x12]), true),
+		// Slot 5 plays seq 0x13 for the PC Quit Game button (retail/titlequit.rs); unshown, it parks like retail's.
+		Page::Root => (park(&[0, 1, 0x10, 0x11, 0x12, 0x13]), true),
 		Page::Options => (park(&[0, 1, 0xbe, 0xbf, 0xc0]), false),
 		Page::Language => (park(&[0, 1, 0xc1, 0xc2, 0xc3]), false),
 		Page::Video => (park(&[0, 1, 0xca, 0xcb, 0xc3]), false),
@@ -878,6 +887,7 @@ impl Menu {
 			Page::Title | Page::Quit | Page::Overwrite => Vec::new(),
 			Page::Map => vec![(self.ingame.planet.clone(), true)],
 			Page::Galactic | Page::GalacticInfo => self.ingame.travel.iter().flat_map(|t| t.planets.iter()).map(|&p| (text.get(PLANET + p as u32).to_string(), true)).collect(),
+			Page::Root if crate::retail::titlequit::row_shown() => vec![t(NEW_GAME), t(LOAD_GAME), t(OPTIONS), t(crate::retail::titlequit::QUIT_GAME)],
 			Page::Root => vec![t(NEW_GAME), t(LOAD_GAME), t(OPTIONS)],
 			Page::NewGame => {
 				let mut v = self.slot_rows(text, true);
