@@ -106,6 +106,7 @@ impl Gpu {
 			sun_bias: [0.0; 4],
 			sun_texel: [0.0; 4],
 			sun_q: [0.0; 4],
+			keep_tail: [0.0; 4],
 		}
 	}
 

@@ -165,11 +165,13 @@ rac-rs/src/flow.rs
 rac-rs/src/fmath.rs
 rac-rs/src/fmath_scan_tests.rs
 rac-rs/src/fmv/adpcm_stream.rs
+rac-rs/src/fmv/feed.rs
 rac-rs/src/fmv/mod.rs
 rac-rs/src/fmv/mpeg2.rs
 rac-rs/src/fmv/player.rs
 rac-rs/src/fmv/present.rs
 rac-rs/src/fmv/pss.rs
+rac-rs/src/fmv/synclog.rs
 rac-rs/src/frontend.rs
 rac-rs/src/frontend_lang.rs
 rac-rs/src/frontend_lines.rs
@@ -409,6 +411,8 @@ rac-rs/src/retail/gscap.rs
 rac-rs/src/retail/gscap/draw.rs
 rac-rs/src/retail/gscap/draw/cpu_repl.rs
 rac-rs/src/retail/gscap/draw/cpu_repl_tests.rs
+rac-rs/src/retail/gscap/draw/fastfill.rs
+rac-rs/src/retail/gscap/draw/fastfill_tests.rs
 rac-rs/src/retail/gscap/draw/gpu.rs
 rac-rs/src/retail/gscap/draw/gpu.wgsl
 rac-rs/src/retail/gscap/draw/gpu/kernels.rs
@@ -420,7 +424,9 @@ rac-rs/src/retail/gscap/draw/gpu_shared.rs
 rac-rs/src/retail/gscap/draw/gpu_shared_tests.rs
 rac-rs/src/retail/gscap/draw/gpu_span.rs
 rac-rs/src/retail/gscap/draw/guard_tests.rs
+rac-rs/src/retail/gscap/draw/par_misc.rs
 rac-rs/src/retail/gscap/draw/pmemo.rs
+rac-rs/src/retail/gscap/draw/prof_coarse.rs
 rac-rs/src/retail/gscap/edge_cut.rs
 rac-rs/src/retail/gscap/edge_cut/guard.rs
 rac-rs/src/retail/gscap/font.rs
@@ -442,6 +448,7 @@ rac-rs/src/retail/modcam/classic.rs
 rac-rs/src/retail/modcam/shoulder.rs
 rac-rs/src/retail/modcam/stamps.rs
 rac-rs/src/retail/modcam/sticks.rs
+rac-rs/src/retail/modcam/water_path.rs
 rac-rs/src/retail/modcam_turn.rs
 rac-rs/src/retail/mouse_answers.rs
 rac-rs/src/retail/mouse_instant.rs
@@ -528,6 +535,7 @@ rac-rs/src/rtss_crash.rs
 rac-rs/src/rtss_layer.rs
 rac-rs/src/runlog.rs
 rac-rs/src/runlog_linux.rs
+rac-rs/src/runlog_policy.rs
 rac-rs/src/save.rs
 rac-rs/src/scene.rs
 rac-rs/src/settings.rs
@@ -608,6 +616,7 @@ rac-rs/src/viewer/framecsv.rs
 rac-rs/src/viewer/front_mirror.rs
 rac-rs/src/viewer/gfxq.rs
 rac-rs/src/viewer/gpu.rs
+rac-rs/src/viewer/gpu/adapter_report.rs
 rac-rs/src/viewer/gpu/culling.rs
 rac-rs/src/viewer/gpu/draw.rs
 rac-rs/src/viewer/gpu/draw/finish.rs
@@ -616,6 +625,7 @@ rac-rs/src/viewer/gpu/draw/pass_kofi.rs
 rac-rs/src/viewer/gpu/draw/pass_omni.rs
 rac-rs/src/viewer/gpu/draw/pass_particles.rs
 rac-rs/src/viewer/gpu/draw/pass_shrubs.rs
+rac-rs/src/viewer/gpu/draw/pass_tail.rs
 rac-rs/src/viewer/gpu/draw/pass_water.rs
 rac-rs/src/viewer/gpu/draw/pass_world.rs
 rac-rs/src/viewer/gpu/draw/passes.rs
@@ -628,6 +638,7 @@ rac-rs/src/viewer/gpu/marker.rs
 rac-rs/src/viewer/gpu/marker_clip.rs
 rac-rs/src/viewer/gpu/marker_ctx.rs
 rac-rs/src/viewer/gpu/metal.rs
+rac-rs/src/viewer/gpu/moby_add.rs
 rac-rs/src/viewer/gpu/ovwrite.rs
 rac-rs/src/viewer/gpu/particle_fx.rs
 rac-rs/src/viewer/gpu/pose_reuse.rs
@@ -651,12 +662,14 @@ rac-rs/src/viewer/gpu/scene_ctx.rs
 rac-rs/src/viewer/gpu/setup.rs
 rac-rs/src/viewer/gpu/sky_water.rs
 rac-rs/src/viewer/gpu/split_orig.rs
+rac-rs/src/viewer/gpu/tail_order.rs
 rac-rs/src/viewer/gpu/tests.rs
 rac-rs/src/viewer/gpu/tfrag_memo.rs
 rac-rs/src/viewer/gpu/warp_actors.rs
 rac-rs/src/viewer/gpucache.rs
 rac-rs/src/viewer/gpuhero.rs
 rac-rs/src/viewer/gpuhero/check.rs
+rac-rs/src/viewer/gpuhero/shader_tests.rs
 rac-rs/src/viewer/gpuskin.rs
 rac-rs/src/viewer/gpuskin/check.rs
 rac-rs/src/viewer/gs_state.rs
@@ -704,10 +717,12 @@ rac-rs/src/viewer/interp/oracle.rs
 rac-rs/src/viewer/interp/still.rs
 rac-rs/src/viewer/interp/weld.rs
 rac-rs/src/viewer/lights.rs
+rac-rs/src/viewer/loose_range.rs
 rac-rs/src/viewer/maths.rs
 rac-rs/src/viewer/mirror.rs
 rac-rs/src/viewer/mirror/copy_cull.rs
 rac-rs/src/viewer/moby_fade.rs
+rac-rs/src/viewer/moby_tail.wgsl
 rac-rs/src/viewer/pace.rs
 rac-rs/src/viewer/partfx.rs
 rac-rs/src/viewer/passtime.rs
@@ -718,6 +733,7 @@ rac-rs/src/viewer/post.rs
 rac-rs/src/viewer/presenter.rs
 rac-rs/src/viewer/profile.rs
 rac-rs/src/viewer/projection.rs
+rac-rs/src/viewer/qdefer.rs
 rac-rs/src/viewer/sfx.rs
 rac-rs/src/viewer/shadowvol.rs
 rac-rs/src/viewer/smooth.rs
@@ -801,6 +817,7 @@ rac-rs/src/viewer/waterfx/underside.rs
 rac-rs/src/viewer/waterfx/wakes.rs
 rac-rs/src/wad.rs
 rac-rs/src/water.rs
+rac-rs/src/wine.rs
 rac-rs/vendor/wgpu-hal/.cargo_vcs_info.json
 rac-rs/vendor/wgpu-hal/Cargo.lock
 rac-rs/vendor/wgpu-hal/Cargo.toml

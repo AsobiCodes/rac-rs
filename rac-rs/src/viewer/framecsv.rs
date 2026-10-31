@@ -11,7 +11,13 @@
 //!   for a published overlay (`CapTake::take`); `S` - the capture thread's `Queue::submit` incl. the wait for the submit lock
 //!   (gpu_shared::submit); `R` - the capture thread waiting for the picture's readback (`Gpu::rb_finish` blocking / `submit` non-lazy).
 //!   Only waits longer than 50 us are written.
-//! - `W start redraw ticks` + 13 phases, then `X start name=us ...` - a redraw longer than `RAC_SLOW_MS` and its biggest spans (`slow`).
+//! - `W start redraw ticks` + 13 phases, then `X start frame=wall:cpu name=wall:cpu ...` - a redraw longer than `RAC_SLOW_MS` and its
+//!   biggest spans (`slow`), each as wall-clock us and the render thread's on-CPU us (profile.rs: QueryThreadCycleTime on Windows, 0 elsewhere);
+//!   `frame` is the whole redraw. wall minus cpu = time the thread did not run (waits, locks, preemption); a pseudo-span such as `ctf_n_verts`
+//!   holds a count, not time. tools/cpuwall.py (lane lows) lists the stalls per span.
+//! - `U` / `Q` / `V` - the present thread before a present: `U` waited for the frame's command buffers (the `enc-finish` jobs), `Q` applied
+//!   the frame's deferred queue writes (viewer/qdefer.rs, RAC_WRITE_DEFER), `V` ran `Queue::submit` (`present_step`); only steps longer than
+//!   50 us are written.
 //! Written about once a second (so a killed run keeps its data) and the rest when the event loop ends (`flush`, viewer/startup.rs). The
 //! file write happens outside the lock that the game, capture and present threads push their rows under.
 //! tools/frames.py (lane) analyses the file.
@@ -115,6 +121,14 @@ pub(super) fn slow(start: Instant, redraw_ms: f32, ticks: u32, phases: &[f32], s
 		let mut s = s.lock().unwrap_or_else(|e| e.into_inner());
 		let t = start.saturating_duration_since(s.t0).as_secs_f64() * 1000.0;
 		s.buf.push_str(&format!("X {t:.3} {spans}\n"));
+	}
+}
+
+/// [PC] The present thread's steps before a present, written when longer than 50 us: `U` it waited for the frame's command
+/// buffers (the `enc-finish` jobs), `Q` it applied the frame's deferred queue writes, `V` it ran `Queue::submit`. `start` is when the step began, `len_ms` how long it took.
+pub(super) fn present_step(kind: char, start: Instant, len_ms: f32) {
+	if on() && len_ms > 0.05 {
+		push(kind, start, &[len_ms]);
 	}
 }
 

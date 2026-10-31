@@ -698,7 +698,7 @@ impl SunShadow {
 
 	/// Renders the three cascades of `f` from the scene's casters.
 	/// `skin` is the GPU-posed props batch's bind group and slot attribute (None: the CPU poses the props in world space).
-	pub(super) fn encode(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, enc: &mut wgpu::CommandEncoder, scene: &Scene, f: &SunFrame, skin: Option<(&wgpu::BindGroup, Option<&wgpu::Buffer>)>) {
+	pub(super) fn encode(&mut self, device: &wgpu::Device, queue: &GatedQueue, enc: &mut wgpu::CommandEncoder, scene: &Scene, f: &SunFrame, skin: Option<(&wgpu::BindGroup, Option<&wgpu::Buffer>)>) {
 		let _s = super::profile::span("sun_shadow");
 		let mut sc = std::mem::take(&mut self.scratch);
 		self.lists(scene, f, &mut sc);
@@ -707,7 +707,7 @@ impl SunShadow {
 	}
 
 	#[allow(clippy::too_many_arguments)]
-	fn encode_lists(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, enc: &mut wgpu::CommandEncoder, scene: &Scene, f: &SunFrame, skin: Option<(&wgpu::BindGroup, Option<&wgpu::Buffer>)>, args: &[[u32; 5]], runs: &[(usize, Src, u64, u32)]) {
+	fn encode_lists(&mut self, device: &wgpu::Device, queue: &GatedQueue, enc: &mut wgpu::CommandEncoder, scene: &Scene, f: &SunFrame, skin: Option<(&wgpu::BindGroup, Option<&wgpu::Buffer>)>, args: &[[u32; 5]], runs: &[(usize, Src, u64, u32)]) {
 		let cut = self.cuts(scene);
 		for (k, c) in f.cascades.iter().enumerate().take(f.q.cascades) {
 			queue.write_buffer(&self.ubuf[k], 0, bytemuck::bytes_of(&c.vp));

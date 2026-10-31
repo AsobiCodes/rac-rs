@@ -105,7 +105,7 @@ impl Gpu {
 		let db = self.frame_buffers(warp_hud)?;
 		self.draw_passes(cam, &dc, &mut dfx, &mut dt, &db)?;
 		let DrawTarget { enc, cuts, .. } = dt;
-		cuts.submit(&self.queue, enc.finish());
+		cuts.submit(self.queue.sync(), enc.finish());
 		Some(())
 	}
 

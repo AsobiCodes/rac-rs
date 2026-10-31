@@ -496,10 +496,11 @@ impl Gs {
             v.sort_by_key(|(_, (_, ns))| std::cmp::Reverse(*ns));
             let sum = |pre: &str| v.iter().filter(|(k, _)| k.starts_with(pre)).map(|(_, (_, ns))| *ns).sum::<u64>() as f64 / 1e8;
             let mut o = format!("gscap prof (100 fields, ms/field; prim memo {}; totals: raster {:.2} draw {:.2} flush {:.2} job {:.2}):", self.pm_stats(), sum("RASTER"), sum("draw"), sum("flush"), sum("job"));
-            for (k, (n, ns)) in v.iter().take(60) {
+            for (k, (n, ns)) in v.iter().filter(|(k, _)| !k.starts_with("C ") && !k.starts_with("P ")).take(60) {
                 o += &format!(" [{k}: {:.2} ms x{:.1}]", *ns as f64 / 1e8, *n as f64 / 100.0);
             }
             eprintln!("{o}");
+            eprintln!("{}", Self::prof_cat_line(&v));
             let g = self.gpu_stats();
             if !g.is_empty() {
                 eprintln!("gscap gpu stats: {g}");

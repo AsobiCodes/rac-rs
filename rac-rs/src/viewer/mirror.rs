@@ -279,7 +279,9 @@ impl Gpu {
 	/// `part`: all of it, or the bed in two passes (`draw_bed`).
 	#[allow(clippy::too_many_arguments)]
 	fn draw_copy(&self, enc: &mut wgpu::CommandEncoder, scene: &Scene, with: &Mirror, mu: &Uniforms, target: (&wgpu::TextureView, &wgpu::TextureView, &wgpu::TextureView), ties: Option<&super::bindless::Runs>, mirror: bool, part: Part) {
-		self.queue.write_buffer(&with.ubuf, 0, bytemuck::bytes_of(mu));
+		let mut mu = *mu;
+		mu.keep_tail[0] = 1.0; // [PC] #29: no blend pass here, so a moby's tail texels stay opaque as before (the shader's `fs`)
+		self.queue.write_buffer(&with.ubuf, 0, bytemuck::bytes_of(&mu));
 		let (colour, resolve, depth) = target;
 		// The second pass of a split bed goes on with the first's colour, depth and stencil.
 		let (first, last) = (!matches!(part, Part::Moving(_)), !matches!(part, Part::Still(_)));
@@ -365,6 +367,10 @@ impl Gpu {
 				pass.set_bind_group(1, &scene.bind_groups[d.texture], &[]);
 				pass.draw_indexed(d.start..d.start + d.count, 0, d.inst..d.inst + 1);
 			}
+		}
+		// [PC] #29 (gpu/moby_add.rs): the additive mobys (retail's ALPHA_1 0x48, two-sided: no winding flip) over the copy's opaque ones, in the last pass.
+		if last && !probe("props") {
+			self.add_round(&mut pass, scene, props, skinned, &|d| d.inst, crate::viewer::gpu::moby_add::AddPart::All);
 		}
 	}
 }

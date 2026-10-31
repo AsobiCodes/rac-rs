@@ -15,7 +15,15 @@
 //! and the picture of a healthy driver does not change. Never used for the core level pipelines (`viewer/gpu/setup.rs`): they are the
 //! picture itself and are swept for FXC offline (tools `fxc_check.py` in the lane notes, RAC_WGSL_DUMP in ENV.md).
 //! Test a refusal by hand: RAC_WGSL_DIR=DIR with a broken `<label>.wgsl` in DIR (devtune.rs) makes that effect's shader fail.
+//!
+//! Queue writes inside a scope (v0.4.3 review): the viewer's `GatedQueue` lists its writes for the present thread (qdefer.rs), which
+//! applies them later, outside every scope: an error such a write causes (an invalid texture after an out-of-memory) would reach wgpu's
+//! default handler and panic. While a scope of this module is open on the thread (`InScope`, `in_scope`), `GatedQueue` therefore makes
+//! its writes at once on the wgpu queue (after the gate wait and the pending list, in order), inside the scope. This holds for every
+//! guarded build and for the hand-made scope of `HeroGpu::new` (gpuhero.rs) without a change at the call sites. The builds are lazy and
+//! run once, so no wait is added per frame; with `RAC_WRITE_DEFER=0` the writes were immediate already.
 
+use std::cell::Cell;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 /// The optional effects that have a build guard. The value is the bit in `OFF`.
@@ -67,6 +75,32 @@ impl Effect {
 
 static OFF: AtomicU32 = AtomicU32::new(0);
 
+thread_local! {
+	/// How many build scopes this thread has open (`InScope`); error scopes are per thread, so is this.
+	static SCOPE_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Whether this thread is inside a build error scope: `GatedQueue` writes are then made at once instead of listed (see the module doc).
+pub(crate) fn in_scope() -> bool {
+	SCOPE_DEPTH.with(|d| d.get() > 0)
+}
+
+/// Marks the thread as inside a build error scope while it lives (also when the build panics). Take it BEFORE the scopes are pushed.
+pub(crate) struct InScope(());
+
+impl InScope {
+	pub(crate) fn enter() -> InScope {
+		SCOPE_DEPTH.with(|d| d.set(d.get() + 1));
+		InScope(())
+	}
+}
+
+impl Drop for InScope {
+	fn drop(&mut self) {
+		SCOPE_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+	}
+}
+
 /// Whether the effect was refused by the driver and is off for this run.
 pub(crate) fn off(e: Effect) -> bool {
 	OFF.load(Ordering::Relaxed) & e.bit() != 0
@@ -113,6 +147,7 @@ fn mark(bits: &AtomicU32, e: Effect) -> bool {
 /// Runs `f` (the effect's shader and pipeline build) inside error scopes: the value and whether the build was accepted. The scopes
 /// are per thread and popped last-in-first-out, as wgpu requires. A refusal sets the effect off and logs one line.
 fn run<T>(device: &wgpu::Device, e: Effect, f: impl FnOnce() -> T) -> (T, bool) {
+	let _in_scope = InScope::enter();
 	let oom = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
 	let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
 	let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -172,6 +207,34 @@ Caused by:
 		let g = Graphics { lighting: 1, fog_q: 3, clouds_q: 2, ..Graphics::CLASSIC };
 		assert_eq!(crate::viewer::volfog::frame::level_if(&g, false), 3);
 		assert_eq!(crate::viewer::volfog::frame::level_if(&g, true), 0, "the retail fog must not be faded when the fog shader was refused");
+	}
+
+	/// `GatedQueue` asks `in_scope` to make its writes at once inside a build scope: nesting counts, other threads are not affected,
+	/// and a build that panics leaves the scope.
+	#[test]
+	fn a_build_scope_is_seen_by_queue_writes_on_its_thread_only() {
+		assert!(!in_scope());
+		{
+			let _outer = InScope::enter();
+			assert!(in_scope());
+			{
+				let _inner = InScope::enter();
+				assert!(in_scope());
+			}
+			assert!(in_scope(), "the inner scope ending must not close the outer one");
+			std::thread::scope(|s| {
+				s.spawn(|| assert!(!in_scope(), "scopes are per thread")).join().unwrap();
+			});
+		}
+		assert!(!in_scope());
+		let hook = std::panic::take_hook();
+		std::panic::set_hook(Box::new(|_| {}));
+		let r = std::panic::catch_unwind(|| {
+			let _s = InScope::enter();
+			panic!("the build failed");
+		});
+		std::panic::set_hook(hook);
+		assert!(r.is_err() && !in_scope(), "a panicking build must leave the scope");
 	}
 
 	#[test]

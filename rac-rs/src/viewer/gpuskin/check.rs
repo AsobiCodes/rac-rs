@@ -51,13 +51,13 @@ struct Tally {
 
 static TALLY: std::sync::Mutex<Option<Tally>> = std::sync::Mutex::new(None);
 
-fn read(device: &wgpu::Device, queue: &wgpu::Queue, buf: &wgpu::Buffer, size: u64) -> Vec<u8> {
+fn read(device: &wgpu::Device, queue: &GatedQueue, buf: &wgpu::Buffer, size: u64) -> Vec<u8> {
 	let stage = device.create_buffer(&wgpu::BufferDescriptor { label: Some("props check"), size, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
 	let mut enc = device.create_command_encoder(&Default::default());
 	enc.copy_buffer_to_buffer(buf, 0, &stage, 0, size);
 	{
 		let _no_configure = crate::retail::gpu_capture_submit_lock();
-		queue.submit(Some(enc.finish()));
+		queue.sync().submit(Some(enc.finish()));
 	}
 	stage.slice(..).map_async(wgpu::MapMode::Read, |_| {});
 	device.poll(wgpu::PollType::wait_indefinitely()).ok();
@@ -83,7 +83,7 @@ fn diff(what: &str, got: &[u8], want: &[PoseEntry]) -> u64 {
 impl PropsGpu {
 	/// Compares the buffers with the references after an upload: `jobs` Some = direct mode (the shadow and the sources are the
 	/// references), None = old mode (`mirror` is). `total`: the entries placed.
-	pub(super) fn check(&self, device: &wgpu::Device, queue: &wgpu::Queue, insts: &[PropInst], jobs: Option<&[PoseJob]>, mirror: &[PoseEntry], total: usize) {
+	pub(super) fn check(&self, device: &wgpu::Device, queue: &GatedQueue, insts: &[PropInst], jobs: Option<&[PoseJob]>, mirror: &[PoseEntry], total: usize) {
 		let mut t = TALLY.lock().unwrap_or_else(|e| e.into_inner());
 		let t = t.get_or_insert_with(Tally::default);
 		t.uploads += 1;

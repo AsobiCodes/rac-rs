@@ -266,7 +266,7 @@ impl VolClouds {
 
 	/// Marches and accumulates this frame's clouds (before the level pass; `apply` then lays them over the backdrop). False (and the
 	/// history dropped) when the level has none, the new sky is off or the noise is still being made.
-	pub(super) fn march(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, enc: &mut wgpu::CommandEncoder, inp: &Input) -> bool {
+	pub(super) fn march(&mut self, device: &wgpu::Device, queue: &GatedQueue, enc: &mut wgpu::CommandEncoder, inp: &Input) -> bool {
 		self.ready = None;
 		let model = self.sky.model().map(|(s, m)| (s, m.clone()));
 		let (Some(mut q), Some(look), Some((sun, skymap)), true) = (params::quality(inp.quality), params::look(inp.level), model, inp.size.0 > 0) else {
@@ -293,7 +293,7 @@ impl VolClouds {
 		}
 		let timer = self.timer.get_or_insert_with(|| gputime::GpuTimer::new(device, queue));
 		if let Some(tm) = timer.as_mut() {
-			tm.poll(device);
+			tm.poll(device, queue);
 		}
 		let key_ok = self.t.as_ref().is_some_and(|t| t.key.2 == inp.generation && t.key.0 == inp.size.0.div_ceil(q.div) && t.key.1 == inp.size.1.div_ceil(q.div));
 		if !key_ok {

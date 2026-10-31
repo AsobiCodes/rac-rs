@@ -47,9 +47,11 @@ impl App {
 			let mut bomb_range: Option<(usize, usize)> = None;
 			let mut light_at: Option<[f32; 3]> = None;
 			let mut hero_gen = 0u64;
+			let mut hero_collapsed = false; let mut loose = [None; loose_range::MAX];
 			let skinned = if hero_hit {
 				let c = self.hero_cache.as_ref().expect("hero_hit needs the cache");
 				hero_gen = c.pose_gen;
+				hero_collapsed = c.collapsed; loose = c.loose;
 				ghost_ranges = c.ghost_ranges;
 				bomb_range = c.bomb_range;
 				light_at = c.light_at;
@@ -80,6 +82,8 @@ impl App {
 						v[1] *= s;
 					}
 				}
+				// Vertex ranges of the loose wrenches (thrown + afterimages): the only parts that stay while the hero is hidden (`collapse_outside`).
+				let mut loose_ranges: Vec<loose_range::LooseRange> = Vec::new();
 				if let Some((hp, hn)) = &self.wrench {
 					// A retail loose wrench in world space -> Ratchet's model space.
 					let hr = hero_rows(p);
@@ -90,6 +94,7 @@ impl App {
 					if r_hand == Some(false) {
 						match &r_thrown {
 							Some((l, (fp, fnn))) => {
+								loose_ranges.push(loose_range::LooseRange::of(l, ps.len(), ps.len() + fp.len()));
 								ps.extend(fp.iter().map(|&v| loose_at(l, v, 1.0)));
 								ns.extend(fnn.iter().map(|&v| loose_at(l, v, 0.0)));
 							}
@@ -124,6 +129,7 @@ impl App {
 							ps.extend(fp.iter().map(|&v| loose_at(l, v, 1.0)));
 							ns.extend(fnn.iter().map(|&v| loose_at(l, v, 0.0)));
 							ghost_ranges[gi] = (l.alpha < 0x80).then_some((base, ps.len(), l.alpha));
+							loose_ranges.push(loose_range::LooseRange::of(l, base, ps.len()));
 							continue;
 						}
 						let base = ps.len();
@@ -324,41 +330,15 @@ impl App {
 						None => hide(&mut ps, &mut ns, n),
 					}
 				}
-				// BRIDGE-40 HERO-GHOST (WPN-6.6a, trail 0x1409c0): up to three translucent copies of the hero's current
-				// base pose at the lagged trail positions and yaws; hidden when absent. No layers or joint effects [C]: the
-				// retail copy's +0x60 / +0x64 lists stay 0 (WPN-6.6b4, decomp/notes/weapons_framework.md). Untinted [C]: its
-				// flags 0x80a clear the CLASS-tint bit 0x10, so the hero glow tint covers the hero range only. Lit with the
-				// hero's current light, where retail freezes the spawn tick's light word [I].
-				let hero_n = class.mesh.positions.len();
-				let trail = p.hero_ghosts();
-				let ghost_pose = trail.iter().any(Option::is_some).then(|| {
-					let (mut gp, mut gn) = anim::skin(class, &self.hero_rig.hero.pose(a, &[]));
-					gp.resize(hero_n, [0.0; 3]);
-					gn.resize(hero_n, [0.0, 0.0, 1.0]);
-					(gp, gn)
-				});
-				for (gi, g) in trail.into_iter().enumerate() {
-					let base = ps.len();
-					let (Some((gpos, gyaw, alpha)), Some((gp, gn))) = (g, ghost_pose.as_ref()) else {
-						hide(&mut ps, &mut ns, hero_n);
-						continue;
-					};
-					let (c, sn) = (p.yaw.cos(), p.yaw.sin());
-					let (gc, gs) = (gyaw.cos(), gyaw.sin());
-					let local = |v: [f32; 3], t: f32| {
-						let r = [v[0] * gc - v[1] * gs, v[0] * gs + v[1] * gc, v[2]];
-						let d = [r[0] + t * (gpos[0] - p.pos[0]), r[1] + t * (gpos[1] - p.pos[1]), r[2] + t * (gpos[2] - p.pos[2])];
-						[d[0] * c + d[1] * sn, -d[0] * sn + d[1] * c, d[2]]
-					};
-					ps.extend(gp.iter().map(|&v| local(v, 1.0)));
-					ns.extend(gn.iter().map(|&v| local(v, 0.0)));
-					ghost_ranges[2 + gi] = Some((base, ps.len(), alpha));
-				}
+				// BRIDGE-40 HERO-GHOST: the three translucent copies of the hero's base pose (hero_pose.rs `append_hero_ghosts`).
+				append_hero_ghosts(&mut ps, &mut ns, &mut ghost_ranges, p, class.mesh.positions.len(), || anim::skin(class, &self.hero_rig.hero.pose(a, &[])));
+				// Retail hides only the hero moby; a wrench he threw while hidden (L1 look) keeps flying in view.
+				hero_collapsed = game.hero_hidden && collapse_outside(&mut ps, &mut ns, &loose_ranges); loose = loose_range::LooseRange::first(&loose_ranges);
 				(ps, ns)
 			}) };
 			if !hero_hit {
 				hero_gen = next_gen();
-				let fresh = HeroCache { key: hero_key, pose_gen: hero_gen, skinned: herocache::copy_posed((!hero_cand).then(|| self.hero_cache.take()).flatten(), &skinned), ghost_ranges, bomb_range, light_at, held_rows, muzzle_model, held_muzzle_model, held_joint0_model, held_xform_model };
+				let fresh = HeroCache { key: hero_key, pose_gen: hero_gen, skinned: herocache::copy_posed((!hero_cand).then(|| self.hero_cache.take()).flatten(), &skinned), ghost_ranges, bomb_range, light_at, held_rows, muzzle_model, held_muzzle_model, held_joint0_model, held_xform_model, collapsed: hero_collapsed, loose };
 				if hero_cand {
 					hero_check_compare(self.hero_cache.as_ref().expect("hero_cand needs the cache"), &fresh);
 				}
@@ -383,13 +363,14 @@ impl App {
 				let l = hero_to_world(&hero_rows(p), m);
 				[p.pos[0] + l[0], p.pos[1] + l[1], p.pos[2] + l[2]]
 			});
+			self.smooth.note_hero_collapsed(hero_collapsed);
 			let (at, skinned, tilt) = { let _s = profile::span("sm_hero"); self.smooth.hero(game, at, skinned, hero_gen) };
 			let (mut at, mut skinned, mut tilt) = (at, skinned, tilt);
 			// [PC] perf (lane R2): the GPU hero blends on the GPU; scenes and ship seats below replace the pose, so no blend.
 			let mut hero_blend_t = self.smooth.hero_blend().map(|b| b.1);
 			let mut hero_gens = self.smooth.hero_gens();
 			// A ship stream plays like a scene, in the frame of the ship pad (FUN_002a39b0: positions through
-			f.at = at; f.skinned = skinned; f.tilt = tilt; f.hero_blend_t = hero_blend_t; f.hero_gens = hero_gens;
+			f.at = at; f.skinned = skinned; f.tilt = tilt; f.hero_blend_t = hero_blend_t; f.hero_gens = hero_gens; f.hero_collapsed = hero_collapsed; f.loose = loose;
 			f.ghost_ranges = ghost_ranges; f.bomb_range = bomb_range; f.light_at = light_at; f.nozzle = nozzle;
 		}
 	}
@@ -397,7 +378,7 @@ impl App {
 	pub(super) fn frame_hero_scene(&mut self, f: &mut Frame) {
 		let (mut at, mut tilt, mut hero_blend_t, mut hero_gens) = (f.at, f.tilt, f.hero_blend_t, f.hero_gens);
 		let mut skinned = std::mem::take(&mut f.skinned);
-		let mut ghost_ranges = f.ghost_ranges;
+		let mut ghost_ranges = f.ghost_ranges; let mut hero_collapsed = f.hero_collapsed; let mut loose = f.loose;
 		if let (Some(game), Some(w)) = (&mut self.game, &self.world) {
 			let p = &game.player;
 			// the ship's matrix and position, camera yaw plus the ship's).
@@ -465,7 +446,7 @@ impl App {
 						hide(&mut ps, &mut ns, held);
 						skinned = Some((ps, ns));
 						hero_blend_t = None;
-						hero_gens = (0, 0);
+						hero_gens = (0, 0); hero_collapsed = false; loose = [None; loose_range::MAX];
 						ghost_ranges = [None; 5];
 						at = Some((place_at(pos), pad_yaw));
 						// BRIDGE-75 [I]: the scene frame poses the hero, untilted.
@@ -533,7 +514,7 @@ impl App {
 					hide(&mut ps, &mut ns, held);
 					skinned = Some(turn((ps, ns)));
 					hero_blend_t = None;
-					hero_gens = (0, 0);
+					hero_gens = (0, 0); hero_collapsed = false; loose = [None; loose_range::MAX];
 					ghost_ranges = [None; 5];
 					at = Some((game::transit::seat_pos(fp.pos, fp.rot_prev, game::transit::RATCHET_SEAT[fp.ship_type.min(2)]), 0.0));
 					// BRIDGE-75 [I]: the seat frame poses the hero, untilted.
@@ -576,13 +557,13 @@ impl App {
 			}
 			// NOV-13.5b: the gadget cinematic's camera (angles applied x, y, z), Ratchet (actor 0) and the gadget
 			f.at = at; f.skinned = skinned; f.tilt = tilt; f.hero_blend_t = hero_blend_t; f.hero_gens = hero_gens;
-			f.actors = actors; f.passenger_shown = passenger_shown; f.eye_glows = eye_glows; f.flight_pose = flight_pose; f.ghost_ranges = ghost_ranges;
+			f.hero_collapsed = hero_collapsed; f.loose = loose; f.actors = actors; f.passenger_shown = passenger_shown; f.eye_glows = eye_glows; f.flight_pose = flight_pose; f.ghost_ranges = ghost_ranges;
 		}
 	}
 
 	pub(super) fn frame_hero_fx(&mut self, f: &mut Frame) {
 		let (mut at, tilt, dt) = (f.at, f.tilt, f.dt);
-		let mut skinned = std::mem::take(&mut f.skinned); let (mut hero_blend_t, mut hero_gens, mut ghost_ranges) = (f.hero_blend_t, f.hero_gens, f.ghost_ranges);
+		let mut skinned = std::mem::take(&mut f.skinned); let (mut hero_blend_t, mut hero_gens, mut ghost_ranges) = (f.hero_blend_t, f.hero_gens, f.ghost_ranges); let mut hero_collapsed = f.hero_collapsed; let mut loose = f.loose;
 		let eye_glows = std::mem::take(&mut f.eye_glows); let mut world_quads = std::mem::take(&mut f.world_quads);
 		if let (Some(game), Some(w)) = (&mut self.game, &self.world) {
 			let p = &game.player;
@@ -635,7 +616,7 @@ impl App {
 						hide(&mut ps, &mut ns, hero_ghost_len(class));
 						skinned = Some((ps, ns));
 						hero_blend_t = None;
-						hero_gens = (0, 0);
+						hero_gens = (0, 0); hero_collapsed = false; loose = [None; loose_range::MAX];
 						ghost_ranges = [None; 5];
 						at = Some((p.pos, p.yaw));
 					}
@@ -718,7 +699,7 @@ impl App {
 			}
 			profile::lap(profile::Phase::Hero);
 			f.vendor_quads = vendor_quads; f.skinned = skinned; f.world_quads = world_quads;
-			f.at = at; f.hero_blend_t = hero_blend_t; f.hero_gens = hero_gens; f.ghost_ranges = ghost_ranges;
+			f.at = at; f.hero_blend_t = hero_blend_t; f.hero_gens = hero_gens; f.hero_collapsed = hero_collapsed; f.loose = loose; f.ghost_ranges = ghost_ranges;
 		}
 	}
 }

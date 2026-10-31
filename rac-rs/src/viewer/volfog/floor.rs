@@ -353,7 +353,7 @@ fn lower_voids(g: &mut Ground, low: &[f32], fade: f32) {
 }
 
 /// The ground map as a texture (R32Float, one texel per cell) with its origin (None: no map), when its generation is not `have`.
-pub fn ground_texture(device: &wgpu::Device, queue: &wgpu::Queue, have: u32) -> Option<(u32, Option<(wgpu::TextureView, [f32; 2])>)> {
+pub fn ground_texture(device: &wgpu::Device, queue: &crate::viewer::presenter::GatedQueue, have: u32) -> Option<(u32, Option<(wgpu::TextureView, [f32; 2])>)> {
 	let now = GEN.load(Ordering::Relaxed);
 	if now == have {
 		return None;

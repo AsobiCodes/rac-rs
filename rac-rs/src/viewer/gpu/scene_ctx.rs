@@ -4,7 +4,7 @@ use super::*;
 
 impl Gpu {
 	pub(in crate::viewer) fn ctx(&self) -> SceneCtx {
-		SceneCtx { device: self.device.clone(), queue: self.queue.clone(), sampler: self.sampler.clone(), wrap_samplers: self.wrap_samplers.clone(), tex_layout: self.tex_layout.clone(), tex_log: std::cell::RefCell::new(None), repl: Default::default(), repl_pending: Default::default(), repl_cap: Default::default(), repl_origs: Default::default(), orig_on: Default::default(), extra_origs: Default::default(), bindless_layout: self.bindless.as_ref().map(|b| b.layout.clone()), paced: false }
+		SceneCtx { device: self.device.clone(), queue: GatedQueue::immediate(self.queue.sync().clone()), sampler: self.sampler.clone(), wrap_samplers: self.wrap_samplers.clone(), tex_layout: self.tex_layout.clone(), tex_log: std::cell::RefCell::new(None), repl: Default::default(), repl_pending: Default::default(), repl_cap: Default::default(), repl_origs: Default::default(), orig_on: Default::default(), extra_origs: Default::default(), bindless_layout: self.bindless.as_ref().map(|b| b.layout.clone()), paced: false }
 	}
 
 	pub(in crate::viewer) fn upload(&self, t: Option<&Texture>, sampler: &wgpu::Sampler) -> wgpu::BindGroup {
@@ -116,7 +116,7 @@ pub(super) fn terrain_inst(k: f32, mxl: usize) -> u32 {
 /// background thread (the level prefetch) while the viewer keeps drawing the level that is still playing.
 pub(in crate::viewer) struct SceneCtx {
 	pub(in crate::viewer) device: wgpu::Device,
-	pub(in crate::viewer) queue: wgpu::Queue,
+	pub(in crate::viewer) queue: GatedQueue,
 	pub(in crate::viewer) sampler: wgpu::Sampler,
 	pub(in crate::viewer) wrap_samplers: [wgpu::Sampler; 3],
 	pub(in crate::viewer) tex_layout: wgpu::BindGroupLayout,

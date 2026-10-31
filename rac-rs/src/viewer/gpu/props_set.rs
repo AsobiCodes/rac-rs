@@ -163,6 +163,7 @@ impl Gpu {
 			}
 		}
 		scene.props_vis = shown.clone();
+		scene.update_tail_order(props, &shown); // [PC] #29 (gpu/tail_order.rs)
 		{
 			let pg = &mut self.props_gpu;
 			// [PC] perf round 3: one record per slot and each distinct pose once; `vs_props` poses the static model.

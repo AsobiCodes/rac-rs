@@ -108,7 +108,7 @@ impl Bindless {
 	}
 
 	/// Writes this frame's indirect arguments (growing the buffer to the next power of two).
-	pub(super) fn write_args(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, args: &[[u32; 5]]) {
+	pub(super) fn write_args(&mut self, device: &wgpu::Device, queue: &GatedQueue, args: &[[u32; 5]]) {
 		let Some((buf, cap)) = &mut self.indirect else { return };
 		if args.len() > *cap {
 			*cap = args.len().next_power_of_two();

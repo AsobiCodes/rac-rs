@@ -226,7 +226,7 @@ impl PartFx {
 	/// (`glow`). `generation` = post targets' generation (they are remade with the depth target).
 	#[allow(clippy::too_many_arguments)]
 	/// `fx`: the effect lights that light the smoke (none in the cover pass). `far`: the world far plane the depth was drawn with.
-	pub(super) fn begin<'e>(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, enc: &'e mut wgpu::CommandEncoder, msaa: &wgpu::TextureView, depth: &wgpu::TextureView, resolve: &wgpu::TextureView, glow: &wgpu::TextureView, generation: u64, fx: &FxLights, far: f32) -> wgpu::RenderPass<'e> {
+	pub(super) fn begin<'e>(&mut self, device: &wgpu::Device, queue: &GatedQueue, enc: &'e mut wgpu::CommandEncoder, msaa: &wgpu::TextureView, depth: &wgpu::TextureView, resolve: &wgpu::TextureView, glow: &wgpu::TextureView, generation: u64, fx: &FxLights, far: f32) -> wgpu::RenderPass<'e> {
 		let tex = resolve.texture();
 		let key = (tex.width(), tex.height(), generation);
 		if self.t.as_ref().is_none_or(|t| t.key != key) {

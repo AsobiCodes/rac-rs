@@ -55,7 +55,7 @@ pub(super) fn maybe(gpu: &Gpu, scene: &Scene, u: &Uniforms, r: &Res, draws: usiz
 			wgpu::TexelCopyBufferInfo { buffer: &buf, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) } },
 			wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
 		);
-		gpu.queue.submit([enc.finish()]);
+		gpu.queue.sync().submit([enc.finish()]);
 		buf.slice(..).map_async(wgpu::MapMode::Read, |_| {});
 		if device.poll(wgpu::PollType::wait_indefinitely()).is_err() {
 			return;

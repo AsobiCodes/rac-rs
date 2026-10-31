@@ -37,6 +37,8 @@ mod level;
 mod fmath;
 mod loadlog;
 mod runlog;
+mod runlog_policy;
+mod wine;
 #[cfg(any(test, target_os = "linux"))]
 mod runlog_linux;
 mod map;
@@ -112,6 +114,8 @@ const PANIC_DETAILS: &str = "player/log.txt";
 fn message_box(text: &str) {
 	#[cfg(windows)]
 	{
+		// [PC] The text is a run log line too, before the box blocks (runlog_policy.rs; GitHub #49: under Wine a box may never be seen).
+		runlog_policy::note_message(text);
 		#[link(name = "user32")]
 		unsafe extern "system" {
 			fn MessageBoxW(hwnd: *mut std::ffi::c_void, text: *const u16, caption: *const u16, kind: u32) -> i32;
@@ -122,7 +126,10 @@ fn message_box(text: &str) {
 	}
 	#[cfg(not(windows))]
 	{
-		eprintln!("{text}");
+		// With the run log on, `dialog_linux::show` writes the text into it ("message box: ..."); without, it stays on stderr as before.
+		if !runlog::active() {
+			eprintln!("{text}");
+		}
 		dialog_linux::show("Ratchet & Clank (rac-rs)", text, dialog_linux::Kind::Error);
 	}
 }
@@ -149,6 +156,13 @@ fn install_root() -> Result<std::path::PathBuf, String> {
 		.and_then(|d| d.ancestors().find(|d| d.join("generated").join("play.cfg").is_file()))
 		.map(|d| d.to_path_buf())
 		.ok_or_else(|| concat!("Run ", setup_name!(), " first: the game has not been set up yet (generated/play.cfg not found).").to_string())
+}
+
+/// [PC] Where the run log goes when `launch_args` failed: `player` of the install root if `play.cfg` was found (the disc image is the
+/// problem), else `player` next to the exe (set-up has not run); `retail::memcard::player_dir()` would be the compile-time dev folder here.
+fn error_log_dir() -> std::path::PathBuf {
+	let beside_exe = || std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.to_path_buf()));
+	install_root().ok().or_else(beside_exe).unwrap_or_default().join("player")
 }
 
 /// [PC] The window title: "rac-rs v0.2.1" from the install root's `generated/built_version.txt` (setup.ps1 writes it after building
@@ -347,6 +361,9 @@ pub fn main() -> ExitCode {
 		match launch_args() {
 			Ok(a) => args = a,
 			Err(msg) => {
+				// [PC] The run log first (still single-threaded), then the box: its text must reach a log even where the box is never seen
+				// (Playden / Wine, GitHub #49). The player folder is not known here (`launch_args` failed before it set it).
+				runlog::start(&error_log_dir());
 				message_box(&msg);
 				return ExitCode::from(2);
 			}

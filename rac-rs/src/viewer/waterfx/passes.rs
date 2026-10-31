@@ -31,7 +31,7 @@ impl WaterFx {
 	/// pass's MSAA depth, `scene` / `lin` / `glow` / `generation` the post's targets (`post::Post::water_inputs`); `parts`: the
 	/// particle pass ran (Particles Enhanced), so the glow target holds their cover.
 	#[allow(clippy::too_many_arguments)]
-	pub(in crate::viewer) fn positions(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, enc: &mut wgpu::CommandEncoder, depth: &wgpu::TextureView, (scene, lin, glow, generation): (&wgpu::TextureView, &wgpu::TextureView, &wgpu::TextureView, u64), f: &WaterFrame, draws: &[WaterDraw], mirrors: &[f32], parts: bool) {
+	pub(in crate::viewer) fn positions(&mut self, device: &wgpu::Device, queue: &GatedQueue, enc: &mut wgpu::CommandEncoder, depth: &wgpu::TextureView, (scene, lin, glow, generation): (&wgpu::TextureView, &wgpu::TextureView, &wgpu::TextureView, u64), f: &WaterFrame, draws: &[WaterDraw], mirrors: &[f32], parts: bool) {
 		self.ready(device, enc, (depth, scene, lin, glow, generation), f.game);
 		let Some(t) = &self.t else { return };
 		let (w, h) = (t.key.0 as f32, t.key.1 as f32);

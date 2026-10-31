@@ -6,7 +6,7 @@ impl App {
 	pub(super) fn frame_switch(&mut self, f: &mut Frame) {
 		let dt = f.dt;
 		if self.retail.is_some() {
-			// Retail: the front end runs in the interpreter and the mirror draws it from its RAM (viewer/front_mirror.rs).
+			// Retail: the front end runs in the game's own code (compiled or interpreted) and the mirror draws it from its RAM (viewer/front_mirror.rs).
 			self.front_mirror_enter();
 			if self.front.is_some() && self.game.is_none() {
 				self.front_mirror_tick(dt);

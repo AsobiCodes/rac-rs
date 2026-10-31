@@ -57,8 +57,8 @@ pub fn front_end(m: &Machine) -> bool {
 	players().iter().find(|p| p.level == FRONT).is_some_and(|p| ee_oracle::rec::hash(&m.cpu.mem, p.entry, p.end) == p.hash)
 }
 
-/// The front end runs interpreted (no recompiled code), and the oracle's hand table is only consulted from recompiled
-/// function entries, so the fmv_bridge hook never fires there on its own: the retail movie player would spin on the
+/// The frontbin movie player stays interpreted (the compiled front-end crates l19 / l20 leave it out: tools/recgen_iso.py FE_DROP),
+/// and the oracle's hand table is only consulted from recompiled function entries, so the fmv_bridge hook never fires there on its own: the retail movie player would spin on the
 /// unemulated IPU. An oracle host stub (`Cpu::add_host_stub`, called from the interpreter's step) on the frontbin player
 /// runs the same hook (`fmv_bridge::movie_call`) as the level movies: the attract movie after ~25 s idle on the title and
 /// the New Game intro play in the window, or are skipped at once without one (v0 = 0 either way, like a skipped movie).

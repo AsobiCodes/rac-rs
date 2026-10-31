@@ -26,6 +26,10 @@ pub(super) struct Frame {
 	pub(super) nozzle: Option<game::pyro::Nozzle>,
 	pub(super) actors: Vec<Option<(Posed, [f32; 3])>>,
 	pub(super) passenger_shown: bool,
+	/// The hero is hidden (L1 look) but a thrown wrench is drawn through the marker (`hero_pose::collapse_outside`).
+	pub(super) hero_collapsed: bool,
+	/// The loose wrenches' ranges and light for `Gpu::marker_loose` (empty whenever a scene / seat / gadget pose replaces the marker).
+	pub(super) loose: [Option<loose_range::LooseRange>; loose_range::MAX],
 	pub(super) eye_glows: Vec<([f32; 3], f32)>,
 	pub(super) vendor_quads: Vec<particles::WorldQuad>,
 	pub(super) fx_posed: HashMap<usize, std::sync::Arc<Posed>>,

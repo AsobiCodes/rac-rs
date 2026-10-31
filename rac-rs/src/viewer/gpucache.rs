@@ -35,12 +35,14 @@ pub(super) struct MarkerKey {
 	pub ghosts: [Option<(usize, usize, u8)>; 5],
 	pub bomb: Option<(usize, usize, [u32; 3])>,
 	pub shift: Option<(usize, usize, u32)>,
+	/// The loose wrench ranges with their own light and third-light id (bits).
+	pub own: [Option<(usize, usize, [u32; 4], u32)>; 3],
 }
 
 impl MarkerKey {
 	/// Check mode only: which parts differ (bit per field, in declaration order).
 	pub fn diff(&self, o: &MarkerKey) -> u32 {
-		[self.skin != o.skin, self.feet != o.feet, self.yaw != o.yaw, self.tilt != o.tilt, self.light != o.light, self.id != o.id, self.tint != o.tint, self.hero_len != o.hero_len, self.clank != o.clank, self.ghosts != o.ghosts, self.bomb != o.bomb, self.shift != o.shift]
+		[self.skin != o.skin, self.feet != o.feet, self.yaw != o.yaw, self.tilt != o.tilt, self.light != o.light, self.id != o.id, self.tint != o.tint, self.hero_len != o.hero_len, self.clank != o.clank, self.ghosts != o.ghosts, self.bomb != o.bomb, self.shift != o.shift, self.own != o.own]
 			.iter()
 			.enumerate()
 			.fold(0, |m, (i, &d)| m | (d as u32) << i)
@@ -66,7 +68,7 @@ pub(super) fn view_bits(v: &ClipView) -> [u32; 14] {
 static MARKER_FRAMES: AtomicU64 = AtomicU64::new(0);
 static MARKER_SAME: AtomicU64 = AtomicU64::new(0);
 static MARKER_BAD: AtomicU64 = AtomicU64::new(0);
-static MARKER_WHY: [AtomicU64; 13] = [const { AtomicU64::new(0) }; 13];
+static MARKER_WHY: [AtomicU64; 14] = [const { AtomicU64::new(0) }; 14];
 static CULL_FRAMES: AtomicU64 = AtomicU64::new(0);
 static CULL_SAME: AtomicU64 = AtomicU64::new(0);
 static CULL_BAD: AtomicU64 = AtomicU64::new(0);
@@ -92,7 +94,7 @@ pub(super) fn marker_note(same_inputs: bool, same_out: bool, why: u32) {
 	}
 	if n % 500 == 0 {
 		let why: Vec<u64> = MARKER_WHY.iter().map(|w| w.load(Ordering::Relaxed)).collect();
-		eprintln!("marker_check: {} calls, {} skippable, {} mismatches; differs (skin feet yaw tilt light id tint hero_len clank ghosts bomb shift | pose bytes): {:?}", n, MARKER_SAME.load(Ordering::Relaxed), MARKER_BAD.load(Ordering::Relaxed), why);
+		eprintln!("marker_check: {} calls, {} skippable, {} mismatches; differs (skin feet yaw tilt light id tint hero_len clank ghosts bomb shift own | pose bytes): {:?}", n, MARKER_SAME.load(Ordering::Relaxed), MARKER_BAD.load(Ordering::Relaxed), why);
 	}
 }
 

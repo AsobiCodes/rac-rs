@@ -327,7 +327,7 @@ impl VolFog {
 		format!("{}{}{}{}{}{}{}", scatter::BLOCK, density::FOG_DENSITY, floor::FLOOR, scatter::MARCH, temporal::RESOLVE, soft::READ, APPLY)
 	}
 
-	fn build(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Pipes {
+	fn build(&self, device: &wgpu::Device, queue: &GatedQueue) -> Pipes {
 		let src = Self::source();
 		let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("volfog"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("volfog", src.into())) });
 		let entry = |binding: u32, ty: wgpu::BindingType| wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::FRAGMENT, ty, count: None };
@@ -472,7 +472,7 @@ impl VolFog {
 
 	/// Marches, accumulates and applies the fog into `inp.scene`. False (and the history dropped) when the level has none. `depth`: the
 	/// level's MSAA depth (sample 0 tells `fs_apply` what lies behind a blended no-Z texel, `soft.rs`).
-	pub(super) fn run(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, enc: &mut wgpu::CommandEncoder, inp: &Input, depth: &wgpu::TextureView) -> bool {
+	pub(super) fn run(&mut self, device: &wgpu::Device, queue: &GatedQueue, enc: &mut wgpu::CommandEncoder, inp: &Input, depth: &wgpu::TextureView) -> bool {
 		let (Some(mut q), true) = (quality(inp.quality), inp.size.0 > 0) else { return false };
 		if let (3.., Some(div)) = (inp.quality, super::gfxq::fog_div()) {
 			q.div = div; // RAC_FOG_DIV (gfxq.rs): an override, unset = `quality`
@@ -487,7 +487,7 @@ impl VolFog {
 		};
 		let _s = super::profile::span("volfog");
 		if let Some(tm) = &mut self.timer {
-			tm.poll(device);
+			tm.poll(device, queue);
 		}
 		if self.pipes.is_none() {
 			// [PC] pipe_guard.rs: a driver that refuses the fog shader (DX12 FXC) turns the fog off, it does not crash the game.

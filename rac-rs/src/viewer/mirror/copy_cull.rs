@@ -90,7 +90,7 @@ impl TieArgs {
 
 	/// Writes `draws` as indirect arguments (`bindless::push_args`: texture slot as the first instance, runs of one cull mode) and
 	/// returns the buffer with the runs.
-	fn upload(&self, device: &wgpu::Device, queue: &wgpu::Queue, draws: &[Draw]) -> (wgpu::Buffer, super::super::bindless::Runs) {
+	fn upload(&self, device: &wgpu::Device, queue: &GatedQueue, draws: &[Draw]) -> (wgpu::Buffer, super::super::bindless::Runs) {
 		let mut args: Vec<[u32; 5]> = Vec::with_capacity(draws.len());
 		let runs = super::super::bindless::push_args(&mut args, draws.iter().copied(), true);
 		let mut held = self.0.lock().unwrap_or_else(|e| e.into_inner());

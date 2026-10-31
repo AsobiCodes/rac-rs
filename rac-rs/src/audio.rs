@@ -15,6 +15,15 @@ pub static ST_FADE_UNDER: std::sync::atomic::AtomicU64 = std::sync::atomic::Atom
 pub static ST_FADE_CLOSE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static ST_FADE_IDLE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static ST_FADE_FRAMES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// [PC] The output device's latency in microseconds: what the last callback's own timestamps say lies between handing it a buffer
+/// and the buffer being heard (`playback` - `callback`). 0 until the first callback or when the host reports none. Written by the device
+/// callback thread, read by the movie player's clock (`fmv/player.rs`).
+static OUT_LATENCY_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The output device's latency now (see `OUT_LATENCY_US`).
+pub fn out_latency() -> std::time::Duration {
+	std::time::Duration::from_micros(OUT_LATENCY_US.load(std::sync::atomic::Ordering::Relaxed))
+}
 
 /// [PC] RAC_AUDIO_STATS=<prefix>: records every device callback (time, size, mix time, the device's own callback and playback
 /// timestamps, the counters above) to <prefix>.csv and the exact samples handed to the device to <prefix>.f32 (interleaved f32
@@ -265,6 +274,8 @@ pub struct StreamSource {
 	/// [PC] Device callbacks that visited this stream, whether or not it had data: tells a dead output device (this stops) from a
 	/// starved stream (this runs, `played` holds); see `fmv/player.rs` (the audio clock watchdog).
 	pulls: std::sync::atomic::AtomicU64,
+	/// [PC] The last of the stream's audio is queued (`finish`): when it runs dry the held frame fades over `CLOSE_FRAMES`, not `FADE_FRAMES`.
+	ending: std::sync::atomic::AtomicBool,
 }
 
 struct StreamState {
@@ -318,6 +329,12 @@ impl StreamSource {
 
 	pub fn close(&self) {
 		self.closed.store(true, std::sync::atomic::Ordering::Relaxed);
+	}
+
+	/// Marks the end of the stream's audio: nothing more will be pushed. Whatever is queued plays out as it was; when the queue then runs
+	/// dry, the last frame is faded over 20 ms instead of 2 ms (a movie whose audio ends off zero would tick at the end otherwise).
+	pub fn finish(&self) {
+		self.ending.store(true, std::sync::atomic::Ordering::Relaxed);
 	}
 }
 
@@ -463,6 +480,7 @@ fn mix_stream(src: &StreamSource, data: &mut [f32], channels: usize, rate: f64) 
 	let step = src.rate as f64 / rate;
 	let vol = st.volume;
 	let closed = src.closed.load(Relaxed);
+	let long_ramp = closed || src.ending.load(Relaxed);
 	let wants = st.playing && !closed;
 	let plays_out = closed && st.playing;
 	for frame in data.chunks_exact_mut(channels) {
@@ -505,7 +523,7 @@ fn mix_stream(src: &StreamSource, data: &mut [f32], channels: usize, rate: f64) 
 				let c = if closed { &ST_FADE_CLOSE } else if wants { &ST_FADE_UNDER } else { &ST_FADE_IDLE };
 				c.fetch_add(1, Relaxed);
 			}
-			st.gain = (st.gain - 1.0 / if closed { CLOSE_FRAMES } else { FADE_FRAMES }).max(0.0);
+			st.gain = (st.gain - 1.0 / if long_ramp { CLOSE_FRAMES } else { FADE_FRAMES }).max(0.0);
 			(l, r) = (st.hold[0], st.hold[1]);
 		}
 		let g = st.gain;
@@ -599,6 +617,8 @@ impl Audio {
 						promoted = true;
 						eprintln!("audio: device callback thread priority: {}", promote_audio_thread());
 					}
+					let ts = info.timestamp();
+					OUT_LATENCY_US.store(((ts.playback.as_nanos() as i128 - ts.callback.as_nanos() as i128).max(0) / 1000) as u64, std::sync::atomic::Ordering::Relaxed);
 					let t = std::time::Instant::now();
 					mix(data);
 					if let Some(p) = probe.as_mut() {
@@ -682,6 +702,7 @@ impl Audio {
 			state: Mutex::new(StreamState { queue: Default::default(), phase: 0.0, played: 0, volume: self.master, playing: false, gain: 1.0, hold: [0.0; 2] }),
 			closed: Default::default(),
 			pulls: Default::default(),
+			ending: Default::default(),
 		});
 		if let Ok(mut v) = self.streams.lock() {
 			v.push(s.clone());
@@ -932,5 +953,28 @@ mod tests {
 		let amp = |k: usize| tail[k].abs();
 		assert!(amp(100) < amp(0) && amp(500) < amp(100) && amp(900) < amp(500), "the ramp is linear over 20 ms");
 		assert!(tail[965..].iter().all(|&v| v.abs() < 1e-3));
+	}
+
+	/// [PC] A stream whose audio ends (`finish`) on a held level fades out over CLOSE_FRAMES (20 ms) once the queue runs dry, not over the
+	/// 2 ms of an ordinary underrun: the largest step of the tail is 10 times smaller, and an unfinished stream still takes the short ramp.
+	#[test]
+	fn stream_end_fades_over_20_ms() {
+		let tone = |frames: usize| -> Vec<i16> { (0..frames).flat_map(|_| [16384i16, -16384]).collect() };
+		let tail_steps = |finished: bool| -> f32 {
+			let (mut a, mut mix) = Audio::offline(48000.0, 2);
+			let s = a.open_stream(48000);
+			s.push(&tone(500));
+			s.set_playing(true);
+			if finished {
+				s.finish();
+			}
+			let mut out = Vec::new();
+			pull(&mut mix, 2000, &mut out);
+			assert!(out[..490].iter().all(|&v| v == 0.5), "gain 1.0 leaves the samples untouched");
+			assert!(out[1500..].iter().all(|&v| v == 0.0), "silent after the fade");
+			out[490..].windows(2).map(|w| (w[0] - w[1]).abs()).fold(0.0, f32::max)
+		};
+		let (short, long) = (tail_steps(false), tail_steps(true));
+		assert!(short > 0.004 && long < 0.0007, "short ramp step {short}, finished-stream ramp step {long}");
 	}
 }

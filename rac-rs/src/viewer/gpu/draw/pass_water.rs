@@ -190,12 +190,12 @@ impl Gpu {
 			}
 	}
 
-	pub(super) fn pass_pools(&self, mut pass: &mut wgpu::RenderPass<'_>, warp: bool, metal: Option<(&Batch, &[wgpu::BindGroup; 2])>, water_on: bool, mut wrec: &mut Vec<super::waterfx::WaterDraw>) {
+	pub(super) fn pass_pools(&self, mut pass: &mut wgpu::RenderPass<'_>, warp: bool, metal: Option<(&Batch, &[Draw], &[wgpu::BindGroup; 2])>, water_on: bool, mut wrec: &mut Vec<super::waterfx::WaterDraw>) {
 		crate::viewer::passtime::lap(pass, "ties lt"); // [probe] RAC_GPU_PASSES lap (passtime.rs)
-			if let Some((batch, tex)) = metal.filter(|_| !dskip("metal")) {
+			if let Some((batch, draws, tex)) = metal.filter(|_| !dskip("metal")) { // [PC] #29: `draws` = the first round's metal draws
 				pass.set_vertex_buffer(0, batch.vbuf.slice(..));
 				pass.set_index_buffer(batch.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-				for d in &batch.draws {
+				for d in draws {
 					pass.set_pipeline(if d.cull != 0 { &self.pipeline_cull[d.cull as usize - 1] } else { &self.pipeline });
 					pass.set_bind_group(1, &tex[d.texture], &[]);
 					pass.draw_indexed(d.start..d.start + d.count, 0, 0..1);

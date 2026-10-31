@@ -193,7 +193,7 @@ pub(super) fn full(view: Option<ClipView>, faces: &[PropFace], verts: &[Vertex])
 }
 
 /// Queues the polygons and updates the masked faces in `marker.ibuf` to `taken`.
-pub(super) fn finish(queue: &wgpu::Queue, scene: &mut Scene, taken: Vec<u32>, polys: Vec<ClipPoly>) {
+pub(super) fn finish(queue: &GatedQueue, scene: &mut Scene, taken: Vec<u32>, polys: Vec<ClipPoly>) {
 	scene.clip_queue.extend(polys);
 	if taken != scene.marker_masked {
 		let _s = super::profile::span("cm_mask");
@@ -240,7 +240,7 @@ fn diff_writes(faces: &[PropFace], old: &[u32], new: &[u32]) -> Vec<(u32, Vec<u3
 	out
 }
 
-fn apply_mask(queue: &wgpu::Queue, ibuf: &wgpu::Buffer, faces: &[PropFace], old: &[u32], new: &[u32]) {
+fn apply_mask(queue: &GatedQueue, ibuf: &wgpu::Buffer, faces: &[PropFace], old: &[u32], new: &[u32]) {
 	for (slot, words) in diff_writes(faces, old, new) {
 		queue.write_buffer(ibuf, slot as u64 * 4, bytemuck::cast_slice(&words));
 	}
@@ -389,7 +389,7 @@ mod tests {
 			let (feet, yaw) = ([rng.range(-5.0, 5.0), rng.range(-5.0, 5.0), rng.range(0.0, 3.0)], rng.range(0.0, 6.28));
 			let tilt = case % 3 == 0;
 			let rows = tilt.then(|| crate::particles::euler_m([rng.range(-0.5, 0.5), rng.range(-0.5, 0.5), yaw]));
-			let inp = MarkerIn { feet, c: yaw.cos(), sn: yaw.sin(), rows, tint: Some(([0.1, 0.2, 0.3], 100)), hero_len: 900, clank: None, ghosts: Default::default(), bomb: None, shift: None, id: 2.0, light: [1.0; 4] };
+			let inp = MarkerIn { feet, c: yaw.cos(), sn: yaw.sin(), rows, tint: Some(([0.1, 0.2, 0.3], 100)), hero_len: 900, clank: None, ghosts: Default::default(), bomb: None, shift: None, id: 2.0, light: [1.0; 4], own: Default::default() };
 			// The camera: from touching the hero to far away, looking at a random point near it (or anywhere).
 			let dist = [0.05, 0.3, 1.0, 2.0, 5.0, 30.0][case as usize % 6] * rng.range(0.5, 1.5);
 			let eye = { let d = rng.dir(); [feet[0] + d[0] * dist, feet[1] + d[1] * dist, feet[2] + 1.0 + d[2] * dist] };

@@ -70,7 +70,7 @@ fn run(c: &mut Cpu, lv: &Lv, a: [f32; 3], b: [f32; 3], mask: u32, keep: bool) ->
 }
 
 /// Up to `RANGES` differing byte ranges (start, length; bytes closer than 8 are one range) and the total of differing bytes.
-fn diff(before: &[u8], after: &[u8]) -> (u32, Vec<(usize, usize)>) {
+pub(super) fn diff(before: &[u8], after: &[u8]) -> (u32, Vec<(usize, usize)>) {
 	const RANGES: usize = 6;
 	let (mut total, mut ranges) = (0u32, Vec::<(usize, usize)>::new());
 	for (i, (x, y)) in before.chunks(0x1000).zip(after.chunks(0x1000)).enumerate() {

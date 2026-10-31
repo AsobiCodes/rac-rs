@@ -11,9 +11,19 @@
 /// a camera bobbing at the surface).
 const BELOW: f32 = 0.1;
 
+/// [PC] Dev aid: RAC_UNDER_LOG=1 also prints the renderer's decision every frame (with the retail words of `retail/fx_queue.rs`).
+pub(super) fn log_on() -> bool {
+	static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+	*ON.get_or_init(|| std::env::var_os("RAC_UNDER_LOG").is_some())
+}
+
 /// The flag the underwater look runs on: retail's camera flag, or the camera below the surface of the water the hero swims in.
 pub(super) fn camera_under(retail_flag: bool, hero_surf: Option<f32>, cam_z: f32) -> bool {
-	retail_flag || hero_surf.is_some_and(|s| s.is_finite() && cam_z < s - BELOW)
+	let on = retail_flag || hero_surf.is_some_and(|s| s.is_finite() && cam_z < s - BELOW);
+	if log_on() {
+		eprintln!("UNDER_DRAW retail_flag {retail_flag} surf {hero_surf:?} cam_z {cam_z} -> under_flag {on}");
+	}
+	on
 }
 
 #[cfg(test)]

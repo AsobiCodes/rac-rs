@@ -159,7 +159,7 @@ impl HeroGpu {
 	/// The check frame. New scheme: only asks (the frame encoder's `record_checks` runs the build into `chk`, copies it into the
 	/// staging buffer and registers the map). Old scheme: runs the pending build in its own submit, copies the vertex buffer and
 	/// maps. Neither waits. The caller then builds the CPU vertices (which this frame draws) and hands them to `set_check_cpu`.
-	pub(in crate::viewer) fn start_check(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, vbuf: &wgpu::Buffer, kind: usize) {
+	pub(in crate::viewer) fn start_check(&mut self, device: &wgpu::Device, queue: &GatedQueue, vbuf: &wgpu::Buffer, kind: usize) {
 		let Some(i) = self.checks[..self.slots()].iter().position(|s| !s.chk.busy()) else { return };
 		let size = (self.n * std::mem::size_of::<Vertex>()) as u64;
 		if self.checks[i].stage.as_ref().is_none_or(|s| s.size() != size) {
@@ -172,7 +172,7 @@ impl HeroGpu {
 			let slot = &mut self.checks[i];
 			let Some(stage) = slot.stage.as_ref() else { return };
 			enc.copy_buffer_to_buffer(vbuf, 0, stage, 0, size);
-			queue.submit(Some(enc.finish()));
+			queue.sync().submit(Some(enc.finish()));
 			let state = slot.chk.begin(kind);
 			stage.slice(..).map_async(wgpu::MapMode::Read, move |r| AsyncCheck::deliver(&state, r.is_ok()));
 			return;

@@ -47,12 +47,14 @@ impl Gpu {
 	/// env matrix from the sphere centre and the camera, then the skinned metal vertices (the pose tail after the LOD vertices,
 	/// else the stored ones). Without a view (menus) nothing is built.
 	pub(super) fn set_metal_props(&mut self, props: &[Prop], jobs: &[(usize, [f32; 16], f32, f32)], posed: &HashMap<PoseKey, Posed>, fx_posed: &HashMap<usize, std::sync::Arc<Posed>>, centres: &[[f32; 3]], radii: &[Option<f32>]) {
-		let (mut verts, mut runs) = (Vec::new(), BTreeMap::new());
+		// [PC] #29 (tail_order.rs): the runs of each group (the first round, a late moby of the main walk, a late deferred one).
+		let (mut verts, mut runs): (Vec<Vertex>, [BTreeMap<(u8, usize), Vec<u32>>; 3]) = (Vec::new(), Default::default());
 		if let Some((view, ranges)) = self.scene.as_ref().and_then(|s| Some((s.clip_view?, &s.props_ranges))) {
-			let mut todo = Vec::new();
+			let (mut todo, mut groups) = (Vec::new(), Vec::new());
 			let lights = self.light_rows();
 			for &(pi, m, scale, id) in jobs {
 				let p = &props[pi];
+				// [PC] #29 (moby_add.rs): no class with the additive flag 0x200 has metal packets (classes 880, 404, 405, 674, 677, 680, 934, 1009, 1017: 0 in every level, `mobies::moby_classes`) [C], so a flagged slot never has metal faces to route; a class that had them would draw them with the normal blend.
 				let (Some(packets), Some(&c), Some(r)) = (self.metal.classes.get(&p.class_id), centres.get(pi), ranges.get(pi)) else { continue };
 				// The MOBY-FADE z of `set_props` and the sphere radius (0 without one).
 				let d: [f32; 3] = std::array::from_fn(|k| c[k] - view.e[k] * 1024.0);
@@ -62,6 +64,7 @@ impl Gpu {
 				let tail = fx_posed.get(&pi).map(|a| &**a).or_else(|| posed.get(&pose_key(p))).filter(|(ps, _)| ps.len() == r.len() + total).map(|(ps, ns)| (&ps[r.len()..], &ns[r.len()..]));
 				let e = mobies::metal_env(view.e, metal_view_rows(&view), c, axes(&m));
 				todo.push((packets.as_slice(), tail, self.metal_rows(&lights, p.light, id), e, m, scale, alpha));
+				groups.push(self.scene.as_ref().map_or(0, |s| s.tail.group(pi)) as usize);
 			}
 			// [PC] perf round 3: one reused vertex buffer; each prop fills its own slice (`fill_metal`) on the frame worker pool.
 			let counts: Vec<usize> = todo.iter().map(|t| metal_count(t.0)).collect();
@@ -84,13 +87,16 @@ impl Gpu {
 					r
 				})
 				.collect();
-			for r in built {
+			for (r, g) in built.into_iter().zip(groups) {
 				for (key, idx) in r {
-					runs.entry(key).or_insert_with(Vec::new).extend(idx);
+					runs[g.min(2)].entry(key).or_insert_with(Vec::new).extend(idx);
 				}
 			}
 		}
-		upload_metal(&self.device, &self.queue, &mut self.metal.props, &mut self.metal.cap, &verts, runs);
+		let ends = upload_metal_groups(&self.device, &self.queue, &mut self.metal.props, &mut self.metal.cap, &verts, runs);
+		if let Some(scene) = &mut self.scene {
+			scene.tail.metal_ends = ends;
+		}
 		self.metal.scratch = verts;
 	}
 }
@@ -165,20 +171,30 @@ fn fill_metal(dst: &mut [Vertex], first: u32, runs: &mut BTreeMap<(u8, usize), V
 }
 
 /// Uploads a metal batch (growing its buffers to the next power of two) with one draw per (cull, texture) run.
-pub(super) fn upload_metal(device: &wgpu::Device, queue: &wgpu::Queue, slot: &mut Option<Batch>, cap: &mut (usize, usize), verts: &[Vertex], runs: BTreeMap<(u8, usize), Vec<u32>>) {
-	let (mut indices, mut draws) = (Vec::new(), Vec::new());
-	for ((cull, texture), idx) in runs {
-		draws.push(Draw { inst: 0, cull, texture, start: indices.len() as u32, count: idx.len() as u32 });
-		indices.extend(idx);
+pub(super) fn upload_metal(device: &wgpu::Device, queue: &GatedQueue, slot: &mut Option<Batch>, cap: &mut (usize, usize), verts: &[Vertex], runs: BTreeMap<(u8, usize), Vec<u32>>) {
+	upload_metal_groups(device, queue, slot, cap, verts, [runs, BTreeMap::new(), BTreeMap::new()]);
+}
+
+/// `upload_metal` for the three draw groups of tail_order.rs (first round, late main walk, late deferred): the draws follow in that
+/// order; gives where each group's draws end.
+pub(super) fn upload_metal_groups(device: &wgpu::Device, queue: &GatedQueue, slot: &mut Option<Batch>, cap: &mut (usize, usize), verts: &[Vertex], groups: [BTreeMap<(u8, usize), Vec<u32>>; 3]) -> [usize; 3] {
+	let (mut indices, mut draws, mut ends) = (Vec::new(), Vec::new(), [0usize; 3]);
+	for (g, runs) in groups.into_iter().enumerate() {
+		for ((cull, texture), idx) in runs {
+			draws.push(Draw { inst: 0, cull, texture, start: indices.len() as u32, count: idx.len() as u32 });
+			indices.extend(idx);
+		}
+		ends[g] = draws.len();
 	}
 	if slot.is_none() || verts.len() > cap.0 || indices.len() > cap.1 {
 		*cap = (verts.len().next_power_of_two().max(cap.0).max(64), indices.len().next_power_of_two().max(cap.1).max(192));
 		*slot = Some(Batch { vbuf: buffer(device, "metal vertices", &vec![0u8; cap.0 * std::mem::size_of::<Vertex>()], wgpu::BufferUsages::VERTEX), ibuf: buffer(device, "metal indices", &vec![0u8; cap.1 * 4], wgpu::BufferUsages::INDEX), draws: Vec::new() });
 	}
-	let Some(batch) = slot else { return };
+	let Some(batch) = slot else { return ends };
 	if !verts.is_empty() {
 		queue.write_buffer(&batch.vbuf, 0, bytemuck::cast_slice(verts));
 		queue.write_buffer(&batch.ibuf, 0, bytemuck::cast_slice(&indices));
 	}
 	batch.draws = draws;
+	ends
 }

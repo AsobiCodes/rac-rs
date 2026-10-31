@@ -114,6 +114,8 @@ unsafe extern "C" fn write_cb(user: *mut c_void, addr: u32, data: *const u8, len
 	}
 	// SAFETY: bounds checked above; `data` has `len` bytes.
 	unsafe { std::ptr::copy_nonoverlapping(data, c.mem.ram.as_mut_ptr().add(a), n) };
+	// Code of the compiled front end (never refused above): the table drops its compiled copy, the interpreter runs the patch.
+	c.rec_front_written(addr, len);
 	1
 }
 

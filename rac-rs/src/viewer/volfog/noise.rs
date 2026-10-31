@@ -85,7 +85,7 @@ pub fn generate(size: u32) -> Vec<u8> {
 }
 
 /// The volume as a 3D texture and its repeating trilinear sampler.
-pub fn upload(device: &wgpu::Device, queue: &wgpu::Queue) -> (wgpu::TextureView, wgpu::Sampler) {
+pub fn upload(device: &wgpu::Device, queue: &crate::viewer::presenter::GatedQueue) -> (wgpu::TextureView, wgpu::Sampler) {
 	let data = generate(SIZE);
 	let tex = device.create_texture(&wgpu::TextureDescriptor {
 		label: Some("volume noise"),

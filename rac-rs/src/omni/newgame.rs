@@ -1,8 +1,8 @@
 //! The `new_game` event (ABI 1.2).
 //!
 //! - New Game from the title: the title's list item does NOT call the overlay NewGame function. It creates the save file, runs the boot
-//!   function FUN_00208e40 (reload the default state) and FUN_0022dc98 (leave the title loop). That boot code is only interpreted (no
-//!   recompiled function, so no hand can reach it), so the event comes from `FrontWatcher`: the front end (title and its menus, `events::FRONT`)
+//!   function FUN_00208e40 (reload the default state) and FUN_0022dc98 (leave the title loop). That boot code belongs to the compiled front
+//!   end (crates l19 / l20), where registered hands never bind (oracle `Table::build`), so no hand can reach it, so the event comes from `FrontWatcher`: the front end (title and its menus, `events::FRONT`)
 //!   was left while the level word is 0 and no `save_loaded` event came since the front end began.
 //! - New Game+ (challenge mode, Veldin 0x2842e8, 764 bytes, keeps the selected state, `++0x15ee20`): a host-internal relocatable hand that only
 //!   WATCHES, found by its code in every level and on the USA disc like a mod hook point (`hooks.rs`; spec from tools/make_spec.py

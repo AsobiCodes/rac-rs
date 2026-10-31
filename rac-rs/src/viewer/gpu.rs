@@ -2,6 +2,7 @@
 //! The `Gpu` struct lives in `viewer.rs`; this module holds its `impl` blocks, one file per job:
 //! - `setup`:        Gpu::new (instance, adapter, device, surface, every pipeline and buffer), resize, surface configuration and present mode.
 //! - `renderer`:     Which graphics API the window opens (Vulkan / DirectX 12 from the options file), DXC for DX12, DX12 frame latency.
+//! - `adapter_report`: The run log's list of adapters (and whether they can present) when the window found none.
 //! - `scene_ctx`:    SceneCtx (the device handles of the scene build) and its texture upload and batching, with the Gpu wrappers around it.
 //! - `scene_build`:  Level scene build (terrain, ties, shrubs, sky) on the build context, and its parallel vertex helpers.
 //! - `props_layout`: Prop slot layout: class faces, draw layout, slot allocation, and growing the props batch (append / regrow).
@@ -29,6 +30,7 @@ use rayon::prelude::*;
 
 mod setup;
 pub(in crate::viewer) mod renderer;
+mod adapter_report;
 mod scene_ctx;
 pub(in crate::viewer) mod repl_upload;
 pub(in crate::viewer) mod split_orig;
@@ -36,7 +38,9 @@ mod scene_build;
 mod props_layout;
 mod props_append;
 mod props_live;
+pub(in crate::viewer) mod moby_add;
 mod props_set;
+pub(in crate::viewer) mod tail_order;
 pub(in crate::viewer) mod pose_reuse;
 mod prop_clip;
 mod marker;

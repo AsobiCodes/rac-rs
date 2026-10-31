@@ -333,7 +333,7 @@ impl SwapWords {
 		let part_far = m.rd32(va(0x1600fc + small)) as i32 as f32 / 4096.0;
 		if under_log() {
 			let flag = m.rd32(va(0x167414u32.wrapping_add_signed(*LEVEL_SHIFT.get(level as usize)?)));
-			eprintln!("UNDER_LOG level {level} flag {flag:#x} part_far {part_far} fog_far {} grp {:#x} f640 {}", m.rdf(b + 4) / 1024.0, m.rd32(0x1413dc), m.rdf(0x13f640));
+			eprintln!("UNDER_LOG level {level} flag {flag:#x} part_far {part_far} fog_far {} grp {:#x} f640 {} state {:#x} hero_z {}", m.rdf(b + 4) / 1024.0, m.rd32(0x1413dc), m.rdf(0x13f640), m.rd32(0x1413d4), m.rdf(0x13f3d8));
 		}
 		Some(SwapWords {
 			fog_rgb: [m.rd32(b + 0x18) as u8, m.rd32(b + 0x1c) as u8, m.rd32(b + 0x20) as u8],

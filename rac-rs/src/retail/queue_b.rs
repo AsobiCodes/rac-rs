@@ -266,6 +266,36 @@ fn suck_tube(m: &Machine, level: u32, f: u32, out: &mut Vec<WorldQuad>) {
 	}
 }
 
+/// The data the Taunter ring callback `f` reads, read from its own code (the same body on all 19 levels of both discs; the
+/// offsets were checked on the code of every level of the PAL and USA discs, and `taunt_slots_are_found_on_the_levels_with_savestates`
+/// repeats it on the 8 PAL levels that have a savestate).
+struct TauntSlots {
+	rings: u32,
+	origin: u32,
+	inv: u32,
+	corners: u32,
+	start: u32,
+	end: u32,
+	amax: u32,
+	rgb: u32,
+}
+
+/// [C] +0xc8 lui/addiu: ring table; +0x100: muzzle origin; +0x16c lui / +0x170 lwc1: 1 / ring life (+0x168 is the `lh` timer
+/// load, not a `lui`: this locator read +0x168 up to v0.4.2, so `taunter` found no inv_life and drew nothing on any level);
+/// +0x1cc: corner table; gp loads at +0x188 / +0x190 / +0x194 / +0x1b8: start size, end size, max alpha, colour.
+fn taunt_slots(m: &Machine, level: u32, f: u32) -> Option<TauntSlots> {
+	Some(TauntSlots {
+		rings: hi_lo(m, f, 0xc8)?,
+		origin: hi_lo(m, f, 0x100)?,
+		inv: hi_lo(m, f, 0x16c)?,
+		corners: hi_lo(m, f, 0x1cc)?,
+		start: gp_rel(m, level, f, 0x188)?,
+		end: gp_rel(m, level, f, 0x190)?,
+		amax: gp_rel(m, level, f, 0x194)?,
+		rgb: gp_rel(m, level, f, 0x1b8)?,
+	})
+}
+
 /// Taunter rings (FUN_002a9910, OV:132201-132357) [C]: texture 8, ALPHA 0x48 additive. dir = -set_len(held +0xd0);
 /// up = -gravity 0x13f5e0; r1 = set_len(up x dir, 1), r2 = dir x r1. For each of ten rings (+0 distance f32, +4 timer
 /// i16, +8 active i16; stride 0xc) with active != 0: centre = origin + dir * distance, t = min(timer * inv_life, 1),
@@ -273,18 +303,7 @@ fn suck_tube(m: &Machine, level: u32, f: u32, out: &mut Vec<WorldQuad>) {
 /// gp-0x57f0 rgb; corners (0x1cf900, x 0) scaled by size, rows dir / r1 / r2 + centre (vec4_mul_mat4, w 1).
 /// UV (0,0) (0,1) (1,0) (1,1).
 fn taunter(m: &Machine, level: u32, f: u32, held: u32, out: &mut Vec<WorldQuad>) {
-	let (Some(rings), Some(origin), Some(inv), Some(corners), Some(start), Some(end), Some(amax), Some(rgb)) = (
-		hi_lo(m, f, 0xc8),
-		hi_lo(m, f, 0x100),
-		hi_lo(m, f, 0x168),
-		hi_lo(m, f, 0x1cc),
-		gp_rel(m, level, f, 0x188),
-		gp_rel(m, level, f, 0x190),
-		gp_rel(m, level, f, 0x194),
-		gp_rel(m, level, f, 0x1b8),
-	) else {
-		return;
-	};
+	let Some(TauntSlots { rings, origin, inv, corners, start, end, amax, rgb }) = taunt_slots(m, level, f) else { return };
 	if held == 0 {
 		return;
 	}
@@ -1322,6 +1341,32 @@ mod tests {
 		assert_eq!(pool_walk(&v, &[5, 9], &r, &l, &[4], [0.0; 3], [1.0, 0.0, 0.0]), vec![Sprite(1), Ribbon(1), Line(0), Ribbon(0), Sprite(0)]);
 	}
 
+	/// The Taunter ring callback's data locators resolve on the 8 levels that have a PAL savestate (levels 0, 1, 4, 6, 9, 14, 17, 18;
+	/// the other 11 are covered by the disc check named above): a miss would drop the rings silently (issue #43: the `inv_life`
+	/// locator pointed one word off on all 19 levels). Without the savestates folder (a checkout without game data) nothing can be
+	/// checked and the test passes with a note; with the folder every listed state must exist and be checked.
+	#[test]
+	fn taunt_slots_are_found_on_the_levels_with_savestates() {
+		let base = concat!(env!("CARGO_MANIFEST_DIR"), "/../oracle/states/");
+		let have_states = std::path::Path::new(base).is_dir();
+		let mut seen = 0;
+		for (lvl, dirs) in [(0, ["fg1/0_0001"]), (1, ["fg1/1_0016"]), (4, ["fg1/4_0159"]), (6, ["fg1/6_0168"]), (9, ["fg1/9_0362"]), (14, ["fg1/14_0692"]), (17, ["fg2/17_0179"]), (18, ["fg2/18_0218"])] {
+			let dir = format!("{base}{}", dirs[0]);
+			if !std::path::Path::new(&dir).join("eeMemory.bin").exists() {
+				continue;
+			}
+			let m = Machine::load(&dir);
+			let f = TAUNTER[lvl];
+			let s = taunt_slots(&m, lvl as u32, f).unwrap_or_else(|| panic!("level {lvl}: Taunter locators failed at {f:x}"));
+			// The slots lie in the level's data (the life factor itself is written at run time, so it may still be 0 in a state before the Taunter ran).
+			assert!(s.inv > 0x100000 && s.inv < 0x200000 && s.rings > 0x100000, "level {lvl}: slots out of the data range");
+			assert!(claims(&m, lvl as u32, f), "level {lvl}: the port claims the callback");
+			seen += 1;
+		}
+		eprintln!("taunt locators checked on {seen} levels");
+		assert!(seen > 0 || !have_states, "oracle/states exists but none of the 8 listed savestates was found: the test checked nothing");
+	}
+
 	#[test]
 	fn set_len_keeps_zero() {
 		assert_eq!(set_len([0.0; 3], -1.0), [0.0; 3]);
@@ -1336,7 +1381,8 @@ pub fn claims(m: &Machine, level: u32, f: u32) -> bool {
 		return false;
 	}
 	is_swing_rope(m, f)
-		|| f == (*crate::retail::disc::pick(&TAUNTER, &TAUNTER_USA))[i]
+		// A Taunter callback whose data cannot be read from its code is left to the generic effects layer (it draws its packets).
+		|| (f == (*crate::retail::disc::pick(&TAUNTER, &TAUNTER_USA))[i] && taunt_slots(m, level, f).is_some())
 		|| f == (*crate::retail::disc::pick(&SUCK_TUBE, &SUCK_TUBE_USA))[i]
 		|| is_barrier(m, level, f)
 		|| is_barrier2(m, level, f)

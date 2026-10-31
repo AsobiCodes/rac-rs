@@ -26,7 +26,7 @@ use std::sync::{atomic::{AtomicBool, Ordering}, Mutex};
 use crate::{fmath::Fm, retail::disc::va};
 pub mod classic;
 pub mod shoulder;
-mod stamps;
+mod stamps; mod water_path;
 pub mod sticks;
 use stamps::{seg_clean, seg_mask};
 
@@ -263,12 +263,11 @@ impl Lv {
 	fn cur(&self) -> u32 {
 		self.g(0x167200)
 	}
-	fn blend(&self) -> u32 {
-		self.g(0x1672f0)
-	}
-	fn gate(&self) -> u32 {
-		self.g(0x16c46c)
-	}
+	fn blend(&self) -> u32 { self.g(0x1672f0) }
+	fn gate(&self) -> u32 { self.g(0x16c46c) }
+	/// The follow camera's eye and retail's water flag (water_path.rs).
+	fn cam_pos(&self) -> u32 { self.g(0x1671c0) }
+	fn water_flag(&self) -> u32 { self.g(0x167414) }
 }
 
 /// The row of the running level (every one of the 19 overlays), from the level byte or, failing that, from the pc.
@@ -1308,13 +1307,13 @@ fn follow(c: &mut Cpu, lv: &'static Lv) -> bool {
 	let _g = Guard;
 	let rec = c.g(4) as u32 & 0x01ff_ffff;
 	c.call(lv.follow);
-	let regs = Regs::save(c);
+	let (regs, prev, e0) = (Regs::save(c), rv(c, lv.g(0x1671c0)), rv(c, rec + 0x30));
 	if let Ok(mut st) = ST.lock() {
 		if rec == c.mem.rd32(lv.cur()) & 0x01ff_ffff {
 			step(c, lv, rec, &mut st);
 		}
 	}
-	regs.restore(c);
+	water_path::walk(c, lv, rec, prev, e0, regs);
 	true
 }
 

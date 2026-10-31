@@ -140,7 +140,9 @@ impl Retail {
 		// Tests only: RAC_WIDE_OFF=1 draws retail's 4:3 verdict as it was (the before pictures of scratch_widecull).
 		let wide = !cfg!(test) || std::env::var_os("RAC_WIDE_OFF").is_none();
 		let lag = self.view_lag();
-		for mb in self.snap.mobys.iter().filter(|mb| Some(mb.addr) != held_addr) {
+		// Retail's draw position: its main walk in table order, then the deferred list (`RetailShadows::deferred`) in the same order.
+		let deferred: &[u32] = self.snap.shadows.as_ref().map_or(&[], |s| &s.deferred);
+		for (rank, mb) in self.snap.mobys.iter().enumerate().filter(|(_, mb)| Some(mb.addr) != held_addr) {
 			let held = self.held.get(&mb.addr).copied().filter(|&i| g.props[i].class_id == mb.class);
 			if held.is_none() {
 				if let Some(i) = self.held.remove(&mb.addr) {
@@ -154,14 +156,17 @@ impl Retail {
 				p.pos = mb.pos;
 				p.rot = mb.rot;
 				p.mirror = mb.mirror;
+				p.order = rank as u32 | if deferred.contains(&mb.addr) { crate::game::DEFERRED_ORDER } else { 0 };
 				p.scale = mb.scale;
 				// Retail's verdict stays as it is in RAM (gameplay reads it); rac-rs's wide window also shows what retail culled only
 			// at its 4:3 side plane.
 			p.shown = mb.shown || (wide && mb.side_only.is_some_and(|s| s.inside_lag(self.aspect, lag)));
+			p.retail_drawn = mb.shown;
 			// [PC] Past its draw distance: posed (shadow and picture) only with Culling Off.
 			p.cast = !p.shown && match mb.view_culled { Culled::View => true, Culled::Far => !pcext::graphics().culling, Culled::No => false };
 				p.light = Some((mb.rgb, mb.light));
 				p.set_retail_draw(mb.alpha, mb.ovr, mb.draw);
+				p.set_retail_additive(mb.additive);
 				if dbg_class() == Some(mb.class as u32) {
 					eprintln!("DBGCLASS f{} {} {:#x} slot {i} rgb {:?} light {:#x} alpha {:#x} draw {} ovr {:?} shown {} scale {}", self.fields, mb.class, mb.addr, mb.rgb, mb.light, mb.alpha, mb.draw, mb.ovr, mb.shown, mb.scale);
 				}
@@ -199,6 +204,7 @@ impl Retail {
 
 pub(super) fn release(g: &mut Game, free: &mut HashMap<u32, Vec<usize>>, i: usize) {
 	g.props[i].shown = false;
+	g.props[i].retail_drawn = false;
 	g.props[i].cast = false;
 	free.entry(g.props[i].class_id).or_default().push(i);
 }

@@ -2,7 +2,7 @@
 
 use super::*;
 use super::marker_clip;
-use super::marker_ctx::{MarkerCtx, MarkerIn, Pose};
+use super::marker_ctx::{MarkerCtx, MarkerIn, Own, Pose};
 
 /// One `set_marker` call that ran the compute build (gpuhero.rs): what the rest of the call needs to know.
 struct GpuFrame {
@@ -34,7 +34,7 @@ impl GpuFrame {
 /// [PC] perf (lane R2, gpuhero.rs): a compute pass builds the vertices from the model and the two step poses (RAC_HERO_GPU=1).
 /// Since lane A (v0.4.2) the build also serves the frames where the hero is not clearly inside / outside the clip guard band: the
 /// clipper then looks only at the faces that may cross it (`marker_clip.rs`). RAC_HERO_GPU_CHECK=1 runs both and compares the bytes.
-fn gpu_build(queue: &wgpu::Queue, device: &wgpu::Device, scene: &mut Scene, inp: &MarkerIn, cur: &Posed, blend: Option<(&Posed, f32)>, gens: (u64, u64)) -> Option<GpuFrame> {
+fn gpu_build(queue: &GatedQueue, device: &wgpu::Device, scene: &mut Scene, inp: &MarkerIn, cur: &Posed, blend: Option<(&Posed, f32)>, gens: (u64, u64)) -> Option<GpuFrame> {
 	if scene.marker_gpu.is_none() || !super::gpuhero::gpu_hero_on() {
 		return None;
 	}
@@ -49,7 +49,7 @@ fn gpu_build(queue: &wgpu::Queue, device: &wgpu::Device, scene: &mut Scene, inp:
 	let skip = scene.clip_view.as_ref().is_none_or(|v| super::gpuskin::sphere_skips(v, inp.feet, hg.radius));
 	// The first frames of each kind run the GPU build and the CPU build and compare them (the CPU result is drawn).
 	let extras = inp.ghosts.iter().any(Option::is_some) || inp.bomb.is_some() || inp.shift.is_some() || inp.clank.is_some();
-	let kind = super::gpuhero::kind(can_blend && t != 1.0, inp.rows.is_some(), extras);
+	let kind = super::gpuhero::kind(can_blend && t != 1.0, inp.rows.is_some(), extras, inp.own.iter().any(Option::is_some));
 	let mut hero_check = super::gpuhero::gpu_hero_check();
 	let mut self_kind = None;
 	// Auto self-check frame: the GPU build is read back without a wait (gpuhero/check.rs); one check in flight at a time. A kind
@@ -88,6 +88,7 @@ impl Gpu {
 		self.moby_dyn.clear();
 		// The afterimage ranges are for this call only, whether or not the marker shows (BRIDGE-28).
 		let ghosts = std::mem::take(&mut self.marker_ghosts);
+		let loose = std::mem::take(&mut self.marker_loose);
 		let bomb = self.marker_bomb.take();
 		let tilt = std::mem::take(&mut self.marker_tilt);
 		let clank_light = self.marker_light.take();
@@ -112,9 +113,11 @@ impl Gpu {
 		let (light, tint) = Self::hero_light_tint(&self.lighting, feet, self.hero_placed, &mut self.hero_env);
 		self.hero_tint_out = Some(tint);
 		let id = dyn_id(&self.table, &mut self.moby_dyn, feet);
+		// A loose wrench is lit like the moby it is: its own light and the third light where it stands (props_set.rs does the same).
+		let own = loose.map(|r| r.map(|r| Own { a: r.a, b: r.b, light: Self::moby_light(r.light), id: dyn_id(&self.table, &mut self.moby_dyn, r.pos) }));
 		drop(_l);
 		let shift = self.marker_v.take();
-		let inp = MarkerIn { feet, c, sn, rows, tint: scene.marker_tint, hero_len: scene.marker_hero_len, clank: clank_light, ghosts, bomb, shift, id, light };
+		let inp = MarkerIn { feet, c, sn, rows, tint: scene.marker_tint, hero_len: scene.marker_hero_len, clank: clank_light, ghosts, bomb, shift, id, light, own };
 		let alpha = ghosts.iter().any(Option::is_some);
 		let n_model = scene.marker_model.len();
 		let blend = blend.filter(|(b, _)| skin0.is_some() && b.0.len() == n_model && b.1.len() == n_model);
@@ -155,6 +158,7 @@ impl Gpu {
 			ghosts,
 			bomb: bomb.map(|(a, b, t)| (a, b, b3(t))),
 			shift: shift.map(|(a, b, d)| (a, b, d.to_bits())),
+			own: own.map(|o| o.map(|o| (o.a, o.b, o.light.map(f32::to_bits), o.id.to_bits()))),
 		};
 		let skin_same = match skin {
 			Some((ps, ns)) => {
@@ -182,7 +186,7 @@ impl Gpu {
 			}
 		}
 		let kept = (same_inputs && check).then(|| scene.marker_verts.clone());
-		let why = if check { scene.marker_key.as_ref().map_or(0x1fff, |k| k.diff(&key)) | (!skin_same as u32) << 12 } else { 0 };
+		let why = if check { scene.marker_key.as_ref().map_or(0x3fff, |k| k.diff(&key)) | (!skin_same as u32) << 13 } else { 0 };
 		scene.marker_key = Some(key);
 		let mut verts = std::mem::take(&mut scene.marker_verts);
 		let _cpu = super::profile::span("sm_cpu");
@@ -212,7 +216,7 @@ impl Gpu {
 /// NOV-5.9d path 2: the hero marker (body and held gadgets, world-space `verts`) takes the same per-face clip; masked faces
 /// are zeroed in `marker.ibuf` with the compare-and-write rule of `clip_props`. `sel` (check modes) = the inputs of the selective
 /// clipper (its poses are the ones the GPU draws, `HeroGpu::kept_pose`), whose result must equal this full one.
-fn clip_marker(queue: &wgpu::Queue, scene: &mut Scene, verts: &[Vertex], sel: Option<(&MarkerIn, f32)>) {
+fn clip_marker(queue: &GatedQueue, scene: &mut Scene, verts: &[Vertex], sel: Option<(&MarkerIn, f32)>) {
 	let _c = super::profile::span("sm_clip");
 	let (taken, polys) = marker_clip::full(scene.clip_view, &scene.marker_faces, verts);
 	if let Some((inp, t)) = sel {

@@ -1,7 +1,9 @@
 //! Level-pass steps that record the world: sky shells and sprites, the opaque world (terrain, ties, shrubs, props, mobies,
 //! shadow volumes, ABE texels), and the vendor shop models.
 
+use super::pass_tail::{Blend, Mobies, Round};
 use super::*;
+use crate::viewer::gpu::moby_add::AddPart;
 
 /// [probe] Lap names of the batch loop in `pass_world` (RAC_GPU_PASSES, passtime.rs `lap`), in loop order.
 const LAPS: [&str; 9] = ["world", "tfrags", "ties", "marker", "props", "clipped", "debris", "warp", "tfrags lt"];
@@ -67,6 +69,11 @@ impl Gpu {
 			let marker_late = marker.filter(|_| volumes.is_some() && self.shadow.marker_late);
 			// [PC] speed (props_live.rs): the props draws without their dead slots (collapsed to a point by `vs_props`: no pixel).
 			let (props_live, props_main, props_late) = scene.props_level_draws(props.is_some(), volumes.is_some());
+			// BRIDGE-45 (NOV-35b): the props' metal faces (chrome / glass, clamp sampler) after the LOD batches. [PC] #29 (tail_order.rs):
+			// `group(g)` = the CPU-clipped and metal draws of the moby group g (0 first round, 1 late main walk, 2 late deferred list).
+			let metal = self.metal.props.as_ref().zip(self.metal.tex.as_ref()).filter(|_| scene.props_shown && !warp);
+			let group = |g: usize| (scene.clip_group(g), metal.map_or(&[][..], |(b, _)| crate::viewer::gpu::tail_order::TailOrder::group_slice(&scene.tail.metal_ends, g, &b.draws)));
+			let (clip_first, metal_first) = group(0);
 			// Retail frame order: the tfrag pass, then the tie pass (FUN_0021af28: tfrag_frame, then TieProc), so a blended tie texel
 			// mixes with the terrain behind it. The texels that write no Z (tfrag below alpha 0x60, tie below 0x40) come last.
 			// `tie`: Some(pass) for the two tie passes (`tie_pipelines`).
@@ -112,7 +119,7 @@ impl Gpu {
 				pass.set_pipeline(pipeline);
 				pass.set_vertex_buffer(0, batch.vbuf.slice(..));
 				pass.set_index_buffer(batch.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-				let draws: &[Draw] = if volumes.is_some() && std::ptr::eq(batch, &scene.props) { &props_main } else if std::ptr::eq(batch, &scene.props) { &props_live } else { &batch.draws };
+				let draws: &[Draw] = if volumes.is_some() && std::ptr::eq(batch, &scene.props) { &props_main } else if std::ptr::eq(batch, &scene.props) { &props_live } else if std::ptr::eq(batch, &scene.clip_batch) { clip_first } else { &batch.draws };
 				// The moby batches (marker, props, clipped props, debris) carry the material's TEX1 K word as the first instance
 				// (`moby_word`); the world and tfrag batches keep theirs (the tfrag pass reads its own word from it).
 				let moby_pass = matches!(bi, 3 | 4 | 5 | 6);
@@ -128,10 +135,22 @@ impl Gpu {
 					}
 				}
 			}
-			// BRIDGE-45 (NOV-35b): the props' metal faces (chrome / glass, clamp sampler) after the LOD batches.
-			let metal = self.metal.props.as_ref().zip(self.metal.tex.as_ref()).filter(|_| scene.props_shown && !warp);
-			self.pass_pools(&mut pass, warp, metal, water_on, wrec);
+			let m = Mobies { scene, skinned, inst: &moby_inst, marker, props, clipped, debris, warp: warp_batch, metal };
+			self.pass_pools(&mut pass, warp, metal.map(|(b, tex)| (b, metal_first, tex)), water_on, wrec);
 			self.pass_shrubs(&mut pass, scene, warp, array, multi);
+			// [PC] #29 (tail_order.rs): the late mobys of retail's main walk draw (opaque, then blended) right after the first round and
+			// BEFORE the shadow volumes, so the volumes darken them as in retail; the late ones of the deferred list come last.
+			let tail = scene.props_tail_draws(props.is_some());
+			let rounds: [Round; 2] = [1, 2].map(|g| { let (clip, metal) = group(g); Round { props: &tail[g - 1], clip, metal } });
+			let abe = !dskip("abe") && (scene.props_shown || scene.marker_shown || warp);
+			let pre = volumes.is_some() && !rounds[0].is_empty();
+			if pre {
+				if abe {
+					self.abe_round(pass, &m, &Blend { marker: marker_late.is_none(), props: &props_main, clip: clip_first, debris: true, warp: true, metal: metal_first });
+				}
+				self.tail_round(pass, &m, &rounds[0]);
+			}
+			if volumes.is_some() { self.add_round(pass, scene, props, skinned, &moby_inst, AddPart::Main); } // [PC] #29 (moby_add.rs): the flagged mobys of the main walk, before the volumes
 			// BRIDGE-64a: the shadow volumes and the darken, then the deferred-list slots drawn opaque over them.
 			if let Some(vb) = volumes.filter(|_| !dskip("vol")) {
 				pass.set_bind_group(0, &self.ubind, &[]);
@@ -169,52 +188,15 @@ impl Gpu {
 				}
 			}
 			// Retail draws every moby texel through one ABE pass: texels below alpha 0x80 blend here (MOBY-GS).
-			if !dskip("abe") && (scene.props_shown || scene.marker_shown || warp) {
-				for batch in [marker, props, clipped, debris, warp_batch].into_iter().flatten() {
-					pass.set_vertex_buffer(0, batch.vbuf.slice(..));
-					pass.set_index_buffer(batch.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-					let (pipelines, culled) = match skinned.filter(|_| std::ptr::eq(batch, &scene.props)) {
-						Some((pg, sj)) => {
-							pass.set_bind_group(2, &pg.bind, &[]);
-							pass.set_vertex_buffer(1, sj.slice(..));
-							(&pg.moby_pipelines, &pg.moby_cull)
-						}
-						None => (&self.moby_pipelines, &self.moby_cull),
-					};
-					for (k, pipeline) in pipelines.iter().enumerate() {
-						pass.set_pipeline(pipeline);
-						let draws: &[Draw] = if std::ptr::eq(batch, &scene.props) { &props_live } else { &batch.draws };
-						for d in draws {
-							// Retail culls in VU1 before the GS: the blended texels of a culled packet keep its cull mode.
-							if d.cull != 0 {
-								pass.set_pipeline(&culled[2 * (d.cull as usize - 1) + k]);
-							}
-							pass.set_bind_group(1, &scene.bind_groups[d.texture], &[]);
-							let inst = moby_inst(d);
-							pass.draw_indexed(d.start..d.start + d.count, 0, inst..inst + 1);
-							if d.cull != 0 {
-								pass.set_pipeline(pipeline);
-							}
-						}
-					}
-				}
-				self.abe_metal(pass, metal);
+			if abe {
+				let b = if pre {
+					Blend { marker: marker_late.is_some(), props: &props_late, ..Blend::NONE } // the rest blended before the volumes
+				} else {
+					Blend { marker: true, props: &props_live, clip: clip_first, debris: true, warp: true, metal: metal_first }
+				};
+				self.abe_round(pass, &m, &b);
 			}
-	}
-
-	/// BRIDGE-45: the metal texels below alpha 0x80 and every metal face drawn with a metal alpha below 0x80 (the ABE pass).
-	fn abe_metal(&self, pass: &mut wgpu::RenderPass<'_>, metal: Option<(&Batch, &[wgpu::BindGroup; 2])>) {
-		if let Some((batch, tex)) = metal {
-			pass.set_vertex_buffer(0, batch.vbuf.slice(..));
-			pass.set_index_buffer(batch.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-			for pipeline in &self.moby_pipelines {
-				pass.set_pipeline(pipeline);
-				for d in &batch.draws {
-					pass.set_bind_group(1, &tex[d.texture], &[]);
-					pass.draw_indexed(d.start..d.start + d.count, 0, 0..1);
-				}
-			}
-		}
+			self.tail_rounds_add(pass, &m, &rounds[pre as usize..], if volumes.is_some() { AddPart::Deferred } else { AddPart::All }); // [PC] #29 (moby_add.rs): then the additive mobys (the deferred ones with volumes), over everything blended
 	}
 
 	pub(super) fn pass_shop_models(&self, pass: &mut wgpu::RenderPass<'_>, scene: &Scene, cam: &Camera, eye: &Camera, aspect: f32, wfar: f32, warp: bool) {

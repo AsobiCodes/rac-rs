@@ -8,7 +8,7 @@ file oracle/src/snd989/handler.rs 1679
 file rac-rs/src/anim.rs 2384
 file rac-rs/src/frontend.rs 2139
 file rac-rs/src/retail/gscap/draw/gpu.rs 1561
-file rac-rs/src/retail/modcam.rs 1793
+file rac-rs/src/retail/modcam.rs 1792
 file rac-rs/src/retail/pcext.rs 1652
 file rac-rs/src/sound.rs 1668
 file rac-rs/src/viewer.rs 1850
@@ -34,14 +34,13 @@ fn rac-rs/src/retail/gscap/draw.rs draw_in 227
 fn rac-rs/src/retail/gscap/draw/gpu.rs gpu_raster 206
 fn rac-rs/src/retail/modcam.rs step 233
 fn rac-rs/src/retail/pcext.rs eudora_graphics_page 226
-fn rac-rs/src/retail/snapshot.rs snap 206
+fn rac-rs/src/retail/snapshot.rs snap 194
 fn rac-rs/src/retail/test_suite.rs retail_mouse_menus 163
 fn rac-rs/src/shop.rs draw 197
 fn rac-rs/src/sound.rs tone_pitch_matches_the_retail_driver 192
 fn rac-rs/src/viewer/app.rs load_level_from 1177
 fn rac-rs/src/viewer/app.rs toggle_play 182
 fn rac-rs/src/viewer/gpu/culling.rs cull_ties 155
-fn rac-rs/src/viewer/gpu/draw/pass_world.rs pass_world 154
 fn rac-rs/src/viewer/gpu/draw/passes.rs draw_passes 162
 fn rac-rs/src/viewer/gpu/particle_fx.rs set_particles 151
 fn rac-rs/src/viewer/gpu/props_layout.rs append_props 158
@@ -49,7 +48,7 @@ fn rac-rs/src/viewer/gpu/scene_build.rs build_scene 228
 fn rac-rs/src/viewer/gpu/setup.rs new 450
 fn rac-rs/src/viewer/handler/frame_audio.rs frame_audio_anim 171
 fn rac-rs/src/viewer/handler/frame_audio.rs frame_audio_music 153
-fn rac-rs/src/viewer/handler/frame_hero.rs frame_hero 390
+fn rac-rs/src/viewer/handler/frame_hero.rs frame_hero 371
 fn rac-rs/src/viewer/handler/frame_hero.rs frame_hero_scene 185
 fn rac-rs/src/viewer/handler/frame_hud.rs frame_hud_draw 293
 fn rac-rs/src/viewer/handler/frame_post.rs frame_sound_events 187

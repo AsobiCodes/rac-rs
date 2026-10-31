@@ -166,6 +166,8 @@ pub(super) struct PropsGpu {
 	pub moby_pipelines: [wgpu::RenderPipeline; 2],
 	/// The moby passes with a packet cull mode (index 2 * (cull - 1) + pass).
 	pub moby_cull: [wgpu::RenderPipeline; 4],
+	/// [PC] #29 (gpu/moby_add.rs): the two additive moby passes (index = pass, no face culling).
+	pub add: [wgpu::RenderPipeline; 2],
 	pub(super) layout: wgpu::BindGroupLayout,
 	insts: wgpu::Buffer,
 	pose: wgpu::Buffer,
@@ -200,10 +202,10 @@ impl PropsGpu {
 		device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("props skin"), entries: &[entry(0), entry(1)] })
 	}
 
-	pub(super) fn new(device: &wgpu::Device, layout: wgpu::BindGroupLayout, pipeline: wgpu::RenderPipeline, pipeline_cull: [wgpu::RenderPipeline; 2], moby_pipelines: [wgpu::RenderPipeline; 2], moby_cull: [wgpu::RenderPipeline; 4]) -> PropsGpu {
+	pub(super) fn new(device: &wgpu::Device, layout: wgpu::BindGroupLayout, pipeline: wgpu::RenderPipeline, pipeline_cull: [wgpu::RenderPipeline; 2], moby_pipelines: [wgpu::RenderPipeline; 2], moby_cull: [wgpu::RenderPipeline; 4], add: [wgpu::RenderPipeline; 2]) -> PropsGpu {
 		let cap = (INST_MIN, POSE_MIN);
 		let (insts, pose, bind) = Self::buffers(device, &layout, cap);
-		PropsGpu { pipeline, pipeline_cull, moby_pipelines, moby_cull, layout, insts, pose, cap, bind, reuse: Default::default() }
+		PropsGpu { pipeline, pipeline_cull, moby_pipelines, moby_cull, add, layout, insts, pose, cap, bind, reuse: Default::default() }
 	}
 
 	fn buffers(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, cap: (usize, usize)) -> (wgpu::Buffer, wgpu::Buffer, wgpu::BindGroup) {
@@ -230,7 +232,7 @@ impl PropsGpu {
 	}
 
 	/// The record half of an upload: all of `insts` (`whole`) or the slots `reuse.inst_dirty` lists.
-	fn upload_insts(&self, queue: &wgpu::Queue, insts: &[PropInst], whole: bool) {
+	fn upload_insts(&self, queue: &GatedQueue, insts: &[PropInst], whole: bool) {
 		let _s = super::profile::span("pw_inst");
 		if whole {
 			if !insts.is_empty() {
@@ -246,7 +248,7 @@ impl PropsGpu {
 
 	/// Writes this frame's records and poses (growing the buffers first when needed). [PC] perf: of the poses only the ranges
 	/// the build wrote (`reuse.dirty`, gpu/pose_reuse.rs); all of them into a new buffer.
-	pub(super) fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, insts: &[PropInst], pose: &[PoseEntry]) {
+	pub(super) fn upload(&mut self, device: &wgpu::Device, queue: &GatedQueue, insts: &[PropInst], pose: &[PoseEntry]) {
 		let grown = self.grow(device, insts.len(), pose.len());
 		self.upload_insts(queue, insts, grown || full_pose_upload());
 		let _s = super::profile::span("pw_pose");
@@ -269,7 +271,7 @@ impl PropsGpu {
 	/// converted from their sources (`jobs`: every distinct pose in entry order, `total` entries) straight into the writes' staging
 	/// memory, with no CPU copy in between. The runs are `upload`'s `spans` (`pose_runs`); the unwritten poses a run spans
 	/// (< POSE_GAP entries) are converted from their sources too: their token says they are bit-equal to what the GPU holds.
-	pub(super) fn upload_direct(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, insts: &[PropInst], jobs: &[PoseJob], total: usize) {
+	pub(super) fn upload_direct(&mut self, device: &wgpu::Device, queue: &GatedQueue, insts: &[PropInst], jobs: &[PoseJob], total: usize) {
 		let grown = self.grow(device, insts.len(), total);
 		let whole = grown || full_pose_upload();
 		self.upload_insts(queue, insts, whole);
@@ -290,7 +292,7 @@ impl PropsGpu {
 	}
 
 	/// One write of the consecutive `jobs` (each n > 0, gapless) into the pose buffer, converted into the staging memory.
-	fn write_jobs(&self, queue: &wgpu::Queue, jobs: &[PoseJob]) {
+	fn write_jobs(&self, queue: &GatedQueue, jobs: &[PoseJob]) {
 		let (first, last) = (jobs[0].base, jobs[jobs.len() - 1].base + jobs[jobs.len() - 1].n);
 		let size = std::mem::size_of::<PoseEntry>();
 		let Some(mut view) = std::num::NonZeroU64::new(((last - first) * size) as u64).and_then(|len| queue.write_buffer_with(&self.pose, (first * size) as u64, len)) else {

@@ -39,6 +39,14 @@ pub struct Moby {
 	pub draw: i16,
 	/// The tail-packet colour +0x90 while flag +0x34 & 0x10 is set (FUN_00263020 init = class +0x40; overrides by actors). [C]
 	pub ovr: Option<u32>,
+	/// Flag +0x34 bit 0x200 (`is_additive`): the moby walk draws it with ALPHA_1 0x48 (additive) and restores 0x8000000044 after it. [C]
+	pub additive: bool,
+}
+
+/// The additive draw flag of a moby (+0x34 bit 0x200): retail's walk (Umbris 0x27eb5c `andi at,t6,0x200` on `lhu t6,0x34(fp)` masked
+/// with 0x208) puts ALPHA_1 0x48 (Cs * As / 128 + Cd) before its packet and 0x8000000044 after it (moby_format.md MOBY-ADD). [C]
+pub fn is_additive(flags: u16) -> bool {
+	flags & 0x200 != 0
 }
 
 /// The inputs of the 4:3 side tests of a moby that retail's draw rejected for a side plane (x or y) and nothing else: view-space
@@ -246,6 +254,8 @@ pub struct LooseWrench {
 	pub rows: [[f32; 3]; 3],
 	pub scale: f32,
 	pub alpha: u8,
+	/// The moby's own light: ambient bytes +0x3c and light word +0x38, as the props path takes them (props_sync.rs).
+	pub light: Option<([u8; 3], u32)>,
 	pub clock: Clock,
 	pub(super) shown: bool,
 	pub(super) side_only: Option<SideOnly>,

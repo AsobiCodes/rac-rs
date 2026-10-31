@@ -21,6 +21,10 @@ pub(super) struct HeroCache {
 	pub held_muzzle_model: Option<[f32; 3]>,
 	pub held_joint0_model: Option<[[f32; 3]; 3]>,
 	pub held_xform_model: Option<([[f32; 3]; 3], [f32; 3])>,
+	/// The hero was hidden and only a loose wrench kept (`hero_pose::collapse_outside`): the marker is drawn although `hero_hidden`.
+	pub collapsed: bool,
+	/// The loose wrenches' vertex ranges with their own light (`loose_range`), for `Gpu::marker_loose`.
+	pub loose: [Option<super::loose_range::LooseRange>; super::loose_range::MAX],
 }
 
 static GEN: AtomicU64 = AtomicU64::new(1);
@@ -59,7 +63,7 @@ pub(super) fn hero_cache_key(anim: usize, level: usize, play_ticks: u32, field: 
 		b(p.pos[2]) | b(p.yaw) << 32,
 		p.pulse_scale.map_or(u64::MAX, b),
 		game.inv.equipped as u64,
-		game.held_hidden as u64 | (p.clank_hidden as u64) << 1 | (game.bomb_in_hand() as u64) << 2,
+		game.held_hidden as u64 | (p.clank_hidden as u64) << 1 | (game.bomb_in_hand() as u64) << 2 | (game.hero_hidden as u64) << 3,
 		game.frames as u64,
 		counts[0] as u64,
 		counts[1] as u64,
@@ -85,6 +89,8 @@ pub(super) fn hero_check_compare(old: &HeroCache, new: &HeroCache) {
 		_ => false,
 	};
 	let same = posed_same
+		&& old.collapsed == new.collapsed
+		&& old.loose == new.loose
 		&& old.ghost_ranges == new.ghost_ranges
 		&& old.bomb_range == new.bomb_range
 		&& bits3(&old.light_at) == bits3(&new.light_at)

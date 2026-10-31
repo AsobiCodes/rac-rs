@@ -27,6 +27,8 @@ pub(super) struct ClipPoly {
 	pub cull: u8,
 	pub verts: Vec<Vertex>,
 	pub tris: Vec<[usize; 3]>,
+	/// [PC] #29 (tail_order.rs): 0 = the first round, `TAIL_MAIN` / `TAIL_DEFERRED` = the late round of its moby.
+	pub group: u8,
 }
 
 /// The view basis of this frame (`e` eye, `s` right, `u` up, `f` forward) and the tangents of the view volume.
@@ -209,7 +211,7 @@ pub(super) fn clip_face(view: &ClipView, tri: [Vertex; 3], phase: u8, tex: usize
 			}
 		})
 		.collect();
-	Some(ClipPoly { tex, cull, verts, tris })
+	Some(ClipPoly { tex, cull, verts, tris, group: 0 })
 }
 
 #[cfg(test)]

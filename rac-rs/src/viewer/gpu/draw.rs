@@ -8,6 +8,7 @@ use super::*;
 mod prepare;
 mod passes;
 mod pass_world;
+mod pass_tail;
 mod pass_water;
 mod pass_particles;
 mod pass_hud;
@@ -119,7 +120,7 @@ pub(super) fn min_alpha_slots(slots: &HashMap<u32, usize>, n: usize, textures: &
 /// `rec`: [PC] Water Enhanced records each strip's buffers (waterfx.rs), with its flow slot from the list (by strip index; 0 past it);
 /// only the strips with one of the listed fx textures, if any are listed.
 #[allow(clippy::too_many_arguments)]
-fn draw_strips(device: &wgpu::Device, queue: &wgpu::Queue, pass: &mut wgpu::RenderPass<'_>, fx_tex: &HashMap<usize, wgpu::BindGroup>, strips: &[particles::WorldStrip], pipeline: &wgpu::RenderPipeline, add_pipeline: &wgpu::RenderPipeline, mut rec: Option<(&mut Vec<super::waterfx::WaterDraw>, &[u32], &[usize])>) {
+fn draw_strips(device: &wgpu::Device, queue: &GatedQueue, pass: &mut wgpu::RenderPass<'_>, fx_tex: &HashMap<usize, wgpu::BindGroup>, strips: &[particles::WorldStrip], pipeline: &wgpu::RenderPipeline, add_pipeline: &wgpu::RenderPipeline, mut rec: Option<(&mut Vec<super::waterfx::WaterDraw>, &[u32], &[usize])>) {
 	for (i, s) in strips.iter().enumerate() {
 		let Some(bind) = fx_tex.get(&crate::retail::efx_draw::plain_tex(s.tex)) else { continue };
 		if s.pos.len() < 3 {

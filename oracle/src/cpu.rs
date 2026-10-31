@@ -246,7 +246,8 @@ impl Cpu {
     }
 
     /// A host hook at a function entry for code the interpreter runs (`Cpu::hand` is only consulted by recompiled
-    /// code, so a function in an overlay without crates, like the front end, can only be replaced this way). It applies
+    /// code, so a function that stays interpreted, like the few front-end functions that tools/recgen_iso.py leaves out of the
+    /// l19 / l20 crates (FE_DROP), or one in an overlay without crates, can only be replaced this way). It applies
     /// only while RAM holds `sig` (the function's first four code words), like an overlay stub.
     pub fn add_host_stub(&mut self, addr: u32, name: &str, sig: [u32; 4], f: fn(&mut Cpu) -> bool) {
         self.add_stub(addr, 0, name);

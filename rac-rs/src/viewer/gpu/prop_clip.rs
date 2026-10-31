@@ -106,14 +106,14 @@ fn prop_verdicts(view: &super::clip::ClipView, mask: &[u8; 128], props: &[Prop],
 	drawn
 }
 
-pub(super) fn clip_props(queue: &wgpu::Queue, scene: &mut Scene, src: ClipSrc, shown: &[bool]) {
+pub(super) fn clip_props(queue: &GatedQueue, scene: &mut Scene, src: ClipSrc, shown: &[bool]) {
 	let mut taken: Vec<(u32, u32)> = Vec::new();
 	if let Some(view) = scene.clip_view {
 		let (band, port) = (view.band(), view.viewport());
 		// [PC] perf: the slots are scanned and clipped on the frame worker pool, then queued in slot / face order.
 		// [PC] lane nprops: only the shown slots with faces are handed to the pool, and only those with polygons are kept.
 		let (ranges, model) = (&scene.props_ranges, &scene.props_model);
-		let todo: Vec<usize> = (0..scene.prop_faces.len()).filter(|&pi| shown.get(pi).copied().unwrap_or(false) && !scene.prop_faces[pi].is_empty()).collect();
+		let todo: Vec<usize> = (0..scene.prop_faces.len()).filter(|&pi| shown.get(pi).copied().unwrap_or(false) && !scene.prop_faces[pi].is_empty() && !scene.tail.in_add(pi)).collect();
 		let per_slot: Vec<(usize, Vec<(u32, super::clip::ClipPoly)>)> = todo
 			.par_iter()
 			.filter_map(|&pi| {
@@ -153,8 +153,10 @@ pub(super) fn clip_props(queue: &wgpu::Queue, scene: &mut Scene, src: ClipSrc, s
 			})
 			.collect();
 		for (pi, polys) in per_slot {
-			for (fi, poly) in polys {
+			let group = scene.tail.group(pi); // [PC] #29: a late moby's clipped faces go with it (tail_order.rs)
+			for (fi, mut poly) in polys {
 				taken.push((pi as u32, fi));
+				poly.group = group;
 				scene.clip_queue.push(poly);
 			}
 		}
@@ -178,22 +180,27 @@ pub(super) fn clip_props(queue: &wgpu::Queue, scene: &mut Scene, src: ClipSrc, s
 
 /// Uploads the queued clipped polygons into `clip_batch` (growing both buffers to the next power of two when needed) and
 /// builds one draw per (cull, texture) run; an empty queue leaves no draws.
-pub(super) fn flush_clip(device: &wgpu::Device, queue: &wgpu::Queue, scene: &mut Scene) {
+pub(super) fn flush_clip(device: &wgpu::Device, queue: &GatedQueue, scene: &mut Scene) {
 	let mut verts: Vec<Vertex> = Vec::new();
-	let mut by_run: BTreeMap<(u8, usize), Vec<u32>> = BTreeMap::new();
+	// [PC] #29 (tail_order.rs): the runs of each group (the first round, a late moby of the main walk, a late deferred one) in that order.
+	let mut by_run: [BTreeMap<(u8, usize), Vec<u32>>; 3] = Default::default();
 	for poly in scene.clip_queue.drain(..) {
 		let base = verts.len();
 		verts.extend(poly.verts);
-		by_run.entry((poly.cull, poly.tex)).or_default().extend(poly.tris.iter().flatten().map(|&i| (base + i) as u32));
+		by_run[(poly.group as usize).min(2)].entry((poly.cull, poly.tex)).or_default().extend(poly.tris.iter().flatten().map(|&i| (base + i) as u32));
 	}
 	scene.clip_batch.draws.clear();
+	scene.tail.clip_ends = [usize::MAX; 3];
 	if verts.is_empty() {
 		return;
 	}
 	let (mut indices, mut draws) = (Vec::new(), Vec::new());
-	for ((cull, texture), idx) in by_run {
-		draws.push(Draw { inst: 0, cull, texture, start: indices.len() as u32, count: idx.len() as u32 });
-		indices.extend(idx);
+	for (g, runs) in by_run.into_iter().enumerate() {
+		for ((cull, texture), idx) in runs {
+			draws.push(Draw { inst: 0, cull, texture, start: indices.len() as u32, count: idx.len() as u32 });
+			indices.extend(idx);
+		}
+		scene.tail.clip_ends[g] = draws.len();
 	}
 	if verts.len() > scene.clip_cap.0 || indices.len() > scene.clip_cap.1 {
 		let cap = (verts.len().next_power_of_two().max(scene.clip_cap.0), indices.len().next_power_of_two().max(scene.clip_cap.1));

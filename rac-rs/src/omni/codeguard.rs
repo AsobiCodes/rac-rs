@@ -8,8 +8,11 @@
 //! So `write_mem` refuses a write that overlaps a function of a set the table uses now, and says so once in the run log. The raw
 //! `ram_ptr` of native mods cannot be checked: code written through it is unsupported the same way (documented in native_host.rs).
 //!
-//! The spans are taken from the registered sets (`ee_oracle::rec::sets`, read only) the way `Table::build` decides: a set counts when every
-//! function of it still hashes to its stored value. They are cached per table build (layer.rs epoch) and found by binary search; a write
+//! The spans are taken from the registered sets of the boot code and the levels (`ee_oracle::rec::level_sets`, read only) the way `Table::build`
+//! decides: a set counts when every function of it still hashes to its stored value. The front-end sets (title and menus, boot image and frontbin)
+//! are left out on purpose: the front end was interpreted before it was compiled, so a mod's write there always worked, and it still does:
+//! `write_cb` (host.rs) lets it through and `Cpu::rec_front_written` rebuilds the table, which then runs the patched front end interpreted.
+//! The spans are cached per table build (layer.rs epoch) and found by binary search; a write
 //! outside 0x100000..0x400000 (the heap, the stack, the overlay's data beyond) costs two comparisons.
 
 use ee_oracle::cpu::Cpu;
@@ -82,7 +85,7 @@ pub(super) fn is_code(c: &Cpu, addr: u32, len: u32) -> bool {
 	let epoch = super::layer::epoch();
 	let mut g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
 	if g.as_ref().is_none_or(|s| s.epoch != epoch) {
-		let sets: Vec<Vec<(u32, u32, u64)>> = ee_oracle::rec::sets().iter().map(|s| s.iter().map(|f| (f.entry, f.end, f.hash)).collect()).collect();
+		let sets: Vec<Vec<(u32, u32, u64)>> = ee_oracle::rec::level_sets().iter().map(|s| s.iter().map(|f| (f.entry, f.end, f.hash)).collect()).collect();
 		*g = Some(Spans { epoch, spans: used_spans(&sets, |lo, hi| ee_oracle::rec::hash(&c.mem, lo, hi)) });
 	}
 	g.as_ref().is_some_and(|s| overlaps(&s.spans, addr, len))

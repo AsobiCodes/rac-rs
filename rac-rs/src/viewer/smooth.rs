@@ -260,6 +260,8 @@ pub(super) struct Smooth {
 	/// and reversed, or the leg twist jumped): the next `hero` call draws the new pose unblended. A vertex blend of a forward and a
 	/// reversed run frame (legs swapped, lower body turned) pulled the legs through each other for a display frame.
 	pub hero_cut: bool,
+	/// The pose of the last `hero` call had the hero collapsed with only a loose wrench kept (`hero_pose::collapse_outside`).
+	hero_collapsed: bool,
 	/// Pose generation numbers (herocache `next_gen`) of `hero_last` / `hero_before`, and what `hero` handed out: (pose as returned,
 	/// blend source). 0 = unknown, e.g. a pose the CPU blended.
 	gen_last: u64,
@@ -302,6 +304,15 @@ impl Smooth {
 			*before = if ticks == 1 { std::mem::take(last) } else { HashMap::new() };
 		}
 		*last = now;
+	}
+
+	/// Called before `hero` with whether this frame's pose is the collapsed one: a switch between the collapsed and the full pose is drawn
+	/// unblended (a vertex blend of the two would smear the hero's vertices out of the origin for a display frame).
+	pub(super) fn note_hero_collapsed(&mut self, collapsed: bool) {
+		if self.hero_collapsed != collapsed {
+			self.hero_collapsed = collapsed;
+			self.hero_cut = true;
+		}
 	}
 
 	/// The hero's drawn placement, pose and body tilt (`at` = feet and yaw, None = not drawn; tilt = BRIDGE-75 roll, pitch).

@@ -33,7 +33,7 @@ impl Gpu {
 				return None;
 			}
 			eprintln!("finish: screenshot frame took the deferred path (RAC_FINISH_DEFER_SHOT=1)");
-			let _gate = &*self.queue; // the readback below needs the submit: wait for the present thread's submit
+			let _gate = self.queue.sync(); // the readback below needs the submit: wait for the present thread's submit
 		} else {
 			let _t = super::profile::span("finish");
 			let cmd = enc.finish();
@@ -42,7 +42,7 @@ impl Gpu {
 			// frame needs its readback at once and submits here.
 			let _t = super::profile::span("submit");
 			if capture {
-				cuts.submit(&self.queue, cmd);
+				cuts.submit(self.queue.sync(), cmd);
 				self.presenter.present(frame);
 			} else {
 				self.presenter.present_frame(cuts, cmd, frame);

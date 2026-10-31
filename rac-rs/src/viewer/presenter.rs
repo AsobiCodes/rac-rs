@@ -21,7 +21,7 @@
 //! Ordering stays exact because every use of the queue from the render thread goes through `GatedQueue` (the `Gpu::queue` field):
 //! its `Deref` waits until the pending submit has returned, so a `write_buffer` / `submit` of frame N+1 can never land before
 //! the command buffers of frame N (wgpu applies `write_buffer`s at the next submit). RAC_SUBMIT_DEFER=0 submits inline (old).
-use std::ops::Deref;
+use super::qdefer::{DeferredView, Pending, TexMeta, WriteList};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -34,7 +34,15 @@ pub(super) struct Presenter {
 	busy: Arc<(Mutex<bool>, Condvar)>,
 	gate: Arc<Gate>,
 	defer: bool,
+	/// [PC] The viewer's queue writes of the frame being built (qdefer.rs); the hand-over gives them to the present thread.
+	pending: Arc<PendingWrites>,
+	/// [PC] Whether `gated()` queues are deferring their writes (worker on, deferred submit, parallel finish, RAC_WRITE_DEFER).
+	defer_writes: bool,
 }
+
+/// The writes of one frame, ready to apply to the wgpu queue.
+type Writes = WriteList<wgpu::Buffer, wgpu::Texture>;
+type PendingWrites = Pending<wgpu::Buffer, wgpu::Texture>;
 
 /// What the present thread does for one frame: the unfinished command-buffer parts (in order) and the last buffer, to submit
 /// first (None: already submitted), then the swapchain image to present.
@@ -48,6 +56,8 @@ struct Job {
 	mid: Option<(usize, Hook)>,
 	/// [PC] Overlay writes (gpu/ovwrite.rs) issued up to this frame's hand-over: `submit_parts` waits for exactly these.
 	ov: u64,
+	/// [PC] The render thread's queue writes up to this frame's hand-over (qdefer.rs), applied before the submit.
+	writes: Option<Writes>,
 }
 
 /// [PC] ReShade add-on (gpu/reshade.rs): runs on the submitting thread between the two halves of a frame's submit.
@@ -58,6 +68,19 @@ fn present_timed(q: &wgpu::Queue, frame: wgpu::SurfaceTexture) {
 	let t = Instant::now();
 	q.present(frame);
 	super::framecsv::present(t, t.elapsed().as_secs_f32() * 1000.0);
+}
+
+/// Applies a frame's queue writes in call order (`Q` row of RAC_FRAME_CSV) and gives the emptied list back for reuse.
+fn apply_writes(pending: &PendingWrites, q: &wgpu::Queue, mut w: Writes) {
+	let t = Instant::now();
+	w.apply(q);
+	super::framecsv::present_step('Q', t, t.elapsed().as_secs_f32() * 1000.0);
+	pending.recycle(w);
+}
+
+/// The encoder split mode of `Cuts::new` (decided once).
+fn cuts_mode() -> u8 {
+	Cuts::new().mode
 }
 
 /// Submits `cmds`; with `mid` = (n, hook): the first n, then the hook, then the rest (the hook's work lands between them on the queue).
@@ -137,6 +160,47 @@ mod tests {
 		(returned, h)
 	}
 
+	/// Needs a GPU (`cargo test write_in_a_build_scope -- --ignored`): a texture write that fails inside a build scope is reported to that
+	/// scope (not listed for later), a failing one outside is listed and nothing reaches wgpu until the flush.
+	#[test]
+	#[ignore]
+	fn write_in_a_build_scope_reaches_the_scope() {
+		let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+		let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).expect("adapter");
+		let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).expect("device");
+		let q = super::GatedQueue { q: queue, gate: gate(), pending: Some(Arc::new(super::PendingWrites::default())) };
+		let tex = device.create_texture(&wgpu::TextureDescriptor {
+			label: Some("scope test"),
+			size: wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
+			mip_level_count: 1,
+			sample_count: 1,
+			dimension: wgpu::TextureDimension::D2,
+			format: wgpu::TextureFormat::Rgba8Unorm,
+			usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+			view_formats: &[],
+		});
+		let short = [0u8; 8]; // a 4 x 4 RGBA picture needs 64 bytes: wgpu rejects the write
+		let layout = wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(16), rows_per_image: Some(4) };
+		let size = wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 };
+		let pending = q.pending.clone().unwrap();
+		// Outside a scope: listed, wgpu has not seen it.
+		q.write_texture(tex.as_image_copy(), &short, layout, size);
+		assert!(pending.take().is_some(), "a write outside a scope is listed");
+		// Inside: made at once, the scope gets the error, nothing is left in the list.
+		let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+		{
+			let _in = super::super::pipe_guard::InScope::enter();
+			q.write_texture(tex.as_image_copy(), &short, layout, size);
+		}
+		let err = pollster::block_on(scope.pop());
+		assert!(err.is_some(), "the failing write must be reported inside the scope");
+		assert!(pending.take().is_none(), "a write inside a scope is not listed");
+		// And a texture write is cancelled by its identity.
+		q.write_texture(tex.as_image_copy(), &[0u8; 64], layout, size);
+		q.cancel_texture_writes(&tex);
+		assert!(pending.take().is_none());
+	}
+
 	/// A mark taken before a hand-over never waits for it (a helper must not wait on the frame being built); the counters are equal
 	/// exactly when nothing is pending. No timing: `wait` is called on the test thread (a wrong wait would hang the test).
 	#[test]
@@ -200,6 +264,10 @@ struct Gate {
 }
 
 impl Gate {
+	fn new() -> Gate {
+		Gate { pending: AtomicBool::new(false), issued: AtomicU64::new(0), done: AtomicU64::new(0), lock: Mutex::new(()), cv: Condvar::new() }
+	}
+
 	fn wait(&self) {
 		if !self.pending.load(Ordering::Acquire) {
 			return;
@@ -257,17 +325,111 @@ impl Drop for Release {
 	}
 }
 
-/// [PC] The viewer's queue: derefs to the `wgpu::Queue` after waiting for a deferred submit of the previous frame to return.
+/// [PC] The viewer's queue. Queue WRITES (`write_buffer`, `write_buffer_with`, `write_texture`) are deferred when the present thread takes
+/// the frames (qdefer.rs): they are listed in call order and the present thread applies them right before it submits that frame, so the
+/// render thread never waits for the previous frame's submit to write. Every other use goes through `sync`: wait until the deferred submit of
+/// the previous frame has returned, apply whatever is pending in order, then use the wgpu queue.
 pub(super) struct GatedQueue {
 	q: wgpu::Queue,
 	gate: Arc<Gate>,
+	/// Some: writes are deferred (see the module doc of qdefer.rs); None: they go to the queue at once (after the gate).
+	pending: Option<Arc<PendingWrites>>,
 }
 
-impl Deref for GatedQueue {
-	type Target = wgpu::Queue;
-	fn deref(&self) -> &wgpu::Queue {
+impl GatedQueue {
+	/// A queue with no gate and no deferral: its writes and submits go straight to `q` (the scene build on its background thread).
+	pub(super) fn immediate(q: wgpu::Queue) -> GatedQueue {
+		GatedQueue { q, gate: Arc::new(Gate::new()), pending: None }
+	}
+
+	/// The wgpu queue, for a submit, a read-back or any use that must come after every earlier write: waits for the previous frame's
+	/// deferred submit (as the old `Deref` did), then applies the pending writes in order.
+	pub(super) fn sync(&self) -> &wgpu::Queue {
 		self.gate.wait();
+		if let Some(p) = &self.pending {
+			p.flush(&self.q);
+		}
 		&self.q
+	}
+
+	/// The pending list when a write may be listed: not inside a build error scope (pipe_guard.rs). A write made inside a scope must reach
+	/// wgpu inside it, or an error it causes (an invalid texture) escapes the scope and wgpu's default handler panics. Those are one-time
+	/// init paths, so the `sync` they pay for (gate wait + flush) costs nothing per frame.
+	fn deferring(&self) -> Option<&Arc<PendingWrites>> {
+		self.pending.as_ref().filter(|_| !super::pipe_guard::in_scope())
+	}
+
+	/// Drops the still-listed writes to `tex` (this frame's, not yet handed over) because a LATER write covers the whole texture and is made
+	/// outside this list (the overlay helper, gpu/ovwrite.rs). No wait; scans nothing unless a texture write is listed.
+	pub(super) fn cancel_texture_writes(&self, tex: &wgpu::Texture) {
+		if let Some(p) = &self.pending {
+			p.cancel_textures(|t| t == tex);
+		}
+	}
+
+	/// `Queue::write_buffer`: listed (no wait) when deferring, else made at once.
+	pub(super) fn write_buffer(&self, buffer: &wgpu::Buffer, offset: wgpu::BufferAddress, data: &[u8]) {
+		match self.deferring() {
+			Some(p) => p.write_buffer(buffer, offset, data),
+			None => self.sync().write_buffer(buffer, offset, data),
+		}
+	}
+
+	/// `Queue::write_buffer_with`: the write is ordered where the returned view is dropped.
+	pub(super) fn write_buffer_with(&self, buffer: &wgpu::Buffer, offset: wgpu::BufferAddress, size: wgpu::BufferSize) -> Option<WriteView<'_>> {
+		match self.deferring() {
+			Some(p) => Some(WriteView::Deferred(DeferredView::new(p, buffer, offset, size.get() as usize))),
+			None => self.sync().write_buffer_with(buffer, offset, size).map(WriteView::Direct),
+		}
+	}
+
+	/// `Queue::write_texture`: listed (no wait) when deferring, else made at once.
+	pub(super) fn write_texture(&self, texture: wgpu::TexelCopyTextureInfo<'_>, data: &[u8], layout: wgpu::TexelCopyBufferLayout, size: wgpu::Extent3d) {
+		match self.deferring() {
+			Some(p) => p.write_texture(texture.texture, TexMeta { mip_level: texture.mip_level, origin: texture.origin, aspect: texture.aspect, layout, size }, data),
+			None => self.sync().write_texture(texture, data, layout, size),
+		}
+	}
+
+	/// `Queue::get_timestamp_period` (a constant of the device: no wait, no flush).
+	pub(super) fn get_timestamp_period(&self) -> f32 {
+		self.q.get_timestamp_period()
+	}
+
+	/// The gate now (see `GateMark`), for a helper that uses `raw` instead of this queue.
+	pub(super) fn mark(&self) -> GateMark {
+		self.gate.mark()
+	}
+
+	/// The queue without the gate wait and without the pending writes: only after `GateMark::wait` of a mark taken on the render thread,
+	/// and only for work that does not depend on this frame's queue writes (the overlay copy, gpu/ovwrite.rs).
+	pub(super) fn raw(&self) -> wgpu::Queue {
+		self.q.clone()
+	}
+}
+
+impl crate::fmv::present::QueueWrites for GatedQueue {
+	fn write_buffer(&self, buffer: &wgpu::Buffer, offset: u64, data: &[u8]) {
+		GatedQueue::write_buffer(self, buffer, offset, data);
+	}
+
+	fn write_texture(&self, texture: wgpu::TexelCopyTextureInfo<'_>, data: &[u8], layout: wgpu::TexelCopyBufferLayout, size: wgpu::Extent3d) {
+		GatedQueue::write_texture(self, texture, data, layout, size);
+	}
+}
+
+/// [PC] What `GatedQueue::write_buffer_with` hands out: wgpu's own staging view, or the deferred one (qdefer.rs).
+pub(super) enum WriteView<'a> {
+	Direct(wgpu::QueueWriteBufferView),
+	Deferred(DeferredView<'a, wgpu::Buffer, wgpu::Texture>),
+}
+
+impl WriteView<'_> {
+	pub(super) fn slice<S: std::ops::RangeBounds<usize>>(&mut self, bounds: S) -> wgpu::WriteOnly<'_, [u8]> {
+		match self {
+			WriteView::Direct(v) => v.slice(bounds),
+			WriteView::Deferred(v) => v.slice(bounds),
+		}
 	}
 }
 
@@ -284,30 +446,19 @@ impl GateMark {
 	}
 }
 
-impl GatedQueue {
-	/// The gate now (see `GateMark`), for a helper that uses `raw` instead of this queue.
-	pub(super) fn mark(&self) -> GateMark {
-		self.gate.mark()
-	}
-
-	/// The queue without the gate wait: only after `GateMark::wait` of a mark taken on the render thread.
-	pub(super) fn raw(&self) -> wgpu::Queue {
-		self.q.clone()
-	}
-}
-
 impl Presenter {
 	/// `vendor`: the adapter's PCI vendor id (the thread's default, see the module doc).
 	pub(super) fn new(queue: wgpu::Queue, vendor: u32) -> Presenter {
-		let gate = Arc::new(Gate { pending: AtomicBool::new(false), issued: AtomicU64::new(0), done: AtomicU64::new(0), lock: Mutex::new(()), cv: Condvar::new() });
+		let gate = Arc::new(Gate::new());
 		let defer = std::env::var("RAC_SUBMIT_DEFER").map_or(true, |v| v != "0");
 		let busy = Arc::new((Mutex::new(false), Condvar::new()));
+		let pending = Arc::new(PendingWrites::default());
 		let on = std::env::var("RAC_PRESENT_THREAD").map_or(vendor == 0x10de, |v| v != "0");
 		eprintln!("present: {}", if on { "on the present thread" } else { "inline (render thread)" });
 		let log = std::env::var("RAC_PRESENT_LOG").is_ok_and(|v| v == "1");
 		let worker = on.then(|| {
 			let (tx, rx) = mpsc::channel::<Job>();
-			let (q, b, g) = (queue.clone(), busy.clone(), gate.clone());
+			let (q, b, g, pw) = (queue.clone(), busy.clone(), gate.clone(), pending.clone());
 			let h = std::thread::Builder::new()
 				.name("present".into())
 				.spawn(move || {
@@ -315,13 +466,20 @@ impl Presenter {
 					let (mut n, mut ns) = (0u64, 0u64);
 					let mut sub = (0u64, 0u64);
 					while let Ok(job) = rx.recv() {
-						let Job { parts, last, submit, frame, mid, ov } = job;
+						let Job { parts, last, submit, frame, mid, ov, writes } = job;
 						if submit {
+							// The frame's queue writes first, in call order (qdefer.rs): the enc-finish jobs run meanwhile.
+							if let Some(w) = writes {
+								apply_writes(&pw, &q, w);
+							}
 							let t0 = Instant::now();
 							let mut cmds: Vec<wgpu::CommandBuffer> = parts.into_iter().filter_map(|rx| rx.recv().ok()).collect();
 							cmds.extend(last);
 							let t1 = t0.elapsed().as_nanos() as u64;
+							super::framecsv::present_step('U', t0, t1 as f32 / 1e6);
+							let ts = Instant::now();
 							submit_parts(&q, cmds, mid, ov);
+							super::framecsv::present_step('V', ts, ts.elapsed().as_secs_f32() * 1000.0);
 							sub = (sub.0 + t1, sub.1 + t0.elapsed().as_nanos() as u64 - t1);
 							g.clear();
 						}
@@ -341,12 +499,14 @@ impl Presenter {
 				.expect("present thread");
 			(tx, h)
 		});
-		Presenter { queue, worker, busy, gate, defer }
+		let defer_writes = worker.is_some() && defer && cuts_mode() == 2 && std::env::var("RAC_WRITE_DEFER").map_or(true, |v| v != "0");
+		eprintln!("present: queue writes {}", if defer_writes { "deferred to the present thread" } else { "made on the render thread" });
+		Presenter { queue, worker, busy, gate, defer, pending, defer_writes }
 	}
 
 	/// The viewer's queue, gated on the deferred submit (see the module doc).
 	pub(super) fn gated(&self) -> GatedQueue {
-		GatedQueue { q: self.queue.clone(), gate: self.gate.clone() }
+		GatedQueue { q: self.queue.clone(), gate: self.gate.clone(), pending: self.defer_writes.then(|| self.pending.clone()) }
 	}
 
 	/// Waits until no present is in flight.
@@ -369,7 +529,7 @@ impl Presenter {
 			self.flush();
 		}
 		*self.busy.0.lock().unwrap() = true;
-		if let Err(mpsc::SendError(job)) = tx.send(Job { parts: Vec::new(), last: None, submit: false, frame, mid: None, ov: 0 }) {
+		if let Err(mpsc::SendError(job)) = tx.send(Job { parts: Vec::new(), last: None, submit: false, frame, mid: None, ov: 0, writes: None }) {
 			*self.busy.0.lock().unwrap() = false;
 			present_timed(&self.queue, job.frame);
 		}
@@ -380,6 +540,7 @@ impl Presenter {
 	/// viewer's `GatedQueue` meanwhile waits for the submit. Otherwise submit here and present as `present`.
 	pub(super) fn present_frame(&self, cuts: Cuts, last: wgpu::CommandBuffer, frame: wgpu::SurfaceTexture) {
 		let Some((tx, _)) = self.worker.as_ref().filter(|_| self.defer && cuts.mode == 2) else {
+			self.pending.flush(&self.queue);
 			cuts.submit(&self.queue, last);
 			self.present(frame);
 			return;
@@ -390,8 +551,11 @@ impl Presenter {
 		}
 		*self.busy.0.lock().unwrap() = true;
 		self.gate.set();
-		let job = Job { parts: cuts.parts, last: Some(last), submit: true, frame, mid: cuts.mid, ov: super::gpu::ovwrite::issued() };
-		if let Err(mpsc::SendError(Job { parts, last, frame, mid, ov, .. })) = tx.send(job) {
+		let job = Job { parts: cuts.parts, last: Some(last), submit: true, frame, mid: cuts.mid, ov: super::gpu::ovwrite::issued(), writes: self.pending.take() };
+		if let Err(mpsc::SendError(Job { parts, last, frame, mid, ov, writes, .. })) = tx.send(job) {
+			if let Some(w) = writes {
+				apply_writes(&self.pending, &self.queue, w);
+			}
 			let mut cmds: Vec<wgpu::CommandBuffer> = parts.into_iter().filter_map(|rx| rx.recv().ok()).collect();
 			cmds.extend(last);
 			submit_parts(&self.queue, cmds, mid, ov);
@@ -424,8 +588,11 @@ impl Presenter {
 		}
 		*self.busy.0.lock().unwrap() = true;
 		self.gate.set();
-		let job = Job { parts: cuts.parts, last: None, submit: true, frame, mid: cuts.mid, ov: super::gpu::ovwrite::issued() };
-		if let Err(mpsc::SendError(Job { parts, last, frame, mid, ov, .. })) = tx.send(job) {
+		let job = Job { parts: cuts.parts, last: None, submit: true, frame, mid: cuts.mid, ov: super::gpu::ovwrite::issued(), writes: self.pending.take() };
+		if let Err(mpsc::SendError(Job { parts, last, frame, mid, ov, writes, .. })) = tx.send(job) {
+			if let Some(w) = writes {
+				apply_writes(&self.pending, &self.queue, w);
+			}
 			let cmds: Vec<wgpu::CommandBuffer> = parts.into_iter().filter_map(|rx| rx.recv().ok()).chain(last).collect();
 			submit_parts(&self.queue, cmds, mid, ov);
 			self.gate.clear();

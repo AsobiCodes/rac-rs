@@ -55,8 +55,15 @@ fn backends_for(choice: Option<bool>, default_set: bool) -> wgpu::Backends {
 /// The instance descriptor, and whether DX12 can be opened with the old FXC compiler (no `dxcompiler.dll`, no WGPU_DX12_COMPILER=dxc):
 /// the compiler is named for every set that holds DX12 (also wgpu's default set of the fallback).
 fn descriptor(choice: Option<bool>, default_set: bool) -> (wgpu::InstanceDescriptor, bool) {
+	descriptor_for(choice, default_set, crate::wine::instance_flags())
+}
+
+/// `descriptor` with the extra instance flags given (`wine.rs`: under Wine the Vulkan adapter that wgpu would hide must stay visible,
+/// else the game found no Vulkan adapter there and fell back to DirectX 12 over vkd3d-proton, which crashed; GitHub #49).
+fn descriptor_for(choice: Option<bool>, default_set: bool, extra: wgpu::InstanceFlags) -> (wgpu::InstanceDescriptor, bool) {
 	let mut d = wgpu::InstanceDescriptor::new_without_display_handle();
 	d.backends = backends_for(choice, default_set);
+	d.flags |= extra; // before `with_env`: WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER=0/1 still has the last word
 	let mut d = d.with_env(); // WGPU_BACKEND, WGPU_DX12_COMPILER ... override the file
 	if d.backends.contains(wgpu::Backends::DX12) && std::env::var_os("WGPU_DX12_COMPILER").is_none() {
 		d.backend_options.dx12.shader_compiler = dx12_compiler(dxc_next_to_exe());
@@ -174,17 +181,34 @@ pub(super) fn open(window: &Arc<Window>) -> (wgpu::Instance, wgpu::Surface<'stat
 	crate::rtss_crash::note_backend(choice != Some(true)); // until the adapter is known (a freeze in the instance)
 	let try_open = |default_set: bool| {
 		let (desc, fxc) = descriptor(choice, default_set);
+		let (backends, flags) = (desc.backends, desc.flags);
 		let instance = wgpu::Instance::new(desc);
-		let surface = instance.create_surface(window.clone()).ok()?;
+		let surface = match instance.create_surface(window.clone()) {
+			Ok(s) => s,
+			Err(e) => {
+				eprintln!("gpu: {backends:?}: no window surface ({e})");
+				return None;
+			}
+		};
 		let adapter = match named(&instance, &surface) {
 			Some(a) => a,
-			None => pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-				power_preference: wgpu::PowerPreference::HighPerformance,
-				compatible_surface: Some(&surface),
-				force_fallback_adapter: false,
-				apply_limit_buckets: false,
-			}))
-			.ok()?,
+			None => {
+				let found = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+					power_preference: wgpu::PowerPreference::HighPerformance,
+					compatible_surface: Some(&surface),
+					force_fallback_adapter: false,
+					apply_limit_buckets: false,
+				}));
+				match found {
+					Ok(a) => a,
+					Err(e) => {
+						// [PC] Which adapters this set has and whether they can present, for the run log (adapter_report.rs).
+						eprintln!("gpu: {backends:?}: no adapter ({e})");
+						super::adapter_report::report(&instance, &surface, backends, flags);
+						return None;
+					}
+				}
+			}
 		};
 		Some((instance, surface, adapter, fxc))
 	};
@@ -226,6 +250,23 @@ mod tests {
 		assert_eq!(backends_for(None, false), wgpu::Backends::VULKAN, "not chosen: Vulkan first, never the DX12 start-up (ReShade crash)");
 		assert_eq!(backends_for(Some(true), true), wgpu::Backends::default(), "the fallback is wgpu's own order");
 		assert!(wgpu::Backends::default().contains(wgpu::Backends::VULKAN), "Vulkan stays in today's default set");
+	}
+
+	/// Under Wine both tries (Vulkan first, then wgpu's own set with its DX12 fallback) get the flag that unhides a non-conformant
+	/// Vulkan adapter; a real Windows and Linux keep wgpu's flags.
+	#[test]
+	fn the_noncompliant_adapter_flag_is_on_both_instances_under_wine_only() {
+		let flag = wgpu::InstanceFlags::ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER;
+		if std::env::var_os("WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER").is_some() {
+			return; // wgpu's own switch has the last word, and this shell sets it
+		}
+		for default_set in [false, true] {
+			let wine = descriptor_for(None, default_set, crate::wine::instance_flags_for(true)).0;
+			assert!(wine.flags.contains(flag), "default_set {default_set}: Wine");
+			let plain = descriptor_for(None, default_set, crate::wine::instance_flags_for(false)).0;
+			assert!(!plain.flags.contains(flag), "default_set {default_set}: not Wine");
+			assert_eq!(plain.flags, wgpu::InstanceFlags::default().with_env(), "the flags stay wgpu's own");
+		}
 	}
 
 	#[test]

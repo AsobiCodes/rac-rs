@@ -470,6 +470,8 @@ pub(crate) fn message_box(text: &str, caption: &str, kind: u32) {
 		fn MessageBoxW(hwnd: *mut std::ffi::c_void, text: *const u16, caption: *const u16, kind: u32) -> i32;
 	}
 	let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+	// [PC] The text is a run log line too, before the box blocks (runlog_policy.rs).
+	crate::runlog_policy::note_message(text);
 	// SAFETY: NUL-terminated UTF-16 strings that outlive the call.
 	unsafe { MessageBoxW(std::ptr::null_mut(), wide(text).as_ptr(), wide(caption).as_ptr(), kind) };
 }

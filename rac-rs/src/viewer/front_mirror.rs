@@ -1,6 +1,6 @@
 //! The retail front end (frontbin: title, main menu, New / Load Game) drawn by the mirror renderer instead of the GS picture.
 //!
-//! The game's own code runs the front end in the interpreter. Everything shown comes from its RAM (`retail::FrontRam`,
+//! The game's own code runs the front end (compiled where RAM matches the disc image, else interpreted). Everything shown comes from its RAM (`retail::FrontRam`,
 //! `mouse_menu::MenuSnap`): the title scene's timeline tick, the logo and Press Start alphas, the black fade, the page, the
 //! selected row and the save-slot list. frontend.rs only supplies the art, the layout and the drawing (`Menu::follow`); its own
 //! key handling and clocks decide nothing. The picture is the title scene (scene.rs `title_scene`, level.rs `Level::title`) drawn

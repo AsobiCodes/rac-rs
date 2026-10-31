@@ -13,7 +13,7 @@ impl App {
 	pub(super) fn frame_upload(&mut self, f: &mut Frame) {
 		let (at, tilt, hero_blend_t, hero_gens) = (f.at, f.tilt, f.hero_blend_t, f.hero_gens);
 		let (ghost_ranges, bomb_range, light_at, nozzle) = (f.ghost_ranges, f.bomb_range, f.light_at, f.nozzle);
-		let passenger_shown = f.passenger_shown; let skinned = std::mem::take(&mut f.skinned);
+		let (passenger_shown, hero_collapsed, loose) = (f.passenger_shown, f.hero_collapsed, f.loose); let skinned = std::mem::take(&mut f.skinned);
 		let mut world_quads = std::mem::take(&mut f.world_quads); let vendor_quads = std::mem::take(&mut f.vendor_quads);
 		let actors = std::mem::take(&mut f.actors); let fx_posed = std::mem::take(&mut f.fx_posed); let title = std::mem::take(&mut f.title);
 		if let (Some(game), Some(w)) = (&mut self.game, &self.world) {
@@ -46,7 +46,7 @@ impl App {
 				let ghost_tail = self.hero_anim.as_ref().map_or(0, |(c, _)| hero_ghost_len(c));
 				let tail = self.suck_rig.as_ref().map_or(0, |s| s.held.class.mesh.positions.len()) + held_len(&self.held_rigs, &self.hook_rig) + back_tail(&self.back_rig, &self.clank_rig, &self.light_rig) + ghost_tail;
 				g.marker_v = nozzle.zip(self.pyro_rig.as_ref().and_then(|r| r.nozzle.as_ref())).zip(skinned.as_ref()).map(|((z, r), (ps, _))| (ps.len() - tail - r.1.len(), ps.len() - tail, z.v as f32 / 4096.0));
-				g.marker_ghosts = ghost_ranges;
+				g.marker_ghosts = ghost_ranges; g.marker_loose = loose;
 				g.marker_light = self.light_rig.as_ref().zip(light_at).zip(skinned.as_ref()).map(|((lc, _), (ps, _))| (ps.len() - ghost_tail - lc.mesh.positions.len(), ps.len() - ghost_tail, game::clank_light_rgb(game.frames)));
 				g.marker_bomb = bomb_range.zip(game.bomb_held_tint()).map(|((a, b), t)| (a, b, t));
 				// BRIDGE-75: the hero body tilt for this frame's marker.
@@ -57,7 +57,7 @@ impl App {
 				}
 				g.set_clip_view(Some((&self.cam, g.config.width as f32 / g.config.height.max(1) as f32)));
 				g.hero_gens = hero_gens;
-				g.set_marker(if game.hero_hidden && !passenger_shown { None } else { at }, skinned.as_ref(), hero_blend_t.and_then(|t| self.smooth.hero_before().map(|b| (b, t))));
+				g.set_marker(if game.hero_hidden && !passenger_shown && !hero_collapsed { None } else { at }, skinned.as_ref(), hero_blend_t.and_then(|t| self.smooth.hero_before().map(|b| (b, t))));
 				// NOV-10.5a-draw: the teleporter rings as debris-batch instances, the beams as additive fx quads.
 				let rings: Vec<particles::WorldInst> = Vec::new();
 				g.scene_actor_start(actors.iter().any(|a| a.is_some()), game.player.pos);

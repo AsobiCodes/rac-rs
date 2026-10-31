@@ -25,7 +25,7 @@ pub(super) struct GpuTimer {
 
 impl GpuTimer {
 	/// A timer, or None when the device has no timestamps or RAC_FOG_LOG is off.
-	pub(super) fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Option<GpuTimer> {
+	pub(super) fn new(device: &wgpu::Device, queue: &crate::viewer::presenter::GatedQueue) -> Option<GpuTimer> {
 		if !super::super::volfog::frame::fog_log() || !device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
 			return None;
 		}
@@ -36,10 +36,13 @@ impl GpuTimer {
 		Some(GpuTimer { qs, resolve, read, period: queue.get_timestamp_period(), state: State::Idle, ready: Arc::new(AtomicBool::new(false)) })
 	}
 
-	/// Called first in every `run`: maps a finished reading, prints a mapped one.
-	pub(super) fn poll(&mut self, device: &wgpu::Device) {
+	/// Called first in every `run`: maps a finished reading, prints a mapped one. The copy into `read` was encoded in an earlier frame that
+	/// may still be handed over and not yet submitted (the split-view Classic pass acquires no frame, so nothing flushed it): `sync` waits
+	/// for that submit first, or the map would meet a buffer a queued command still uses. Debug path only (RAC_FOG_LOG), once per reading.
+	pub(super) fn poll(&mut self, device: &wgpu::Device, queue: &crate::viewer::presenter::GatedQueue) {
 		match self.state {
 			State::Copied => {
+				queue.sync();
 				let ready = self.ready.clone();
 				ready.store(false, Ordering::Relaxed);
 				self.read.slice(..).map_async(wgpu::MapMode::Read, move |r| ready.store(r.is_ok(), Ordering::Relaxed));

@@ -1,13 +1,15 @@
 //! [PC] perf: the hero marker built on the GPU. `Gpu::set_marker` builds the marker's world-space vertices on the CPU
 //! every display frame (blend of the two step poses, turn, light / tint / ghost colour, upload). With frame smoothing that is
 //! 2-3 times per game step. Here a compute pass writes `marker.vbuf` instead: the model and the step's two poses (before / now)
-//! are uploaded once per change, a display frame only writes the 368-byte parameter block (placement, light, colours, blend factor).
+//! are uploaded once per change, a display frame only writes the 464-byte parameter block (placement, light, colours, blend factor).
 //! `build_cpu` in gpu.rs stays the reference (and the fallback when the hero crosses the clip guard band, needing CPU vertices);
 //! RAC_HERO_GPU=0 keeps the CPU path everywhere, RAC_HERO_GPU_CHECK=1 compares the GPU vertices with the CPU ones every frame.
 
 use super::*;
 
 mod check;
+#[cfg(test)]
+mod shader_tests;
 
 /// RAC_HERO_GPU: unset = `Auto` (GPU build, verified by a self-check on first use), `0` = `Off` (CPU build always), `1` = `On` (GPU
 /// build, no self-check: for measuring). RAC_HERO_GPU_CHECK=1 = `Check` (GPU build, compared with the CPU build every frame).
@@ -36,8 +38,8 @@ pub(super) fn mode() -> Mode {
 
 /// Frames the self-check compares per kind of frame (see `kind`).
 const SELF_FRAMES: u32 = 60;
-const KINDS: usize = 8;
-const KIND_NAMES: [&str; 3] = ["blend", "tilt", "extras"];
+const KINDS: usize = 16;
+const KIND_NAMES: [&str; 4] = ["blend", "tilt", "extras", "loose"];
 
 /// The adapter can run the build (set by `device_created`); false until then.
 static AVAILABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -89,9 +91,10 @@ pub(super) fn device_created(adapter: &wgpu::Adapter, device: &wgpu::Device) {
 }
 
 /// The kind of a hero frame for the self-check: bit 0 = blends two poses, bit 1 = tilted (euler rows), bit 2 = afterimage / bomb /
-/// nozzle shift / Clank light. Each kind is compared for `SELF_FRAMES` frames before the GPU build is trusted for it.
-pub(super) fn kind(blend: bool, tilt: bool, extras: bool) -> usize {
-	blend as usize | (tilt as usize) << 1 | (extras as usize) << 2
+/// nozzle shift / Clank light, bit 3 = a loose wrench lit by its own moby (`loose_range.rs`). Each kind is compared for `SELF_FRAMES`
+/// frames before the GPU build is trusted for it.
+pub(super) fn kind(blend: bool, tilt: bool, extras: bool, loose: bool) -> usize {
+	blend as usize | (tilt as usize) << 1 | (extras as usize) << 2 | (loose as usize) << 3
 }
 
 /// Whether a frame of this kind is still being verified (Auto mode, build not failed).
@@ -101,7 +104,7 @@ pub(super) fn self_check_wanted(kind: usize) -> bool {
 }
 
 fn kind_name(kind: usize) -> String {
-	let n: Vec<&str> = (0..3).filter(|b| kind >> b & 1 == 1).map(|b| KIND_NAMES[b]).collect();
+	let n: Vec<&str> = (0..4).filter(|b| kind >> b & 1 == 1).map(|b| KIND_NAMES[b]).collect();
 	if n.is_empty() { "plain".into() } else { n.join("+") }
 }
 
@@ -166,6 +169,10 @@ pub(super) struct HeroParams {
 	pub gh: [[f32; 4]; 5],
 	/// ghost range a, b, present
 	pub gr: [[u32; 4]; 5],
+	/// loose wrench ranges: their own light (rgb, light word)
+	pub ol: [[f32; 4]; 3],
+	/// loose wrench ranges: a, b, present, third-light id (f32 bits)
+	pub orr: [[u32; 4]; 3],
 	/// vertex count, have-before, tilt basis, tint present
 	pub u0: [u32; 4],
 	/// tint start, hero length, clank a, clank b
@@ -180,6 +187,7 @@ const SHADER: &str = r#"
 struct P {
 	feet: vec4<f32>, cs: vec4<f32>, r0: vec4<f32>, r1: vec4<f32>, r2: vec4<f32>, light: vec4<f32>, tint: vec4<f32>,
 	clank: vec4<f32>, bomb: vec4<f32>, gh: array<vec4<f32>, 5>, gr: array<vec4<u32>, 5>,
+	ol: array<vec4<f32>, 3>, orr: array<vec4<u32>, 3>,
 	u0: vec4<u32>, u1: vec4<u32>, u2: vec4<u32>, u3: vec4<u32>,
 };
 @group(0) @binding(0) var<storage, read> model: array<f32>;
@@ -287,8 +295,18 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
 		col = vec4<f32>(prm.clank.xyz, -2.0);
 		done = true;
 	}
+	// A loose wrench is lit by its own moby: its light and third-light id (the ghost loop below keeps its own encoding).
+	var lit = prm.light;
+	var w = prm.cs.w;
+	for (var oi = 0u; oi < 3u; oi = oi + 1u) {
+		let r = prm.orr[oi];
+		if (r.z != 0u && k >= r.x && k < r.y) {
+			lit = prm.ol[oi];
+			w = bitcast<f32>(r.w);
+			break;
+		}
+	}
 	if (!done) {
-		var w = prm.cs.w;
 		for (var gi = 0u; gi < 5u; gi = gi + 1u) {
 			let r = prm.gr[gi];
 			if (r.z != 0u && k >= r.x && k < r.y) {
@@ -317,10 +335,10 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
 	outv[mb + 9u] = col.y;
 	outv[mb + 10u] = col.z;
 	outv[mb + 11u] = col.w;
-	outv[mb + 12u] = prm.light.x;
-	outv[mb + 13u] = prm.light.y;
-	outv[mb + 14u] = prm.light.z;
-	outv[mb + 15u] = prm.light.w;
+	outv[mb + 12u] = lit.x;
+	outv[mb + 13u] = lit.y;
+	outv[mb + 14u] = lit.z;
+	outv[mb + 15u] = lit.w;
 }
 "#;
 
@@ -393,7 +411,7 @@ fn keep_copy(dst: &mut Posed, src: &Posed) {
 
 impl HeroGpu {
 	/// `vbuf` is the marker batch's vertex buffer, which must have STORAGE usage.
-	pub(super) fn new(device: &wgpu::Device, queue: &wgpu::Queue, model: &[Vertex], vbuf: &wgpu::Buffer) -> Option<HeroGpu> {
+	pub(super) fn new(device: &wgpu::Device, queue: &GatedQueue, model: &[Vertex], vbuf: &wgpu::Buffer) -> Option<HeroGpu> {
 		let n = model.len();
 		let lim = device.limits();
 		if (2 * n * 24) as u64 > lim.max_storage_buffer_binding_size as u64 || (n * std::mem::size_of::<Vertex>()) as u64 > lim.max_storage_buffer_binding_size as u64 || n.div_ceil(64) as u32 > lim.max_compute_workgroups_per_dimension {
@@ -402,6 +420,8 @@ impl HeroGpu {
 		}
 		// Any validation error while building the pipeline (a driver that rejects the shader), or an out-of-memory error from the buffers
 		// (an 8 GB iGPU), means the CPU path, not a panic (wgpu's default handler panics on an uncaptured error).
+		// The model upload below goes through the queue: while this scope is open the GatedQueue makes its writes at once (pipe_guard.rs `InScope`).
+		let _in_scope = crate::viewer::pipe_guard::InScope::enter();
 		let scope_v = device.push_error_scope(wgpu::ErrorFilter::Validation);
 		let scope_i = device.push_error_scope(wgpu::ErrorFilter::Internal);
 		let scope_o = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
@@ -453,7 +473,7 @@ impl HeroGpu {
 	/// computes and the same number to every unmodified copy of it, so equal non-zero numbers prove equal bytes and the 1.25 MB
 	/// compare is skipped. Check mode still compares and counts the cases where the number said "equal" but the bytes were not.
 	/// Returns whether the shader may blend.
-	pub(super) fn set_poses(&mut self, queue: &wgpu::Queue, before: Option<(&Posed, u64)>, now: (&Posed, u64)) -> bool {
+	pub(super) fn set_poses(&mut self, queue: &GatedQueue, before: Option<(&Posed, u64)>, now: (&Posed, u64)) -> bool {
 		use std::sync::atomic::Ordering::Relaxed;
 		let n = self.n;
 		let same = |a: &Posed, b: &Posed| bytemuck::cast_slice::<_, u8>(&a.0) == bytemuck::cast_slice::<_, u8>(&b.0) && bytemuck::cast_slice::<_, u8>(&a.1) == bytemuck::cast_slice::<_, u8>(&b.1);
@@ -547,7 +567,7 @@ impl HeroGpu {
 		self.flip as u32 as f32
 	}
 
-	pub(super) fn queue_build(&mut self, queue: &wgpu::Queue, p: HeroParams) {
+	pub(super) fn queue_build(&mut self, queue: &GatedQueue, p: HeroParams) {
 		if self.last != Some(p) {
 			queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
 		}
@@ -561,13 +581,13 @@ impl HeroGpu {
 	}
 
 	/// Check mode: runs the pending build now and returns the vertex buffer's bytes.
-	pub(super) fn build_and_read(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, vbuf: &wgpu::Buffer) -> Vec<u8> {
+	pub(super) fn build_and_read(&mut self, device: &wgpu::Device, queue: &GatedQueue, vbuf: &wgpu::Buffer) -> Vec<u8> {
 		let size = (self.n * std::mem::size_of::<Vertex>()) as u64;
 		let stage = device.create_buffer(&wgpu::BufferDescriptor { label: Some("hero check"), size, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
 		let mut enc = device.create_command_encoder(&Default::default());
 		self.record(&mut enc);
 		enc.copy_buffer_to_buffer(vbuf, 0, &stage, 0, size);
-		queue.submit(Some(enc.finish()));
+		queue.sync().submit(Some(enc.finish()));
 		stage.slice(..).map_async(wgpu::MapMode::Read, |_| {});
 		let _w = crate::runlog::waiting("the GPU's hero build for the self-check (gpuhero)");
 		device.poll(wgpu::PollType::wait_indefinitely()).ok();

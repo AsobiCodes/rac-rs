@@ -661,7 +661,7 @@ impl VegFx {
 
 	/// Before the level pass: this frame's cell draws and the uniforms (`on`: Lighting Enhanced, a level on screen; Vegetation
 	/// not Off).
-	pub(super) fn prepare(&mut self, queue: &wgpu::Queue, scene: &Scene, on: bool, eye: [f32; 3], vp: &[[f32; 4]; 4]) {
+	pub(super) fn prepare(&mut self, queue: &GatedQueue, scene: &Scene, on: bool, eye: [f32; 3], vp: &[[f32; 4]; 4]) {
 		self.draws.clear();
 		let on = on && want() > 0;
 		if !self.plan.as_ref().is_some_and(|p| on && SHOWN.load(std::sync::atomic::Ordering::Relaxed) && p.scene_id == (scene.tfrag_set.len(), scene.radius.to_bits())) {

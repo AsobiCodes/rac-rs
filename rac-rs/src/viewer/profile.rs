@@ -89,6 +89,8 @@ pub(super) struct FrameRec {
 	pub ticks: u32,
 	pub phase: [Duration; 13],
 	pub spans: Vec<(&'static str, Duration, u32)>,
+	/// [PC] RAC_FRAME_CSV only: the render thread's own CPU cycles per span name (`thread_cycles`), to tell work from stalls.
+	pub cyc: Vec<(&'static str, u64)>,
 }
 
 impl FrameRec {
@@ -179,6 +181,8 @@ struct State {
 	/// The last frame end (for the between-frames time).
 	last_end: Option<Instant>,
 	print: bool,
+	/// `thread_cycles` at the frame start (RAC_FRAME_CSV).
+	cyc0: u64,
 }
 
 thread_local! {
@@ -198,7 +202,10 @@ pub(super) fn init_from_env() {
 /// Turns profiling on for this thread (`print`: the once-per-second stderr line).
 pub(super) fn enable(print: bool) {
 	let now = Instant::now();
-	STATE.with(|s| *s.borrow_mut() = Some(State { mark: now, start: now, window_start: now, window: Totals::default(), all: Totals::default(), cur: FrameRec::default(), last_end: None, print }));
+	STATE.with(|s| *s.borrow_mut() = Some(State { mark: now, start: now, window_start: now, window: Totals::default(), all: Totals::default(), cur: FrameRec::default(), last_end: None, print, cyc0: 0 }));
+	if super::framecsv::on() {
+		let _ = cycles_per_us(); // the one 20 ms calibration spin, before the first frame
+	}
 	ON.store(true, Ordering::Relaxed);
 }
 
@@ -218,6 +225,9 @@ pub(super) fn frame_start() {
 			let now = Instant::now();
 			s.mark = now;
 			s.start = now;
+			if super::framecsv::on() {
+				s.cyc0 = thread_cycles();
+			}
 			if let Some(e) = s.last_end.take() {
 				s.window.gap += now - e;
 				s.window.worst_gap = s.window.worst_gap.max(now - e);
@@ -255,20 +265,58 @@ pub(super) fn span_add(name: &'static str, ms: f32) {
 }
 
 /// Times a nested piece into its own bucket until the guard drops.
-pub(super) struct Span(Option<(&'static str, Instant)>);
+pub(super) struct Span(Option<(&'static str, Instant, u64)>);
 
 #[inline]
 pub(super) fn span(name: &'static str) -> Span {
-	Span(on().then(|| (name, Instant::now())))
+	Span(on().then(|| (name, Instant::now(), if super::framecsv::on() { thread_cycles() } else { 0 })))
+}
+
+/// [PC] The calling thread's CPU cycles so far (Windows `QueryThreadCycleTime`: counts only while the thread runs on a core, so a
+/// span whose wall time is far above its cycles waited or was descheduled). 0 elsewhere. Used by RAC_FRAME_CSV only.
+#[cfg(windows)]
+pub(super) fn thread_cycles() -> u64 {
+	unsafe extern "system" {
+		fn GetCurrentThread() -> *mut std::ffi::c_void;
+		fn QueryThreadCycleTime(thread: *mut std::ffi::c_void, cycles: *mut u64) -> i32;
+	}
+	let mut c = 0u64;
+	// SAFETY: the pseudo handle of the calling thread and a valid out pointer.
+	unsafe { QueryThreadCycleTime(GetCurrentThread(), &mut c) };
+	c
+}
+
+#[cfg(not(windows))]
+pub(super) fn thread_cycles() -> u64 {
+	0
+}
+
+/// Cycles per microsecond of this machine's thread cycle counter (one 20 ms spin at the first call).
+fn cycles_per_us() -> f64 {
+	static K: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+	*K.get_or_init(|| {
+		let (t, c) = (Instant::now(), thread_cycles());
+		while t.elapsed() < Duration::from_millis(20) {
+			std::hint::spin_loop();
+		}
+		((thread_cycles().wrapping_sub(c)) as f64 / (t.elapsed().as_secs_f64() * 1e6)).max(1.0)
+	})
 }
 
 impl Drop for Span {
 	fn drop(&mut self) {
-		if let Some((name, t)) = self.0 {
+		if let Some((name, t, c0)) = self.0 {
 			let d = t.elapsed();
+			let cyc = if super::framecsv::on() { thread_cycles().wrapping_sub(c0) } else { 0 };
 			STATE.with(|s| {
 				if let Some(s) = s.borrow_mut().as_mut() {
 					add_span(&mut s.cur.spans, name, d, 1);
+					if cyc != 0 {
+						match s.cur.cyc.iter_mut().find(|x| x.0 == name) {
+							Some(x) => x.1 += cyc,
+							None => s.cur.cyc.push((name, cyc)),
+						}
+					}
 				}
 			});
 		}
@@ -361,7 +409,10 @@ pub(super) fn frame_end(ticks: u32) {
 			let ph: Vec<f32> = cur.phase.iter().map(|d| d.as_secs_f32() * 1000.0).collect();
 			let mut sp: Vec<&(&'static str, Duration, u32)> = cur.spans.iter().collect();
 			sp.sort_by(|a, b| b.1.cmp(&a.1));
-			let txt: Vec<String> = sp.iter().take(64).map(|x| format!("{}={:.0}", x.0, x.1.as_secs_f32() * 1e6)).collect();
+			let k = cycles_per_us();
+			let cpu = |n: &str| cur.cyc.iter().find(|x| x.0 == n).map_or(0.0, |x| x.1 as f64 / k);
+			let mut txt: Vec<String> = vec![format!("frame={:.0}:{:.0}", cur.ms * 1000.0, thread_cycles().wrapping_sub(s.cyc0) as f64 / k)];
+			txt.extend(sp.iter().take(64).map(|x| format!("{}={:.0}:{:.0}", x.0, x.1.as_secs_f32() * 1e6, cpu(x.0))));
 			super::framecsv::slow(s.start, cur.ms, ticks, &ph, &txt.join(" "));
 		}
 		let w = &mut s.window;
@@ -381,6 +432,7 @@ pub(super) fn frame_end(ticks: u32) {
 		} else {
 			// Keep the span list's allocation for the next frame.
 			cur.spans.clear();
+			cur.cyc.clear();
 			cur.phase = [Duration::ZERO; 13];
 			s.cur = cur;
 		}

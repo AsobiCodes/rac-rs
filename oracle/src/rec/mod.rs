@@ -12,8 +12,8 @@ use crate::mem::Mem;
 pub use ee_core::rec::Fn;
 
 /// The generated sets (crates under oracle/rec, registered by ee-game), each with the level whose overlay it
-/// compiles (`None`: boot code or unknown, always probed). Each is used only when all its functions match RAM,
-/// because its functions call each other directly.
+/// compiles (`None`: boot code or unknown, always probed; `FRONT_LEVEL` and up: the front-end images). Each is used only
+/// when all its functions match RAM, because its functions call each other directly.
 static SETS: std::sync::Mutex<Vec<(Option<u32>, &'static [Fn])>> = std::sync::Mutex::new(Vec::new());
 
 /// Adds a generated set that is not tied to a level (once per set).
@@ -21,11 +21,21 @@ pub fn register(set: &'static [Fn]) {
     register_at(None, set);
 }
 
-/// Adds a generated set of level `level` (the level byte, 0x15ed84; once per set). `Table::build` probes the entries
-/// of such a set (for the table to notice it matching) only while that level is the current one, or while the set is
-/// in use.
+/// Adds a generated set of level `level` (the level byte, 0x15ed84; once per set), or of a front-end image
+/// (`FRONT_LEVEL`, `FRONT_LEVEL + 1`). `Table::build` probes the entries of such a set only while it is in use; while it
+/// does not match, it watches the one function that keeps it from matching (`Table::pending`, see there), for the
+/// current level's sets and for the front-end sets (whatever the level byte).
 pub fn register_level(level: u32, set: &'static [Fn]) {
     register_at(Some(level), set);
+}
+
+/// The first pseudo-level of the front-end code (tools/recgen_iso.py FRONT_A = 19: the boot ELF's own front end, FRONT_B = 20:
+/// frontbin, which the game loads after Quit Game). The level byte is only ever 0..18, so these sets belong to no level: the
+/// title runs with the level byte 0.
+pub const FRONT_LEVEL: u32 = 19;
+
+fn is_front(tag: Option<u32>) -> bool {
+    tag.is_some_and(|l| l >= FRONT_LEVEL)
 }
 
 fn register_at(tag: Option<u32>, set: &'static [Fn]) {
@@ -100,6 +110,13 @@ pub fn sets() -> Vec<&'static [Fn]> {
     SETS.lock().unwrap().iter().map(|&(_, s)| s).collect()
 }
 
+/// The registered sets of the boot code and of the levels, without the front-end images. rac-rs's mod code guard
+/// (omni/codeguard.rs) refuses mod writes over these; the front end was never compiled before, so a mod may still patch it
+/// (`Cpu::rec_front_written` then drops the compiled copy).
+pub fn level_sets() -> Vec<&'static [Fn]> {
+    SETS.lock().unwrap().iter().filter(|&&(t, _)| !is_front(t)).map(|&(_, s)| s).collect()
+}
+
 /// Return address of `Cpu::call` (kernel area, never executed: the call ends when the PC gets there).
 const CALL_RET: u32 = 0x10;
 
@@ -123,6 +140,14 @@ pub struct Table {
     /// RAM words at every registered function's entry when built (address, word): a FlushCache that finds one
     /// changed rebuilds the table (`Cpu::rec_flushed`).
     probe: Vec<(u32, u32)>,
+    /// For each set that does not match and that the table watches (the current level's, and the front-end images'
+    /// whatever the level byte): (entry, end, hash) of the first function that fails. The set can match only after that
+    /// function does, so `stale` is true when its hash fits RAM now.
+    pending: Vec<(u32, u32, u64)>,
+    /// The functions of the front-end sets in use: (entry, the largest end up to this entry), sorted by entry (`front_overlaps`).
+    front: Vec<(u32, u32)>,
+    /// The front-end sets in use, by registration index (`check_diff`).
+    front_sets: Vec<usize>,
     hand: std::collections::HashMap<u32, (fn(&mut Cpu) -> bool, u64)>,
     /// The same hands as a short list for `run_hand` (a linear scan of a few entries beats a SipHash lookup: ~14 ns per hand call).
     hlin: Vec<(u32, fn(&mut Cpu) -> bool, u64)>,
@@ -134,6 +159,12 @@ impl Table {
     pub fn build(mem: &Mem, level: u32) -> Table {
         // A rebuild follows every overlay load (FlushCache): the host learns which overlay is in RAM (`ver::on_rebuild`).
         crate::ver::rebuilt(&mem.ram);
+        let sets = SETS.lock().unwrap().clone();
+        Table::build_sets(mem, level, &sets)
+    }
+
+    /// `build` over the given sets (tests build over their own).
+    fn build_sets(mem: &Mem, level: u32, sets: &[(Option<u32>, &'static [Fn])]) -> Table {
         let (lo, hi) = (0x10_0000u32, 0x40_0000u32);
         let loader = u16::from_le_bytes([mem.ram[LOADER as usize], mem.ram[LOADER as usize + 1]]);
         let mut t = Table {
@@ -144,6 +175,9 @@ impl Table {
             loader,
             sets: Vec::new(),
             probe: Vec::new(),
+            pending: Vec::new(),
+            front: Vec::new(),
+            front_sets: Vec::new(),
             hand_bits: vec![0; ((hi - lo) / 4 / 64) as usize],
             hand: std::collections::HashMap::new(),
             hlin: Vec::new(),
@@ -153,22 +187,33 @@ impl Table {
             return t;
         }
         // A set is used only when all its functions match RAM (they call each other directly).
-        for (i, &(tag, set)) in SETS.lock().unwrap().iter().enumerate() {
-            let used = !set.iter().any(|f| f.end > hi || f.entry < lo || hash(mem, f.entry, f.end) != f.hash);
-            // Probe the entries of the sets in use, of the sets not tied to a level and of the current level's sets
-            // (not matching yet). A set of another level that does not match is hashed but not probed: its
-            // overlay words are live data of the loaded level and change every field.
-            if used || tag.map_or(true, |l| l == level) {
+        for (i, &(tag, set)) in sets.iter().enumerate() {
+            let bad = set.iter().find(|f| f.end > hi || f.entry < lo || hash(mem, f.entry, f.end) != f.hash);
+            let used = bad.is_none();
+            // Probe the entries of the sets in use and of the sets not tied to a level (boot code: a rebuild when it is
+            // loaded or changes). A set of a level that does not match is hashed but not probed: its address range is
+            // live data when that overlay is not in RAM (the level byte is 0 at the title, with the front end there)
+            // and changes every field. It can only start to match when the first function that fails now matches, so the
+            // current level's sets keep that one function (`pending`) and `stale` hashes it: no rebuild unless it fits.
+            // The front-end sets (tags FRONT_LEVEL and up) do the same whatever the level byte: no level byte ever names
+            // them, and a set that was found not matching gets no entry probe, so without `pending` a front end that
+            // finishes loading later (frontbin after Quit Game) would only be picked up by an unrelated rebuild.
+            if used || tag.is_none() {
                 for f in set.iter().filter(|f| f.entry >= lo && f.end <= hi) {
                     for a in [f.entry, f.entry + 4] {
                         t.probe.push((a, rd(mem, a)));
                     }
                 }
+            } else if let Some(b) = bad.filter(|b| (tag == Some(level) || is_front(tag)) && b.entry >= lo && b.end <= hi) {
+                t.pending.push((b.entry, b.end, b.hash));
             }
             if !used {
                 continue;
             }
             t.sets.push(i);
+            if is_front(tag) {
+                t.front_sets.push(i);
+            }
             for f in set.iter() {
                 t.fns.push(f.f);
                 let k = t.fns.len() as u32;
@@ -176,9 +221,18 @@ impl Table {
                     t.map[((l - lo) / 4) as usize] = k;
                 }
                 t.spans.push((f.entry, f.end));
+                if is_front(tag) {
+                    t.front.push((f.entry, f.end));
+                }
             }
         }
         t.spans.sort_unstable();
+        t.front.sort_unstable();
+        let mut reach = 0;
+        for s in &mut t.front {
+            reach = reach.max(s.1);
+            s.1 = reach;
+        }
         if !std::env::var("ORACLE_HAND").is_ok_and(|v| v == "0") {
             // ORACLE_EST_SCALE=P (percent, default 100): a hand advances the instruction count by est*P/100 (timing
             // probe; unset leaves est as is).
@@ -204,16 +258,24 @@ impl Table {
         // RAC_HS=0 leaves out only the built-in speed hands; the REGISTERED ones (PC hooks, mods) are installed anyway.
         if !std::env::var("ORACLE_HAND").is_ok_and(|v| v == "0") {
             let spans = t.spans.clone();
-            let mut all = if speed_hands_on() { crate::hs_hands::reloc_all() } else { Vec::new() };
+            // (hand, built-in speed hand): the registered ones (mod hook points, PC hooks) never bind into the front-end sets. The
+            // front end was interpreted before it was compiled and a hand is only consulted at a compiled function's entry, so
+            // no registered hand could ever run there; a hook point (OmniLoader `rac1.*`, Arsenal Mastery) whose function also
+            // exists in the front end would otherwise start to fire at the title. The built-in speed hands are exact, so they
+            // may bind anywhere.
+            let mut all: Vec<_> = if speed_hands_on() { crate::hs_hands::reloc_all().into_iter().map(|h| (h, true)).collect() } else { Vec::new() };
             for rh in reloc_hands() {
-                if !all.iter().any(|x| std::ptr::eq(*x, rh)) {
-                    all.push(rh);
+                if !all.iter().any(|x| std::ptr::eq(x.0, rh)) {
+                    all.push((rh, false));
                 }
             }
             let mut n_hs = 0u32;
-            for rh in all {
+            for (rh, builtin) in all {
                 let r = (rh.reloc)();
                 for &(e, en) in &spans {
+                    if !builtin && t.front.binary_search_by_key(&e, |x| x.0).is_ok() {
+                        continue;
+                    }
                     if e >= lo && en <= hi && en - e == r.len && r.matches(mem, e) {
                         let i = ((e - lo) / 4) as usize;
                         t.hand_bits[i >> 6] |= 1 << (i & 63);
@@ -251,14 +313,59 @@ impl Table {
         self.hand.len()
     }
 
-    /// The same sets and hands are in use (test: `ORACLE_REC_CHECK`).
-    pub fn same_use(&self, o: &Table) -> bool {
-        self.sets == o.sets && self.hand.len() == o.hand.len() && self.hand.keys().all(|k| o.hand.contains_key(k))
+    /// A front-end set is in use: the front end (title, menus, or the frontbin after Quit Game) is in RAM and runs compiled.
+    pub fn front_in_use(&self) -> bool {
+        !self.front.is_empty()
     }
 
-    /// Code at a function entry changed since the build.
+    /// Whether `addr..addr+len` overlaps a function of a front-end set in use (overlapping and nested functions included).
+    pub fn front_overlaps(&self, addr: u32, len: u32) -> bool {
+        let end = addr.saturating_add(len);
+        let k = self.front.partition_point(|&(e, _)| e < end);
+        k.checked_sub(1).and_then(|i| self.front.get(i)).is_some_and(|&(_, en)| en > addr)
+    }
+
+    /// A skipped rebuild that matters (test: `ORACLE_REC_CHECK`), or None; `o` is a full rebuild at the same level and loader.
+    /// Reported: a set or hand `o` uses that this table lacks (a pickup `stale` missed), and a front-end set this table keeps that `o`
+    /// drops (compiled front-end code over RAM that changed behind unchanged entry words; the front end ran interpreted before this
+    /// lane). Not reported: a boot or level set this table keeps although its body no longer matches RAM while its entry words do
+    /// (Quit Game from a level: heap data lands on the dead overlay's last function). The probes of a set in use are the two entry
+    /// words of every function, as in dev s137, whose table keeps such a set up to the same rebuild (Quit Game replay: the first
+    /// rebuild after the boot one is at icount 257680928 in both). Nothing calls into the dead overlay.
+    pub fn check_diff(&self, o: &Table) -> Option<String> {
+        let add_s: Vec<_> = o.sets.iter().filter(|s| !self.sets.contains(s)).collect();
+        let add_h: Vec<_> = o.hand.keys().filter(|k| !self.hand.contains_key(k)).map(|k| format!("{k:#x}")).collect();
+        let lost_f: Vec<_> = self.front_sets.iter().filter(|s| !o.sets.contains(s)).collect();
+        if add_s.is_empty() && add_h.is_empty() && lost_f.is_empty() {
+            return None;
+        }
+        Some(format!("sets it would add {add_s:?}, hands it would add {add_h:?}, front-end sets it would drop {lost_f:?}"))
+    }
+
+    /// Code at a function entry changed since the build, or a set that did not match can now (its first failing function fits).
     pub fn stale(&self, mem: &Mem) -> bool {
-        self.probe.iter().any(|&(a, w)| rd(mem, a) != w)
+        self.probe.iter().any(|&(a, w)| rd(mem, a) != w) || self.pending.iter().any(|&(e, en, h)| hash(mem, e, en) == h)
+    }
+
+    /// Diagnostics (ORACLE_REC_LOG=1): the probes that differ, with the owner of the first few.
+    fn stale_report(&self, mem: &Mem) -> String {
+        let bad: Vec<&(u32, u32)> = self.probe.iter().filter(|&&(a, w)| rd(mem, a) != w).collect();
+        let npend = self.pending.iter().filter(|&&(e, en, h)| hash(mem, e, en) == h).count();
+        let mut s = format!(" nprobe={} npending={} ndiff={} pending_fit={} used={:?} nhand={}", self.probe.len(), self.pending.len(), bad.len(), npend, self.sets, self.hand.len());
+        let sets = SETS.lock().unwrap();
+        for &&(a, w) in bad.iter().take(3) {
+            let mut own = String::from("hand/none");
+            for (i, &(tag, set)) in sets.iter().enumerate() {
+                if set.iter().any(|f| f.entry == a || f.entry + 4 == a) {
+                    own += &format!(" set{}(tag={:?},used={})", i, tag, self.sets.contains(&i));
+                }
+            }
+            if hands().iter().any(|h| h.entry == a || h.entry + 4 == a) {
+                own += " REGHAND";
+            }
+            s += &format!(" [{:#x} {:#010x}->{:#010x} {}]", a, w, rd(mem, a), own);
+        }
+        s
     }
 
     pub fn len(&self) -> usize {
@@ -421,14 +528,16 @@ impl Cpu {
                 let lv = self.mem.ram[crate::LEVEL as usize] as u32;
                 let n = Table::build(&self.mem, lv);
                 // A level or loader change not yet seen is the vblank callback's rebuild (lib.rs), same as before this change.
-                if n.level == t.level && n.loader == t.loader && !t.same_use(&n) {
-                    panic!("rec_check: skipped rebuild would change the table at icount {} level {} loader {}", self.icount, lv, loader(&self.mem));
+                if n.level == t.level && n.loader == t.loader {
+                    if let Some(d) = t.check_diff(&n) {
+                        panic!("rec_check: skipped rebuild would change the table at icount {} level {} loader {}: {}", self.icount, lv, loader(&self.mem), d);
+                    }
                 }
             }
             return;
         }
         if rebuild_log() {
-            eprintln!("rec_rebuild {} {} {}", self.icount, self.mem.ram[crate::LEVEL as usize], loader(&self.mem));
+            eprintln!("rec_rebuild {} {} {}{}", self.icount, self.mem.ram[crate::LEVEL as usize], loader(&self.mem), t.stale_report(&self.mem));
         }
         let n = Table::build(&self.mem, self.mem.ram[crate::LEVEL as usize] as u32);
         let changed = n.sets != t.sets;
@@ -436,6 +545,20 @@ impl Cpu {
         if changed && self.rec_catch {
             std::panic::resume_unwind(Box::new(crate::RecRebuilt));
         }
+    }
+
+    /// A mod wrote `len` bytes at `addr` (rac-rs omni/host.rs, after the write). When that is code of the compiled front end in use,
+    /// the table is rebuilt at once: the front end was interpreted before, so a patch there always took effect, and a compiled
+    /// copy would ignore a write that no function entry probe sees. The rebuilt table finds the patched set no longer matching RAM
+    /// and leaves it out (the interpreter runs the patched code, as before the front end was compiled); the compiled frames unwind
+    /// at the next vblank like after a level load. Anywhere else this is a range check.
+    pub fn rec_front_written(&mut self, addr: u32, len: u32) {
+        if !self.rec.as_ref().is_some_and(|t| t.front_overlaps(addr, len)) {
+            return;
+        }
+        let lv = self.mem.ram[crate::LEVEL as usize] as u32;
+        self.rec = Some(Box::new(Table::build(&self.mem, lv)));
+        self.rec_unwind = true;
     }
 
     /// At the vblank wait: an armed wait runs the frame callback (which raises the vblank) and the game goes on;
@@ -767,5 +890,167 @@ pub fn ee_core_vcallms(c: &mut ee_core::cpu::Cpu, a: u32, pc: u32) {
     }
     if let Err(e) = c.vu0_micro(a * 8) {
         c.halt(format!("{e} (VCALLMS from {pc:08x})"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hs_reloc::{Reloc, RelocHand};
+    use std::sync::OnceLock;
+
+    fn nop(_: &mut ee_core::cpu::Cpu) {}
+    const BASE: u32 = 0x30_0000;
+
+    fn fnv(words: &[u32]) -> u64 {
+        words.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &w| (h ^ w as u64).wrapping_mul(0x100_0000_01b3))
+    }
+
+    fn put(mem: &mut Mem, a: u32, words: &[u32]) {
+        for (i, w) in words.iter().enumerate() {
+            let o = a as usize + 4 * i;
+            mem.ram[o..o + 4].copy_from_slice(&w.to_le_bytes());
+        }
+    }
+
+    /// A set of functions laid out one after the other from `entry` (no disc: the code words are made up).
+    fn set_of(entry: u32, funcs: &[&[u32]]) -> &'static [Fn] {
+        let mut a = entry;
+        let v: Vec<Fn> = funcs
+            .iter()
+            .map(|w| {
+                let f = Fn { entry: a, end: a + 4 * w.len() as u32, hash: fnv(w), labels: Box::leak(vec![a].into_boxed_slice()), f: nop };
+                a = f.end;
+                f
+            })
+            .collect();
+        Box::leak(v.into_boxed_slice())
+    }
+
+    const F1: [u32; 4] = [0x1111_0001, 0x1111_0002, 0x1111_0003, 0x1111_0004];
+    const F2: [u32; 2] = [0x2222_0005, 0x2222_0006];
+    const F3: [u32; 3] = [0x3333_0007, 0x3333_0008, 0x3333_0009];
+
+    /// A front-end set (tag FRONT_LEVEL + 1) has a `pending` entry whatever the level byte, so a front end that finishes
+    /// loading later (frontbin after Quit Game) is picked up by the next FlushCache; a level set of another level has none.
+    #[test]
+    fn a_front_end_set_is_watched_whatever_the_level_byte() {
+        let mut mem = Mem::new();
+        let fe = set_of(BASE, &[&F1, &F2]);
+        let lv = set_of(BASE + 0x1000, &[&F2]);
+        let sets = [(Some(FRONT_LEVEL + 1), fe), (Some(5), lv)];
+        let t = Table::build_sets(&mem, 0, &sets);
+        assert_eq!((t.pending.len(), t.len(), t.sets.len()), (1, 0, 0), "level byte 0: only the front-end set is watched");
+        assert_eq!(Table::build_sets(&mem, 5, &sets).pending.len(), 2, "level 5: its own set too");
+        assert!(!t.stale(&mem));
+        // The first function lands: the set is stale, the rebuilt table watches the second function.
+        put(&mut mem, BASE, &F1);
+        assert!(t.stale(&mem));
+        let t = Table::build_sets(&mem, 0, &sets);
+        assert_eq!((t.pending.len(), t.sets.len()), (1, 0));
+        assert_eq!(t.pending[0].0, BASE + 16, "the second function is the one that fails now");
+        assert!(!t.stale(&mem));
+        // The last one lands: stale again, and the rebuilt table uses the set and no longer watches it.
+        put(&mut mem, BASE + 16, &F2);
+        assert!(t.stale(&mem));
+        let t = Table::build_sets(&mem, 0, &sets);
+        assert_eq!((t.pending.len(), t.sets.clone(), t.len()), (0, vec![0], 2));
+        assert!(t.front_in_use() && !t.stale(&mem));
+    }
+
+    /// A failing function outside the compiled range is never watched (that set can never match).
+    #[test]
+    fn a_failing_function_outside_the_code_range_is_not_watched() {
+        let mem = Mem::new();
+        let t = Table::build_sets(&mem, 0, &[(Some(FRONT_LEVEL), set_of(0x8_0000, &[&F1]))]);
+        assert!(t.pending.is_empty() && !t.stale(&mem));
+    }
+
+    /// `stale_report` (ORACLE_REC_LOG=1) counts the watched functions and the ones that fit now.
+    #[test]
+    fn the_stale_report_counts_the_pending_functions_that_fit() {
+        let mut mem = Mem::new();
+        let t = Table::build_sets(&mem, 0, &[(Some(FRONT_LEVEL), set_of(BASE, &[&F1, &F2]))]);
+        assert!(t.stale_report(&mem).contains("npending=1 ndiff=0 pending_fit=0"), "{}", t.stale_report(&mem));
+        put(&mut mem, BASE, &F1);
+        assert!(t.stale_report(&mem).contains("npending=1 ndiff=0 pending_fit=1"), "{}", t.stale_report(&mem));
+    }
+
+    /// `check_diff` (ORACLE_REC_CHECK): a level set kept although its last function changed behind unchanged entry words is
+    /// the entry-probe design of dev s137 and is not reported; the same for a front-end set is (compiled front-end code is new),
+    /// and so is a set a full rebuild would add.
+    #[test]
+    fn the_rebuild_check_reports_a_lost_pickup_or_a_stale_front_end_set_but_not_a_stale_level_set() {
+        let mut mem = Mem::new();
+        put(&mut mem, BASE, &F1);
+        put(&mut mem, BASE + 16, &F3);
+        let lv = set_of(BASE, &[&F1, &F3]);
+        let sets = [(Some(0), lv)];
+        let t = Table::build_sets(&mem, 0, &sets);
+        assert_eq!(t.sets, vec![0]);
+        assert!(t.check_diff(&Table::build_sets(&mem, 0, &sets)).is_none());
+        // The heap lands on the last word of the last function (three words: the probes are its first two): not seen.
+        put(&mut mem, BASE + 24, &[0xdead_beef]);
+        assert!(!t.stale(&mem), "the probes see only the entry words");
+        let n = Table::build_sets(&mem, 0, &sets);
+        assert!(n.sets.is_empty(), "a full rebuild drops the set");
+        assert!(t.check_diff(&n).is_none(), "kept like dev s137 does: not reported");
+        // The same for a front-end set is reported.
+        put(&mut mem, BASE + 24, &F3[2..]);
+        let fe = [(Some(FRONT_LEVEL), lv)];
+        let t = Table::build_sets(&mem, 0, &fe);
+        assert_eq!((t.sets.clone(), t.front_sets.clone()), (vec![0], vec![0]));
+        put(&mut mem, BASE + 24, &[0xdead_beef]);
+        assert!(!t.stale(&mem));
+        let d = t.check_diff(&Table::build_sets(&mem, 0, &fe)).expect("a stale front-end set is reported");
+        assert!(d.contains("front-end sets it would drop [0]"), "{d}");
+        // A set the table does not use but a full rebuild would: a pickup that was missed.
+        put(&mut mem, BASE + 24, &F3[2..]);
+        let d = Table::build_sets(&mem, 0, &fe);
+        let miss = Table::build_sets(&Mem::new(), 0, &fe).check_diff(&d).expect("a missed pickup is reported");
+        assert!(miss.contains("sets it would add [0]"), "{miss}");
+    }
+
+    fn reloc() -> &'static Reloc {
+        static R: OnceLock<Reloc> = OnceLock::new();
+        R.get_or_init(|| Reloc::parse(&format!("reloc test_hook entry {BASE:#x} len {:#x}\nmhash {:#x}\n", 4 * F2.len(), fnv(&F2))).unwrap())
+    }
+
+    fn hook(_: &mut Cpu) -> bool {
+        false
+    }
+
+    /// A registered relocatable hand (mod hook point, PC hook) binds into a level's set but not into a front-end set with the
+    /// same code; the front end's compiled functions answer `front_overlaps` for mod writes.
+    #[test]
+    fn registered_hands_do_not_bind_into_the_front_end() {
+        static H: RelocHand = RelocHand { name: "test_hook", reloc, est: 0, f: hook };
+        register_reloc_hand(&H);
+        let mut mem = Mem::new();
+        put(&mut mem, BASE, &F2);
+        put(&mut mem, BASE + 0x1000, &F2);
+        let sets = [(Some(0), set_of(BASE, &[&F2])), (Some(FRONT_LEVEL), set_of(BASE + 0x1000, &[&F2]))];
+        let t = Table::build_sets(&mem, 0, &sets);
+        assert_eq!((t.sets.clone(), t.hand_len()), (vec![0, 1], 1));
+        assert!(t.has_hand(BASE) && !t.has_hand(BASE + 0x1000));
+        let (a, b) = (BASE + 0x1000, BASE + 0x1000 + 4 * F2.len() as u32);
+        assert!(t.front_overlaps(a, 4) && t.front_overlaps(b - 4, 8) && t.front_overlaps(a - 2, 4));
+        assert!(!t.front_overlaps(a - 4, 4) && !t.front_overlaps(b, 4) && !t.front_overlaps(BASE, 8));
+    }
+
+    /// A mod write over compiled front-end code rebuilds the table at once; any other write leaves it alone.
+    #[test]
+    fn a_mod_write_into_the_compiled_front_end_rebuilds_the_table() {
+        let mut mem = Mem::new();
+        put(&mut mem, BASE, &F1);
+        let sets = [(Some(FRONT_LEVEL), set_of(BASE, &[&F1]))];
+        let mut c = Cpu::new(mem);
+        c.rec = Some(Box::new(Table::build_sets(&c.mem, 0, &sets)));
+        assert!(c.rec.as_ref().unwrap().front_in_use());
+        c.rec_front_written(BASE + 0x100, 4);
+        assert!(!c.rec_unwind && c.rec.as_ref().unwrap().front_in_use(), "outside the front end: nothing");
+        c.rec_front_written(BASE + 8, 4);
+        assert!(c.rec_unwind, "inside a compiled front-end function: rebuilt, compiled frames unwind");
+        assert!(!c.rec.as_ref().unwrap().front_in_use(), "the rebuilt table (the global sets) does not hold the made-up set");
     }
 }

@@ -2,7 +2,9 @@
 //! See decomp/notes/cutscenes.md.
 
 pub mod adpcm_stream;
+pub mod feed;
 pub mod pss;
 pub mod mpeg2;
 pub mod player;
 pub mod present;
+pub mod synclog;

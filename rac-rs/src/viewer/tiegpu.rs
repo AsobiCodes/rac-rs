@@ -262,7 +262,7 @@ pub(super) struct TieGpu {
 
 impl TieGpu {
 	#[allow(clippy::too_many_arguments)]
-	pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, vbuf: &wgpu::Buffer, base: &[[f32; 3]], morph: &[[f32; 3]], slots: &[ties::TieSlot], qdep: &[bool], vranges: &[[std::ops::Range<usize>; 3]], cols: &[Vec<[f32; 4]>]) -> Option<TieGpu> {
+	pub fn new(device: &wgpu::Device, queue: &GatedQueue, vbuf: &wgpu::Buffer, base: &[[f32; 3]], morph: &[[f32; 3]], slots: &[ties::TieSlot], qdep: &[bool], vranges: &[[std::ops::Range<usize>; 3]], cols: &[Vec<[f32; 4]>]) -> Option<TieGpu> {
 		if !wanted() {
 			return None;
 		}
@@ -332,7 +332,7 @@ impl TieGpu {
 	}
 
 	/// Uploads the slot colours of the instances `relight` changed since the last pass.
-	pub fn flush_caps(&mut self, queue: &wgpu::Queue, cols: &[Vec<[f32; 4]>]) {
+	pub fn flush_caps(&mut self, queue: &GatedQueue, cols: &[Vec<[f32; 4]>]) {
 		for i in std::mem::take(&mut self.caps_dirty) {
 			match pack_caps(&cols[i]) {
 				Some(p) => {
@@ -364,7 +364,7 @@ impl TieGpu {
 
 	/// Builds the task list of the GPU jobs, uploads it and runs the dispatch; in check mode also compares the written ranges with
 	/// the CPU mirror (which the caller has rewritten for every job).
-	pub fn dispatch(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, jobs: &[Job], vranges: &[[std::ops::Range<usize>; 3]], mirror: &[Vertex], check: bool) -> u64 {
+	pub fn dispatch(&mut self, device: &wgpu::Device, queue: &GatedQueue, jobs: &[Job], vranges: &[[std::ops::Range<usize>; 3]], mirror: &[Vertex], check: bool) -> u64 {
 		self.flush_pending(device, queue);
 		self.tasks_cpu.clear();
 		self.tasks_cpu.extend([0u32; 8]);
@@ -428,7 +428,7 @@ impl TieGpu {
 				at += bytes;
 			}
 		}
-		queue.submit([enc.finish()]);
+		queue.sync().submit([enc.finish()]);
 		if check {
 			let st = stats();
 			let stage = &self.stage.as_ref().unwrap().0;
@@ -467,11 +467,11 @@ impl TieGpu {
 
 	/// The last pass was never encoded into a frame (the frame was dropped): run it now, before anything else writes the tie vertices
 	/// or its task buffer is reused (`cull_ties` calls this first).
-	pub fn flush_pending(&self, device: &wgpu::Device, queue: &wgpu::Queue) {
+	pub fn flush_pending(&self, device: &wgpu::Device, queue: &GatedQueue) {
 		if self.pending.load(Ordering::Relaxed) > 0 {
 			let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("tie rewrite") });
 			self.encode(&mut enc);
-			queue.submit([enc.finish()]);
+			queue.sync().submit([enc.finish()]);
 		}
 	}
 

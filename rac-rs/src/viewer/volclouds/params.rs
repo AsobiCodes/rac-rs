@@ -131,9 +131,11 @@ pub fn look(level: usize) -> Option<Look> {
 		4 => Some(Look { cu: 0.6, sc: 0.12, ac: 0.08, ci: 0.12, cc: 0.05, tower: 0.7, top: 6000.0, mid: 7200.0, high: 10500.0, ..fair }),
 		// Pokitaru: tropical heaps building into towers, cirrus high above.
 		11 => Some(Look { cu: 0.6, sc: 0.05, ac: 0.06, ci: 0.2, cc: 0.05, tower: 0.85, base: 1300.0, top: 6200.0, mid: 7400.0, high: 10500.0, ..fair }),
-		// Rilgar at night: the retail starry sky stays whole (`sky_mask`); a few thin night clouds over it, dim, lit by the moon and
-		// the city from below, so the stars and the nebula show between them and through their thin parts.
-		5 => Some(Look { cu: 0.2, sc: 0.12, ac: 0.06, ci: 0.0, cc: 0.0, tower: 0.1, base: 1800.0, top: 3600.0, density: 0.22, haze: 20000.0, sun: 0.35, hue: 0.0, amb: 0.6, farcov: 0.04, expo: 0.45, tint: Some([0.55, 0.78, 0.85]), ..fair }),
+		// Rilgar at night: the retail starry sky stays whole (`sky_mask`); a thin, soft, murky night overcast over it in the sky's own
+		// dark teal (the Orxon recipe: a broken stratocumulus deck, feathered edges, no silver lining or rims, dim bodies lit only
+		// by the sky), so the nebula and the stars show through and the clouds belong to the sky instead of sitting on it (user
+		// 2026-10-30: the crisp grey heaps looked pasted on). Tuned with RAC_TUNE on the combined exe; the tint is unchanged.
+		5 => Some(Look { cu: 0.15, sc: 0.45, ac: 0.0, ci: 0.0, cc: 0.0, tower: 0.0, base: 1800.0, top: 3600.0, density: 0.0825, haze: 20000.0, sun: 0.1, hue: 0.0, dusk: 0.4, dusk_amb: 2.0, amb: 0.2, farcov: 0.04, expo: 0.28, tint: Some([0.55, 0.78, 0.85]), rim: 0.0, lining: 0.0, under: 0.3, feather: 1.0, ..fair }),
 		// Umbris at night: the retail painted overcast (dark olive-brown, stars between its breaks, the blue planet, the orange horizon
 		// glow) stays whole (`sky_mask`); a low, murky, low-contrast deck of the same olive-brown over it, lit only by the dim glow
 		// of the horizon, no bright edges.

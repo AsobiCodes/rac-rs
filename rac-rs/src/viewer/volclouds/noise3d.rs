@@ -265,7 +265,7 @@ impl Noise {
 
 	/// One generation step into `enc` (call once per frame) for the cumulus coverages `cov` (near, far: the weather map is remade,
 	/// in one dispatch, when they change); true once every texture is complete.
-	pub fn step(&mut self, queue: &wgpu::Queue, enc: &mut wgpu::CommandEncoder, cov: [f32; 2]) -> bool {
+	pub fn step(&mut self, queue: &crate::viewer::presenter::GatedQueue, enc: &mut wgpu::CommandEncoder, cov: [f32; 2]) -> bool {
 		let done = self.step >= STEPS;
 		if done && cov == self.cov {
 			return true;

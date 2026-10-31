@@ -9,7 +9,7 @@
 #   (a) downloads a private, pinned copy of Rust (GNU host, linker included), Python (embeddable) and the GNU assembler into .\toolchain
 #       (once; nothing is installed on the PC, no admin rights, no PATH or registry change)
 #   (b) checks that the disc image is Ratchet & Clank PAL / Europe v1.00 (SCES-50916) or USA v1.00 (SCUS-97199) (size and SHA-1)
-#   (c) generates the game code from the disc image with tools\recgen_iso.py (boot code + 19 levels) into .\oracle\rec and .\oracle\game
+#   (c) generates the game code from the disc image with tools\recgen_iso.py (boot code + 19 levels + the front end) into .\oracle\rec and .\oracle\game
 #   (c2) generates the VU microcode translations (graphics code) from the disc image with tools\vugen_iso.py into
 #        .\oracle\src\vu0_prog0.rs, vu0_prog1.rs, vu0_prog9hi.rs, skinff_ee.rs, skinff_vu.rs (the skinning fast path: tools\skinff_ee.py,
 #        tools\skinff_gen.py, run by vugen_iso.py) and .\rac-rs\src\gsfull\vu1_prog*.rs + vu1aot_gen.rs
@@ -83,7 +83,7 @@ $ExpectedSha1 = $Discs[0].Sha1
 $DiscName = $Discs[0].Name
 $GenFlags = @('--no-comments', '--compact', '--shared-slow', '--outline-mem', '--direct-mem', '--skin-ff', '--vu-guard')
 if ($NoSharedSlow) { $GenFlags = @('--no-comments', '--compact', '--outline-mem', '--direct-mem', '--skin-ff', '--vu-guard') }   # inline slow paths: bigger source and slower build, speed measured in SETUP_NOTES 7b
-$Levels = 0..18
+$Levels = 0..20
 
 function Step($text) { Write-Host ''; Write-Host "== $text" -ForegroundColor Cyan }
 function Fail($text) { Stop-LibsFetch; Write-Host "ERROR: $text" -ForegroundColor Red; Wait-RustJob; exit 1 }
@@ -2388,26 +2388,52 @@ if ($RustDirect) {
     $env:RUSTC = Join-Path $rustHome 'bin\rustc.exe'
 }
 
-function Get-Pinned($url, $file, $sha) {
-    # Downloads $url to $file and checks its SHA-256; up to 3 tries.
+$PinnedStallSec = 30     # seconds without a single byte from the server before a download counts as stalled
+
+function Save-UrlStall([string]$url, [string]$file, [int]$stallSec) {
+    # Downloads $url to $file. Throws when the server sends nothing for $stallSec seconds (connecting, or in the middle of the
+    # file), so a stalled download moves on instead of hanging; a slow download that keeps moving is left alone.
+    $req = [System.Net.WebRequest]::Create($url)
+    $req.Timeout = $stallSec * 1000
+    if ($req -is [System.Net.HttpWebRequest]) { $req.ReadWriteTimeout = $stallSec * 1000; $req.UserAgent = 'rac-rs-setup' }
+    $resp = $req.GetResponse()
+    try {
+        $in = $resp.GetResponseStream()
+        $out = [System.IO.File]::Create($file)
+        try {
+            $buf = New-Object byte[] 262144
+            while (($n = $in.Read($buf, 0, $buf.Length)) -gt 0) { $out.Write($buf, 0, $n) }
+        } finally { $out.Dispose(); $in.Dispose() }
+    } finally { $resp.Close() }
+}
+
+function Get-Pinned($urls, $file, $sha) {
+    # Downloads $file from the first of $urls that works (a list = the same file on several servers: the next one is tried when a
+    # server fails, stalls or sends a wrong file) and checks its SHA-256; up to 3 rounds over the list.
     if ((Test-Path -LiteralPath $file) -and (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -eq $sha) { return }
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $file) | Out-Null
     try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
+    $list = @($urls)
     $part = "$file.part"
     for ($try = 1; $try -le 3; $try++) {
-        try {
-            $old = $ProgressPreference; $ProgressPreference = 'SilentlyContinue'     # the progress bar makes Invoke-WebRequest very slow
-            try { Invoke-WebRequest -Uri $url -OutFile $part -UseBasicParsing } finally { $ProgressPreference = $old }
-            $h = (Get-FileHash -LiteralPath $part -Algorithm SHA256).Hash
-            if ($h -eq $sha) { Move-Item -LiteralPath $part -Destination $file -Force; return }
-            Write-Host "  download of $url has the wrong SHA-256 ($h), retrying" -ForegroundColor Yellow
-        } catch {
-            Write-Host "  download of $url failed ($($_.Exception.Message)), retrying" -ForegroundColor Yellow
+        for ($i = 0; $i -lt $list.Count; $i++) {
+            $url = $list[$i]
+            $then = $(if ($i + 1 -lt $list.Count) { 'trying ' + ([Uri]$list[$i + 1]).Host } elseif ($try -lt 3) { 'retrying' } else { 'giving up' })
+            try {
+                Save-UrlStall $url $part $PinnedStallSec
+                $h = (Get-FileHash -LiteralPath $part -Algorithm SHA256).Hash
+                if ($h -eq $sha) { Move-Item -LiteralPath $part -Destination $file -Force; return }
+                Write-Host "  download of $url has the wrong SHA-256 ($h), $then" -ForegroundColor Yellow
+            } catch {
+                $m = $(if ($_.Exception.InnerException) { $_.Exception.InnerException.Message } else { $_.Exception.Message })     # without PowerShell's "Exception calling ..." wrapper
+                try { $r = $_.Exception.InnerException.Response; if ($r) { $r.Close() } } catch { }   # an unclosed error response holds one of only 2 connections per server (PowerShell 5.1)
+                Write-Host "  download of $url failed ($m), $then" -ForegroundColor Yellow
+            }
+            Remove-Item -LiteralPath $part -Force -ErrorAction SilentlyContinue
         }
-        Remove-Item -LiteralPath $part -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds (5 * $try)
+        if ($try -lt 3) { Start-Sleep -Seconds (5 * $try) }
     }
-    Fail "could not download $url (check the internet connection, then run Setup.cmd again)"
+    Fail "could not download $($list[0]) (check the internet connection, then run Setup.cmd again)"
 }
 
 # DirectX shader compiler (DXC) for the DirectX 12 renderer option (Options -> Graphics -> Screen -> Renderer). The game looks for
@@ -2755,7 +2781,15 @@ if ($script:RustUnpack.Count -gt 0) {
 # GNU assembler. rustc makes the Windows API import libraries of some crates (windows-link and its users) with dlltool.exe,
 # which comes with Rust, and dlltool runs the GNU assembler (as.exe), which does not. as.exe and the four DLLs it needs are
 # taken from pinned MSYS2 packages (about 9 MB, SHA-256 checked) by tools\mingw_as.py into Rust's linker folder next to dlltool.
-$MsysRepo = 'https://repo.msys2.org/mingw/mingw64'
+# Official MSYS2 servers with the same files, tried in order (the SHA-256 check makes any of them safe): the main server, MSYS2's
+# redirector to a nearby mirror, then mirrors in Europe, America and Asia. One server alone left a player's setup stuck midway.
+$MsysRepos = @(
+    'https://repo.msys2.org/mingw/mingw64',
+    'https://mirror.msys2.org/mingw/mingw64',
+    'https://mirrors.dotsrc.org/msys2/mingw/mingw64',
+    'https://mirror.umd.edu/msys2/mingw/mingw64',
+    'https://mirrors.tuna.tsinghua.edu.cn/msys2/mingw/mingw64'
+)
 $AsPkgs = [ordered]@{
     'mingw-w64-x86_64-binutils-2.47-3-any.pkg.tar.zst'        = '827363748CE3320683319D860EE4FCFCDBB36BAF66AAC6DAB0EC3822BE2D4FF7'
     'mingw-w64-x86_64-gettext-runtime-1.0-1-any.pkg.tar.zst'  = 'BE68D7F260633284B910C588C6D82EE304A81C8817A686D2CD9DF83F872C27AF'
@@ -2769,7 +2803,7 @@ if (@($asFiles | Where-Object { -not (Test-Path -LiteralPath (Join-Path $rsc $_)
     Write-Host '  downloading the GNU assembler (MSYS2 binutils 2.47, about 9 MB) into toolchain\ ...'
     foreach ($e in $AsPkgs.GetEnumerator()) {
         $f = Join-Path $tcDl $e.Key
-        Get-Pinned "$MsysRepo/$($e.Key)" $f $e.Value
+        Get-Pinned @($MsysRepos | ForEach-Object { "$_/$($e.Key)" }) $f $e.Value
         $script:AsPkgFiles += $f
     }
 }

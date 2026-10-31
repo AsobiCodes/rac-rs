@@ -8,6 +8,8 @@
 //! the watchdog thread once the window is open, to check that last part.
 //! Only when stderr goes nowhere (the double-clicked game, Setup's Play): a console or a redirected stderr keeps it, so dev and test
 //! runs are unchanged. RAC_RUN_LOG=1 forces it (tests), RAC_RUN_LOG=0 turns it off. Windows (the whole log) and Linux (stderr into the file only: runlog_linux.rs); elsewhere `start` does nothing.
+//! Under Wine (Playden on the PS5, Proton) the log is on by itself even with a stderr, and also written to `<exe folder>/<exe name>_Data/output_log.txt`,
+//! the file Playden collects; the text of message boxes is a log line too. The rules (on/off, files, boxes) are in `runlog_policy.rs`, the Wine test in `wine.rs` (GitHub #49).
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
@@ -38,7 +40,15 @@ pub fn active() -> bool {
 }
 
 /// Starts the run log in `dir` when stderr goes nowhere (see the module doc). Called once on the main thread, after `launch_args`.
+/// Then the texts of the message boxes that came before it are written (or dropped when there is no log: `runlog_policy::finish`).
 pub fn start(dir: &std::path::Path) -> bool {
+	let started = begin(dir);
+	crate::runlog_policy::finish(started);
+	started
+}
+
+/// `start` without the message boxes' part.
+fn begin(dir: &std::path::Path) -> bool {
 	#[cfg(target_os = "linux")]
 	{
 		if !crate::runlog_linux::redirect(dir) {
@@ -58,15 +68,15 @@ pub fn start(dir: &std::path::Path) -> bool {
 	}
 	#[cfg(windows)]
 	{
-		let force = std::env::var("RAC_RUN_LOG").ok();
-		if force.as_deref() == Some("0") || (force.as_deref() != Some("1") && win::has_stderr()) {
+		use crate::runlog_policy as policy;
+		let wine = crate::wine::version();
+		if !policy::wanted(policy::setting(std::env::var("RAC_RUN_LOG").ok().as_deref()), win::has_stderr(), wine.is_some()) {
 			return false;
 		}
-		let _ = std::fs::create_dir_all(dir);
-		let path = dir.join("log.txt");
-		let _ = std::fs::rename(&path, dir.join("log.prev.txt"));
-		let Ok(f) = std::fs::File::create(&path) else { return false };
-		if !win::set_stderr(f) {
+		// log.txt in the player folder; under Wine also (as the real file) Playden's output_log.txt, see runlog_policy.rs.
+		let Some(log) = policy::open(&policy::slots(dir, crate::wine::data_dir())) else { return false };
+		let path = log.path;
+		if !win::set_stderr(log.file) {
 			return false;
 		}
 		LABEL.with(|l| {
@@ -76,6 +86,13 @@ pub fn start(dir: &std::path::Path) -> bool {
 		ACTIVE.store(true, Ordering::Release);
 		eprintln!("rac-rs run log: {} started {} (local time)", crate::app_name(), win::local_time());
 		eprintln!("system: {}", win::system());
+		if let Some(v) = wine {
+			eprintln!("wine: {}", if v.is_empty() { "(version unknown)" } else { v });
+			eprintln!("log files: {}", log.names.iter().map(|n| n.display().to_string()).collect::<Vec<_>>().join(", "));
+		}
+		for note in &log.notes {
+			eprintln!("runlog: {note}");
+		}
 		eprintln!("exe: {}", std::env::current_exe().map_or_else(|e| e.to_string(), |p| p.display().to_string()));
 		win::catch_crashes();
 		let _ = std::thread::Builder::new().name("runlog".into()).spawn(move || win::watch(path));

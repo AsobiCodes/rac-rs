@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.4.3
+
+- Updating from v0.4.2 keeps your saves and settings.
+- Linux: update with one click from the RAC-RS Launcher, or unpack the new release over the game folder and run `sh setup.sh` again. The new RAC-RS Launcher v0.1.4 fits the Steam Deck screen in Gaming Mode (launcher issue #1).
+- Fixed: Qwark's TV in Blackwater City showed a still green screen instead of his face (issue #29). Clank's glass dome and the blue "G" Gadgetron signs (Aridia, Hoven, Umbris) now glow closer to the PS2.
+- Fixed: the turret shots on Umbris were barely visible, and only from some angles (issue #29). Each shot is now a bright glowing streak from every angle, as on the PS2. The same rule makes the green force-field panels on Gemlik Base and the cyan bolts at Drek's Fleet a little brighter, also as on the PS2.
+- Fixed: the ring waves of the Taunter enemies on Blarg were invisible (issue #43).
+- Fixed: the thrown wrench vanished while you held L1 to look around (issue #51).
+- Fixed: the blue underwater tint and the muffled sound could stay on after Ratchet surfaced with the Modern camera (issue #39).
+- Fixed: USA disc: the sound of the movies could drift or stop, for example while the window was dragged (issue #7).
+- Fixed: Rilgar at night: the clouds looked like grey heaps pasted onto the sky. They are now a thin, soft overcast with the stars showing through, like the clouds on Orxon.
+- Speed: the title screen, the Options pages and the Gadgetron vendors need much less processor time, for weak PCs such as the Steam Deck (issue #50). The title screen's game code is now built from your disc like the rest of the game, and the menu and shop pictures are drawn faster. Not yet tried on a real Steam Deck.
+- Fixed: Wine and Proton (Linux, Steam Deck): the game could find no graphics card and wrote no log (issue #49). Not yet tried on a real Steam Deck.
+- Fixed: setup no longer hangs when a download server stops sending. After 30 seconds without data it tries again or moves on to a backup server, and on Windows the GNU assembler files can now also come from four official MSYS2 backup servers. The Linux setup uses the same 30-second rule.
+
 ## v0.4.2
 
 - Updating from v0.4.1 keeps your saves and settings.

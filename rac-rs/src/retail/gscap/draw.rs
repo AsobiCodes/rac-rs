@@ -6,6 +6,12 @@ use super::{Gs, Overlay, Vtx};
 use rayon::prelude::*;
 
 pub(super) mod pmemo;
+mod fastfill;
+mod par_misc;
+mod prof_coarse;
+use par_misc::to_rgba;
+#[cfg(test)]
+mod fastfill_tests;
 pub(super) mod gpu;
 pub(super) mod gpu_cache;
 pub(super) mod gpu_repl;
@@ -83,6 +89,9 @@ impl Gs {
         self.ras_ns = 0;
         self.draw_in(ty, vs);
         self.prof_add(&key, t0);
+        if let Some(t) = t0 {
+            self.prof_coarse(ty, vs, t.elapsed().as_nanos() as u64);
+        }
         if t0.is_some() && self.ras_ns > 0 {
             let r = self.ras_ns;
             self.prof_add_ns(&format!("RASTER {key}"), r);
@@ -636,6 +645,13 @@ impl Gs {
         let (ix0, ix1) = ((lx.ceil() as i32).max(st.sc[0]), (hx.ceil() as i32).min(st.sc[1] + 1));
         let (iy0, iy1) = ((ly.ceil() as i32).max(st.sc[2]), (hy.ceil() as i32).min(st.sc[3] + 1));
         let fst = st.at & 0x100 != 0;
+        // An untextured sprite into a PSMCT32 VRAM target runs over raw rows (fastfill.rs; the memo would cost more than it).
+        if st.at & 0x10 == 0 && !st.ov {
+            let par = self.par_ok(st, ix0, ix1 - 1, iy0, iy1 - 1);
+            if fastfill::sprite(&self.view(), st, &pb, (ix0, ix1, iy0, iy1), par) {
+                return;
+            }
+        }
         let tok = if st.zb.is_some() { pmemo::Tok::None } else { self.pm_begin(st, 6, &[a, b], (ix0, ix1, iy0, iy1)) };
         if matches!(tok, pmemo::Tok::Hit) {
             return;
@@ -668,6 +684,7 @@ impl Gs {
         // follow from them.
         let sh = Sh::new(st, &v);
         let pt = Pt::new(st, &v);
+        let vpx = fastfill::VramPx::new(st, &v);
         let q = if pb.q != 0.0 { pb.q } else { 1.0 };
         let coord = |p: i32, lo: f32, hi: f32, a: f32, b: f32, size: f32| -> (i32, f32) {
             let t = if hi != lo { (p as f32 - lo) / (hi - lo) } else { 0.0 };
@@ -709,7 +726,7 @@ impl Gs {
                 let mut c = pb.rgba;
                 View::tex_fx(&sh, &t, &mut c);
                 if let Some((c, wa)) = v.post(&sh, c, pb.f) {
-                    v.put_h(st, &pt, x, y, &c, wa, pb.z);
+                    match &vpx { Some(vp) => vp.put(&v, x, y, &c, wa), None => v.put_h(st, &pt, x, y, &c, wa, pb.z) }
                 }
             }
         };
@@ -741,6 +758,7 @@ impl Gs {
         self.tex_cache(st, &pxs, (minx, maxx, miny, maxy));
         let vw = self.view();
         let (sh, pt) = (Sh::new(st, &vw), Pt::new(st, &vw));
+        let vpx = fastfill::VramPx::new(st, &vw);
         let (fst, fog, zon) = (st.at & 0x100 != 0, st.at & 0x20 != 0, st.zb.is_some());
         let neg = area < 0.0;
         let row = |y: i32| {
@@ -786,7 +804,10 @@ impl Gs {
                 if zon {
                     q.z = mix(pxs[0].z, pxs[1].z, pxs[2].z);
                 }
-                vw.pixel_h(st, &sh, &pt, x, y, &q);
+                if x < 0 || y < 0 { continue; }
+                if let Some((c, wa)) = vw.shade_h(st, &sh, &q) {
+                    match &vpx { Some(vp) => vp.put(&vw, x, y, &c, wa), None => vw.put_h(st, &pt, x, y, &c, wa, q.z) }
+                }
             }
         };
         if par {
@@ -919,21 +940,6 @@ fn blank_rows(buf: &mut [[f32; 4]], w: u32, dirty: &Rows) {
 fn px8(p: &[f32; 4]) -> [u8; 4] {
     let n = |c: f32| ((c / 255.0).clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
     [n(p[0]), n(p[1]), n(p[2]), (p[3] * 255.0 + 0.5) as u8]
-}
-
-/// The first `rows` rows of a picture as RGBA8; the rows that are not dirty are blank and become the constant.
-fn to_rgba(pic: &[[f32; 4]], w: u32, rows: u32, dirty: &Rows) -> Vec<[u8; 4]> {
-    let w = w as usize;
-    let blank = px8(&BLANK);
-    let mut out = Vec::with_capacity(w * rows as usize);
-    for (y, r) in pic.chunks(w).take(rows as usize).enumerate() {
-        if dirty.has(y as i32) {
-            out.extend(r.iter().map(px8));
-        } else {
-            out.resize(out.len() + w, blank);
-        }
-    }
-    out
 }
 
 /// A prim's shade state (texture, TFX, fog, alpha test) decoded once from the registers, so the per-pixel code only

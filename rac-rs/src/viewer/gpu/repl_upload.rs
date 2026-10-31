@@ -271,6 +271,12 @@ impl Gpu {
 	/// Top of `draw`: swaps replacements that finished loading since the scene was built into their slots (about 16 MB actually
 	/// uploaded and 64 textures per frame), then rebuilds the bindless texture array when anything changed. Nothing without pending slots.
 	pub(in crate::viewer) fn swap_repl(&mut self) {
+		// The common frame (no pack, or nothing new finished) returns here: `ctx()` syncs the queue (gate wait + the pending writes applied on
+		// the render thread, scene_ctx.rs), which every frame took away the benefit of the deferred writes (qdefer.rs). Only a real swap needs it.
+		match self.scene.as_ref().and_then(|s| s.repl.as_ref()) {
+			Some(rs) if rs.repl.done.load(Relaxed) != rs.seen => {}
+			_ => return,
+		}
 		let ctx = self.ctx();
 		let Some(scene) = self.scene.as_mut() else { return };
 		let Some(rs) = scene.repl.as_mut() else { return };

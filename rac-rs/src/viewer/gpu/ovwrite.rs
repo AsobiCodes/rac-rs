@@ -25,6 +25,14 @@
 //!   allocation. Its write is ordered like the texture copy (after frame N-1's final submit by the mark, before the copy by the same
 //!   submit sequence), and the previous job's copy has been submitted before the worker takes the next job. The submit takes the capture's submit lock like any submit from a
 //!   thread other than the window's (`Surface::configure` fails when another thread submits meanwhile, setup.rs).
+//! - Deferred queue writes (qdefer.rs): the sync path `Gpu::set_retail_overlay` LISTS its texture write for the present thread, which applies it
+//!   before the frame's submit, i.e. after this helper's copy (the helper submits as soon as its gate mark allows). Before the deferral the sync
+//!   write was staged first and the helper's submit flushed it ahead of the copy, so the newer (helper) picture won. `write_overlay` therefore
+//!   drops the still-listed texture writes to the overlay texture before it hands a job over (`GatedQueue::cancel_texture_writes`: no gate
+//!   wait, and no scan unless a texture write is listed). A job replaces the whole texture, so nothing is lost. Invariant: an overlay write
+//!   that is NEWER than a job goes through `overlay_texture` first (`join_to`: the job's copy is submitted before the newer write is even
+//!   listed); one that is OLDER is cancelled in `write_overlay`. The two callers are exclusive per redraw today (handler/frame_render.rs,
+//!   front_mirror.rs), the rule keeps a mode switch inside one redraw safe.
 //! A panic in a job (e.g. a wgpu validation error, which the default handler turns into a panic) is caught: the job still counts
 //! as done (no wait ever hangs), `DEAD` is set and every later overlay is written on the render thread as with RAC_OV_ASYNC=0.
 //! RAC_OV_ASYNC=0 writes on the render thread as before.
@@ -138,7 +146,7 @@ fn stride_of(w: u32) -> usize {
 	((w * 4) as usize).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize)
 }
 
-fn write(queue: &wgpu::Queue, tex: &wgpu::Texture, w: u32, rows: u32, px: &[[u8; 4]]) {
+fn write(queue: &crate::viewer::presenter::GatedQueue, tex: &wgpu::Texture, w: u32, rows: u32, px: &[[u8; 4]]) {
 	queue.write_texture(
 		tex.as_image_copy(),
 		bytemuck::cast_slice(px),
@@ -164,6 +172,7 @@ impl super::Gpu {
 	/// Stages `px` into `tex` (the overlay texture) on the worker; falls back to writing here when there is no worker (or it died).
 	pub(super) fn write_overlay(&mut self, tex: &wgpu::Texture, w: u32, rows: u32, px: Vec<[u8; 4]>) {
 		if let Some(tx) = worker().filter(|_| usable(px.len(), w, rows)) {
+			self.queue.cancel_texture_writes(tex); // the older sync picture, if one is listed in this frame (module doc)
 			let seq = ISSUED.load(Ordering::Acquire) + 1;
 			let device = self.device.clone();
 			let size = (stride_of(w) * rows as usize) as u64;

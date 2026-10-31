@@ -284,7 +284,10 @@ fn own_is_dx12() -> bool {
 /// DXC the capture draws on the CPU). Never both: a DX12 player's process loads no Vulkan driver.
 fn own(want: &str) -> Option<Dev> {
     let dx12 = own_is_dx12();
-    let mut desc = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
+    // [PC] Under Wine the Vulkan adapter wgpu would hide stays visible, as for the window (wine.rs); WGPU_ALLOW_UNDERLYING_... still wins.
+    let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+    desc.flags |= crate::wine::instance_flags();
+    let mut desc = desc.with_env();
     let backends = if dx12 { wgpu::Backends::DX12 } else { wgpu::Backends::VULKAN };
     desc.backends = backends;
     if dx12 {

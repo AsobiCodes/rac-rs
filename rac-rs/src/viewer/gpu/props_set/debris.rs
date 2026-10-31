@@ -5,7 +5,7 @@ use super::*;
 /// Debris: every live piece is instanced into the per-frame debris batch (the moby pool bounds the count).
 /// `view`: the clip view's (eye, forward) for the draw-distance fade; `cull`: Culling On.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn build(scene: &mut Scene, queue: &wgpu::Queue, table: &[Option<dynlight::SlotLight>; 8], moby_dyn: &mut Vec<([f32; 3], [f32; 3])>, cull: bool, view: Option<([f32; 3], [f32; 3])>, debris: &[particles::Debris], insts: &[particles::WorldInst]) {
+pub(super) fn build(scene: &mut Scene, queue: &GatedQueue, table: &[Option<dynlight::SlotLight>; 8], moby_dyn: &mut Vec<([f32; 3], [f32; 3])>, cull: bool, view: Option<([f32; 3], [f32; 3])>, debris: &[particles::Debris], insts: &[particles::WorldInst]) {
 	let Some(batch) = &mut scene.debris else { return };
 	let (mut dv, mut by_tex): (Vec<Vertex>, BTreeMap<usize, Vec<u32>>) = (Vec::new(), BTreeMap::new());
 	let mut di = 0;

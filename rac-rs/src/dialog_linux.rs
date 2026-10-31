@@ -132,6 +132,8 @@ pub(crate) fn show_with(path: &str, desktop: &str, title: &str, text: &str, kind
 
 /// `show_with` for this process's environment.
 pub(crate) fn show(title: &str, text: &str, kind: Kind) -> bool {
+	// [PC] The text is a run log line too (runlog_policy.rs), whether or not a helper can show it.
+	crate::runlog_policy::note_message(text);
 	let path = std::env::var("PATH").unwrap_or_default();
 	let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
 	show_with(&path, &desktop, title, text, kind)

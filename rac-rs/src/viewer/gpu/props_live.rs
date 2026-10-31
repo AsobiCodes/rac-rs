@@ -31,6 +31,13 @@ pub(super) fn draws_of(draws: &[Draw], runs: &[Vec<(u32, u32, u32)>], take: impl
 	out
 }
 
+/// The draws of the live slots (`live`) `take` accepts, for the normal passes (`additive` false: the slots without the additive draw
+/// flag, `add`) or for the additive pass (`additive` true: the slots with it). The two selections of one frame share `live` and `add`,
+/// so they split the live slots: every face of a live slot is in exactly one of them (`moby_add.rs` tests).
+pub(super) fn split_draws(draws: &[Draw], runs: &[Vec<(u32, u32, u32)>], live: impl Fn(usize) -> bool, add: impl Fn(usize) -> bool, additive: bool, take: impl Fn(usize) -> bool) -> Vec<Draw> {
+	draws_of(draws, runs, |s| take(s) && live(s) && add(s) == additive)
+}
+
 /// [probe] RAC_PROPS_LIVE=0 draws every slot again (the dead ones too), for A/B runs of one exe.
 pub(super) fn enabled() -> bool {
 	static S: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -50,13 +57,15 @@ impl Scene {
 	/// The level pass's props draws: (all live, live without the late slots, the late slots' live draws); the last two only with
 	/// shadow volumes this frame (the deferred-list slots leave the opaque draws for the redraw after the volumes).
 	pub(in crate::viewer) fn props_level_draws(&self, shown: bool, volumes: bool) -> (Vec<Draw>, Vec<Draw>, Vec<Draw>) {
-		let live = if shown { self.props_live_draws(|_| true) } else { Vec::new() };
+		// [PC] #29 (tail_order.rs): the slots ranked after a blended no-Z tail leave these draws for the second round (`props_tail_draws`).
+		let early = |s: usize| !self.tail.is_late(s);
+		let live = if shown { self.props_live_draws(early) } else { Vec::new() };
 		level_stats(&self.props.draws, &live);
 		if !volumes {
 			return (live, Vec::new(), Vec::new());
 		}
 		let late = |s: usize| self.props_late.contains(&s);
-		let (main, tail) = (self.props_live_draws(|s| !late(s)), self.props_live_draws(late));
+		let (main, tail) = (self.props_live_draws(|s| !late(s) && early(s)), self.props_live_draws(|s| late(s) && early(s)));
 		(live, main, tail)
 	}
 
@@ -67,12 +76,11 @@ impl Scene {
 	}
 
 	/// The props batch's draws without its dead slots, with `take` further limiting the live slots (the bed's still / moving split).
-	/// All of the batch's draws when the records and the runs disagree in length.
+	/// All of the batch's draws when the records and the runs disagree in length. [PC] #29 (moby_add.rs): the additive slots have their
+	/// own pass (`props_add_draws`), they are not in these draws.
 	pub(in crate::viewer) fn props_live_draws(&self, take: impl Fn(usize) -> bool) -> Vec<Draw> {
-		if !enabled() || self.props_inst.len() != self.slot_runs.len() {
-			return draws_of(&self.props.draws, &self.slot_runs, take);
-		}
-		draws_of(&self.props.draws, &self.slot_runs, |s| take(s) && self.prop_live(s))
+		let every = !enabled() || self.props_inst.len() != self.slot_runs.len();
+		split_draws(&self.props.draws, &self.slot_runs, |s| every || self.prop_live(s), |s| self.tail.in_add(s), false, take)
 	}
 }
 

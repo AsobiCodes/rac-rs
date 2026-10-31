@@ -904,9 +904,9 @@ const TITLE_CODE: [(u32, u32); 11] = [
 	(0x0000_102d, !0),          // move v0, zero
 ];
 
-/// The front end runs interpreted (no recompiled code: title_boot.rs `hook_front_movies`), so the Options hook is an oracle host
-/// stub on every copy of `TITLE_CODE` in the code range, applied only while RAM still holds that function. Called when the
-/// front end starts (cold boot title in the boot ELF, frontbin after Quit Game).
+/// The Options-list function stays interpreted (the compiled front-end crates l19 / l20 leave it out: recgen_iso.py FE_DROP; hands
+/// are only consulted from compiled entries): the Options hook is an oracle host stub on every copy of `TITLE_CODE` in the code
+/// range, applied only while RAM still holds that function. Called when the front end starts (title in the boot ELF, frontbin after Quit Game).
 pub fn hook_front(m: &mut ee_oracle::Machine) {
 	if !enabled() {
 		return;

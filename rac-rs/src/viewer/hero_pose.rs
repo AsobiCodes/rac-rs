@@ -65,6 +65,55 @@ pub(super) fn hide(ps: &mut Vec<[f32; 3]>, ns: &mut Vec<[f32; 3]>, n: usize) {
 	ns.extend(std::iter::repeat([0.0, 0.0, 1.0]).take(n));
 }
 
+/// Retail hides only the hero moby while he is hidden (flag +0x34 bit 0: the first-person look with L1, shops); a wrench he threw is a moby of
+/// its own and keeps flying in view. The marker model carries the loose wrenches as extra vertex ranges, so while the hero is hidden every
+/// vertex outside `keep` (`[a, b)` ranges) collapses the way `hide` does. Returns false and leaves the pose alone when `keep` holds
+/// no vertex: nothing of the model stays visible then and the marker is dropped instead (frame_upload.rs).
+pub(super) fn collapse_outside(ps: &mut [[f32; 3]], ns: &mut [[f32; 3]], keep: &[super::loose_range::LooseRange]) -> bool {
+	if keep.iter().all(|r| r.a >= r.b) {
+		return false;
+	}
+	for (i, (p, n)) in ps.iter_mut().zip(ns.iter_mut()).enumerate() {
+		if !keep.iter().any(|r| i >= r.a && i < r.b) {
+			*p = [0.0; 3];
+			*n = [0.0, 0.0, 1.0];
+		}
+	}
+	true
+}
+
+/// BRIDGE-40 HERO-GHOST (WPN-6.6a, trail 0x1409c0): up to three translucent copies of the hero's current base pose at the lagged trail
+/// positions and yaws, appended to the marker model; hidden when absent. No layers or joint effects [C]: the retail copy's +0x60 / +0x64
+/// lists stay 0 (WPN-6.6b4, decomp/notes/weapons_framework.md). Untinted [C]: its flags 0x80a clear the CLASS-tint bit 0x10, so the hero
+/// glow tint covers the hero range only. Lit with the hero's current light, where retail freezes the spawn tick's light word [I].
+/// `base_pose` skins the hero's base pose (called only when a copy exists); `hero_n` = vertices of the hero class.
+pub(super) fn append_hero_ghosts(ps: &mut Vec<[f32; 3]>, ns: &mut Vec<[f32; 3]>, ghost_ranges: &mut [Option<(usize, usize, u8)>; 5], p: &crate::player::Player, hero_n: usize, base_pose: impl FnOnce() -> Posed) {
+	let trail = p.hero_ghosts();
+	let ghost_pose = trail.iter().any(Option::is_some).then(|| {
+		let (mut gp, mut gn) = base_pose();
+		gp.resize(hero_n, [0.0; 3]);
+		gn.resize(hero_n, [0.0, 0.0, 1.0]);
+		(gp, gn)
+	});
+	for (gi, g) in trail.into_iter().enumerate() {
+		let base = ps.len();
+		let (Some((gpos, gyaw, alpha)), Some((gp, gn))) = (g, ghost_pose.as_ref()) else {
+			hide(ps, ns, hero_n);
+			continue;
+		};
+		let (c, sn) = (p.yaw.cos(), p.yaw.sin());
+		let (gc, gs) = (gyaw.cos(), gyaw.sin());
+		let local = |v: [f32; 3], t: f32| {
+			let r = [v[0] * gc - v[1] * gs, v[0] * gs + v[1] * gc, v[2]];
+			let d = [r[0] + t * (gpos[0] - p.pos[0]), r[1] + t * (gpos[1] - p.pos[1]), r[2] + t * (gpos[2] - p.pos[2])];
+			[d[0] * c + d[1] * sn, -d[0] * sn + d[1] * c, d[2]]
+		};
+		ps.extend(gp.iter().map(|&v| local(v, 1.0)));
+		ns.extend(gn.iter().map(|&v| local(v, 0.0)));
+		ghost_ranges[2 + gi] = Some((base, ps.len(), alpha));
+	}
+}
+
 /// Skinned model-space positions and normals.
 pub(super) type Posed = (Vec<[f32; 3]>, Vec<[f32; 3]>);
 
@@ -111,6 +160,31 @@ mod back_object_tests {
 		let (mut ps, mut ns) = (Vec::new(), Vec::new());
 		append_back_object(&mut ps, &mut ns, 3, (vec![[1.0; 3]; 3], vec![[0.0; 3]; 3]), None);
 		assert!(ps.iter().all(|p| *p == [0.0; 3]) && ps.len() == 3);
+	}
+
+	#[test]
+	fn collapse_outside_keeps_only_the_loose_ranges() {
+		let mut ps: Vec<[f32; 3]> = (0..10).map(|i| [i as f32 + 1.0, 2.0, 3.0]).collect();
+		let mut ns = vec![[1.0, 0.0, 0.0]; 10];
+		let before = ps.clone();
+		let r = |a, b| super::super::loose_range::LooseRange { a, b, pos: [0.0; 3], light: None };
+		// Nothing to keep: the pose is untouched and the caller drops the marker.
+		assert!(!collapse_outside(&mut ps, &mut ns, &[]));
+		assert!(!collapse_outside(&mut ps, &mut ns, &[r(4, 4)]));
+		assert_eq!(ps, before);
+		// A thrown wrench at 3..5 and an afterimage at 7..9 stay; the hero (0..3), the gap and the tail collapse like `hide`.
+		assert!(collapse_outside(&mut ps, &mut ns, &[r(3, 5), r(7, 9)]));
+		for i in 0..10 {
+			if (3..5).contains(&i) || (7..9).contains(&i) {
+				assert_eq!((ps[i], ns[i]), (before[i], [1.0, 0.0, 0.0]), "vertex {i} kept");
+			} else {
+				assert_eq!((ps[i], ns[i]), ([0.0; 3], [0.0, 0.0, 1.0]), "vertex {i} collapsed");
+			}
+		}
+		// A range past the end is harmless.
+		let (mut ps, mut ns) = (vec![[1.0; 3]; 2], vec![[0.0; 3]; 2]);
+		assert!(collapse_outside(&mut ps, &mut ns, &[r(1, 99)]));
+		assert_eq!((ps[0], ps[1]), ([0.0; 3], [1.0; 3]));
 	}
 
 	#[test]

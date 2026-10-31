@@ -65,7 +65,7 @@ pub(in crate::viewer) fn features(adapter: &wgpu::Adapter) -> wgpu::Features {
 /// (user 2026-10-25). These pipelines write no depth, so testing first only skips texels the test drops anyway; the one change is that a
 /// hidden texel no longer leaves its mark (772 of 2.2M pixels at that view, single pixels along far plant edges).
 pub(in crate::viewer) fn level_source(src: &str, early: bool) -> String {
-	let mut s = format!("{src}{WORLD}");
+	let mut s = format!("{src}{WORLD}{}", crate::viewer::gpu::moby_add::WGSL);
 	if early && crate::devtune::f32("fog_early", 1.0) >= 0.5 {
 		for fs in STORERS {
 			s = s.replace(&format!("@fragment fn {fs}("), &format!("@fragment @early_depth_test(force) fn {fs}("));

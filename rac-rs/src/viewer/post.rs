@@ -1081,7 +1081,7 @@ impl Post {
 	#[allow(clippy::too_many_arguments)]
 	/// `fx`: the effect lights (with `glow`). `gi_level` > 0: the global illumination after `mid` (as given to `prepare`). `far`: the
 	/// world far plane the depth was drawn with (`Gpu::world_far`).
-	pub(super) fn encode(&self, queue: &wgpu::Queue, enc: &mut wgpu::CommandEncoder, cam: &Camera, aspect: f32, ao_level: u8, sun_level: u8, part_level: u8, glow: bool, fx: &super::partfx::FxLights, sun: Option<([f32; 2], f32)>, gi_level: u8, far: f32, mid: impl FnOnce(&mut wgpu::CommandEncoder, &wgpu::TextureView, Option<&wgpu::TextureView>)) {
+	pub(super) fn encode(&self, queue: &GatedQueue, enc: &mut wgpu::CommandEncoder, cam: &Camera, aspect: f32, ao_level: u8, sun_level: u8, part_level: u8, glow: bool, fx: &super::partfx::FxLights, sun: Option<([f32; 2], f32)>, gi_level: u8, far: f32, mid: impl FnOnce(&mut wgpu::CommandEncoder, &wgpu::TextureView, Option<&wgpu::TextureView>)) {
 		let Some(t) = &self.t else { return };
 		let gi = self.gi_on(t, gi_level);
 		let ao = ao_level > 0;

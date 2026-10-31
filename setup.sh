@@ -10,7 +10,7 @@
 # Steps, in order:
 #   (a)  the tools: download and unpack Rust, Python and the C linker (once; skipped when they are there)
 #   (b)  check that the .iso is Ratchet & Clank PAL/EU v1.00 (SCES-50916) or USA v1.00 (SCUS-97199)
-#   (c)  generate the game code from the disc with tools/recgen_iso.py (boot + 19 levels)
+#   (c)  generate the game code from the disc with tools/recgen_iso.py (boot + 19 levels + the front end)
 #   (c2) generate the VU microcode translations with tools/vugen_iso.py
 #   (d)  build the game with cargo (release) into ./build
 #   (e)  write generated/play.cfg, so ./build/release/rac-rs can start on its own
@@ -376,8 +376,9 @@ AnyPython() {
 # Download one URL to one file: curl, else wget, else python's urllib.
 Fetch() {
     if Have curl; then
-        # -q first: no ~/.curlrc (it can switch off the certificate check, add a proxy or an output folder)
-        curl -q -fsSL --connect-timeout 30 --max-time 3600 -o "$2" "$1"
+        # -q first: no ~/.curlrc (it can switch off the certificate check, add a proxy or an output folder).
+        # --speed-limit/--speed-time: a download that sends nothing for 30 s counts as stalled and is retried (like setup.ps1)
+        curl -q -fsSL --connect-timeout 30 --speed-limit 1 --speed-time 30 --max-time 3600 -o "$2" "$1"
     elif Have wget; then
         # GNU wget: no ~/.wgetrc, and no ~/.wget-hsts (wget writes it on every https download: a file outside this folder).
         # busybox wget has neither option nor file.
@@ -958,7 +959,7 @@ want="$sha1 $disc_size flags=$(join_words ' ' $gen_flags) gen=$gen_hash"
 have=''
 if [ -f "$stamp" ]; then have=$(trim "$(cat "$stamp")"); fi
 [ -f "$orc/game/src/lib.rs" ] || have=''
-[ -f "$orc/rec/l18_00/Cargo.toml" ] || have=''
+[ -f "$orc/rec/l20_00/Cargo.toml" ] || have=''
 
 if [ "$regenerate" -eq 1 ] || [ "$have" != "$want" ]; then
     # The generators write in place and only touch files whose content differs, so
@@ -978,7 +979,7 @@ if [ "$regenerate" -eq 1 ] || [ "$have" != "$want" ]; then
     for sh_d in "$root/$orc"/rec/sh_*; do
         [ -d "$sh_d" ] && rm -rf "$sh_d"
     done
-    # Levels 0..18, --jobs of them at a time. The levels are started in order and reaped in
+    # Levels 0..20 (19, 20: the front end), --jobs of them at a time. The levels are started in order and reaped in
     # order, so the oldest running one is always the one to reap: two counters are enough
     # for the queue, and no list is needed.
     # Each level writes its own exit status to generated/logs/level_N.exit, and that file
@@ -987,7 +988,7 @@ if [ "$regenerate" -eq 1 ] || [ "$have" != "$want" ]; then
     started=0
     reaped=0
     failed=''
-    while [ "$started" -le 18 ]; do
+    while [ "$started" -le 20 ]; do
         while [ $((started - reaped)) -ge "$jobs" ]; do
             l=$reaped
             reaped=$((reaped + 1))

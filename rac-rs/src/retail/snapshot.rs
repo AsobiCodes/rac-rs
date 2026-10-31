@@ -431,7 +431,7 @@ pub fn snap(m: &ee_oracle::Machine) -> Snap {
 				let shown = m.rd8(a + 0x31) != 0;
 				let cut = view.as_ref().filter(|_| !shown && walked && (slot as i8) >= 0).map(|v| v.culls(m, a));
 				let side_only = cut.and_then(|(culls, side)| culls.side_only().then_some(side));
-				let (rot, mirror) = basis_pose(m, a, true);
+				let (rot, mirror) = basis_pose(m, a, true); let flags = m.rd16(a + 0x34); // +0x34 read once (ovr, additive)
 				out.mobys.push(Moby {
 					addr: a,
 					class,
@@ -452,7 +452,7 @@ pub fn snap(m: &ee_oracle::Machine) -> Snap {
 					fx: joint_records(m, a),
 					alpha: m.rd8(a + 0x23),
 					draw: m.rd16(a + 0x32) as i16,
-					ovr: (m.rd16(a + 0x34) & 0x10 != 0).then(|| m.rd32(a + 0x90)),
+					ovr: (flags & 0x10 != 0).then(|| m.rd32(a + 0x90)), additive: is_additive(flags),
 				});
 			}
 		}
@@ -467,7 +467,7 @@ pub fn snap(m: &ee_oracle::Machine) -> Snap {
 	if let Some(a) = out.shop.as_ref().and_then(|sh| sh.prompt).filter(|&a| m.rd32(a + 0x24) != 0) {
 		let hdr = m.rd32(a + 0x24) & 0x01ff_ffff;
 		let base = f32::from_bits(m.rd32(hdr + 0x24));
-		let (rot, mirror) = basis_pose(m, a, true);
+		let (rot, mirror) = basis_pose(m, a, true); let flags = m.rd16(a + 0x34);
 		out.mobys.push(Moby {
 			addr: a,
 			class: m.rd16(a + 0xa6) as u32,
@@ -488,7 +488,7 @@ pub fn snap(m: &ee_oracle::Machine) -> Snap {
 			fx: joint_records(m, a),
 			alpha: m.rd8(a + 0x23),
 			draw: m.rd16(a + 0x32) as i16,
-			ovr: (m.rd16(a + 0x34) & 0x10 != 0).then(|| m.rd32(a + 0x90)),
+			ovr: (flags & 0x10 != 0).then(|| m.rd32(a + 0x90)), additive: is_additive(flags),
 		});
 	}
 	// In a scene with actors the held item belongs to the hidden placed hero, not to the scene's Ratchet.
@@ -509,19 +509,7 @@ pub fn snap(m: &ee_oracle::Machine) -> Snap {
 		.mobys
 		.iter()
 		.filter(|mb| mb.class == crate::mobies::WRENCH_CLASS && Some(mb.addr) != in_hand && (m.rd8(mb.addr + 0x20) as i8) >= 0)
-		.map(|mb| {
-			let base = f32::from_bits(m.rd32((m.rd32(mb.addr + 0x24) & 0x01ff_ffff) + 0x24));
-			LooseWrench {
-				addr: mb.addr,
-				pos: mb.pos,
-				rows: [m.rdv3(mb.addr + 0xc0), m.rdv3(mb.addr + 0xd0), m.rdv3(mb.addr + 0xe0)],
-				scale: if base != 0.0 { m.rdf(mb.addr + 0x2c) / base } else { 1.0 },
-				alpha: m.rd8(mb.addr + 0x23),
-				clock: mb.clock,
-				shown: mb.shown,
-				side_only: mb.side_only,
-			}
-		})
+		.map(|mb| loose_wrench(m, mb))
 		.collect();
 	// Modern camera: Clank, the back object and the bomb in the glove follow the drawn yaw (strafe.rs `turn_parts`, draw only).
 	if hero_addr != 0 && modcam::enabled() {
@@ -534,6 +522,22 @@ pub fn snap(m: &ee_oracle::Machine) -> Snap {
 		fx.movers = out.mobys.iter().filter(|mb| mb.shown).map(|mb| (mb.addr, mb.pos, m.rdf(mb.addr + 0xc) / 1024.0)).collect();
 	}
 	out
+}
+
+/// One loose class-71 wrench moby (thrown, or an afterimage) as the hero marker draws it: pose, scale, alpha and its own light bytes.
+fn loose_wrench(m: &ee_oracle::Machine, mb: &Moby) -> LooseWrench {
+	let base = f32::from_bits(m.rd32((m.rd32(mb.addr + 0x24) & 0x01ff_ffff) + 0x24));
+	LooseWrench {
+		addr: mb.addr,
+		pos: mb.pos,
+		rows: [m.rdv3(mb.addr + 0xc0), m.rdv3(mb.addr + 0xd0), m.rdv3(mb.addr + 0xe0)],
+		scale: if base != 0.0 { m.rdf(mb.addr + 0x2c) / base } else { 1.0 },
+		alpha: m.rd8(mb.addr + 0x23),
+		light: Some((mb.rgb, mb.light)),
+		clock: mb.clock,
+		shown: mb.shown,
+		side_only: mb.side_only,
+	}
 }
 
 /// The PC strafe pose and the render-only poses the mods asked for on the hero moby `a` (omni pose ops and follow poses; both empty without a

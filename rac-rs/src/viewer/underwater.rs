@@ -306,7 +306,7 @@ impl Under {
 	}
 
 	/// The pass: the picture in `scene` below the retail HUD, with `depth` (the level's MSAA depth, sample 0).
-	pub(super) fn run(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, enc: &mut wgpu::CommandEncoder, scene: &wgpu::TextureView, depth: &wgpu::TextureView, f: &UnderFrame, sky: &waterfx::SkyMap) {
+	pub(super) fn run(&mut self, device: &wgpu::Device, queue: &GatedQueue, enc: &mut wgpu::CommandEncoder, scene: &wgpu::TextureView, depth: &wgpu::TextureView, f: &UnderFrame, sky: &waterfx::SkyMap) {
 		if super::pipe_guard::off(super::pipe_guard::Effect::Underwater) {
 			return; // [PC] pipe_guard.rs: the driver refused the underwater shader
 		}

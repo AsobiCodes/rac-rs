@@ -76,6 +76,8 @@ pub use foes::{BIRDBOT, BIRDBOT_FIRE, BIRDBOT_HIT_JOINTS};
 /// AUD-11e: `Event::SoundLoop` owner ids from here up are the hero's eight loop slots (0x141568), not props.
 pub const HERO_LOOP_OWNER: usize = usize::MAX - 8;
 pub use visibomb::VISIBOMB_LOOP_OWNER;
+/// [PC] `Prop::order` bit: the moby is on retail's deferred draw list (drawn after the whole main moby walk).
+pub const DEFERRED_ORDER: u32 = 1 << 31;
 pub const BOLT: u32 = 13; // 14, 15, 16: the 5, 20 and 50 bolt pieces
 const BOLT_CRATE: u32 = 500;
 const NANOTECH_CRATE: u32 = 501;
@@ -185,7 +187,15 @@ pub struct Prop {
 	pub rot: V3,
 	/// Retail mode: the draw basis is mirrored in model Y (moby +0x34 bit 0x8000, retail.rs `basis_pose`); `rot` is the plain rotation.
 	pub mirror: bool,
+	/// [PC] Retail mode: the moby's draw position this tick (`retail/props_sync.rs`): its rank in retail's moby table walk, plus
+	/// `DEFERRED_ORDER` when it is on the deferred list, which retail draws after that whole walk. The pool slot order is per
+	/// class and says nothing about it. `viewer/gpu/tail_order.rs` reads it.
+	pub order: u32,
 	pub shown: bool,
+	/// [PC] Retail mode: retail itself drew the moby this tick (`retail::Moby::shown`). `shown` is also set for the mobys only rac-rs's
+	/// widescreen window keeps (retail culled them at its 4:3 side plane); those are not in retail's draw stream, so they are never
+	/// the point other mobys are ordered against (`viewer/gpu/tail_order.rs`).
+	pub retail_drawn: bool,
 	/// [PC] Retail mode: not shown only because retail's draw culled it for the game camera (`retail::Moby::view_culled`): it still
 	/// casts its sun shadow, and Culling Off draws it (viewer/gpu/props_set.rs). With Culling Off also when past its draw distance.
 	pub cast: bool,
@@ -207,7 +217,7 @@ pub struct Prop {
 impl Prop {
 	/// An inert prop of a retail-mode pool (retail.rs moves and shows it from the interpreter's moby table).
 	pub fn retail(class_id: u32, level: i32) -> Prop {
-		Prop { class_id, pos: [0.0; 3], rot: [0.0; 3], mirror: false, shown: false, cast: false, anim: crate::anim::PropAnim::new(0), scale: 1.0, tint: None, light: None, index: None, sched: sched::spawned(level, class_id),  kind: Kind::Retail { alpha: 0x80, ovr: None } }
+		Prop { class_id, pos: [0.0; 3], rot: [0.0; 3], mirror: false, order: 0, shown: false, retail_drawn: false, cast: false, anim: crate::anim::PropAnim::new(0), scale: 1.0, tint: None, light: None, index: None, sched: sched::spawned(level, class_id),  kind: Kind::Retail { alpha: 0x80, ovr: None, add: false } }
 	}
 	pub fn is_retail(&self) -> bool {
 		self.index.is_none() && matches!(self.kind, Kind::Retail { .. })
@@ -215,10 +225,19 @@ impl Prop {
 	/// Retail mode: the moby's draw alpha +0x23, its +0x90 tail colour (None while flag +0x34 & 0x10 is clear) and its draw
 	/// distance +0x32 (the header alpha is min(fade, 0x80) * +0x23 >> 7 with the fade from +0x32, moby_format.md MOBY-FADE). [C]
 	pub fn set_retail_draw(&mut self, a: u8, o: Option<u32>, draw: i16) {
-		if let Kind::Retail { alpha, ovr } = &mut self.kind {
+		if let Kind::Retail { alpha, ovr, .. } = &mut self.kind {
 			(*alpha, *ovr) = (a, o);
 			self.sched.draw = draw;
 		}
+	}
+	/// Retail mode: the moby's flag +0x34 bit 0x200 (`retail::is_additive`): drawn with ALPHA_1 0x48, additive (viewer/gpu/moby_add.rs). [C]
+	pub fn set_retail_additive(&mut self, on: bool) {
+		if let Kind::Retail { add, .. } = &mut self.kind {
+			*add = on;
+		}
+	}
+	pub fn is_additive(&self) -> bool {
+		matches!(self.kind, Kind::Retail { add: true, .. })
 	}
 	/// Retail mode: Some(tail colour) for a retail prop (channel = byte / 128, R = low byte; moby_format.md CLASS-tint), None
 	/// for a rac-rs prop. The inner None = no colour override (lit as the other packets).
@@ -295,7 +314,7 @@ enum Kind {
 	/// REN-13: skeletal scenery with only the generic seq-0 clock; no position, collision or state.
 	Scenery,
 	/// A retail-mode pool prop (retail.rs moves it from the interpreter's moby table): draw alpha +0x23, colour +0x90.
-	Retail { alpha: u8, ovr: Option<u32> },
+	Retail { alpha: u8, ovr: Option<u32>, add: bool },
 }
 
 

@@ -74,7 +74,7 @@ mod interp;
 mod profile; mod passtime; mod gfxq; pub(crate) mod framecsv;
 mod pace;
 mod test_clock;
-mod presenter;
+mod presenter; mod qdefer; use presenter::GatedQueue;
 mod fardraw;
 
 mod startup;
@@ -82,7 +82,7 @@ mod app_state;
 mod projection;
 mod targets;
 mod maths;
-mod hero_pose;
+mod hero_pose; mod loose_range;
 mod pause_hero;
 mod lights;
 mod sfx;
@@ -169,14 +169,14 @@ struct Uniforms {
 	sun_bias: [f32; 4],
 	sun_texel: [f32; 4],
 	/// [PC] Dynamic shadows Low / Medium / High (sunshadow.rs `Quality`): PCF kernel side, map uv scale, cascades read.
-	sun_q: [f32; 4],
+	sun_q: [f32; 4], keep_tail: [f32; 4], // [PC] #29: keep_tail.x = 1 in the water bed / mirror passes (mirror.rs; no blend pass there): a moby's tail texels draw opaque as before
 }
 
 /// Mobies lit by a dynamic light in one frame (the rest take none).
 const MAX_DYN: usize = 128;
 
 const SHADER: &str = concat!(r#"
-struct U { view_proj: mat4x4<f32>, sky_view_proj: mat4x4<f32>, lights: array<array<vec4<f32>, 4>, 16>, ambient: array<vec4<f32>, 4>, fog_colour: vec4<f32>, fog: vec4<f32>, eye: vec4<f32>, points: array<vec4<f32>, 16>, dynl: array<vec4<f32>, 256>, sun_vp: array<mat4x4<f32>, 3>, sun: vec4<f32>, sun_bias: vec4<f32>, sun_texel: vec4<f32>, sun_q: vec4<f32> };
+struct U { view_proj: mat4x4<f32>, sky_view_proj: mat4x4<f32>, lights: array<array<vec4<f32>, 4>, 16>, ambient: array<vec4<f32>, 4>, fog_colour: vec4<f32>, fog: vec4<f32>, eye: vec4<f32>, points: array<vec4<f32>, 16>, dynl: array<vec4<f32>, 256>, sun_vp: array<mat4x4<f32>, 3>, sun: vec4<f32>, sun_bias: vec4<f32>, sun_texel: vec4<f32>, sun_q: vec4<f32>, keep_tail: vec4<f32> };
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var sun_map: texture_depth_2d_array;
 @group(0) @binding(2) var sun_cmp: sampler_comparison;
@@ -478,8 +478,8 @@ fn ice_look(i: VOut, rgb: vec3<f32>) -> vec3<f32> {
 	var c = world_texel(i);
 	if (i.c.a >= 0.0 && i.kmx.y >= 0.0) { c = textureSampleLevel(tex, samp, i.uv, gs_level(i)); }
 	if (c.a < 0.25) { discard; }
-	// Lit moby texels below alpha 0x80 are blended in the moby pass (fs_moby_a / fs_moby_b), not drawn opaque here.
-	if (i.c.a >= 0.0 && floor(c.a * 128.0 + 0.5) < 128.0) { discard; }
+	// Lit moby texels and a moby's tinted-tail texels (`moby_tail`) below alpha 0x80 are blended in the moby pass (fs_moby_a / fs_moby_b), not drawn opaque here (the water bed and mirror passes have no blend pass: u.keep_tail.x = 1 keeps the tail texels opaque there, as before #29).
+	if ((i.c.a >= 0.0 || (moby_tail(i) && u.keep_tail.x <= 0.0)) && floor(c.a * 128.0 + 0.5) < 128.0) { discard; }
 	if (i.c.a >= 0.0 && i.c.a - floor(i.c.a + 0.5) > 0.0005) { discard; }
 	// Alpha says how to light it: -2 baked world colour in rgb (terrain, ties, shrubs:
 	// vertex_colours.md), -1 other world geometry (spawned-moby ambient, light 0), >= 0 a moby lit by
@@ -524,7 +524,7 @@ fn shrub_bb_texel(i: VOut) -> vec4<f32> {
 	return textureSampleLevel(tex, samp, i.uv, gs_level(i));
 }
 
-"#, include_str!("viewer/texfilter.wgsl"), r#"
+"#, include_str!("viewer/texfilter.wgsl"), include_str!("viewer/moby_tail.wgsl"), r#"
 
 // Terrain fragment: the baked world colour of `fs` with the level-chosen texel (GS LOD = log2(32 vz) + K; REN-TEX-RESIDENCY).
 // GS ALPHA 0x44 (Cs - Cd) * As + Cd with As = the texel alpha (vertex alpha 128) and TEST 0x5360b (ATE GEQUAL AREF 0x60, AFAIL
@@ -658,7 +658,7 @@ fn moby_rgb(i: VOut, c: vec4<f32>) -> vec3<f32> {
 	var rgb = c.rgb * i.c.rgb * sun_lit(i);
 	if (i.c.a < -1.5) {
 		// Tinted tail packet: constant unlit colour, same alpha as the lit packets.
-		rgb = c.rgb * min(i.c.rgb, vec3<f32>(255.0 / 128.0));
+		rgb = c.rgb * sun_baked(min(i.c.rgb, vec3<f32>(255.0 / 128.0)), i.w); // [PC] Enhanced sun shadow, as the opaque tail texels of `fs`
 	}
 	let d = distance(i.w, u.eye.xyz);
 	let f = clamp(u.fog.z + (d - u.fog.x) * (u.fog.w - u.fog.z) / max(u.fog.y - u.fog.x, 0.001), min(u.fog.z, u.fog.w), 255.0) / 255.0;
@@ -667,7 +667,7 @@ fn moby_rgb(i: VOut, c: vec4<f32>) -> vec3<f32> {
 
 @fragment fn fs_moby_a(i: VOut) -> @location(0) vec4<f32> {
 	let ta = floor(moby_texel(i).a * 128.0 + 0.5);
-	if (moby_alpha(i) == 128.0 && (ta >= 128.0 || i.c.a < 0.0)) { discard; }
+	if (moby_alpha(i) == 128.0 && (ta >= 128.0 || (i.c.a < 0.0 && !moby_tail(i)))) { discard; }
 	let c = moby_texel(i);
 	let ra = moby_a(i, c);
 	if (ra * 128.0 < 96.0) { discard; }
@@ -676,7 +676,7 @@ fn moby_rgb(i: VOut, c: vec4<f32>) -> vec3<f32> {
 
 @fragment fn fs_moby_b(i: VOut) -> @location(0) vec4<f32> {
 	let ta = floor(moby_texel(i).a * 128.0 + 0.5);
-	if (moby_alpha(i) == 128.0 && (ta >= 128.0 || i.c.a < 0.0)) { discard; }
+	if (moby_alpha(i) == 128.0 && (ta >= 128.0 || (i.c.a < 0.0 && !moby_tail(i)))) { discard; }
 	let c = moby_texel(i);
 	let ra = moby_a(i, c);
 	if (ra * 128.0 >= 96.0) { discard; }
@@ -1094,7 +1094,7 @@ struct Scene {
 	props_order: Vec<usize>,
 	/// [PC] Each prop class's faces as the props batch groups them (`Gpu::append_props`).
 	class_faces: HashMap<u32, gpu::ClassFaces>,
-	props_late: Vec<usize>,
+	props_late: Vec<usize>, tail: gpu::tail_order::TailOrder, // [PC] #29: the mobys drawn after the blended no-Z texels (gpu/tail_order.rs)
 	/// NOV-5.9c: per props slot the faces the CPU clipper may take (`clip::PropFace`), the (slot, face) pairs currently
 	/// masked out of `props.ibuf`, the growable overlay batch of the clipped polygons (capacity in vertices, indices),
 	/// this frame's view basis (None = no clipping) and the polygons queued for the next flush.
@@ -1311,7 +1311,7 @@ struct Gpu {
 	/// [PC] Dynamic shadows (sunshadow.rs): the cascade maps, bound in the level's group 0 with their compare sampler.
 	sun: sunshadow::SunShadow,
 	/// Retail mode: a ship fight is on (`shipmouse::in_ship_fight`): space, no sun to cast from (handler.rs sets it).
-	ship_fight: bool, hud_place: Option<handler::hud_place::Place>, retail_ov_guard: handler::hud_hold::Held, reshade: gpu::reshade::Slot, rscale: gpu::rscale::RScale, // [PC] ReShade add-on (gpu/reshade.rs); render scale state (gpu/rscale.rs)
+	ship_fight: bool, marker_loose: [Option<loose_range::LooseRange>; loose_range::MAX], hud_place: Option<handler::hud_place::Place>, retail_ov_guard: handler::hud_hold::Held, reshade: gpu::reshade::Slot, rscale: gpu::rscale::RScale, // [PC] ReShade add-on (gpu/reshade.rs); render scale state (gpu/rscale.rs)
 	/// The loaded level (handler.rs; [PC] Water Enhanced gives Gaspar's lava its own look, waterfx.rs `LAVA_SLOT`).
 	level: usize,
 	/// SCN-3: the lighting word the scene actors copied from the hero when the scene started (FUN_00244e58); None outside a scene.

@@ -134,7 +134,7 @@ impl Gpu {
 				}
 				{
 					let _c = super::profile::span("ap_submit");
-					queue.submit(enc.take().map(|e| e.finish()));
+					queue.sync().submit(enc.take().map(|e| e.finish()));
 				}
 				for (dst, r) in &plan.chunks {
 					queue.write_buffer(&ibuf, *dst as u64 * 4, bytemuck::cast_slice(&plan.fresh[r.clone()]));
@@ -155,7 +155,7 @@ impl Gpu {
 				let _s = super::profile::span("ap_index");
 				let (draws, slot_runs, indices) = prop_layout(&scene.class_faces, &scene.tex_slots, &all_classes, &all_ranges, order);
 				if let Some(e) = enc.take() {
-					queue.submit(Some(e.finish()));
+					queue.sync().submit(Some(e.finish()));
 				}
 				queue.write_buffer(&scene.props.ibuf, 0, bytemuck::cast_slice(&indices));
 				scene.props.draws = draws;

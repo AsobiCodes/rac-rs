@@ -35,6 +35,22 @@ struct Planes {
 	bind: wgpu::BindGroup,
 }
 
+/// The queue writes the movie presenter makes (a wgpu `Queue`, or the viewer's `GatedQueue`, which defers them to the present thread).
+pub trait QueueWrites {
+	fn write_buffer(&self, buffer: &wgpu::Buffer, offset: u64, data: &[u8]);
+	fn write_texture(&self, texture: wgpu::TexelCopyTextureInfo<'_>, data: &[u8], layout: wgpu::TexelCopyBufferLayout, size: wgpu::Extent3d);
+}
+
+impl QueueWrites for wgpu::Queue {
+	fn write_buffer(&self, buffer: &wgpu::Buffer, offset: u64, data: &[u8]) {
+		wgpu::Queue::write_buffer(self, buffer, offset, data);
+	}
+
+	fn write_texture(&self, texture: wgpu::TexelCopyTextureInfo<'_>, data: &[u8], layout: wgpu::TexelCopyBufferLayout, size: wgpu::Extent3d) {
+		wgpu::Queue::write_texture(self, texture, data, layout, size);
+	}
+}
+
 pub struct Presenter {
 	pipeline: wgpu::RenderPipeline,
 	layout: wgpu::BindGroupLayout,
@@ -100,7 +116,7 @@ impl Presenter {
 	/// Uploads a decoded frame and shows it from the next `draw` on. A decoded frame is a playing movie's picture, never a
 	/// held one, so it shows untinted: a movie-end fade tint left from the movie before (a second movie right after the
 	/// first, Veldin's ending) does not darken it.
-	pub fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, f: &Frame) {
+	pub fn upload(&mut self, device: &wgpu::Device, queue: &impl QueueWrites, f: &Frame) {
 		self.tint = [0.0, 0.0, 0.0, 1.0];
 		let (w, h) = (f.width, f.height);
 		if self.planes.as_ref().is_none_or(|p| p.size != (w, h)) {
@@ -154,7 +170,7 @@ impl Presenter {
 
 	/// Draws black plus the picture into `view` (window size `sw` x `sh`); no-op when inactive or
 	/// before the first frame.
-	pub fn draw(&self, queue: &wgpu::Queue, enc: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, sw: f32, sh: f32) {
+	pub fn draw(&self, queue: &impl QueueWrites, enc: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, sw: f32, sh: f32) {
 		if self.black {
 			drop(enc.begin_render_pass(&wgpu::RenderPassDescriptor {
 				label: Some("movie black"),
