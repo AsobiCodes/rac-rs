@@ -1,0 +1,70 @@
+{
+  "format": 2,
+  "id": "bolt-multiplier",
+  "name": "Bolt Multiplier",
+  "version": "0.2.1",
+  "author": "5kft",
+  "description": "Linear kill-based bolt multiplier with compact native-style HUD and simple gameplay settings.",
+  "license": "MIT",
+  "type": "script",
+  "api": "1.3",
+  "scripts": [
+    "main.luau"
+  ],
+  "games": {
+    "rac1": [
+      "pal",
+      "ntsc"
+    ]
+  },
+  "hooks": [
+    "rac1.moby.record_death",
+    "rac1.player.take_damage"
+  ],
+  "settings": [
+    {
+      "key": "kill_threshold",
+      "name": "Kills per multiplier level",
+      "type": "int",
+      "default": 5,
+      "min": 1,
+      "max": 100
+    },
+    {
+      "key": "max_multiplier",
+      "name": "Maximum multiplier",
+      "type": "int",
+      "default": 20,
+      "min": 1,
+      "max": 30
+    },
+    {
+      "key": "multiply_bolts",
+      "name": "Enable bolt multiplier",
+      "type": "bool",
+      "default": true
+    },
+    {
+      "key": "max_award",
+      "name": "Largest eligible bolt gain per tick",
+      "type": "int",
+      "default": 250,
+      "min": 1,
+      "max": 10000
+    },
+    {
+      "key": "show_hud",
+      "name": "Show multiplier HUD",
+      "type": "bool",
+      "default": true
+    },
+    {
+      "key": "hud_duration_ticks",
+      "name": "HUD display duration (ticks)",
+      "type": "int",
+      "default": 100,
+      "min": 30,
+      "max": 600
+    }
+  ]
+}
