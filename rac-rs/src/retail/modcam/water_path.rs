@@ -127,7 +127,54 @@ pub(super) fn walk(c: &mut Cpu, lv: &Lv, rec: u32, prev: [f32; 3], e0: [f32; 3],
 	if let Some(probe) = (!pts.is_empty()).then(|| probe_addr(c, lv)).flatten() {
 		run(c, lv, probe, &pts, (prev, new));
 	}
+	if new != e0 {
+		settle(c, lv, new);
+	}
 	regs.restore(c);
+}
+
+/// Hero state group word and the z of the water face he is in (valid in groups 0x11 under water / 0x12 at the surface;
+/// fx_queue.rs reads the same words for the PC underwater look).
+const HERO_GROUP_WORD: u32 = 0x1413dc;
+const HERO_WATER_Z: u32 = 0x13f640;
+/// Retail's band: the probe sets the flag for an eye below face + 0.04 and clears it above.
+const FACE_BAND: f32 = 0.04;
+/// The last water face the hero was in (level, z): a flag left at 1 after he climbed out is cleared against it.
+static LAST_FACE: Mutex<Option<(u32, f32)>> = Mutex::new(None);
+
+/// [PC] The flag the Modern eye should have, from the water the hero is in (None = no answer: leave retail's value).
+fn want_flag(eye_z: f32, face: Option<f32>, flag: bool) -> Option<bool> {
+	let face = face.filter(|z| z.is_finite())?;
+	let under = eye_z < face + FACE_BAND;
+	// out of the water (only the last face is known): clear a stuck 1 above it, never set the flag from it
+	Some(under).filter(|&u| u != flag)
+}
+
+/// [PC] Retail's flag only changes when its probe finds a water face within 0.75 m of the eye. The Modern eye can enter or
+/// leave the water sideways (orbiting, a wall pushing it in, the hero swimming off under it), where no band crossing is probed:
+/// no fog swap, tint and muffle with the eye under water, or all three stuck on with the eye in the air (the walk above only
+/// covers fast vertical moves). After each Modern pose the flag is set from the eye against the face the hero swims in, with
+/// retail's own band; out of the water a stuck 1 is cleared against the last face, a 0 is never set from it.
+fn settle(c: &mut Cpu, lv: &Lv, eye: [f32; 3]) {
+	let flag = lv.water_flag();
+	let on = c.mem.rd32(flag) & 0xff != 0;
+	let in_water = matches!(c.mem.rd32(HERO_GROUP_WORD), 0x11 | 0x12);
+	let Ok(mut last) = LAST_FACE.lock() else { return };
+	let face = if in_water {
+		let z = f32::from_bits(c.mem.rd32(HERO_WATER_Z));
+		*last = z.is_finite().then_some((lv.level, z));
+		Some(z)
+	} else {
+		last.filter(|&(l, _)| l == lv.level).map(|(_, z)| z).filter(|_| on)
+	};
+	let want = match want_flag(eye[2], face, on) {
+		Some(w) if in_water || !w => w,
+		_ => return,
+	};
+	c.mem.wr32(flag, want as u32);
+	if path_log() {
+		eprintln!("UNDER_SETTLE level {} eye_z {} face {:?} in_water {in_water} flag {} -> {}", lv.level, eye[2], face, on as u32, want as u32);
+	}
 }
 
 /// Bytes of seg_collide's moby collision-mesh cache: 8 round-robin slots, each a key (8 bytes: the actor's +0xa8 stamp and a flag) in the
@@ -281,6 +328,18 @@ fn run(c: &mut Cpu, lv: &Lv, probe: u32, pts: &[[f32; 3]], ends: ([f32; 3], [f32
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn the_eye_against_the_face_decides_the_flag() {
+		// eye under the face, flag 0: set; eye in the air, flag 1: clear; already right or no face: leave it
+		assert_eq!(want_flag(41.0, Some(42.0), false), Some(true));
+		assert_eq!(want_flag(43.0, Some(42.0), true), Some(false));
+		assert_eq!(want_flag(42.03, Some(42.0), false), Some(true));
+		assert_eq!(want_flag(42.05, Some(42.0), false), None);
+		assert_eq!(want_flag(41.0, Some(42.0), true), None);
+		assert_eq!(want_flag(41.0, None, false), None);
+		assert_eq!(want_flag(41.0, Some(f32::NAN), false), None);
+	}
 
 	fn gap(a: [f32; 3], b: [f32; 3]) -> f32 {
 		((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
