@@ -66,6 +66,8 @@ impl Worker {
 			}
 			// The title's Options -> Graphics row (pcext.rs `hook_front`).
 			pcext::hook_front(&mut m);
+			// And the main menu's Quit Game row (titlequit.rs).
+			crate::retail::titlequit::hook_front(&mut m.cpu.mem);
 			(pooled, transit, front_n, front_ns) = (u32::MAX, true, 0, 0);
 			eprintln!("retail: front end running at field {field} (late GS pipe {late_gs})");
 		} else if front && !in_front {

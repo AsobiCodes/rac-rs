@@ -258,6 +258,11 @@ impl ApplicationHandler for App {
 				}
 			}
 			WindowEvent::RedrawRequested => {
+				// [PC] Quit Game on the title's main menu (retail/titlequit.rs): closes like the window's close button.
+				if crate::retail::titlequit::requested() {
+					el.exit();
+					return;
+				}
 				if let Some(g) = &mut self.gpu {
 					g.rscale_sync(); // [PC] a changed render scale (menu / env) applies before anything reads the frame size
 				}
