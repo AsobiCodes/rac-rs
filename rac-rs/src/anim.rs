@@ -1808,6 +1808,19 @@ pub const HEAD_COPY_433_EXTRA: usize = 6;
 /// The other head classes (1289, 1290): item joints 1, 2 = hero joints 8, 10 (list 0x15f688).
 pub const HEAD_COPY: [usize; 3] = [7, 8, 10];
 
+/// [PC] The pose-copy list of a worn head item class (433 O2 mask, 1289 / 1290 helmets; view mode 0, inventory `ITEM_VIEW`) and
+/// its extra identity joints: like the gloves (`hand_copy_pose`), retail poses it from the hero's live local joints every tick,
+/// so its own clock never shows. Without it the drawn helmet kept its bind pose on the neck joint 7 while the head (joints 8,
+/// 10) turned and bobbed under it: it sat askew in the Suck Cannon stance and bobbed off the head walking (user report
+/// 2026-11-01; `--gsfull` drew it right).
+pub fn head_copy_list(class: u32) -> Option<(&'static [usize], usize)> {
+	match class {
+		433 => Some((&HEAD_COPY_433, HEAD_COPY_433_EXTRA)),
+		1289 | 1290 => Some((&HEAD_COPY, 0)),
+		_ => None,
+	}
+}
+
 /// FUN_00208e10: the joint frame an item skeleton takes from the hero's live local joints. Joint 0 is the identity;
 /// item joint k (>= 1) copies hero joint `list[k]` (`list[0]` is skipped) with the rotation quantised to 1/32768
 /// (truncated, clamped), a scale record only when the scale quantised to 1/4096 differs from (1, 1, 1), and a

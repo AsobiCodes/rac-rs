@@ -14,6 +14,9 @@ pub struct Moby {
 	pub mirror: bool,
 	/// Scale over the class header's base scale.
 	pub scale: f32,
+	/// [PC] Per-axis stretch of the draw basis on top of `scale` (`basis_axes`): [1; 3] unless retail's rows have unequal lengths, as
+	/// for a head item on the squashed and stretched head joint.
+	pub axes: [f32; 3],
 	pub shown: bool,
 	/// Retail culled it only at the 4:3 side plane (`DrawView::culls`): rac-rs shows it when its wider plane keeps it.
 	pub side_only: Option<SideOnly>,
@@ -398,6 +401,23 @@ pub(super) fn basis_pose(m: &ee_oracle::Machine, a: u32, unmirror: bool) -> ([f3
 		r1 = r1.map(|x| -x);
 	}
 	(euler_from_rows(r0, r1, r2), mirror)
+}
+
+/// [PC] The per-axis stretch of moby `a`'s draw basis rows `+0xc0..+0xef` (model axis k = row k), over their geometric mean: the uniform
+/// part is `scale` (+0x2c). A head item (Pilot's Helmet 1290 and the other hero item table head items) is drawn on the hero's head
+/// joint, which the animations squash and stretch per axis (joint 7: 0.91..1.09 walking, 0.97..1.05 holding the Suck Cannon,
+/// runs/helmet.log 2026-11-01); retail draws the item with that joint's basis, so the item squashes with the head. `basis_pose`
+/// normalises the rows (Euler angles carry no scale): without this the helmet stayed rigid on the squashed head and bobbed off it.
+/// Equal lengths (every moby on the Euler path) give [1; 3].
+pub(super) fn basis_axes(m: &ee_oracle::Machine, a: u32) -> [f32; 3] {
+	let len = |v: [f32; 3]| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+	let l = [len(m.rdv3(a + 0xc0)), len(m.rdv3(a + 0xd0)), len(m.rdv3(a + 0xe0))];
+	let g = (l[0] * l[1] * l[2]).cbrt();
+	if !(g > 1e-6) || !g.is_finite() {
+		return [1.0; 3];
+	}
+	let k = l.map(|x| x / g);
+	if k.iter().all(|x| (x - 1.0).abs() < 1e-3) { [1.0; 3] } else { k }
 }
 
 /// Euler angles `[x, y, z]` of the unit basis rows (row 0 = `[cy cz, cy sz, -sy]`, row 1 z = `sx cy`, row 2 z = `cx cy`). At the

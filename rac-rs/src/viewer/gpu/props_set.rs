@@ -134,6 +134,7 @@ impl Gpu {
 			shown[pi] = true;
 			// PC-FPS-1: the placement drawn between the last two ticks when smooth motion blends it.
 			let (m, scale) = super::smooth::prop_xf(pi).unwrap_or_else(|| (place_mirrored(p.pos, p.rot, p.mirror), p.scale));
+			let m = crate::viewer::maths::stretch(m, p.axes);
 			let light = Self::moby_light(p.light);
 			let id = dyn_id(&self.table, &mut self.moby_dyn, [m[12], m[13], m[14]]);
 			let tint = PROP_TINTS.with(|t| t.borrow().get(pi).copied().flatten());
@@ -335,6 +336,7 @@ fn open_alphas(alphas: Vec<Option<u8>>, props: &[Prop], cull: bool) -> (Vec<Opti
 
 fn culled_src<'a>(pi: usize, p: &Prop, ps: &'a [[f32; 3]], ns: &'a [[f32; 3]], alpha: u8, cull: bool, cuv: [f32; 2]) -> SlotSrc<'a> {
 	let (m, scale) = super::smooth::prop_xf(pi).unwrap_or_else(|| (place_mirrored(p.pos, p.rot, p.mirror), p.scale));
+	let m = crate::viewer::maths::stretch(m, p.axes);
 	let tint = PROP_TINTS.with(|t| t.borrow().get(pi).copied().flatten());
 	let job = SlotJob { ps, ns, m, scale, light: Gpu::moby_light(p.light), alpha_code: moby_alpha_encoding(0.0, alpha).0, prop_tint: p.tint, tint, alpha, dv: cuv[1], du: cuv[0] };
 	if cull {

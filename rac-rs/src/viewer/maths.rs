@@ -43,6 +43,16 @@ pub(super) fn place_mirrored(pos: [f32; 3], rot: [f32; 3], mirror: bool) -> [f32
 	m
 }
 
+/// [PC] A column-major placement with model axis k stretched by `axes[k]` (`Prop::axes`, a head item squashed with the head).
+pub(super) fn stretch(mut m: [f32; 16], axes: [f32; 3]) -> [f32; 16] {
+	for (c, k) in axes.iter().enumerate() {
+		for v in &mut m[c * 4..c * 4 + 3] {
+			*v *= k;
+		}
+	}
+	m
+}
+
 pub(super) fn place(pos: [f32; 3], rot: [f32; 3]) -> [f32; 16] {
 	let (sx, cx) = rot[0].sin_cos();
 	let (sy, cy) = rot[1].sin_cos();

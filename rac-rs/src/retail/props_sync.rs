@@ -158,6 +158,7 @@ impl Retail {
 				p.mirror = mb.mirror;
 				p.order = rank as u32 | if deferred.contains(&mb.addr) { crate::game::DEFERRED_ORDER } else { 0 };
 				p.scale = mb.scale;
+				p.axes = mb.axes;
 				// Retail's verdict stays as it is in RAM (gameplay reads it); rac-rs's wide window also shows what retail culled only
 			// at its 4:3 side plane.
 			p.shown = mb.shown || (wide && mb.side_only.is_some_and(|s| s.inside_lag(self.aspect, lag)));

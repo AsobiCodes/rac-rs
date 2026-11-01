@@ -203,6 +203,8 @@ pub struct Prop {
 	pub anim: crate::anim::PropAnim,
 	/// Size multiplier, and a colour the model is multiplied by (the moby's RGB tint, 1.0 = neutral).
 	pub scale: f32,
+	/// [PC] Retail mode: the per-axis stretch of the draw basis on top of `scale` (`retail::basis_axes`; [1; 3] for a rigid moby).
+	pub axes: [f32; 3],
 	pub tint: Option<[f32; 3]>,
 	/// A placed moby's colour and light word (instance +0x64.. / +0x70); None for spawned ones, lit with
 	/// gameplay::SPAWN_AMBIENT and word 0 (decomp/notes/lighting_fog.md "Moby lighting").
@@ -217,7 +219,7 @@ pub struct Prop {
 impl Prop {
 	/// An inert prop of a retail-mode pool (retail.rs moves and shows it from the interpreter's moby table).
 	pub fn retail(class_id: u32, level: i32) -> Prop {
-		Prop { class_id, pos: [0.0; 3], rot: [0.0; 3], mirror: false, order: 0, shown: false, retail_drawn: false, cast: false, anim: crate::anim::PropAnim::new(0), scale: 1.0, tint: None, light: None, index: None, sched: sched::spawned(level, class_id),  kind: Kind::Retail { alpha: 0x80, ovr: None, add: false } }
+		Prop { class_id, pos: [0.0; 3], rot: [0.0; 3], mirror: false, order: 0, shown: false, retail_drawn: false, cast: false, anim: crate::anim::PropAnim::new(0), scale: 1.0, axes: [1.0; 3], tint: None, light: None, index: None, sched: sched::spawned(level, class_id),  kind: Kind::Retail { alpha: 0x80, ovr: None, add: false } }
 	}
 	pub fn is_retail(&self) -> bool {
 		self.index.is_none() && matches!(self.kind, Kind::Retail { .. })
