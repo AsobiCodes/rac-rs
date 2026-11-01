@@ -1527,6 +1527,9 @@ struct App {
 	/// PC perf: (game frame counter, props address, props count) when the last frame's prop poses were built; a frame with
 	/// no game tick and the same stamp moves those poses over instead of skinning them again (same pose keys, same anim state).
 	pose_stamp: Option<(u32, usize, usize)>,
+	/// [PC] The hero's live local joints of the last posed tick while he wears a head item (frame_hero.rs): the head item's pose copy
+	/// (frame_props.rs, `anim::HEAD_COPY`). Empty otherwise.
+	hero_local_now: Vec<([f32; 4], [f32; 3], [f32; 3])>,
 	/// PC perf (lane A B1): the hero's posed bundle of the last tick (viewer/herocache.rs).
 	hero_cache: Option<herocache::HeroCache>,
 	/// The wrench in Ratchet's hand: its vertices and normals in his wrist joint's frame.

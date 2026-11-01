@@ -103,6 +103,7 @@ fn new_app(iso_path: &str, level: usize, shot: Option<String>, start: Option<[f3
 		accum: 0.0,
 		smooth: Default::default(),
 		pose_stamp: None,
+		hero_local_now: Vec::new(),
 		hero_cache: None,
 		wrench: None,
 		wrench_axis: None,

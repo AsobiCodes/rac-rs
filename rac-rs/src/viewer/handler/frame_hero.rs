@@ -71,7 +71,11 @@ impl App {
 				if !(hero_check && self.smooth.ticks == 0) { self.smooth.set_pose_fix(/* once per tick: RAC_HERO_CHECK=1 poses every display frame */ rparts.and_then(|q| strafe_fix(&mut self.hero_rig.hero, a, q, self.retail.as_ref().and_then(|r| r.hero_clock()), &mats))); }
 				// HELD-GLOVE: a glove in hand (FUN_0020d018) is posed from the hero's own live local joints, not its clock.
 				let hand_copy = crate::inventory::hand_pose_copy(game.inv.equipped);
-				let hero_local = if hand_copy { self.hero_rig.hero.local_held(a, &hero_fx, throw_pose.as_ref(), layer1_pose.as_ref(), &hold_poses) } else { Vec::new() };
+				// [PC] A worn head item is posed the same way (frame_props.rs, `anim::head_copy_list`).
+				let head_copy = rparts.is_some() && game.props.iter().any(|q| q.shown && anim::head_copy_list(q.class_id).is_some());
+				let live = if hand_copy || head_copy { self.hero_rig.hero.local_held(a, &hero_fx, throw_pose.as_ref(), layer1_pose.as_ref(), &hold_poses) } else { Vec::new() };
+				self.hero_local_now = if head_copy { live.clone() } else { Vec::new() };
+				let hero_local = if hand_copy { live } else { Vec::new() };
 				let (mut ps, mut ns) = anim::skin(class, &mats);
 				// HERO-16: the limb pulse squashes the hero's x and y axes; held items follow below.
 				let pulse = p.pulse_scale;

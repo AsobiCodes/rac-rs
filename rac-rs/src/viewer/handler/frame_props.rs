@@ -48,6 +48,12 @@ impl App {
 				// Vendor/orb spins, and any prop fading from a snapshot (its pose is its own).
 				let spins = game.vendor_fx.poses.get(&pi).map(|fx| fx.spins.as_slice());
 				if let Some((class, a)) = self.prop_anims.get(&pr.class_id) {
+					// [PC] A worn head item: the pose copy of the hero's live head joints, as retail poses it (`anim::head_copy_list`).
+					let worn = (pr.pos[0] - p.pos[0]).hypot(pr.pos[1] - p.pos[1]) < 1.5 && (pr.pos[2] - p.pos[2]).abs() < 3.0;
+					if let Some((list, extra)) = anim::head_copy_list(pr.class_id).filter(|_| worn && !self.hero_local_now.is_empty()) {
+						fx_jobs.push((pi, class, a.pose_single(&anim::pose_copy_frame(&self.hero_local_now, list, extra, &a.skeleton.bind_translation))));
+						continue;
+					}
 					// NOV-14.8e: the Plumber's head-look joint overrides.
 					// KER-1a: the Kerwan walker's blocks drive the attach slot 2 / 3 joints.
 					let mut fx: Vec<anim::JointFx> = Vec::new();
