@@ -3,7 +3,9 @@
 # compiled functions the same way on every PC, whatever folder the game is installed in, and the speed profile in pgo\ (made by
 # the developers) fits your build. setup.ps1 builds with this file; rac-rs\Cargo.toml is the game itself.
 [workspace]
-members = ["rac-rs", "rac-rs/exe"]
+# Since the engine split (v0.5.0) the game is the crates rac-formats, rac-engine, rac1 (+ rac_ngx_abi, the DLSS bridge ABI) next to rac-rs itself;
+# path dependencies inside the root are members anyway, they are listed to be explicit. R&C2 (crates/rac2, exe_rc2) is not part of the release.
+members = ["rac-rs", "rac-rs/exe", "rac-rs/crates/formats", "rac-rs/crates/engine", "rac-rs/crates/rac1", "rac-rs/crates/ngx_abi"]
 default-members = ["rac-rs", "rac-rs/exe"]
 resolver = "3"
 

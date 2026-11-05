@@ -2109,24 +2109,43 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
-name = "rac-rs"
+name = "rac-engine"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
+ "ash",
  "bytemuck",
  "cpal",
- "ee-game",
  "ee-oracle",
- "gilrs",
  "libc",
  "libloading",
  "libm",
  "naga",
  "pollster",
+ "rac-formats",
+ "rac_ngx_abi",
  "rayon",
  "wgpu",
  "windows",
  "winit",
  "xxhash-rust",
+]
+
+[[package]]
+name = "rac-formats"
+version = "0.1.0"
+dependencies = [
+ "wgpu",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "rac-rs"
+version = "0.1.0"
+dependencies = [
+ "rac-engine",
+ "rac-formats",
+ "rac1",
 ]
 
 [[package]]
@@ -2159,6 +2178,29 @@ name = "rac-rs-order-b"
 version = "0.1.0"
 dependencies = [
  "rac-rs",
+]
+
+[[package]]
+name = "rac1"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "ee-game",
+ "ee-oracle",
+ "gilrs",
+ "pollster",
+ "rac-engine",
+ "rac-formats",
+ "rayon",
+ "wgpu",
+ "winit",
+]
+
+[[package]]
+name = "rac_ngx_abi"
+version = "0.1.0"
+dependencies = [
+ "libloading",
 ]
 
 [[package]]

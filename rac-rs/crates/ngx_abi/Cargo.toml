@@ -1,0 +1,21 @@
+[package]
+name = "rac_ngx_abi"
+version = "0.1.0"
+edition = "2021"
+publish = false
+# [PC] DLSS (lane dlss2): the C ABI of rac_ngx.dll (repr(C) structs, constants, the run-time loader). NO NVIDIA code: the engine
+# links only this; rac_ngx.dll (msvc, links NVIDIA's NGX library) is built OUTSIDE this tree (crate rac_ngx, not public,
+# which keeps an identical copy of src/ngx_abi/lib.rs: copy it there on any change and bump ABI_VERSION) and is opened at run
+# time from the exe folder, shipped next to the exe like the FidelityFX DLLs.
+# Sources in rac-rs/src/ngx_abi; this folder holds only the manifest.
+
+[lib]
+name = "rac_ngx_abi"
+path = "../../src/ngx_abi/lib.rs"
+
+[features]
+default = ["loader"]
+loader = ["dep:libloading"]
+
+[dependencies]
+libloading = { version = "0.8.9", optional = true }

@@ -1,0 +1,89 @@
+backdrop blur 16 scrim #05080F6B
+text 48 47 SemiBold 13 #A9B4C4FF Left max 0 track 0.18 "PAUSED - OPTIONS"
+rrect 48 68.5 30 24 r 6 fill #FFFFFF14 border 1 #FFFFFF47
+text 63 80.5 SemiBold 12 #EEF2F7FF Center max 0 track 0 "Q"
+text 102 79 Condensed 27 #FFFFFFFF Left max 0 track 0.06 "GRAPHICS"
+rrect 102 99 120.96 3 r 2 fill #FFB347FF
+text 260.96 79 Condensed 27 #A9B4C4FF Left max 0 track 0.06 "CAMERA"
+text 389.68 79 Condensed 27 #A9B4C4FF Left max 0 track 0.06 "AUDIO"
+text 503.28 79 Condensed 27 #A9B4C4FF Left max 0 track 0.06 "SYSTEM"
+rrect 618 68.5 30 24 r 6 fill #FFFFFF14 border 1 #FFFFFF47
+text 633 80.5 SemiBold 12 #EEF2F7FF Center max 0 track 0 "E"
+text 1232 81.5 Regular 14 #A9B4C4FF Right max 0 track 0 "Saved automatically"
+rrect 48 116 760 540 r 16 fill #0A0F1BD6 border 1 #FFFFFF14
+clip 49 117 758 538 r 15
+rrect 61 131 734 56 r 12 fill #FFB3471A
+text 77 159 Medium 16 #FFE2B8FF Left max 459.5 track 0 "Most effects need Enhanced lighting"
+rrect 548.5 141 230.5 36 r 8 fill #FFB347FF
+text 663.75 159 SemiBold 15 #1A1206FF Center max 0 track 0 "Switch Lighting to Enhanced"
+text 77 214 Condensed 15 #8FA0B8FF Left max 0 track 0.16 "LOOK"
+rrect 61 231 734 52 r 10 fill #FFB34721 border 1.5 #FFB34799
+text 77 257 Medium 18 #FFFFFFFF Left max 433.5 track 0 "preset"
+rrect 522.5 240 46.5 34 r 8 fill #FFFFFF14
+text 545.75 257 SemiBold 15 #DCE3ECFF Center max 0 track 0 "Low"
+rrect 577 240 69 34 r 8 fill #FFFFFF14
+text 611.5 257 SemiBold 15 #DCE3ECFF Center max 0 track 0 "Medium"
+rrect 654 240 54 34 r 8 fill #FFFFFF14
+text 681 257 SemiBold 15 #DCE3ECFF Center max 0 track 0 "High"
+rrect 716 240 69 34 r 8 fill #FFB347FF
+text 750.5 257 SemiBold 15 #1A1206FF Center max 0 track 0 "Custom"
+text 77 311 Medium 18 #DCE3ECFF Left max 436 track 0 "Light"
+rrect 525 294 34 34 r 8 fill #FFFFFF0F
+chevron 535 304 14 14 left #DCE3ECFF
+rrect 751 294 34 34 r 8 fill #FFFFFF0F
+chevron 761 304 14 14 right #DCE3ECFF
+text 655 306 SemiBold 18 #EEF2F7FF Center max 176 track 0 "Classic"
+rrect 635 323 18 3 r 1.5 fill #FFB347FF
+rrect 657 323 18 3 r 1.5 fill #FFFFFF29
+text 77 365 Medium 18 #97A3B6FF Left max 436 track 0 "shadows"
+rrect 525 348 34 34 r 8 fill #FFFFFF0F
+chevron 535 358 14 14 left #DCE3ECFF
+rrect 751 348 34 34 r 8 fill #FFFFFF0F
+chevron 761 358 14 14 right #DCE3ECFF
+text 655 360 SemiBold 18 #EEF2F7FF Center max 176 track 0 "High"
+rrect 613 377 18 3 r 1.5 fill #FFB34766
+rrect 635 377 18 3 r 1.5 fill #FFB34766
+rrect 657 377 18 3 r 1.5 fill #FFB34766
+rrect 679 377 18 3 r 1.5 fill #FFB347FF
+text 77 419 Medium 18 #97A3B6FF Left max 592 track 0 "bloom"
+text 721 419 SemiBold 18 #EEF2F7FF Right max 0 track 0 "On"
+rrect 729 404 56 30 r 15 fill #FFB347FF
+rrect 758 407 24 24 r 12 fill #FFFFFFFF
+text 77 474 Condensed 15 #8FA0B8FF Left max 0 track 0.16 "VIEW"
+text 77 517 Medium 18 #DCE3ECFF Left max 438 track 0 "fov"
+rrect 527 515 190 4 r 2 fill #FFFFFF2E
+rrect 527 515 112.2 4 r 2 fill #FFB347FF
+rrect 630.2 508 18 18 r 9 fill #FFFFFFFF border 2 #FFB347FF
+text 785 517 SemiBold 18 #EEF2F7FF Right max 0 track 0 "90 deg"
+clip-end
+rrect 832 116 400 540 r 16 fill #0A0F1BD6 border 1 #FFFFFF14
+text 861 153 SemiBold 13 #8FA0B8FF Left max 342 track 0.16 "GRAPHICS · LOOK"
+text 861 196.95 Condensed 38 #FFFFFFFF Left max 342 track 0 "preset"
+text 861 241.9 Regular 15 #A9B4C4FF Left max 342 track 0 "Now"
+text 891 241.9 SemiBold 15 #FFB347FF Left max 312 track 0 "Custom"
+text 956 241.9 Regular 15 #A9B4C4FF Left max 247 track 0 "Default"
+text 1016 241.9 SemiBold 15 #EEF2F7FF Left max 187 track 0 "High"
+text 861 280.07 Regular 17 #C9D2DEFF Left max 342 track 0 "What this row does."
+rrect 861 574 342 1 r 0 fill #FFFFFF14
+text 861 608 Regular 15 #A9B4C4FF Left max 184.5 track 0 "Look at the game behind"
+rrect 1057.5 589 145.5 38 r 8 fill #FFFFFF14
+rrect 1069.5 597 46 22 r 6 fill #FFFFFF14 border 1 #FFFFFF47
+text 1092.5 608 SemiBold 12 #EEF2F7FF Center max 0 track 0 "Space"
+text 1123.5 608 SemiBold 15 #EEF2F7FF Left max 0 track 0 "View game"
+rrect 563 677 46 22 r 6 fill #FFFFFF14 border 1 #FFFFFF47
+text 586 688 SemiBold 12 #EEF2F7FF Center max 0 track 0 "Enter"
+text 617 688 Medium 15 #C9D2DEFF Left max 0 track 0 "Change"
+rrect 688 677 34 22 r 6 fill #FFFFFF14 border 1 #FFFFFF47
+text 705 688 SemiBold 12 #EEF2F7FF Center max 0 track 0 "Esc"
+text 730 688 Medium 15 #C9D2DEFF Left max 0 track 0 "Back"
+rrect 792 677 70 22 r 6 fill #FFFFFF14 border 1 #FFFFFF47
+text 827 688 SemiBold 12 #EEF2F7FF Center max 0 track 0 "Backspace"
+text 870 688 Medium 15 #C9D2DEFF Left max 0 track 0 "Reset"
+rrect 945.5 677 46 22 r 6 fill #FFFFFF14 border 1 #FFFFFF47
+text 968.5 688 SemiBold 12 #EEF2F7FF Center max 0 track 0 "Space"
+text 999.5 688 Medium 15 #C9D2DEFF Left max 0 track 0 "View game"
+rrect 1099 677 22 22 r 6 fill #FFFFFF14 border 1 #FFFFFF47
+text 1110 688 SemiBold 12 #EEF2F7FF Center max 0 track 0 "Q"
+rrect 1127 677 22 22 r 6 fill #FFFFFF14 border 1 #FFFFFF47
+text 1138 688 SemiBold 12 #EEF2F7FF Center max 0 track 0 "E"
+text 1157 688 Medium 15 #C9D2DEFF Left max 0 track 0 "Switch tab"

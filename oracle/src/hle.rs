@@ -137,6 +137,9 @@ impl Cpu {
         if std::env::var("ORACLE_RPC").is_ok() {
             eprintln!("bind client {client:x} sid {sid:x} -> server {server:x}");
         }
+        if crate::ver::rc2() {
+            crate::rc2::hle::note_bind(client, sid);
+        }
         self.mem.wr32(client + 0x24, server);
     }
 
@@ -148,7 +151,7 @@ impl Cpu {
     /// 33 (update) echoes the handle while the sound plays and 0 once it has
     /// ended, 25 echoes its first word, 50 returns 0, 9 has no callback.
     /// Read `n` 2048-byte sectors at `lba` of the disc image into EE memory at `buf`.
-    fn iso_read(&mut self, lba: u32, n: u32, buf: u32) -> bool {
+    pub(crate) fn iso_read(&mut self, lba: u32, n: u32, buf: u32) -> bool {
         let mut data = vec![0u8; n as usize * 2048];
         let ok = self.iso.as_mut().is_some_and(|f| {
             use std::io::{Read, Seek, SeekFrom};
@@ -168,7 +171,7 @@ impl Cpu {
         // The end function (eighth argument) and its argument (the ninth, on the stack).
         let (end, sp) = (self.g(11) as u32, self.g(29) as u32);
         let end_param = self.mem.rd32(sp);
-        self.rpc_reply(client, fno, send, ssize, recv, rsize, end, end_param);
+        self.rpc_answer(client, fno, send, ssize, recv, rsize, end, end_param);
     }
 
     /// RPC calls in flight in the loaded state: the game called sceSifCallRpc on the real IOP and its reply had not
@@ -220,7 +223,7 @@ impl Cpu {
                 if std::env::var("ORACLE_RPC").is_ok() {
                     eprintln!("in flight at load: client {client:x} fno {fno:#x} send {send:x} recv {recv:x} end {end:x} ({end_param:x}) (mcserv)");
                 }
-                self.rpc_reply(client, fno, send, ssize, recv, rsize, end, end_param);
+                self.rpc_answer(client, fno, send, ssize, recv, rsize, end, end_param);
                 if self.stop.is_some() {
                     return;
                 }
@@ -239,7 +242,7 @@ impl Cpu {
             if std::env::var("ORACLE_RPC").is_ok() {
                 eprintln!("in flight at load: client {client:x} fno {fno:#x} recv {recv:x} rsize {rsize:#x}");
             }
-            self.rpc_reply(client, fno, 0, 0, recv, rsize, 0, 0);
+            self.rpc_answer(client, fno, 0, 0, recv, rsize, 0, 0);
             self.mem.wr32(pkt + 0x18, 0);
             let id = self.mem.rd32(pkt + 0x10);
             self.mem.wr32(pkt + 0x10, id & !1);
@@ -249,6 +252,16 @@ impl Cpu {
 
     /// The reply the IOP side gives sceSifCallRpc(client, fno, mode, send, ssize, recv, rsize, end, end_param), written
     /// at once (`end` / `end_param`: the call's end function and its argument; only the memory card server uses them).
+    /// An RPC call's reply: R&C2's servers (rc2/hle.rs `rpc_rc2`), else `rpc_reply`.
+    #[allow(clippy::too_many_arguments)]
+    fn rpc_answer(&mut self, client: u32, fno: u32, send: u32, ssize: u32, recv: u32, rsize: u32, end: u32, end_param: u32) {
+        if crate::ver::rc2() {
+            self.rpc_rc2(client, fno, send, ssize, recv, rsize, end, end_param);
+        } else {
+            self.rpc_reply(client, fno, send, ssize, recv, rsize, end, end_param);
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn rpc_reply(&mut self, client: u32, fno: u32, send: u32, ssize: u32, recv: u32, rsize: u32, end: u32, end_param: u32) {
         if std::env::var("ORACLE_RPC").is_ok() {

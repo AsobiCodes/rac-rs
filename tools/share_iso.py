@@ -40,9 +40,10 @@ HEX = re.compile(r'0x([0-9a-f]+)(\w*)$')
 FN_HDR = re.compile(r'^pub fn ([A-Za-z0-9_]+)\(c: &mut Cpu\) \{$')
 ARM = re.compile(r'^0x([0-9a-f]+) => \{$')
 FNS_ROW = re.compile(r'ee_core::rec::Fn \{ entry: (0x[0-9a-f]+), end: (0x[0-9a-f]+),.* f: ([A-Za-z0-9_]+) \},$')
-WRAP = re.compile(r'^pub fn ([A-Za-z0-9_]+)\(c: &mut Cpu\) \{ (rec_sh_\d+)::(t_\d+)\(c, (0x[0-9a-f]+), &V_\1, &F_\1\); \}$')
+WRAP = re.compile(r'^pub fn ([A-Za-z0-9_]+)\(c: &mut Cpu\) \{ (rec_(?:r2)?sh_\d+)::(t_\d+)\(c, (0x[0-9a-f]+), &V_\1, &F_\1\); \}$')
 TPL_HDR = re.compile(r'^pub fn (t_\d+)\(c: &mut Cpu, zb_: u32, zv_: &\[u64; (\d+)\], zf_: &\[fn\(&mut Cpu\); (\d+)\]\) \{$')
-SH_DIR = re.compile(r'sh_\d+$')
+# R&C2's tree (crates r2*, recgen_iso.py) gets r2sh_NN crates (unique package names next to R&C1's).
+SH_DIR = re.compile(r'(?:r2)?sh_\d+$')
 ALIAS = '#[allow(non_camel_case_types, dead_code)] type zu64_ = u64;'
 # the value tables are named after their function (V_f_2017d0): without this every one is a compiler warning, 50,000 in all, and
 # cargo prints them all again on every later build (a 2-minute stall before an update build can use more than one CPU)
@@ -365,7 +366,7 @@ def job_rewrite(a):
     put(os.path.join(rec, cr, 'src', 'lib.rs'), '\n'.join(src) + '\n')
     deps = ''.join(f'rec-{s.replace("_", "-")} = {{ path = "../{s}" }}\n' for s in sorted(used))
     ct = open(os.path.join(rec, cr, 'Cargo.toml'), encoding='utf-8').read()
-    ct = re.sub(r'\nrec-sh-\d+ = \{[^\n]*\}', '', ct).rstrip('\n') + '\n' + deps
+    ct = re.sub(r'\nrec-(?:r2)?sh-\d+ = \{[^\n]*\}', '', ct).rstrip('\n') + '\n' + deps
     put(os.path.join(rec, cr, 'Cargo.toml'), ct)
 
     # proof: from the files as written
@@ -485,6 +486,9 @@ def main():
     crates = sorted(d for d in os.listdir(rec) if os.path.isfile(os.path.join(rec, d, 'Cargo.toml')))
     if any(SH_DIR.fullmatch(c) for c in crates):
         sys.exit('share_iso.py: rec/ already has sh_ crates (run it once, on fresh recgen_iso.py output)')
+    pfx = 'r2' if crates and all(c.startswith('r2') for c in crates) else ''
+    # The ee-core dependency line of the generated crates (same directory, so the same relative path in a sh_ crate).
+    core_dep = re.search(r'^ee-core = .*$', open(os.path.join(rec, crates[0], 'Cargo.toml'), encoding='utf-8').read(), re.M).group(0)
     # biggest crates first (shorter tail when the last ones run); the scan results are then put back in name order
     size = {c: os.path.getsize(os.path.join(rec, c, 'src', 'lib.rs')) for c in crates}
     big = sorted(crates, key=lambda c: (-size[c], c))
@@ -532,7 +536,7 @@ def main():
             if cur_n >= A.chunk:
                 cur_sh, cur_n = cur_sh + 1, 0
             cur_n += g[0][3]
-            sh = 'sh_%02d' % cur_sh
+            sh = pfx + 'sh_%02d' % cur_sh
             tsh.append((tname, sh, nv, nf))
             tjobs[g[0][0]].append((tname, g[0][1], g[0][2], kh, kf))
             for m in g:
@@ -566,7 +570,7 @@ def main():
             src.append('pub static FNS: &[ee_core::rec::Fn] = &[];')
             d = os.path.join(rec, sh)
             put(os.path.join(d, 'Cargo.toml'), f'[package]\nname = "rec-{sh.replace("_", "-")}"\nversion = "0.1.0"\nedition = "2021"\n\n'
-                f'[dependencies]\nee-core = {{ path = "../../core" }}\n')
+                f'[dependencies]\n{core_dep}\n')
             put(os.path.join(d, 'src', 'lib.rs'), '\n'.join(src) + '\n')
         body = None
 

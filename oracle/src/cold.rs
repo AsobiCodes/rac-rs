@@ -26,6 +26,7 @@ pub const PWR_DEFAULT: u32 = 0xf;
 /// (FUN_0023d3xx: 1 -> 0, 2 -> 2, 3 -> 4, 4 -> 3, 5 -> 5) and loads the front end's language pack for it.
 pub const OSD_ENGLISH: u32 = 1;
 static LANGUAGE: AtomicU32 = AtomicU32::new(u32::MAX);
+static ASPECT: AtomicU32 = AtomicU32::new(u32::MAX);
 
 /// Chooses the language of the next `Machine::cold` (call before it; overrides env COLD_LANG). `osd` as `parse_language`.
 pub fn set_language(osd: u32) {
@@ -62,14 +63,28 @@ pub fn language() -> u32 {
     }
 }
 
+/// The OSD screen type a cold boot reports when env COLD_ASPECT is not set: a game pack's default (R&C2 sets 1, which its boot
+/// reads as its "16:9 (widescreen)" option), else 0 (4:3).
+pub fn set_aspect(t: u32) {
+    ASPECT.store(t & 3, Ordering::Relaxed);
+}
+
 /// The console's OSD settings word (GetOsdConfigParam): bit 0 spdif, bits 1-2 screen type (0 4:3, 1 full, 2 16:9), bit 3 video
 /// output, bit 4 japLanguage, bits 5-12 ps1drv, bits 13-15 version (2), bits 16-20 language (`language()`), bits 21-31 timezone
-/// offset. Defaults: English, 4:3 (env COLD_ASPECT 0..3), time zone 0; with the host clock on (clock::set_real) the time zone is
-/// the host's standard offset, so the game's own clock conversion (boot 0x12d6d8) shows local time.
+/// offset. Defaults: English, 4:3 (`aspect`), time zone 0; with the host clock on (clock::set_real) the time zone is the host's
+/// standard offset, so the game's own clock conversion (boot 0x12d6d8) shows local time.
 pub(crate) fn osd_config_word() -> u32 {
-    let aspect = std::env::var("COLD_ASPECT").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
     let zone = if crate::clock::real() { crate::clock::osd_zone_bits(crate::clock::zone()) } else { 0 };
-    2 << 13 | (language() & 0x1f) << 16 | (aspect & 3) << 1 | zone
+    2 << 13 | (language() & 0x1f) << 16 | (aspect() & 3) << 1 | zone
+}
+
+/// The OSD screen type the next cold boot reports: env COLD_ASPECT 0..3, else `set_aspect`'s, else 0 (4:3).
+pub fn aspect() -> u32 {
+    let set = match ASPECT.load(Ordering::Relaxed) {
+        u32::MAX => 0,
+        a => a,
+    };
+    std::env::var("COLD_ASPECT").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(set)
 }
 
 pub struct Hnd {
@@ -107,6 +122,9 @@ pub struct Kernel {
     pub threads: Vec<(u32, u32, u32)>,
     pub heap_end: u32,
     pub rules_ret: HashMap<u32, u64>,
+    /// `ret PC VAL W0 W1`: the ret rule fires only while the code words at PC, PC+4 are W0, W1 (R&C2 code overlays differ
+    /// per level at the same address).
+    pub ret_sig: HashMap<u32, (u32, u32)>,
     pub rules_w32: HashMap<u32, Vec<(u32, u32)>>,
     pub rules_jmp: HashMap<u32, u32>,
     pub frames: u64,
@@ -193,6 +211,9 @@ pub fn read_hooks(t: &str, k: &mut Kernel, hooked: &mut [bool]) {
         match w[0] {
             "ret" => {
                 k.rules_ret.insert(pc, h(w[2]) as u64);
+                if w.len() >= 5 && !w[3].starts_with('#') {
+                    k.ret_sig.insert(pc, (h(w[3]), h(w[4])));
+                }
             }
             "w32" => k.rules_w32.entry(pc).or_default().push((h(w[2]), h(w[3]))),
             "jmp" => {
@@ -456,7 +477,7 @@ pub fn boot(iso_path: &str, stubs_path: &str, extra_hooks: Option<&str>) -> Resu
     // The disc (PAL SCES_509.16 or USA SCUS_971.99) and the video mode the game will pick from SYSTEM.CNF.
     crate::ver::from_iso(iso_path);
     let boot = crate::ver::disc().boot_file();
-    let (lba, size) = iso_find(&mut iso, &format!("{boot};1")).ok_or_else(|| format!("neither SCES_509.16 nor SCUS_971.99 in the ISO {iso_path}"))?;
+    let (lba, size) = iso_find(&mut iso, &format!("{boot};1")).ok_or_else(|| format!("none of SCES_509.16, SCUS_971.99, SCES_516.07 in the ISO {iso_path}"))?;
     let mut elf = vec![0u8; size as usize];
     iso.seek(SeekFrom::Start(lba as u64 * 2048)).map_err(|e| e.to_string())?;
     iso.read_exact(&mut elf).map_err(|e| e.to_string())?;
@@ -502,7 +523,7 @@ pub fn boot(iso_path: &str, stubs_path: &str, extra_hooks: Option<&str>) -> Resu
     }
     c.iso = std::fs::File::open(iso_path).ok();
     crate::load_stubs(&mut c, stubs_path);
-    c.add_stub(crate::PAD_READ, 18, "pad_read");
+    c.add_stub(crate::ver::addrs().pad_read, 18, "pad_read");
     let mut pad = [0u8; 18];
     pad[0] = 0xff;
     pad[1] = 0xff;
@@ -514,7 +535,7 @@ pub fn boot(iso_path: &str, stubs_path: &str, extra_hooks: Option<&str>) -> Resu
     }
     let mut k = Kernel::default();
     let mut hk = vec![false; 1 << 23];
-    read_hooks(HOOKS, &mut k, &mut hk);
+    read_hooks(if crate::ver::rc2() { crate::rc2::HOOKS } else { HOOKS }, &mut k, &mut hk);
     if let Some(p) = extra_hooks {
         if let Ok(t) = std::fs::read_to_string(p) {
             read_hooks(&t, &mut k, &mut hk);
@@ -530,12 +551,18 @@ pub fn boot(iso_path: &str, stubs_path: &str, extra_hooks: Option<&str>) -> Resu
 /// from the interpreter and from the dispatcher in front of compiled code). True: the pc was handled (no instruction runs).
 pub fn stub(c: &mut Cpu, pc: u32) -> bool {
     let Some(mut k) = c.cold.take() else { return false };
-    let r = stub_k(c, &mut k, pc);
+    let mut hand = false;
+    let r = stub_k(c, &mut k, pc, &mut hand);
     c.cold = Some(k);
+    // A `ret` rule whose entry has a Hand (rec::register_hand; installed when its code-word hash matched): the Hand runs instead,
+    // with the kernel in place (it may take a vblank). Interpreted calls reach hook rules only here, never `Cpu::hand`.
+    if hand {
+        return c.run_hand(pc);
+    }
     r
 }
 
-fn stub_k(c: &mut Cpu, k: &mut Kernel, pc: u32) -> bool {
+fn stub_k(c: &mut Cpu, k: &mut Kernel, pc: u32, hand: &mut bool) -> bool {
     if pc >= 0x8000_0000 {
         if k.hooks_only {
             return false;
@@ -600,8 +627,15 @@ fn stub_k(c: &mut Cpu, k: &mut Kernel, pc: u32) -> bool {
             }
         }
         if let Some(&v) = k.rules_ret.get(&pc) {
-            ret(c, v);
-            return true;
+            let sig_ok = k.ret_sig.get(&pc).is_none_or(|&(w0, w1)| c.mem.rd32(pc) == w0 && c.mem.rd32(pc + 4) == w1);
+            if sig_ok {
+                if c.rec.as_ref().is_some_and(|t| t.has_hand(pc)) {
+                    *hand = true;
+                    return true;
+                }
+                ret(c, v);
+                return true;
+            }
         }
         if let Some(ws) = k.rules_w32.get(&pc) {
             for &(ad, v) in ws.clone().iter() {
@@ -619,6 +653,7 @@ fn stub_k(c: &mut Cpu, k: &mut Kernel, pc: u32) -> bool {
 
 /// The field timer expired (`Cpu::step` / `poll_slow`): the same vblank, raised while the game computes.
 pub fn tick(c: &mut Cpu) {
+    c.snd_cd_finish();
     c.mem.rearm_tick(c.icount);
     c.vsync_armed = true;
     if !c.vblank_hook() {
@@ -652,7 +687,7 @@ pub fn install(c: &mut Cpu, full: bool) {
     }
     if full {
         // POLL_HEAD: the interpreter's idle skip of sceGsSyncV's poll (`Cpu::poll_ff`, level loads after the 60 Hz switch).
-        idx.extend([0x8000_0200u32, 0x8000_0204, TRAMP, crate::POLL_HEAD].iter().map(|&p| ((p & 0x01ff_ffff) >> 2) as usize));
+        idx.extend([0x8000_0200u32, 0x8000_0204, TRAMP, crate::ver::addrs().poll_head].iter().map(|&p| ((p & 0x01ff_ffff) >> 2) as usize));
         c.mem.rearm_tick(0);
     }
     for i in idx {

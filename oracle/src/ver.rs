@@ -4,12 +4,16 @@
 //! SYSTEM.CNF (sector 0x121) and sets the PAL flag 0x15ed80 when byte 0x33 is not 'N' (VMODE = PAL / NTSC); see
 //! decomp/notes/region_versions.md. Defaults are PAL, so nothing changes for the PAL disc. The PAL disc's 50/60 Hz option
 //! switches it at run time: every switch resets the GS through SetGsCrt (hle.rs syscall 0x02), which sets the mode here.
+//! R&C2 PAL (SCES-51607, boot ELF SCES_516.07) is a third disc: another program on the same engine and SDK, with its own
+//! boot addresses (`Addrs`, rc2/mod.rs) and IOP replies (rc2/hle.rs). Every R&C2 path is behind `rc2()`; R&C1 is unchanged.
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Disc {
     Pal,
     Usa,
+    /// Ratchet & Clank 2 PAL v1.00 (SCES-51607).
+    Rc2,
 }
 
 static DISC: AtomicU8 = AtomicU8::new(0);
@@ -21,6 +25,7 @@ impl Disc {
         match self {
             Disc::Pal => "SCES_509.16",
             Disc::Usa => "SCUS_971.99",
+            Disc::Rc2 => "SCES_516.07",
         }
     }
     /// The serial as the memory card directory and the setup check name it.
@@ -28,6 +33,7 @@ impl Disc {
         match self {
             Disc::Pal => "SCES-50916",
             Disc::Usa => "SCUS-97199",
+            Disc::Rc2 => "SCES-51607",
         }
     }
     /// Short tag for logs and file names.
@@ -35,17 +41,51 @@ impl Disc {
         match self {
             Disc::Pal => "pal",
             Disc::Usa => "usa",
+            Disc::Rc2 => "rc2",
         }
     }
 }
 
 /// The disc of this process (set by `Machine::cold` / `Machine::load` from the disc image; PAL until then).
 pub fn disc() -> Disc {
-    if DISC.load(Ordering::Relaxed) == 1 { Disc::Usa } else { Disc::Pal }
+    match DISC.load(Ordering::Relaxed) {
+        1 => Disc::Usa,
+        2 => Disc::Rc2,
+        _ => Disc::Pal,
+    }
 }
 
 pub fn set_disc(d: Disc) {
-    DISC.store((d == Disc::Usa) as u8, Ordering::Relaxed);
+    DISC.store(d as u8, Ordering::Relaxed);
+}
+
+/// True while the R&C2 disc runs (every R&C2-only path checks this).
+#[inline]
+pub fn rc2() -> bool {
+    DISC.load(Ordering::Relaxed) == 2
+}
+
+/// The boot-ELF addresses the oracle itself hooks (SDK functions and loops), per game.
+#[derive(Clone, Copy, Debug)]
+pub struct Addrs {
+    /// The vblank poll loop the game waits in (sceGsSyncV).
+    pub vblank_wait: u32,
+    /// sceGsSyncV's INTC_STAT poll while no vsync callback is registered (`Cpu::poll_ff`); R&C2: none known (never hit).
+    pub poll_head: u32,
+    /// Pad read: copies the pad DMA reply into a1, returns its length.
+    pub pad_read: u32,
+    /// libsif sceSifCallRpc / sceSifBindRpc (stubs.txt entries the HLE answers).
+    pub sif_call_rpc: u32,
+    pub sif_bind_rpc: u32,
+}
+
+/// R&C1, PAL and USA (the boot ELF code is the same on both).
+pub const RC1_ADDRS: Addrs = Addrs { vblank_wait: 0x118cb0, poll_head: 0x118c10, pad_read: 0x124bd8, sif_call_rpc: 0x11b1c8, sif_bind_rpc: 0x11aff8 };
+
+/// The addresses of the disc of this process.
+#[inline]
+pub fn addrs() -> &'static Addrs {
+    if rc2() { &crate::rc2::ADDRS } else { &RC1_ADDRS }
 }
 
 /// True while the game runs in NTSC mode (60 fields a second).
@@ -89,7 +129,7 @@ pub(crate) fn rebuilt(ram: &[u8]) {
 /// The disc in an image: whichever boot ELF its root directory holds (None: neither, or unreadable).
 pub fn detect(iso: &str) -> Option<Disc> {
     let mut f = std::fs::File::open(iso).ok()?;
-    for d in [Disc::Pal, Disc::Usa] {
+    for d in [Disc::Pal, Disc::Usa, Disc::Rc2] {
         if crate::cold::iso_find(&mut f, &format!("{};1", d.boot_file())).is_some() {
             return Some(d);
         }
@@ -112,7 +152,10 @@ pub fn from_iso(iso: &str) {
     if let Some(d) = detect(iso) {
         set_disc(d);
     }
-    if let Some(n) = vmode_ntsc(iso) {
+    // R&C2's SYSTEM.CNF sits elsewhere (LBA 0x3e8) and says VMODE = PAL (rac2/NOTES.md "Disc").
+    if rc2() {
+        set_ntsc(false);
+    } else if let Some(n) = vmode_ntsc(iso) {
         set_ntsc(n);
     }
 }

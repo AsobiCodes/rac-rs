@@ -13,8 +13,12 @@ Support the project (no pressure tho!): https://ko-fi.com/asobicodes
 
 - The whole game is playable from power-on to the end credits, including New Game+.
 - Gameplay follows the original PS2 game one to one. On top of that, the PC version has widescreen, keyboard and mouse controls, gamepad support, and an optional modern camera (mouse look and strafing).
-- Optional modern graphics on the Graphics page (Pause > Options > Graphics): enhanced lighting with volumetric fog, 3D clouds and shining stars, global illumination, ambient occlusion, dynamic shadows, clear reflective water with waves and tides, vegetation, enhanced smoke, fire and explosions, sun rays, frame smoothing and a sharp HUD, each with quality levels, plus a Graphics Preset row (Low / Medium / High / Custom). The Classic settings keep the original PS2 look.
+- Optional modern graphics on the Graphics page (Pause > Options > Graphics): enhanced lighting with volumetric fog, 3D clouds and shining stars, global illumination, ambient occlusion, dynamic shadows, clear reflective water with waves and tides, vegetation, animated fire that lights the scene, rising volumetric smoke, fur on Ratchet, shiny metal, sun rays, frame smoothing and a sharp HUD, each with quality levels, plus a Graphics Preset row (Low / Medium / High / Custom). The Classic settings keep the original PS2 look.
 - Two renderers: Vulkan (the default) and DirectX 12 (Options > Graphics > Screen > Renderer). ReShade works with both.
+- **Upscalers** (since v0.5, Windows): AMD FidelityFX Super Resolution (FSR) and, on NVIDIA RTX graphics cards, NVIDIA DLSS (Graphics > Resolution > Upscaler), with Vulkan and DirectX 12. See [Upscalers](#upscalers).
+- **Modern menus** (since v0.5): the title screen, pause menu, vendor, Galactic Map, Save / Load, Quick Select, Controls and Mods as modern pages with mouse support. The Classic menus stay (Graphics > Menu style).
+- **Achievements** (since v0.5): 35 achievements, shown as toasts when you earn them, in the pause menu's Achievements tab and in the launcher.
+- **Aspect ratio** (since v0.5): Auto, 4:3, 16:9, 16:10, 21:9 or 32:9 (Display > Screen > Aspect ratio).
 - **RAC-RS Launcher** (since v0.4): a separate app to play, change every option, manage texture packs and mods, keep several game versions side by side, and update with a backup first. See [Launcher](#launcher).
 - **Mods** (since v0.4): script mods through the bundled OmniLoader mod loader. **Arsenal Mastery** comes preinstalled and switched off. See [Mods and texture packs](#mods-and-texture-packs).
 - **PCSX2 texture packs** (since v0.4): packs made for PCSX2 work as they are.
@@ -42,7 +46,7 @@ That's all. Setup downloads anything else it needs into its own folder.
 
 ## Setup
 
-1. Download **rac-rs-0.4.3.zip** from the [latest release](https://github.com/AsobiCodes/rac-rs/releases/latest) (or click the green **Code** button above and choose **Download ZIP**), and unzip it anywhere. Drives formatted as exFAT, USB sticks and SD cards work too.
+1. Download **rac-rs-0.5.0.zip** from the [latest release](https://github.com/AsobiCodes/rac-rs/releases/latest) (or click the green **Code** button above and choose **Download ZIP**), and unzip it anywhere. Drives formatted as exFAT, USB sticks and SD cards work too.
 2. Double-click **Setup.cmd**. A window opens (no black console window).
 3. Click **Browse** and pick your `.iso` file. The window checks it and shows a green **Disc OK**. Two boxes below choose whether to also install the **RAC-RS Launcher** and whether to **add the game to Steam** (close Steam first). Then click **Install**.
 4. Wait. The window shows the steps and a progress bar (about 15 minutes; you can keep using your PC). When it says **Ready to play**, click **Play**.
@@ -106,7 +110,8 @@ The **RAC-RS Launcher** ([AsobiCodes/rac-rs-launcher](https://github.com/AsobiCo
 - start the game, and change every option (graphics, camera, controls, Skip intro) before you play,
 - add, import and switch PCSX2 texture packs, and turn mods on or off with their own settings,
 - keep several game versions side by side and use profiles,
-- update the game: it backs up your current version first.
+- update the game: it backs up your current version first,
+- see your achievements (Achievements tab).
 
 The game works the same without the launcher; everything it changes can also be set in the game's own menus.
 
@@ -116,6 +121,10 @@ The game works the same without the launcher; everything it changes can also be 
 - **The mod format comes from OpenRAC.** OmniLoader is this project's own code, written from the public, MIT-licensed mod SDK of [OpenRAC](https://github.com/OpenRAC/OpenRAC) (another Ratchet & Clank PC project). It follows OpenRAC's script-mod format and Luau API, so a mod folder with OpenRAC's `openrac-mod.json` is read too. No code of OpenRAC's game port is used. Credit and the SDK licence are in [NOTICE.md](NOTICE.md).
 - **Arsenal Mastery** is preinstalled and switched off: a fan-remaster style mod where weapons level up like in Ratchet & Clank 3, Nanotech levels raise Ratchet's health and enemies are rebalanced to match. Switch it on in the launcher when you want it.
 - **PCSX2 texture packs:** add a pack made for PCSX2 (a folder or a .zip) in the launcher, or import it from your PCSX2 texture folder. Packs cover world textures, water, sky, chrome and glass, the ship, particles, grass, and the HUD and menus. A pack made for the other disc region mostly works too. Turn packs on or off on the title screen under Options > Mods; while one is on, Pause > Options > Mods has the switches in game too.
+
+## Upscalers
+
+On Windows, Graphics > Resolution > Upscaler offers AMD FidelityFX Super Resolution (FSR) and NVIDIA DLSS (DLSS 4.5, NVIDIA RTX graphics cards only). The game is drawn at a lower resolution and scaled up to the window; menus and the HUD stay sharp. Both come as DLL files with the release: `amd_fidelityfx_loader_vk.dll`, `amd_fidelityfx_loader_dx12.dll`, `amd_fidelityfx_upscaler_vk.dll` and `amd_fidelityfx_upscaler_dx12.dll` (AMD, MIT licence), `nvngx_dlss.dll` (the NVIDIA DLSS runtime) and `rac_ngx.dll` (this project's small bridge to it, which contains NVIDIA's NGX SDK library). Without them the Upscaler row stays Off and the game plays as before. Licences and credits are in [NOTICE.md](NOTICE.md).
 
 ## Making mods
 
@@ -133,13 +142,16 @@ What changed in each version is in [CHANGELOG.md](CHANGELOG.md).
 
 ## Controls
 
-The game's own button prompts show the keyboard and mouse keys. You can change the camera style, the language and every button in the game's Options menu (Pause > Options > Controls for the buttons; Camera speed and Mouse speed are separate rows). Controllers work too: Xbox-style controllers (XInput) and PlayStation controllers (PS4 DualShock 4 and PS5 DualSense, over USB or Bluetooth), also when you switch one on or plug it in after the game has started. With the modern camera on, hold R2 to strafe (Options > Camera > Strafe aiming: Raised, Shoulder or Off). Tutorial pop-ups show your keyboard keys when you play on keyboard. Pause > Options > Graphics, page System, has Quick Select mouse (off by default: hold Triangle, T or the middle mouse button and point at a weapon), Stick dead zone and Button glyphs.
+The game's own button prompts show the keyboard and mouse keys. You can change the camera style, the language and every button in the game's Options menu (Pause > Options > Controls for the buttons; Camera speed and Mouse speed are separate rows). Controllers work too: Xbox-style controllers (XInput) and PlayStation controllers (PS4 DualShock 4 and PS5 DualSense, over USB or Bluetooth), also when you switch one on or plug it in after the game has started. With the modern camera on, hold R2 to strafe (Options > Camera > Strafe aiming: Raised, Shoulder, Steady or Off). Tutorial pop-ups show your keyboard keys when you play on keyboard. Pause > Options > Graphics, page System, has Quick Select mouse (off by default: hold Triangle, T or the middle mouse button and point at a weapon), Stick dead zone and Button glyphs.
 
 ## Known issues
 
 - The faint afterimage trail behind Ratchet during Thruster-Pack flight is not drawn yet.
 - Some glass surfaces can flicker.
 - On AMD and Intel graphics, HUD Sharp only sharpens the title screen and main menu for now. In game, the on-screen text, icons, menus and shop keep the Original look.
+- With the Classic camera, any strafe aim makes the camera jump for one frame when you press it.
+- The modern pause menu's Help tab is empty; Space opens the classic Helpdesk.
+- The Upscaler, Quick Select pause and Aspect ratio rows are only in the modern menu style.
 
 ## Reporting a problem
 
@@ -147,14 +159,18 @@ If the game freezes, crashes or looks wrong, please [open an issue](https://gith
 
 ## Contributors
 
-- **[DeSynkro](https://github.com/DeSynkro)**: the Linux port ([pull request #38](https://github.com/AsobiCodes/rac-rs/pull/38), v0.4.1).
+- **[DeSynkro](https://github.com/DeSynkro)**: the Linux port ([pull request #38](https://github.com/AsobiCodes/rac-rs/pull/38), v0.4.1) and a lot of help with the Linux support since.
+- **khalifax10**: suggested the achievements (v0.5).
+- **Ko-fi supporters**: thank you to Scrolt, korixx, reTokyo, khalifax10, DeSynkro, DarkBlaze, Smoe05, eardrummer, Chris, Ryan Palmer, fleece, Justintime4u2bu, Ga, THUND3R_WOLF, MK, Ratchetenjoyer, Tonyswan and Luke4600. Switch on Supporter drawings (Options > Graphics) to see their drawings on the walls of the garage on Veldin.
 
 ## Legal
 
 This is a fan project for preservation and education. It is **not affiliated with, endorsed by or sponsored by Sony Interactive Entertainment or Insomniac Games**. "Ratchet & Clank" is a trademark of Sony Interactive Entertainment LLC. All game content belongs to its owners.
 
+NVIDIA, RTX and DLSS are trademarks and/or registered trademarks of NVIDIA Corporation in the U.S. and other countries. AMD, Radeon and FidelityFX are trademarks of Advanced Micro Devices, Inc. Windows and DirectX are trademarks of the Microsoft group of companies. This project is not affiliated with, endorsed by or sponsored by NVIDIA, AMD or Microsoft.
+
 The repository contains only original source code and tools. It contains no copyrighted game data, and it does not tell you how to get the game other than from a disc you own.
 
 ## License
 
-GPL-3.0-or-later, see [LICENSE](LICENSE). Credits for third-party work (including OmniLoader's Luau script engine) are in [NOTICE.md](NOTICE.md).
+GPL-3.0-or-later, see [LICENSE](LICENSE). Credits for third-party work (including OmniLoader's Luau script engine, AMD FidelityFX FSR, NVIDIA DLSS and Microsoft's DirectX Shader Compiler) are in [NOTICE.md](NOTICE.md). The NVIDIA DLSS files (`nvngx_dlss.dll`, `rac_ngx.dll`) are not under the GPL: they come under NVIDIA's own licence, and an additional permission under section 7 of the GPL allows rac-rs to be shipped and run with them (see [NOTICE.md](NOTICE.md)).

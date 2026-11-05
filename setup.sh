@@ -1042,8 +1042,8 @@ vu_want="$sha1 vu1 gen=$(Stamp $vu_files)"
 vu_have=''
 if [ -f "$vu_stamp" ]; then vu_have=$(trim "$(cat "$vu_stamp")"); fi
 [ -f "$orc/src/vu0_prog0.rs" ] || vu_have=''
-[ -f "rac-rs/src/gsfull/vu1aot_gen.rs" ] || vu_have=''
-[ -f "rac-rs/src/particles/orb_tables.rs" ] || vu_have=''
+[ -f "rac-rs/src/engine/gsfull/vu1aot_gen.rs" ] || vu_have=''
+[ -f "rac-rs/src/rac1/particles/orb_tables.rs" ] || vu_have=''
 
 if [ "$regenerate" -eq 1 ] || [ "$vu_have" != "$vu_want" ]; then
     # Not -I: vugen_iso.py puts tools/vu on sys.path itself.

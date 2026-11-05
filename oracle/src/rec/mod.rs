@@ -165,8 +165,9 @@ impl Table {
 
     /// `build` over the given sets (tests build over their own).
     fn build_sets(mem: &Mem, level: u32, sets: &[(Option<u32>, &'static [Fn])]) -> Table {
-        let (lo, hi) = (0x10_0000u32, 0x40_0000u32);
-        let loader = u16::from_le_bytes([mem.ram[LOADER as usize], mem.ram[LOADER as usize + 1]]);
+        // R&C2's game code overlay runs to 0x450000 (rac2/notes_rec.md).
+        let (lo, hi) = (0x10_0000u32, if crate::ver::rc2() { 0x50_0000u32 } else { 0x40_0000u32 });
+        let loader = loader(mem);
         let mut t = Table {
             lo,
             map: vec![0; ((hi - lo) / 4) as usize],
@@ -396,9 +397,18 @@ impl Table {
     }
 }
 
-/// The level loader state word (`LOADER`).
+/// The level loader state word (`LOADER`); R&C2: 0 (its sets are not tied to a loader state: a set is used while all its
+/// functions match RAM).
 pub fn loader(mem: &Mem) -> u16 {
+    if crate::ver::rc2() {
+        return 0;
+    }
     u16::from_le_bytes([mem.ram[LOADER as usize], mem.ram[LOADER as usize + 1]])
+}
+
+/// The level byte the table is keyed on (R&C1 0x15ed84); R&C2: 0 (no level tag, so no rebuild for a level change).
+pub fn level_key(mem: &Mem) -> u32 {
+    if crate::ver::rc2() { 0 } else { mem.ram[crate::LEVEL as usize] as u32 }
 }
 
 /// ORACLE_REC_LOG=1 (read once): every table rebuild after a FlushCache prints `rec_rebuild ICOUNT LEVEL LOADER` to stderr.
@@ -444,7 +454,7 @@ impl Cpu {
 
     #[inline(always)]
     fn step_rec_impl<const INL: bool>(&mut self) {
-        if self.pc == crate::VBLANK_WAIT && self.vsync_armed && self.vblank_cb.is_some() {
+        if self.pc == self.vblank_pc && self.vsync_armed && self.vblank_cb.is_some() {
             self.vblank_hook();
         }
         // Not in a delay slot (the interpreter finishes a branch it started).
@@ -525,7 +535,7 @@ impl Cpu {
         let Some(t) = self.rec.as_ref() else { return };
         if !t.stale(&self.mem) {
             if rebuild_check() {
-                let lv = self.mem.ram[crate::LEVEL as usize] as u32;
+                let lv = level_key(&self.mem);
                 let n = Table::build(&self.mem, lv);
                 // A level or loader change not yet seen is the vblank callback's rebuild (lib.rs), same as before this change.
                 if n.level == t.level && n.loader == t.loader {
@@ -537,9 +547,9 @@ impl Cpu {
             return;
         }
         if rebuild_log() {
-            eprintln!("rec_rebuild {} {} {}{}", self.icount, self.mem.ram[crate::LEVEL as usize], loader(&self.mem), t.stale_report(&self.mem));
+            eprintln!("rec_rebuild {} {} {}{}", self.icount, level_key(&self.mem), loader(&self.mem), t.stale_report(&self.mem));
         }
-        let n = Table::build(&self.mem, self.mem.ram[crate::LEVEL as usize] as u32);
+        let n = Table::build(&self.mem, level_key(&self.mem));
         let changed = n.sets != t.sets;
         self.rec = Some(Box::new(n));
         if changed && self.rec_catch {
@@ -590,7 +600,7 @@ impl Cpu {
     /// At the vblank wait with no frame callback: compiled code unwinds to the host loop.
     #[inline]
     fn unwind_wait(&self) -> bool {
-        self.pc == crate::VBLANK_WAIT && self.vblank_cb.is_none()
+        self.pc == self.vblank_pc && self.vblank_cb.is_none()
     }
 
     /// Block entry: whether the next `n` instructions can run without the interpreter's per-instruction checks

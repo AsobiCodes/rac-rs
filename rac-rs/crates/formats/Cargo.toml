@@ -1,0 +1,19 @@
+[package]
+name = "rac-formats"
+version = "0.1.0"
+edition = "2024"
+# Engine split stage E3 (ENGINE_SPLIT.md): Insomniac's file and RAM formats shared by the Ratchet & Clank games.
+# The sources stay in rac-rs/src/formats (crate root lib.rs); this folder holds only the manifest.
+
+[lib]
+name = "rac_formats"
+path = "../../src/formats/lib.rs"
+
+[dependencies]
+wgpu = "30.0.1"
+# PCSX2 texture hashes (texhash.rs).
+xxhash-rust = { version = "0.8.18", default-features = false, features = ["xxh3"] }
+
+[features]
+# The packs' unit tests use this crate's test helpers (`#[cfg(any(test, feature = "test-api"))]`); never in a game build.
+test-api = []

@@ -1,0 +1,86 @@
+//! The wgpu renderer of the viewer: device and pipelines, scene upload, prop slots, per-frame draw.
+//! The `Gpu` struct lives in `viewer.rs`; this module holds its `impl` blocks, one file per job:
+//! - `setup`:        Gpu::new (instance, adapter, device, surface, every pipeline and buffer), resize, surface configuration and present mode.
+//! - `renderer`:     Which graphics API the window opens (Vulkan / DirectX 12 from the options file), DXC for DX12, DX12 frame latency.
+//! - `adapter_report`: The run log's list of adapters (and whether they can present) when the window found none.
+//! - `scene_ctx`:    SceneCtx (the device handles of the scene build) and its texture upload and batching, with the Gpu wrappers around it.
+//! - `scene_build`:  Level scene build (terrain, ties, shrubs, sky) on the build context, and its parallel vertex helpers.
+//! - `props_layout`: Prop slot layout: class faces, draw layout, slot allocation, and growing the props batch (append / regrow).
+//! - `props_append`: The per-class work of a pool growth (`append_props`): vertices, radius and clippable faces built once per class.
+//! - `props_set`:    Per-frame prop slot rebuild (set_props): slot jobs and sources, GPU records, preview and panel poses, debris.
+//! - `prop_clip`:    Retail polygon clipper for props: draw-distance alphas, per-prop verdicts and the clipped polygon queue.
+//! - `marker`:       The posed hero marker model (set_marker) and its clipped polygons.
+//! - `marker_ctx`:   The hero marker's inputs, its per-vertex CPU build and the GPU build's parameter block.
+//! - `marker_clip`:  The hero marker's guard-band clipper on the faces that may cross it (chunk spheres), and the mask diff.
+//! - `item_panel`:   Shop portrait pose and the item panel render targets.
+//! - `metal`:        Metal (chrome) mobys: view and palette rows, packet to vertex conversion, upload and the per-frame metal props.
+//! - `lighting`:     Frame uniforms and fog, dynamic light rows, relight of the scene vertices, and the moby / hero light words.
+//! - `culling`:      Per-frame culling of ties, shrubs and tfrags, the far draw level, and the ice tag.
+//! - `particle_fx`:  Particle sprites, ribbons and lines (set_particles) and their view tests.
+//! - `sky_water`:    Sky spin and sprites, ocean surfaces (set_ocean, set_ocean_ram) and the sea shading mesh.
+//! - `hud_art`:      HUD art textures and the retail overlay texture.
+//! - `rscale`:       Render scale: the picture drawn at a percentage of the window size, the copy onto the window, the window size.
+//! - `aspect_pass`:  [PC] Aspect ratio box: the frame drawn at the box size, copied into its rectangle between black bars.
+//! - `frame_sizes`:  [PC] The frame's target sizes checked against each other before recording (a mismatch skips the frame).
+//! - `ui_pass`:      The modern menu's pass (`ui/gpu.rs`) over the finished window image (with an Aspect ratio box: the box picture).
+//! - `reshade`:      ReShade add-on: registers with a loaded ReShade, depth + picture before the HUD (files in `reshade/`).
+//! - `warp_actors`:  Warp (travel) actors: load, pose and clear.
+//! - `draw`:         The per-frame draw: Gpu::draw, strip drawing, debug switches, water mirror choice.
+//! - `tests`:        Unit tests of the renderer helpers (kept together; they reach every sibling through `use super::*`).
+
+use super::*;
+use rayon::prelude::*;
+
+mod setup;
+pub mod renderer;
+mod dlss_vk; // [PC] DLSS: the window's Vulkan instance / device with NGX's extensions (upscale/dlss.rs)
+mod adapter_report;
+mod scene_ctx;
+pub(in crate::viewer) mod repl_upload;
+pub(in crate::viewer) mod split_orig;
+mod scene_build;
+mod props_layout;
+mod props_append;
+mod props_live;
+pub(in crate::viewer) mod moby_add;
+pub(in crate::viewer) mod moby_fire;
+mod props_set;
+mod pack_feed;
+pub(in crate::viewer) mod ov_depth;
+pub(in crate::viewer) mod tail_order;
+pub(in crate::viewer) mod pose_reuse;
+pub mod prop_clip;
+mod marker;
+pub(in crate::viewer) mod marker_ctx;
+pub(in crate::viewer) mod marker_clip;
+mod item_panel;
+mod metal;
+mod lighting;
+mod culling;
+mod tfrag_memo;
+mod particle_fx;
+mod sky_water;
+mod hud_art;
+pub(in crate::viewer) mod ach_icons;
+pub(in crate::viewer) mod ovwrite;
+pub(in crate::viewer) mod reshade;
+pub(in crate::viewer) mod rscale;
+mod aspect_pass;
+mod frame_sizes;
+mod ui_pass;
+mod warp_actors;
+mod draw;
+mod tests;
+
+use self::setup::*;
+pub use self::scene_ctx::*;
+use self::scene_build::*;
+pub(super) use self::props_layout::*;
+pub(super) use self::props_set::*;
+use self::prop_clip::*;
+use self::metal::*;
+use self::lighting::*;
+use self::culling::*;
+use self::particle_fx::*;
+use self::sky_water::*;
+use self::draw::*;

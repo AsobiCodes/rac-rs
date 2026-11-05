@@ -7,8 +7,8 @@
 #
 #   oracle/rec, oracle/game        the generated game code
 #   oracle/src/vu0_prog*.rs        the generated VU microcode
-#   rac-rs/src/gsfull/vu1_prog*.rs
-#   rac-rs/src/particles/orb_tables.rs
+#   rac-rs/src/engine/gsfull/vu1_prog*.rs
+#   rac-rs/src/rac1/particles/orb_tables.rs
 #   build/                         the compiler's working files
 #   toolchain/                     the build tools setup.sh downloaded (Rust, Python, the C linker;
 #                                  about 1 GB; setup.sh fetches them again when it needs them)
@@ -51,8 +51,8 @@ echo "  removing the game code generated from your disc"
 rm -rf oracle/rec oracle/game
 rm -f oracle/src/vu0_prog0.rs oracle/src/vu0_prog1.rs oracle/src/vu0_prog9hi.rs
 rm -f oracle/src/skinff_ee.rs oracle/src/skinff_vu.rs
-rm -f rac-rs/src/gsfull/vu1_prog*.rs rac-rs/src/gsfull/vu1aot_gen.rs
-rm -f rac-rs/src/particles/orb_tables.rs
+rm -f rac-rs/src/engine/gsfull/vu1_prog*.rs rac-rs/src/engine/gsfull/vu1aot_gen.rs
+rm -f rac-rs/src/rac1/particles/orb_tables.rs
 
 # The build log and the stamps. play.cfg is what the game reads to find your
 # disc, so it stays. The version the window title shows falls back to the

@@ -8,6 +8,10 @@
 # Format: one `<preset>.<key>=<value>` per line, `#` starts a comment. Presets: low, medium, high. Keys and values are those of
 # pc_options.txt: lighting classic|enhanced, draw low|medium|high, smoothing on|off, hud sharp|original, ao / shadows / sunrays / gi
 # off|low|medium|high, water / particles classic|low|medium|high, vegetation off|moderate|lush, waves on|off, fog / clouds classic|low|medium|high, texfilter classic|smooth (only active with Lighting Enhanced).
+# fur off|low|medium|high (Ratchet's fur shader, only active with Lighting Enhanced), fire off|low|medium|high (realistic flames and burning
+# buildings) and smoke off|low|medium|high (volumetric smoke); the three are listed last in each preset. The Fur STYLE (furstyle soft|fluffy)
+# is never part of a preset. A pc_options.txt without a fur / fire / smoke key reads as the level of the preset its other rows match (else off),
+# see retail/pcext/furopt.rs rows.
 #
 # Never part of a preset: camera, controls, language, display mode, the renderer (Vulkan / DirectX 12), debug mode. Every preset sets Culling On
 # (v0.4.1; not a table key, so the launcher's table is unchanged).
@@ -26,6 +30,9 @@ low.waves=off
 low.fog=classic
 low.clouds=classic
 low.texfilter=smooth
+low.fur=off
+low.fire=off
+low.smoke=off
 medium.lighting=classic
 medium.draw=low
 medium.smoothing=on
@@ -41,6 +48,9 @@ medium.waves=on
 medium.fog=low
 medium.clouds=low
 medium.texfilter=smooth
+medium.fur=low
+medium.fire=low
+medium.smoke=low
 high.lighting=classic
 high.draw=medium
 high.smoothing=on
@@ -56,3 +66,6 @@ high.waves=on
 high.fog=high
 high.clouds=high
 high.texfilter=smooth
+high.fur=high
+high.fire=high
+high.smoke=high

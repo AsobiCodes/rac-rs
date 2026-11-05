@@ -1,5 +1,74 @@
 # Changelog
 
+## v0.5.0
+
+- This update rebuilds the whole game once, so it takes longer than usual: about 10 minutes, up to 20 on slower PCs. Your saves and settings are kept.
+- Linux: update with one click from the RAC-RS Launcher, or unpack the new release over the game folder and run `sh setup.sh` again. The new RAC-RS Launcher v0.1.5 has an Achievements tab and the new graphics rows.
+
+### New graphics options
+
+- New: Fire, Smoke, Fur and Metal. They need Lighting set to Enhanced (Pause > Options > Graphics); then the Fur, Fur style, Metal, Fire and Smoke rows appear. Each has quality levels, so you can trade looks for speed.
+- New: Fire. Burning buildings and level fires are drawn as animated flame sprites without flicker. Explosions (Bomb Glove, R.Y.N.O., Devastator and others) leave fire on the ground and burn the grass; small shots such as the Blaster leave none. The Pyrocitor is unchanged.
+- New: fire lights the scene. The level's fires and the effect fire throw warm, slowly swelling and sinking light on the walls, ground, Ratchet and nearby enemies. How many fires and weapon shots give light follows the Global illumination setting (Off, Low, Medium, High). Weapon shots (Pyrocitor, Blaster, Devastator, Tesla Claw, R.Y.N.O.) light up what is nearby too.
+- New: volumetric smoke. Smoke now rises in drifting, spreading columns instead of round lumps standing still, and the columns stay steady while the camera moves.
+- New: shiny Metal with soft reflections and a real floor mirror. A Metal reflections slider (default 75 %) sets how strong it is. Metal costs some graphics-card time, so turn it Off on weak PCs.
+- New: Fur on Ratchet, with a Fur style row: Soft (short, close to the PS2 look; the default) or Fluffy (long and plush).
+- New: Upscaler row (Graphics > Resolution): Off, AMD FidelityFX Super Resolution (FSR) or NVIDIA DLSS (DLSS 4.5), with Upscale quality (Native AA, Quality, Balanced, Performance). The game is drawn smaller and scaled up to the window; menus and the HUD stay sharp. It switches without a restart, works with Vulkan and DirectX 12 (Windows only), and Off gives the same picture as before. FSR and DLSS need the vendors' own DLL files, which come with the game download; without them the row stays Off. DLSS needs an NVIDIA RTX graphics card.
+- New: Display > Screen > Aspect ratio (issue #45): Auto (default, the picture fills the window as before), 4:3, 16:9, 16:10, 21:9 or 32:9. Any other shape draws the whole game (world, HUD, menus, movies, mouse) in the largest box of that shape inside the window, with black bars around it, and switches at once. 4:3 is the shape of the PS2 picture. ReShade is off while bars show. Modern menu style only.
+- New: Graphics > World > Underwater look (issue #64): On (default) or Off. Off turns off our underwater effects (fog colour, light patterns on the floor, light shafts, wobble) and shows the PS2's own underwater picture; the water surface keeps your Water setting. Waves and Underwater look are greyed out while Water is Classic, with a button to switch Water to High.
+- New: every Graphics row shows a "speed impact" meter, measured on the graphics card at three places in the game (not guessed).
+- New: Graphics > More effects > Supporter drawings (Off by default). On = thank-you drawings for the Ko-fi supporters on the walls of the garage on Veldin, on every visit. Thank you: Scrolt, korixx, reTokyo, khalifax10, DeSynkro, DarkBlaze, Smoe05, eardrummer, Chris, Ryan Palmer, fleece, Justintime4u2bu, Ga, THUND3R_WOLF, MK, Ratchetenjoyer, Tonyswan and Luke4600.
+
+### Menus
+
+- New: modern menus. The title screen, pause menu (tabs, Help, Options, Goodies, Weapons / Gadgets / Items), Gadgetron vendor, Galactic Map, Save / Load, Quick Select (a ring of 8 slots with the game's own item pictures; Q / E or L1 / R1 turn it), Options > Controls (rebind keys) and Options > Mods are redrawn as modern pages. A Menu style row (Graphics) switches back to Classic, which stays as the PS2 menus.
+- New: the modern pause menu has a Map tab. A click on it (or Enter / Cross) closes the pause menu and opens the modern planet map and mission list. Pause > Options (Modern style) has Display, Graphics and Game rows that open the Options screen on that tab.
+- New: Quit to Desktop (issue #53), the last row of Options (pause menu and title screen). It asks first, saves the achievements, then closes.
+- New: mouse menus: hovering selects a row, a click selects an item at once, you can click other tabs from inside a sub-page, and click Buy, Cancel or the hint bar. Button hints show your keyboard keys on keyboard or mouse and the A/B/X/Y or PlayStation symbols only on a gamepad.
+- Modern menus follow the game's language (a German save gets German menus). The new menus have texts in English, French, German, Spanish and Italian; the French, Spanish and Italian ones have not been checked by native speakers yet.
+- Texture packs now also reach the modern menus, the vendor and Quick Select, and the classic vendor's item icons (issue #66).
+
+### Gameplay and controls
+
+- New: Camera > Strafe aiming: a fourth choice, Steady (issues #73 and #27), like Ratchet & Clank 2. While you hold the strafe aim (right mouse / R2) the camera stays at its normal height behind Ratchet and does not swing; he faces where the camera looks and side-steps or walks backwards, and there is no aim circle. Shots fly level from his chest along the camera; the Bomb Glove, Mine Glove, Devastator and R.Y.N.O. keep the game's own targeting. The default stays Raised.
+- New: Camera > Aiming > Lock-on strength slider. The lock-on no longer picks targets beyond the weapon's reach (also for the Blaster with the crosshair off); 100 % is the lock as before, within the reach.
+- New: Game > Gameplay > Auto-equip gadgets (issue #76), Off by default. With it On, pressing Circle (fire) at a Swingshot target, a Trespasser lock or a Hydrodisplacer pad takes out the right gadget by itself, and your weapon comes back afterwards.
+- New: Game > Gameplay > Wrench throw (issue #72): Classic (the original) or Moving (like Ratchet & Clank 3: you can run once the wrench has left his hand, and it flies where he aims, even while strafing backwards). Default Classic.
+- New: Game > Gameplay > Quick Select pauses the game (issues #46 and #67), Off by default. With it On, enemies, shots and the world stand still while the Quick Select ring is open.
+- New: the mouse turns the view in first-person (Triangle look) in both camera styles (issue #71).
+- New: lower mouse lag (issue #63): the camera on screen already turns by the mouse movement the game has not used yet.
+- Fixed: the oxygen meter moves to the window's edge together with the other boxes with HUD position Corners, but only when nothing else is drawn there (issue #65).
+- New: Hide HUD (Debug mode, F11) also hides the mods' layer, such as Arsenal Mastery's weapon level, during gameplay.
+
+### Achievements
+
+- New: Achievements, 35 of them (suggested by khalifax10). They show as toasts when you earn them, and in the Achievements tab of the modern pause menu (F6 while paused in any menu style). The launcher has an Achievements tab too.
+
+### Fixes
+
+Problems of v0.4.3 that are fixed. (Problems in the new v0.5 features that were found and fixed before this release are not listed.)
+
+- Fixed: the Galactic Map could get stuck (no exit, no travel) and the game could crash on the way to or while landing on a planet. A clean-up of the game thread's call stack could run in the middle of a menu hook; it now waits for a safe moment.
+- Fixed: random game sounds after a normal game start (issue #62, PAL and USA): every random sound came out the same, for example Ratchet's third-hit grunt was always the same deep one. They now vary like on the PS2 (about one third hit in three has no grunt). Saves loaded in-game were not affected.
+- Fixed: gold bolt pickup (issue #69): his weapon or wrench no longer shows in his hand while he holds up a gold bolt, as on the PS2.
+- Fixed: smoother picture at 120 to 240 Hz (frame pacing, issues #28 and #57).
+- Fixed: the oxygen meter stayed in the 4:3 area with HUD position Corners (issue #65; details under Gameplay and controls).
+- Fixed: texture packs did not reach the vendor's item icons (issue #66; details under Menus).
+- Fixed: switching Water to Classic while under water could leave fog, clouds, smoke and global illumination switched off on every level until Water was set back to Low or higher.
+- Fixed: Novalis caves: the water reflected a pale sky inside the caves. Under a roof or in a cave it now shows its own colour; open water is unchanged.
+- Fixed: sun shadows (Lighting Enhanced) with a texture pack on: lamp posts cast only a floating head without the pole, and some big objects cast no shadow at all (for example on Pokitaru). Thin objects such as lamp posts now also keep their shadow farther from the camera.
+- Fixed: HD texture pack: Gemlik no longer crashes ("device lost").
+- Fixed: menu sound crackle: the paused game's frozen sound level is removed before it reaches your speakers, so short Windows sound stalls no longer click.
+
+### Known issues
+
+- Issue #70 (needs the reporter's exact spot), #24 (same as on the PS2) and #31 (the PS2 game has no rumble) are not changed.
+- With the Classic camera, any strafe aim causes a one-frame camera jump when you press it (the Raised aim has it too).
+- The modern Help tab is empty; Space opens the classic Helpdesk.
+- The first start of a new version pauses for about 8 seconds at the first level while shaders compile (once).
+- The upscaler, Quick Select pause and Aspect ratio rows are in the modern menu style only.
+- Not tried on a real Steam Deck. Not checked on the USA disc: the modern planet map for every planet, and a planet the map does not name ("????").
+
 ## v0.4.3
 
 - Updating from v0.4.2 keeps your saves and settings.

@@ -1,0 +1,20 @@
+# R&C2 (SCES_516.07) cold-boot hooks; the R&C1 rule each one replaces is named (oracle/src/cold_hooks.txt, coldboot.md "Run 2").
+# libkernel InitSys FindAddress scan of the BIOS image in RAM (R&C1 11d798) -> skip
+ret 11f718 0
+# sceSifInitRpc / sceSifInitCmd wait for the IOP's reply packet over SIF0 (R&C1 11ab20 / 11a480) -> skip
+ret 11cf78 0
+ret 11c8d8 0
+# sceSifRebootIop / sceSifSyncIop (R&C1 11cf48 / 11cf10): the IOP "rebooted" at once
+ret 11eed8 1
+ret 11eea0 1
+# WaitSema / PollSema / iPollSema syscall wrappers (R&C1 1189b0/c0/d0): always succeed, through `jr ra; move v0,a0`
+# placed in free low RAM when the crt0 entry (0x131b48) runs.
+w32 131b48 1000 03e00008
+w32 131b48 1004 0080102d
+jmp 11ac60 1000
+jmp 11ac70 1000
+jmp 11ac80 1000
+# Movie player (FUN_00351140: IPU + an MPEG decode thread 0x353c68 the HLE has no scheduler for) -> skipped (v0 = 1). The Hand
+# registered at this entry (rac-rs/src/rac2/movie.rs, code-word hash guard) runs in the rule's place (cold.rs `stub`): the window
+# plays the movie, or it skips at once with the rule's value while nothing services movies.
+ret 351140 1 27bdffd0 3c01001b

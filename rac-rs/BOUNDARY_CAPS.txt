@@ -1,0 +1,6 @@
+# Engine split boundary (ENGINE_SPLIT.md): the crossings each file of src/engine and src/formats still has.
+# Kept by rac-rs/src/boundary_tests.rs. Kinds: rac1 = names a module of the R&C1 pack; engine = a formats file names an engine
+# module; addr = an R&C1 RAM address literal (0x100000..0x4fffff, not a multiple of 0x10000 nor an all-ones mask, outside
+# `#[cfg(test)] mod` blocks). A cap only goes down: after removing crossings run
+#  RAC_BOUNDARY_CAPS_WRITE=1 cargo test --lib boundary  (lowers caps, drops the zeros). Never raise or add one by hand.
+# Totals: 

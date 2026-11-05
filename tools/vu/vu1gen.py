@@ -1,6 +1,6 @@
-"""VU1 microprogram -> Rust ahead-of-time translator for rac-rs (src/gsfull/vu1_progN.rs + vu1aot_gen.rs).
+"""VU1 microprogram -> Rust ahead-of-time translator for rac-rs (src/engine/gsfull/vu1_progN.rs + vu1aot_gen.rs).
 
-The output reproduces the interpreter in src/gsfull/vu1.rs bit for bit. The interpreter's timing state (per-register
+The output reproduces the interpreter in src/engine/gsfull/vu1.rs bit for bit. The interpreter's timing state (per-register
 VF/ACC ready cycles, the pending Q result, the MAC/clip flag queue, the pending branch, the E-bit slot and the branch
 hazard register) is explored at generation time: one node = one instruction pair specialised over that state, so the
 native code carries no ready tables, only the values. Nodes are chained into basic blocks of a `loop { match }` state

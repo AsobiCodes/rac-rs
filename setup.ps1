@@ -12,7 +12,7 @@
 #   (c) generates the game code from the disc image with tools\recgen_iso.py (boot code + 19 levels + the front end) into .\oracle\rec and .\oracle\game
 #   (c2) generates the VU microcode translations (graphics code) from the disc image with tools\vugen_iso.py into
 #        .\oracle\src\vu0_prog0.rs, vu0_prog1.rs, vu0_prog9hi.rs, skinff_ee.rs, skinff_vu.rs (the skinning fast path: tools\skinff_ee.py,
-#        tools\skinff_gen.py, run by vugen_iso.py) and .\rac-rs\src\gsfull\vu1_prog*.rs + vu1aot_gen.rs
+#        tools\skinff_gen.py, run by vugen_iso.py) and .\rac-rs\src\engine\gsfull\vu1_prog*.rs + vu1aot_gen.rs
 #   (d) builds the game with cargo (release) into .\build, guided by the speed profile for your disc in .\pgo when the release has one
 #   (e) writes generated\play.cfg (the disc image path) and Play.cmd, which starts the game from your disc image (cold boot: logos, title screen, New Game, no savestate),
 #       and a desktop shortcut to the game exe (the exe, started with no arguments, reads generated\play.cfg)
@@ -635,9 +635,16 @@ function Test-ProtectedPath([string]$rel) {
     $r = $rel.Replace('\', '/').TrimStart('/').ToLowerInvariant()
     foreach ($p in @('toolchain/', 'build/', 'generated/', 'player/', 'oracle/rec/', 'oracle/game/', 'test_shots/', 'mods/', 'profiles/')) { if ($r.StartsWith($p)) { return $true } }
     if ($r -in @('launcher.cfg', 'library.json', 'portable.txt', 'rac-rs launcher.exe', 'rac-rs launcher.exe.old')) { return $true }
-    if ($r -in @('play.cmd', 'oracle/src/vu0_prog0.rs', 'oracle/src/vu0_prog1.rs', 'oracle/src/vu0_prog9hi.rs', 'oracle/src/skinff_ee.rs', 'oracle/src/skinff_vu.rs', 'rac-rs/src/gsfull/vu1aot_gen.rs', 'rac-rs/src/particles/orb_tables.rs')) { return $true }
-    if ($r -match '^rac-rs/src/gsfull/vu1_prog\d+\.rs$') { return $true }
+    if ($r -in @('play.cmd', 'oracle/src/vu0_prog0.rs', 'oracle/src/vu0_prog1.rs', 'oracle/src/vu0_prog9hi.rs', 'oracle/src/skinff_ee.rs', 'oracle/src/skinff_vu.rs', 'rac-rs/src/engine/gsfull/vu1aot_gen.rs', 'rac-rs/src/rac1/particles/orb_tables.rs')) { return $true }
+    if ($r -match '^rac-rs/src/engine/gsfull/vu1_prog\d+\.rs$') { return $true }
     return $r.EndsWith('.iso')
+}
+
+function Test-VendorRel([string]$rel) {
+    # The upscaler DLLs and licence texts in bundled\ (v0.5.0) are not in git, so a tag archive never holds them: an update must not delete them
+    # (not even when a release_files.txt stops listing them); they are replaced only by Install-VendorDlls against its pinned table.
+    $r = $rel.Replace('\', '/').TrimStart('/').ToLowerInvariant()
+    return ($r -match '^bundled/(amd_fidelityfx_(loader|upscaler)_(vk|dx12)\.dll|nvngx_dlss\.dll|rac_ngx\.dll|licenses/.*)$')
 }
 
 function Get-Sha256Hex([string]$path) {
@@ -739,7 +746,7 @@ function Sync-Update([string]$src, [string]$dst) {
     if ($oldList.Count -gt 0 -and $newList.Count -gt 0) {
         $keep = @{}; foreach ($n in $newList) { $keep[$n] = $true }
         foreach ($o in $oldList) {
-            if ($keep.ContainsKey($o) -or ($last -contains $o) -or (Test-ProtectedPath $o) -or $o -match '(^|/)\.\.(/|$)' -or $o.StartsWith('/')) { continue }
+            if ($keep.ContainsKey($o) -or ($last -contains $o) -or (Test-ProtectedPath $o) -or (Test-VendorRel $o) -or $o -match '(^|/)\.\.(/|$)' -or $o.StartsWith('/')) { continue }
             $d = Join-Path $dst ($o.Replace('/', '\'))
             if (Test-Path -LiteralPath $d -PathType Leaf) {
                 Remove-Item -LiteralPath $d -Force
@@ -2680,9 +2687,103 @@ function Install-BundledLoader([string]$exeDir) {
     else { Write-Host "  mod loader: omniloader.dll $newVer replaces a loader of unknown version (the old one is kept as omniloader.dll.prev)" }
 }
 
+# v0.5.0: the upscaler DLLs the game opens at run time from the folder of rac-rs.exe (src/engine/viewer/upscale/ffx.rs: amd_fidelityfx_loader_*.dll
+# + amd_fidelityfx_upscaler_*.dll for Vulkan and DirectX 12; dlss.rs: rac_ngx.dll (our bridge) + nvngx_dlss.dll (NVIDIA's DLSS model)).
+# They are NOT in git, so a tag archive (the in-game / launcher update) does not hold them. Two sources: bundled\ of the release zip (a fresh
+# install), or the asset zip rac-rs-upscalers-1.zip of the GitHub release v0.5.0 (pinned URL and SHA-256, every DLL checked against the table
+# below), downloaded once into bundled\ (with the licence texts in bundled\licenses\) when a DLL is missing there and not already next to the exe.
+# Built by release_build\mk_upscaler_zip.py. Licence texts: NVIDIA_DLSS_SDK_LICENSE.txt, AMD_FidelityFX_LICENSE.md. Any failure is only a
+# warning (the upscaler options stay off): never a failed setup. -TestUpdateBase serves <base>/rac-rs-upscalers-1.zip instead of GitHub.
+$VendorZipName = 'rac-rs-upscalers-1.zip'
+$VendorZipUrl = 'https://github.com/AsobiCodes/rac-rs/releases/download/v0.5.0/rac-rs-upscalers-1.zip'
+$VendorZipSha256 = '323D9D91136EFC4E616153C1905D7FA4382DA87BD0A2B8DFEB66E1D9AB9AC403'
+$VendorDllSha256 = [ordered]@{
+    'amd_fidelityfx_loader_dx12.dll'   = 'E2191D3C0828BE45EB8AFFD4E3EC0378F2293ADC345B772A7170EDCF3B021ECB'
+    'amd_fidelityfx_loader_vk.dll'     = '38A56A01FB3565C0757D9F5C1E4E69DE4B65E5F2E5769B323B200DC1F142BAB9'
+    'amd_fidelityfx_upscaler_dx12.dll' = 'AAD4FCCCCB29084A655F9A4F9F613BD22C8C03FB4A0F8840148CC6543B4CCACE'
+    'amd_fidelityfx_upscaler_vk.dll'   = '4A7E895AF6E0B615D40A84D59EB8C2B1054AD91CDD0C739567940270D51BDAB7'
+    'nvngx_dlss.dll'                   = 'D00B5B0AB29C3CA101B70C3A5ECB3A01B7EF33766A3383A28A18623083E6123E'
+    'rac_ngx.dll'                      = '91ADA0E533A67407C7B5C4E29B1AF850621E78E37E3B63AE314970810A144F44'
+}
+$VendorDlls = @($VendorDllSha256.Keys)
+$VendorLicenses = @('licenses/NVIDIA_DLSS_SDK_LICENSE.txt', 'licenses/AMD_FidelityFX_LICENSE.md')
+
+function Test-VendorFile([string]$path, [string]$name) {
+    return ((Test-Path -LiteralPath $path -PathType Leaf) -and ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -eq $VendorDllSha256[$name]))
+}
+
+# Downloads the asset zip (or takes it from -TestUpdateBase), checks its SHA-256 and extracts only the expected entries into bundled\
+# (each DLL checked against the table). Throws on any failure; leaves no temp file.
+function Get-VendorZipIntoBundled([string]$b) {
+    New-Item -ItemType Directory -Force -Path $b | Out-Null
+    $zip = Join-Path $b 'upscalers_download.tmp'
+    try {
+        if ($TestUpdateBase) {
+            if ($TestUpdateBase -match '^(https?|file)://') { Save-Url ($TestUpdateBase.TrimEnd('/') + "/$VendorZipName") $zip }
+            else {
+                $f = Join-Path $TestUpdateBase $VendorZipName
+                if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { throw "not found: $f" }
+                Copy-Item -LiteralPath $f -Destination $zip -Force
+            }
+        } else {
+            try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
+            Save-Url $VendorZipUrl $zip
+        }
+        $h = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+        if ($h -ne $VendorZipSha256) { throw "wrong SHA-256 $h" }
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $za = [System.IO.Compression.ZipFile]::OpenRead($zip)
+        try {
+            foreach ($rel in (@($VendorDlls) + $VendorLicenses)) {
+                $entry = $za.Entries | Where-Object { $_.FullName.Replace('\', '/') -eq $rel } | Select-Object -First 1
+                if (-not $entry) { throw "$rel is not in the archive" }
+                $dst = Join-Path $b ($rel.Replace('/', '\'))
+                New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst) | Out-Null
+                $tmp = "$dst.tmp"
+                [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $tmp, $true)
+                if ($VendorDllSha256.Contains($rel) -and (Get-FileHash -LiteralPath $tmp -Algorithm SHA256).Hash -ne $VendorDllSha256[$rel]) {
+                    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+                    throw "$rel has an unexpected SHA-256"
+                }
+                Move-Item -LiteralPath $tmp -Destination $dst -Force
+            }
+        } finally { $za.Dispose() }
+    } finally {
+        Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
+        foreach ($rel in (@($VendorDlls) + $VendorLicenses)) { Remove-Item -LiteralPath ((Join-Path $b ($rel.Replace('/', '\'))) + '.tmp') -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+function Install-VendorDlls([string]$exeDir) {
+    $b = Join-Path $root 'bundled'
+    # download only when some DLL is neither in bundled\ nor already next to the exe with the pinned hash
+    $need = $false
+    foreach ($f in $VendorDlls) {
+        if (-not (Test-VendorFile (Join-Path $b $f) $f) -and -not (Test-VendorFile (Join-Path $exeDir $f) $f)) { $need = $true }
+    }
+    if ($need) {
+        Write-Host '  upscalers (FSR, DLSS): downloading the DLLs (rac-rs-upscalers-1.zip, about 95 MB) into bundled\'
+        try { Get-VendorZipIntoBundled $b }
+        catch { Write-Host "  upscalers (FSR, DLSS): could not get the DLLs ($($_.Exception.Message)); the upscaler options stay off" -ForegroundColor Yellow }
+    }
+    $n = 0; $miss = 0
+    foreach ($f in $VendorDlls) {
+        $src = Join-Path $b $f
+        $dst = Join-Path $exeDir $f
+        if (Test-VendorFile $dst $f) { continue }
+        if (-not (Test-VendorFile $src $f)) { $miss++; continue }   # missing, or not the pinned file: never copied
+        Copy-Item -LiteralPath $src -Destination $dst -Force
+        $n++
+    }
+    if ($miss -eq $VendorDlls.Count) { Write-Host '  upscalers (FSR, DLSS): the DLLs are not available, so the upscaler options stay off' -ForegroundColor Yellow }
+    elseif ($miss -gt 0) { Write-Host "  upscalers (FSR, DLSS): $miss of $($VendorDlls.Count) DLLs missing; the options that need them stay off" -ForegroundColor Yellow }
+    else { Write-Host "  upscalers (FSR, DLSS): $($VendorDlls.Count) DLLs next to rac-rs.exe ($n copied)" }
+}
+
 function Install-Bundled([string]$exeDir) {
     $b = Join-Path $root 'bundled'
     try {
+        try { Install-VendorDlls $exeDir } catch { Write-Host "  upscalers (FSR, DLSS): $($_.Exception.Message); the options that need the DLLs stay off (is the game running?)" -ForegroundColor Yellow }
         try { Install-BundledLoader $exeDir } catch { Write-Host "  mod loader: $($_.Exception.Message); the installed loader stays (is the game running?)" -ForegroundColor Yellow }
         $bm = Join-Path $b 'mods'
         if (Test-Path -LiteralPath $bm -PathType Container) {
@@ -3051,7 +3152,7 @@ if ($Regenerate -or $have -ne $want) {
 # none of that is shipped. Output (written in place, the files the sources already include): oracle\src\vu0_prog0.rs,
 # vu0_prog1.rs, vu0_prog9hi.rs, skinff_ee.rs, skinff_vu.rs (the skinning fast path: the loop's code words are read from the disc
 # image, tools\skinff_ee.py and tools\skinff_gen.py run inside vugen_iso.py),
-# rac-rs\src\gsfull\vu1_prog*.rs and vu1aot_gen.rs.
+# rac-rs\src\engine\gsfull\vu1_prog*.rs and vu1aot_gen.rs.
 # An update from a release without these files (v0.2.2) regenerates: the files are missing and the tool hash ($vuWant) changed.
 Step '(c2) generating the VU microcode translations from the disc image'
 [void](Complete-Tools $false)
@@ -3062,7 +3163,7 @@ $VuCompatible = @('5b49455da24a986799cd727bb9a4563a70609ab5759df4c060f5df0b00bec
 $vuWant = "$vuBase gen=$(Get-FilesHash (Get-VuGenFiles))"
 $vuHave = ''
 if (Test-Path -LiteralPath $vuStamp) { $vuHave = (Get-Content -LiteralPath $vuStamp -Raw).Trim() }
-if (-not (Test-Path -LiteralPath (Join-Path $orc 'src\vu0_prog0.rs')) -or -not (Test-Path -LiteralPath (Join-Path $orc 'src\vu0_prog1.rs')) -or -not (Test-Path -LiteralPath (Join-Path $orc 'src\vu0_prog9hi.rs')) -or -not (Test-Path -LiteralPath (Join-Path $orc 'src\skinff_ee.rs')) -or -not (Test-Path -LiteralPath (Join-Path $orc 'src\skinff_vu.rs')) -or -not (Test-Path -LiteralPath (Join-Path $root 'rac-rs\src\gsfull\vu1aot_gen.rs')) -or -not (Test-Path -LiteralPath (Join-Path $root 'rac-rs\src\particles\orb_tables.rs'))) { $vuHave = '' }
+if (-not (Test-Path -LiteralPath (Join-Path $orc 'src\vu0_prog0.rs')) -or -not (Test-Path -LiteralPath (Join-Path $orc 'src\vu0_prog1.rs')) -or -not (Test-Path -LiteralPath (Join-Path $orc 'src\vu0_prog9hi.rs')) -or -not (Test-Path -LiteralPath (Join-Path $orc 'src\skinff_ee.rs')) -or -not (Test-Path -LiteralPath (Join-Path $orc 'src\skinff_vu.rs')) -or -not (Test-Path -LiteralPath (Join-Path $root 'rac-rs\src\engine\gsfull\vu1aot_gen.rs')) -or -not (Test-Path -LiteralPath (Join-Path $root 'rac-rs\src\rac1\particles\orb_tables.rs'))) { $vuHave = '' }
 if ($vuHave -and $vuHave -ne $vuWant) {
     $oldGen = ''
     if ($vuHave -eq $vuBase) { $oldGen = $VuCompatible[0] } elseif ($vuHave.StartsWith($vuBase + ' gen=')) { $oldGen = $vuHave.Substring($vuBase.Length + 5) }

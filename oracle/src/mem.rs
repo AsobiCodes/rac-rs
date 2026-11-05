@@ -723,6 +723,7 @@ impl Mem {
         }
         let mut words = if cap { crate::gs::take_words(self.vif1_words) } else { Vec::new() };
         let mut marks = vec![(0usize, 0u32)];
+        let mut tie = if cap { crate::rc2::tiecap::kick_start(self) } else { None };
         if cap {
             self.dma_words(self.hw32(VIF1 + 0x10), qwc, &mut words);
             if mode == 0 {
@@ -779,6 +780,9 @@ impl Mem {
                         }
                     }
                     marks.push((words.len(), 0));
+                    if let Some(t) = tie.as_mut() {
+                        crate::rc2::tiecap::block(self, t, src, q);
+                    }
                     self.dma_words(src, q, &mut words);
                 }
                 madr = data.wrapping_add(q * 16);
@@ -791,6 +795,9 @@ impl Mem {
         if cap && mode == 1 {
             self.vif1_words = words.len();
             self.gsc_vif1(words, marks);
+        }
+        if let Some(t) = tie {
+            crate::rc2::tiecap::kick_end(t);
         }
         let fin = (chcr & 0xffcf) | (asp as u32) << 4 | tag_hi;
         self.vif1_pend = Some([fin, madr, tadr, asr[0], asr[1]]);
@@ -813,7 +820,7 @@ impl Mem {
         u128::from_le_bytes(b.try_into().unwrap())
     }
 
-    fn dma_words(&self, a: u32, q: u32, out: &mut Vec<u32>) {
+    pub(crate) fn dma_words(&self, a: u32, q: u32, out: &mut Vec<u32>) {
         // [PC] (speed) RAM data that does not wrap: the same words in one pass (the game sends ~800K words a field).
         let o = (a & 0x01ff_fff0) as usize;
         if a & 0x8000_0000 == 0 && o + q as usize * 16 <= RAM {

@@ -1,10 +1,12 @@
 # Notices and credits
 
-rac-rs is licensed under GPL-3.0-or-later (see LICENSE). It builds on the published knowledge and work listed below.
+rac-rs is licensed under GPL-3.0-or-later (see LICENSE), with one additional permission for the NVIDIA DLSS files (see "Additional permission under GNU GPL version 3 section 7" below). It builds on the published knowledge and work listed below.
 
 ## Contributors
 
-- **DeSynkro** (https://github.com/DeSynkro): the Linux port (pull request #38, v0.4.1): building and running the game on Linux, Linux gamepads, the Linux run and crash logs and the exact maths that give Linux the same game memory as Windows. Contributed under GPL-3.0-or-later like the rest of rac-rs.
+- **DeSynkro** (https://github.com/DeSynkro): the Linux port (pull request #38, v0.4.1): building and running the game on Linux, Linux gamepads, the Linux run and crash logs and the exact maths that give Linux the same game memory as Windows. Contributed under GPL-3.0-or-later like the rest of rac-rs. DeSynkro has also helped a lot with the Linux support since.
+- **khalifax10**: suggested the achievements (v0.5).
+- **Ko-fi supporters**: thank you to Scrolt, korixx, reTokyo, khalifax10, DeSynkro, DarkBlaze, Smoe05, eardrummer, Chris, Ryan Palmer, fleece, Justintime4u2bu, Ga, THUND3R_WOLF, MK, Ratchetenjoyer, Tonyswan and Luke4600, whose thank-you drawings hang in the garage on Veldin (Options > Graphics > Supporter drawings).
 
 ## rac1-decomp
 
@@ -114,6 +116,54 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## Upscalers: AMD FidelityFX Super Resolution and NVIDIA DLSS
+
+On Windows, the Upscaler row (Options > Graphics > Resolution) uses libraries from AMD and NVIDIA. They are DLL files that come with the
+release zip and sit next to `rac-rs.exe`; they are not in the source repository. The game works without them (the row then stays Off).
+
+### AMD FidelityFX Super Resolution (FSR)
+
+`amd_fidelityfx_loader_vk.dll`, `amd_fidelityfx_loader_dx12.dll`, `amd_fidelityfx_upscaler_vk.dll` and `amd_fidelityfx_upscaler_dx12.dll` are
+the unmodified signed binaries of the AMD FidelityFX SDK v2.4.0 (`Kits/FidelityFX/signedbin`,
+https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK). The SDK's `docs/license.md` puts these files under the MIT licence below,
+quoted unchanged; the whole file ships as `bundled/licenses/AMD_FidelityFX_LICENSE.md`.
+
+```
+Copyright (C) Advanced Micro Devices, Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the “Software”), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+AMD, the AMD Arrow logo, Radeon and FidelityFX are trademarks of Advanced Micro Devices, Inc. rac-rs is not affiliated with, endorsed by
+or sponsored by AMD.
+
+### NVIDIA DLSS
+
+rac-rs uses the NVIDIA DLSS SDK and the NVIDIA NGX SDK (v310.9.16, https://github.com/NVIDIA/DLSS):
+
+- `nvngx_dlss.dll` is the NVIDIA DLSS Super Resolution runtime, redistributed unmodified.
+- `rac_ngx.dll` is this project's small bridge library between the game and that runtime. It contains NVIDIA's NGX SDK library
+  (`nvsdk_ngx_d.lib`) in object code form, so it is distributed as a binary only.
+
+These two files are not covered by the GPL. They are licensed to you under the NVIDIA RTX SDKs licence, whose full text ships as
+`bundled/licenses/NVIDIA_DLSS_SDK_LICENSE.txt` (also at https://github.com/NVIDIA/DLSS/blob/main/LICENSE.txt). Its terms apply to them:
+among others, they may not be reverse engineered, decompiled, disassembled or modified, may not be distributed on their own, and are
+licensed for use with NVIDIA graphics cards only. DLSS needs an NVIDIA RTX graphics card.
+
+NVIDIA, the NVIDIA logo, GeForce, RTX and DLSS are trademarks and/or registered trademarks of NVIDIA Corporation in the U.S. and other
+countries. rac-rs is not affiliated with, endorsed by or sponsored by NVIDIA.
+
+### Additional permission under GNU GPL version 3 section 7
+
+If you modify rac-rs, or any covered work, by linking or combining it with the NVIDIA DLSS runtime (`nvngx_dlss.dll`) or the bridge
+library `rac_ngx.dll` (or a modified version of those libraries), containing parts covered by the terms of the NVIDIA RTX SDKs licence,
+the licensors of rac-rs grant you additional permission to convey the resulting work. This permission covers only those two libraries:
+they are not part of the Corresponding Source of rac-rs, and everything else in rac-rs stays under GPL-3.0-or-later.
 
 ## Microsoft DirectX Shader Compiler (dxcompiler.dll)
 

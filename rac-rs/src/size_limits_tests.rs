@@ -30,7 +30,7 @@ fn ident(c: char) -> bool {
 }
 
 /// The text with comments, string and char literals blanked (newlines kept), so braces and `fn` are only code.
-fn code_only(src: &str) -> Vec<char> {
+pub(super) fn code_only(src: &str) -> Vec<char> {
 	let c: Vec<char> = src.chars().collect();
 	let mut out = c.clone();
 	let blank = |out: &mut Vec<char>, a: usize, b: usize| {

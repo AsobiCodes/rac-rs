@@ -12,6 +12,10 @@
 /oracle/src/vu0_prog9hi.rs
 /oracle/src/skinff_ee.rs
 /oracle/src/skinff_vu.rs
-/rac-rs/src/gsfull/vu1_prog*.rs
-/rac-rs/src/gsfull/vu1aot_gen.rs
-/rac-rs/src/particles/orb_tables.rs
+/rac-rs/src/engine/gsfull/vu1_prog*.rs
+/rac-rs/src/engine/gsfull/vu1aot_gen.rs
+/rac-rs/src/rac1/particles/orb_tables.rs
+# upscaler DLLs (FSR, DLSS): in the release zip (bundled/), never in git
+/bundled/amd_fidelityfx_*.dll
+/bundled/nvngx_dlss.dll
+/bundled/rac_ngx.dll

@@ -1,0 +1,7 @@
+# addr ret name   (R&C2 SCES_516.07 boot code; R&C1 oracle/stubs.txt equivalents in brackets)
+# Pad state: the IOP pad driver is not emulated; report a connected pad. [124da0]
+128c18 1 pad_get_state
+# SIF RPC (IOP not emulated): calls complete at once, nothing is busy. [11b1c8 11b3b8 11aff8]
+11d620 0 sceSifCallRpc
+11d810 0 sceSifCheckStatRpc
+11d450 0 sceSifBindRpc

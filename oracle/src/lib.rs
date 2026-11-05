@@ -23,6 +23,7 @@ pub mod snapfile;
 pub mod snd989;
 pub mod spu2;
 pub mod rec;
+pub mod rc2;
 pub mod vif;
 mod vu;
 mod vu0_prog0;
@@ -35,12 +36,8 @@ use cpu::Cpu;
 use mem::Mem;
 
 const LEVEL: u32 = 0x15ed84;
-/// The vblank poll loop the game waits in (boot).
-pub(crate) const VBLANK_WAIT: u32 = 0x118cb0;
-/// sceGsSyncV's INTC_STAT poll while no vsync callback is registered (boot FUN_00118bd0 +0x40; `Cpu::poll_ff`).
-pub(crate) const POLL_HEAD: u32 = 0x118c10;
-/// Pad read (boot FUN_00124bd8): copies the pad DMA reply into a1, returns its length.
-pub const PAD_READ: u32 = 0x124bd8;
+// The vblank poll loop (boot 0x118cb0), sceGsSyncV's INTC_STAT poll head (FUN_00118bd0 +0x40, `Cpu::poll_ff`) and the pad
+// read (FUN_00124bd8) are per game: `ver::Addrs` (R&C1 `ver::RC1_ADDRS`, R&C2 `rc2::ADDRS`); the vblank one is also `Cpu::vblank_pc`.
 
 /// A savestate (p2s.py output) to run: `load_raw`, then the RPC calls in flight in it are completed
 /// (`Cpu::finish_rpcs_in_flight`).
@@ -114,6 +111,7 @@ pub fn load_raw(dir: &str) -> Cpu {
     let iso = std::env::var("ORACLE_ISO").unwrap_or_else(|_| DEFAULT_ISO.into());
     // The disc and its video mode (USA: NTSC timing; PAL: unchanged).
     ver::from_iso(&iso);
+    c.vblank_pc = ver::addrs().vblank_wait;
     c.iso = std::fs::File::open(iso).ok();
     c
 }
@@ -144,8 +142,12 @@ pub fn load_stubs(c: &mut Cpu, path: &str) {
         c.trace_left = std::env::var("ORACLE_CALLN").ok().and_then(|n| n.parse().ok()).unwrap_or(40);
         c.add_watch(a);
     }
-    let Ok(t) = std::fs::read_to_string(path) else { return };
-    let lvl = c.mem.ram[LEVEL as usize] as u32;
+    // R&C2's stub rules are built in (rc2/stubs.txt); `path` names R&C1's file.
+    let t = if ver::rc2() { crate::rc2::STUBS.to_string() } else {
+        let Ok(t) = std::fs::read_to_string(path) else { return };
+        t
+    };
+    let lvl = rec::level_key(&c.mem);
     for l in t.lines() {
         let l = l.trim();
         if l.is_empty() || l.starts_with('#') {
@@ -264,7 +266,7 @@ impl Machine {
         // the oracle runs from RAM (0x80001660) writes it at the next VBLANK_S and clears it. The state may be anywhere
         // (a load's SIF poll, not only the vblank poll), so the outputs are never guessed from the stack pointer.
         cpu.vsync = None;
-        cpu.add_stub(PAD_READ, 18, "pad_read");
+        cpu.add_stub(ver::addrs().pad_read, 18, "pad_read");
         // Debug: hook rules (stopif / tracer / stop / trace ...) on a savestate machine, env COLD_HOOKS=file; the BIOS in
         // RAM stays in charge (cold::Kernel::hooks_only).
         let hooks = std::env::var("COLD_HOOKS").ok().and_then(|p| std::fs::read_to_string(p).ok()).map(|t| {
@@ -372,8 +374,8 @@ impl Machine {
                 c.vblank_cb = Some(Box::new(move |c: &mut Cpu| {
                     c.vblank();
                     // A new level's overlay: its recompiled functions (none while the loader replaces the overlay).
-                    let lvl = c.mem.ram[LEVEL as usize] as u32;
-                    let ld = u16::from_le_bytes([c.mem.ram[rec::LOADER as usize], c.mem.ram[rec::LOADER as usize + 1]]);
+                    let lvl = rec::level_key(&c.mem);
+                    let ld = rec::loader(&c.mem);
                     if c.rec.as_ref().is_some_and(|t| t.level != lvl || t.loader != ld) {
                         c.rec = Some(Box::new(rec::Table::build(&c.mem, lvl)));
                         c.rec_unwind = true;
@@ -477,7 +479,7 @@ impl Machine {
     }
 
     pub fn level(&self) -> u32 {
-        self.cpu.mem.ram[LEVEL as usize] as u32
+        rec::level_key(&self.cpu.mem)
     }
     pub fn rd8(&self, a: u32) -> u8 {
         self.cpu.mem.ram[(a & 0x01ff_ffff) as usize]

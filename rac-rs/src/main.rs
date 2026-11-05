@@ -4,79 +4,11 @@
 // This file is the root of the library crate rac_game (src/lib.rs includes it); the exe is exe/src/main.rs, which
 // sets the no-console subsystem (feature `windows_gui`) and calls `main` below.
 
-mod ambience;
-mod anim;
-mod anim_pose;
-mod audio;
-mod gauss;
-mod bytes;
-mod camera;
-mod camgrid;
-mod collision;
-mod devtune;
-mod dialog_linux;
-mod dynlight;
-mod flow;
-mod fmv;
-mod game;
-mod frontend;
-mod frontend_lang;
-mod frontend_lines;
-mod awake;
-mod awake_linux;
-mod update_notice_linux;
-mod gsfull;
-mod gadgets;
-mod gameplay;
-mod help;
-mod hud;
-mod inventory;
-mod iso;
-mod kofi;
-mod level;
-mod fmath;
-mod loadlog;
-mod runlog;
-mod runlog_policy;
-mod wine;
-#[cfg(any(test, target_os = "linux"))]
-mod runlog_linux;
-mod map;
-mod mesh;
-mod mobies;
-mod particles;
-mod music;
-mod occlusion;
-mod omni;
-mod overlay;
-mod physics;
-mod player;
-mod render;
-mod retail;
-mod gscap_guard;
-mod rtss_crash;
-mod rtss_layer;
-mod save;
-mod scene;
-mod settings;
-mod fire;
-mod shadows;
-mod shipgloss;
-mod shop;
-mod shrubs;
-mod sky;
-mod strips;
-mod sound;
-mod spumix;
-mod spurev;
-mod terrain;
-mod texpack;
-mod ties;
-mod toc;
-mod viewer;
-mod ocean;
-mod water;
-mod wad;
+// Engine split (ENGINE_SPLIT.md): since stage E3 the modules live in three crates (rac-formats, rac-engine,
+// rac1); this root imports the ones the command line uses under their old names.
+use rac_engine::{dialog_linux, gscap_guard, gsfull, loadlog, omni, pack, pcopts, render, rtss_layer, runlog, runlog_policy, install_root};
+use rac_formats::{iso, level, mesh, mobies, terrain, ties, wad};
+use rac1::{inventory, omni_bind, pack_bind, retail, toc, update_notice_linux};
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -96,7 +28,7 @@ const USAGE: &str = "usage:
 #[cfg(feature = "windows_gui")]
 fn crash_log(text: &str) {
 	use std::io::Write;
-	let dir = retail::memcard::player_dir();
+	let dir = pcopts::player_dir();
 	let _ = std::fs::create_dir_all(&dir);
 	let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
 	if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("crash.log")) {
@@ -134,48 +66,11 @@ fn message_box(text: &str) {
 	}
 }
 
-/// The setup script the messages name: Setup.cmd on Windows, setup.sh on Linux. A macro (not a const) so that `concat!` makes it one
-/// literal with the rest of the message: on Windows the strings in the exe are exactly the ones from before the Linux port.
-#[cfg(target_os = "linux")]
-macro_rules! setup_name {
-	() => {
-		"setup.sh"
-	};
-}
-#[cfg(not(target_os = "linux"))]
-macro_rules! setup_name {
-	() => {
-		"Setup.cmd"
-	};
-}
-
-/// The install root: the first folder from the exe's folder upwards that holds `generated/play.cfg`. Err is the text for a message box.
-fn install_root() -> Result<std::path::PathBuf, String> {
-	let exe = std::env::current_exe().map_err(|e| format!(concat!("Cannot find the game folder ({}). Run ", setup_name!(), " first."), e))?;
-	exe.parent()
-		.and_then(|d| d.ancestors().find(|d| d.join("generated").join("play.cfg").is_file()))
-		.map(|d| d.to_path_buf())
-		.ok_or_else(|| concat!("Run ", setup_name!(), " first: the game has not been set up yet (generated/play.cfg not found).").to_string())
-}
-
 /// [PC] Where the run log goes when `launch_args` failed: `player` of the install root if `play.cfg` was found (the disc image is the
 /// problem), else `player` next to the exe (set-up has not run); `retail::memcard::player_dir()` would be the compile-time dev folder here.
 fn error_log_dir() -> std::path::PathBuf {
 	let beside_exe = || std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.to_path_buf()));
 	install_root().ok().or_else(beside_exe).unwrap_or_default().join("player")
-}
-
-/// [PC] The window title: "rac-rs v0.2.1" from the install root's `generated/built_version.txt` (setup.ps1 writes it after building
-/// this exe, so an update whose files arrived but whose build has not finished still shows the old version), else its VERSION file
-/// (the release the player downloaded), else "rac-rs" (dev and test runs outside an install).
-pub fn app_name() -> &'static str {
-	static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-	NAME.get_or_init(|| {
-		let read = |r: &std::path::Path, f: &str| std::fs::read_to_string(r.join(f)).ok().filter(|v| !v.trim().is_empty());
-		let ver = install_root().ok().and_then(|r| read(&r, "generated/built_version.txt").or_else(|| read(&r, "VERSION"))).unwrap_or_default();
-		let ver = ver.trim_start_matches('\u{feff}').trim();
-		if ver.is_empty() || ver.len() > 24 || !ver.chars().all(|c| c.is_ascii_alphanumeric() || ".-+".contains(c)) { "rac-rs".into() } else { format!("rac-rs v{ver}") }
-	})
 }
 
 /// Public Windows build only: before the game starts, ask `setup.ps1 -Launch` (a hidden PowerShell) whether an update is waiting.
@@ -263,7 +158,7 @@ mod tests {
 /// Runs first thing in `main`, before any thread starts (`set_var` is only sound then).
 fn launch_args() -> Result<Vec<String>, String> {
 	let root = install_root()?;
-	let cfg = std::fs::read(root.join("generated").join("play.cfg")).map_err(|e| format!(concat!("Cannot read generated/play.cfg ({}). Run ", setup_name!(), " again."), e))?;
+	let cfg = std::fs::read(root.join("generated").join("play.cfg")).map_err(|e| format!(concat!("Cannot read generated/play.cfg ({}). Run ", rac_engine::setup_name!(), " again."), e))?;
 	let cfg = String::from_utf8_lossy(&cfg);
 	let (mut iso, mut lang) = (None, None);
 	for line in cfg.trim_start_matches('\u{feff}').lines() {
@@ -275,13 +170,13 @@ fn launch_args() -> Result<Vec<String>, String> {
 			}
 		}
 	}
-	let iso = iso.filter(|i| !i.is_empty()).ok_or(concat!("Run ", setup_name!(), " again: generated/play.cfg has no disc image path."))?;
+	let iso = iso.filter(|i| !i.is_empty()).ok_or(concat!("Run ", rac_engine::setup_name!(), " again: generated/play.cfg has no disc image path."))?;
 	// [PC] Linux: setup.sh writes a relative path (rom/<name>.iso); it is relative to the install root, not to the folder the exe was
 	// started from (Steam's "Start In", a file manager). Windows keeps the path as it is (setup.ps1 writes an absolute one).
 	#[cfg(target_os = "linux")]
 	let iso = disc_path(&root, &iso);
 	if !std::path::Path::new(&iso).is_file() {
-		return Err(format!(concat!("Your disc image moved or is gone:\n{}\n\nRun ", setup_name!(), " again."), iso));
+		return Err(format!(concat!("Your disc image moved or is gone:\n{}\n\nRun ", rac_engine::setup_name!(), " again."), iso));
 	}
 	let player = root.join("player");
 	let _ = std::fs::create_dir_all(&player);
@@ -293,8 +188,8 @@ fn launch_args() -> Result<Vec<String>, String> {
 	}
 	// Not COLD_LANG: that forces a language and would beat the one the player picked (Options -> Language or the launcher, kept in
 	// pc_options.txt) on every start; English when neither is set.
-	if let Some(l) = lang.as_deref().and_then(retail::pcopts::Lang::from_code) {
-		retail::pcopts::set_setup_lang(l);
+	if let Some(l) = lang.as_deref().and_then(pcopts::Lang::from_code) {
+		pcopts::set_setup_lang(l);
 	}
 	// Safety copies of the save card before each start (the newest two starts).
 	let (card, c1, c2) = (player.join("card.bin"), player.join("card.start1.bin"), player.join("card.start2.bin"));
@@ -309,14 +204,18 @@ fn launch_args() -> Result<Vec<String>, String> {
 
 pub fn main() -> ExitCode {
 	loadlog::init();
+	// The R&C1 pack's part of the engine's mod host (rac1/omni_bind.rs), before anything that may ask for it (the HUD art's icon table).
+	omni::game::set(&omni_bind::RAC1);
+	// R&C1's part of the window and renderer (engine/pack.rs), before the window opens.
+	pack::set(&pack_bind::RAC1);
 	// [PC] RivaTuner's Vulkan layer off before the first Vulkan call (rtss_layer.rs).
 	rtss_layer::apply();
 	#[cfg(feature = "windows_gui")]
 	std::panic::set_hook(Box::new(|info| {
 		let thread = std::thread::current();
 		// [PC] A panic that is caught on the spot (texture-pack decoder, overlay helper; texpack/guard.rs): one log line, no crash.log, no call trace.
-		if crate::texpack::guard::take_expected() {
-			eprintln!("{}: {info}", crate::texpack::guard::expected_note());
+		if rac_engine::texpack::guard::take_expected() {
+			eprintln!("{}: {info}", rac_engine::texpack::guard::expected_note());
 			return;
 		}
 		let text = format!("panic in thread {}: {info}", thread.name().unwrap_or("?"));
@@ -351,7 +250,7 @@ pub fn main() -> ExitCode {
 		let prev = std::panic::take_hook();
 		std::panic::set_hook(Box::new(move |info| {
 			prev(info);
-			if std::thread::current().name() == Some("main") && !crate::texpack::guard::panic_expected() {
+			if std::thread::current().name() == Some("main") && !rac_engine::texpack::guard::panic_expected() {
 				dialog_linux::show("Ratchet & Clank (rac-rs)", &format!("The game stopped: {info}\n\nMore details are in {PANIC_DETAILS}."), dialog_linux::Kind::Error);
 			}
 		}));
@@ -371,13 +270,13 @@ pub fn main() -> ExitCode {
 	}
 	// [PC] The player's run log (runlog.rs): stderr into <player dir>/log.txt when it goes nowhere (the double-clicked game).
 	// After `launch_args` (it sets RAC_PLAYER_DIR while the process is still single-threaded).
-	runlog::start(&retail::memcard::player_dir());
+	runlog::start(&pcopts::player_dir());
 	// [PC] Linux: the update notice of the Windows check (`update_notice_linux.rs`): same start (the cold boot), same skip rules, a window
 	// that points to the launcher; on a thread of its own, so it never delays the start.
 	#[cfg(all(target_os = "linux", feature = "windows_gui"))]
 	if args.iter().any(|a| a == "--retail-cold") {
 		if let Ok(root) = install_root() {
-			update_notice_linux::start(root);
+			update_notice_linux::start_from_exe(root);
 		}
 	}
 	let result = match args.first().map(String::as_str) {
@@ -525,7 +424,7 @@ fn cmd_view(a: &[String]) -> Res<()> {
 		eprintln!("retail: the savestate is level {l}, not {level}: loading level {l}");
 		level = l;
 	}
-	viewer::run(&a[0], level, shot, cam, play, front, give)
+	rac1::host::run(&a[0], level, shot, cam, play, front, give)
 }
 
 fn cmd_terrain(path: &str, which: &str, lod: &str, out: &str) -> Res<()> {

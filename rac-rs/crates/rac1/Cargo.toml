@@ -1,0 +1,34 @@
+[package]
+name = "rac1"
+version = "0.1.0"
+edition = "2024"
+# Engine split stage E3 (ENGINE_SPLIT.md): the Ratchet & Clank 1 pack (glue to R&C1's RAM, disc map, PC menus,
+# Modern camera, per-planet looks). Sources in rac-rs/src/rac1 (crate root lib.rs); this folder holds only the manifest.
+
+[lib]
+name = "rac1"
+path = "../../src/rac1/lib.rs"
+
+[dependencies]
+rac-formats = { path = "../formats" }
+rac-engine = { path = "../engine" }
+bytemuck = { version = "1.25.2", features = ["derive", "extern_crate_alloc"] }
+pollster = "1.0.1"
+rayon = "1.12.0"
+wgpu = "30.0.1"
+winit = "0.30.13"
+ee-oracle = { path = "../../../oracle" }
+# Pure-Rust maths for the PC code that writes game memory (src/rac1/fmath.rs): the same bits on Windows and Linux. Pinned: a new
+# version can change bits (re-take the fmath GOLDEN and the fullcheck replay hashes first).
+
+# Linux: the gamepads (an Xbox controller, a DualSense, ...) as evdev devices, read with gilrs (retail/lxpad.rs). The Windows build
+# has its own paths (xinput for an Xbox controller, pspad for a PlayStation one) and does not need it. The default features of gilrs
+# (`wgi`) are kept: gilrs-core insists on one of `wgi` / `xinput` being enabled on every platform, and the `windows` crate behind
+# `wgi` is an empty stub outside Windows, so it costs nothing here.
+[target.'cfg(target_os = "linux")'.dependencies]
+gilrs = { version = "0.11.2" }
+
+[dev-dependencies]
+rac-formats = { path = "../formats", features = ["test-api"] }
+rac-engine = { path = "../engine", features = ["test-api"] }
+ee_game_for_tests = { package = "ee-game", path = "../../../oracle/game" }

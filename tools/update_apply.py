@@ -45,11 +45,11 @@ def is_protected(rel):
             return True
     if r in ('launcher.cfg', 'library.json', 'portable.txt', 'rac-rs launcher.exe', 'rac-rs launcher.exe.old', 'play.cmd',
              'oracle/src/vu0_prog0.rs', 'oracle/src/vu0_prog1.rs', 'oracle/src/vu0_prog9hi.rs', 'oracle/src/skinff_ee.rs',
-             'oracle/src/skinff_vu.rs', 'rac-rs/src/gsfull/vu1aot_gen.rs', 'rac-rs/src/particles/orb_tables.rs'):
+             'oracle/src/skinff_vu.rs', 'rac-rs/src/engine/gsfull/vu1aot_gen.rs', 'rac-rs/src/rac1/particles/orb_tables.rs'):
         return True
     if '/' not in r and (r.startswith('rac-rs-launcher') or r.startswith('rac-rs launcher')):
         return True      # the launcher program itself (any platform name)
-    if re.match(r'^rac-rs/src/gsfull/vu1_prog\d+\.rs$', r):
+    if re.match(r'^rac-rs/src/engine/gsfull/vu1_prog\d+\.rs$', r):
         return True
     return r.endswith('.iso')
 

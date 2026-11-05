@@ -201,7 +201,7 @@ pub fn run_from(c: &mut Cpu, fr: &Frame, pc: u32, ic: u64, pure: bool) {
     let ib0 = if pure { 0 } else { ib_budget() };
     let mut ib = ib0;
     while !fr.done(c) {
-        if c.stop.is_some() || (c.pc == crate::VBLANK_WAIT && c.vblank_cb.is_none() && !pure) {
+        if c.stop.is_some() || (c.pc == c.vblank_pc && c.vblank_cb.is_none() && !pure) {
             RETAIL_INSNS.fetch_add(c.icount.wrapping_sub(ic), std::sync::atomic::Ordering::Relaxed);
             return;
         }

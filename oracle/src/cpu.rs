@@ -94,6 +94,11 @@ pub struct Cpu {
     pub vu0_aot: crate::vu0aot::Vu0Aot,
     /// Native one-joint skinning loop (skinff.rs).
     pub skinff: crate::skinff::SkinFf,
+    /// The vblank poll loop of the disc's game (`ver::Addrs::vblank_wait`, chosen when the machine is made): the frame
+    /// callback runs and compiled code unwinds there (rec/mod.rs, hs.rs).
+    pub vblank_pc: u32,
+    /// R&C2: a 989snd CD channel read is done at the next field tick (rc2/hle.rs `snd_cd_finish`); never set on R&C1.
+    pub snd_cd_pending: bool,
 }
 
 /// Architectural state for the hand-written functions' checks (`Cpu::snapshot` / `restore`): registers, RAM,
@@ -229,6 +234,8 @@ impl Cpu {
             mc: Default::default(),
             vu0_aot: crate::vu0aot::Vu0Aot::from_env(),
             skinff: Default::default(),
+            vblank_pc: crate::ver::addrs().vblank_wait,
+            snd_cd_pending: false,
         }
     }
 
@@ -343,6 +350,7 @@ impl Cpu {
     /// Vblank start: SetVSyncFlag outputs and INTC VBLANK_S.
     pub fn vblank(&mut self) {
         self.vsync_armed = false;
+        self.snd_cd_finish();
         // ORACLE_ICOUNT_SKEW=N (default 0): the instruction count (COP0 Count, timers, DMA/interrupt clock) jumps
         // by N once per field (timing probe).
         static SKEW: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
@@ -373,7 +381,7 @@ impl Cpu {
         if self.cold.is_some() && crate::cold::stub(self, pc) {
             return true;
         }
-        if pc == crate::POLL_HEAD {
+        if pc == crate::ver::addrs().poll_head {
             self.poll_ff(pc);
         }
         if self.watch.contains(&pc) {
@@ -421,13 +429,14 @@ impl Cpu {
         if crate::mem::stats() {
             *self.stub_hits.entry(pc).or_insert(0) += 1;
         }
-        if pc == 0x11b1c8 {
+        let a = crate::ver::addrs();
+        if pc == a.sif_call_rpc {
             self.sif_call_rpc();
         }
-        if pc == 0x11aff8 {
+        if pc == a.sif_bind_rpc {
             self.sif_bind_rpc();
         }
-        if pc == crate::PAD_READ {
+        if pc == a.pad_read {
             if let Some(p) = self.pad {
                 let a = self.g(5) as u32;
                 for (k, b) in p.iter().enumerate() {

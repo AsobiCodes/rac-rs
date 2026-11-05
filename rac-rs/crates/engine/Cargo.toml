@@ -1,0 +1,47 @@
+[package]
+name = "rac-engine"
+version = "0.1.0"
+edition = "2024"
+# Engine split stage E3 (ENGINE_SPLIT.md): the game-neutral engine (window, renderer, PC effects, audio, movies,
+# GS capture, input devices, texture packs, mod host). Sources in rac-rs/src/engine (crate root lib.rs); this folder holds only
+# the manifest.
+
+[lib]
+name = "rac_engine"
+path = "../../src/engine/lib.rs"
+
+[dependencies]
+rac-formats = { path = "../formats" }
+bytemuck = { version = "1.25.2", features = ["derive", "extern_crate_alloc"] }
+cpal = "0.18.2"
+pollster = "1.0.1"
+rayon = "1.12.0"
+wgpu = "30.0.1"
+winit = "0.30.13"
+libloading = "0.8.9"
+# [PC] DLSS (viewer/upscale/dlss.rs): the C ABI of rac_ngx.dll, opened at run time (no NVIDIA code linked); ash for the Vulkan
+# device's buffer-device-address feature struct NGX needs (gpu/dlss_vk.rs; the version wgpu-hal uses, in Cargo.lock).
+rac_ngx_abi = { path = "../ngx_abi" }
+ash = "0.38"
+ee-oracle = { path = "../../../oracle" }
+# PCSX2 texture pack names (src/engine/texpack): XXH3_64 of the texture bytes.
+xxhash-rust = { version = "0.8.18", default-features = false, features = ["xxh3"] }
+libm = "=0.2.16"
+# Fonts of the modern UI (src/engine/ui/font.rs): pure Rust glyph outlines and a rasteriser (Apache-2.0); already in Cargo.lock.
+ab_glyph = "0.2.32"
+
+# Same version as wgpu-hal's (Cargo.lock): the D3D12 descriptor types for the ReShade add-on (src/engine/viewer/gpu/reshade/native.rs);
+# MapVirtualKeyW for the keycaps of the modern UI's tab keys (src/engine/ui/keycaps.rs).
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", default-features = false, features = ["Win32_Foundation", "Win32_Graphics_Direct3D12", "Win32_Graphics_Dxgi_Common", "Win32_UI_Input_KeyboardAndMouse"] }
+
+# Linux: libc for the run log, the keep-awake inhibitor and the message dialogs (runlog_linux.rs, awake_linux.rs, dialog_linux.rs).
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2.190"
+
+[features]
+# The packs' unit tests use this crate's test helpers (`#[cfg(any(test, feature = "test-api"))]`); never in a game build.
+test-api = ["rac-formats/test-api"]
+
+[dev-dependencies]
+naga = { version = "30.0.1", features = ["wgsl-in"] }
