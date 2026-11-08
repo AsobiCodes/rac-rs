@@ -78,6 +78,8 @@ fn no_audio_in_stream(audio_seen: bool, video_span: u64) -> bool {
 
 struct Shared {
 	video: Mutex<VecDeque<Frame>>,
+	/// Frames to queue before starting the audio clock; enhanced movies allow a larger warm-up cushion.
+	video_prime: AtomicU64,
 	/// PTS of the first audio packet of the track (90 kHz), once seen.
 	audio_pts0: Mutex<Option<u64>>,
 	done: AtomicBool,
@@ -94,7 +96,7 @@ struct Shared {
 
 impl Shared {
 	fn new(video: VecDeque<Frame>, audio_pts0: Option<u64>) -> Shared {
-		Shared { video: Mutex::new(video), audio_pts0: Mutex::new(audio_pts0), done: AtomicBool::new(false), stop: AtomicBool::new(false), audio_off: AtomicBool::new(false), audio_end: AtomicBool::new(false), lat_bits: AtomicU64::new(0), video_span: AtomicU64::new(0) }
+		Shared { video: Mutex::new(video), video_prime: AtomicU64::new(3), audio_pts0: Mutex::new(audio_pts0), done: AtomicBool::new(false), stop: AtomicBool::new(false), audio_off: AtomicBool::new(false), audio_end: AtomicBool::new(false), lat_bits: AtomicU64::new(0), video_span: AtomicU64::new(0) }
 	}
 
 	/// The demuxer read a video packet stamped `pts`; `first` is the PTS of the first stamped one.
@@ -138,6 +140,7 @@ pub struct Player {
 
 /// The worker's video side: packets to the decoder, decoded frames to the queue.
 struct VideoSide {
+	enhancer: super::rtx_video::Filter,
 	dec: Decoder,
 	last_pts: Option<u64>,
 	frame_ticks: u64,
@@ -162,6 +165,8 @@ impl VideoSide {
 			let p = f.pts.or(self.last_pts.map(|p| p + self.frame_ticks)).unwrap_or(0);
 			f.pts = Some(p);
 			self.last_pts = Some(p);
+			self.enhancer.apply(&mut f, &shared.stop);
+			shared.video_prime.store(self.enhancer.prime_frames(), Ordering::Relaxed);
 			shared.video.lock().unwrap().push_back(f);
 		}
 	}
@@ -194,7 +199,7 @@ fn run(iso: String, lba: u32, bytes: u64, track: u8, fps: f32, shared: Arc<Share
 		return;
 	};
 	let mut dm = PssDemuxer::new(DiscReader::new(&mut disc, lba, bytes));
-	let mut video = VideoSide { dec: Decoder::new(), last_pts: None, frame_ticks: (90000.0 / fps.max(1.0)) as u64, decode_ms: super::synclog::test_decode_ms(), spilled: VecDeque::new(), spilled_bytes: 0 };
+	let mut video = VideoSide { enhancer: super::rtx_video::Filter::new(), dec: Decoder::new(), last_pts: None, frame_ticks: (90000.0 / fps.max(1.0)) as u64, decode_ms: super::synclog::test_decode_ms(), spilled: VecDeque::new(), spilled_bytes: 0 };
 	let mut adpcm: Option<AdpcmDecoder> = None;
 	let mut pcm = Vec::new();
 	let mut first_vpts = None;
@@ -333,7 +338,7 @@ impl Player {
 				self.leave_audio();
 				primed = true;
 			}
-			if !(queued >= 3 || (done && queued > 0)) || !primed {
+			if !(queued >= self.shared.video_prime.load(Ordering::Relaxed) as usize || (done && queued > 0)) || !primed {
 				if done && queued == 0 {
 					self.finished = true;
 				}
