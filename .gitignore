@@ -19,3 +19,6 @@
 /bundled/amd_fidelityfx_*.dll
 /bundled/nvngx_dlss.dll
 /bundled/rac_ngx.dll
+
+# Optional RTX Video helper: build products and NVIDIA runtime belong in release ZIPs.
+/tools/rtx-video/build/

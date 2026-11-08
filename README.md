@@ -174,3 +174,5 @@ The repository contains only original source code and tools. It contains no copy
 ## License
 
 GPL-3.0-or-later, see [LICENSE](LICENSE). Credits for third-party work (including OmniLoader's Luau script engine, AMD FidelityFX FSR, NVIDIA DLSS and Microsoft's DirectX Shader Compiler) are in [NOTICE.md](NOTICE.md). The NVIDIA DLSS files (`nvngx_dlss.dll`, `rac_ngx.dll`) are not under the GPL: they come under NVIDIA's own licence, and an additional permission under section 7 of the GPL allows rac-rs to be shipped and run with them (see [NOTICE.md](NOTICE.md)).
+
+Optional community feature proposal: [RTX Video movie enhancement](docs/RTX_VIDEO.md) (Windows, compatible NVIDIA RTX GPU; standalone mod package).

@@ -58,6 +58,7 @@ clean.sh
 docker-compose.yml
 docs/MODDING.md
 docs/MODDING_REFERENCE.md
+docs/RTX_VIDEO.md
 docs/TEXTURE_PACKS.md
 install-desktop-entry.sh
 oracle/Cargo.toml
@@ -228,6 +229,7 @@ rac-rs/src/engine/fmv/mpeg2.rs
 rac-rs/src/engine/fmv/player.rs
 rac-rs/src/engine/fmv/present.rs
 rac-rs/src/engine/fmv/pss.rs
+rac-rs/src/engine/fmv/rtx_video.rs
 rac-rs/src/engine/fmv/synclog.rs
 rac-rs/src/engine/furspec.rs
 rac-rs/src/engine/fxhash.rs
@@ -1357,6 +1359,15 @@ tools/fn_bounds.tsv
 tools/fn_bounds_usa.tsv
 tools/mingw_as.py
 tools/recgen_iso.py
+tools/rtx-video/LICENSE
+tools/rtx-video/build-helper.ps1
+tools/rtx-video/mod/LICENSE
+tools/rtx-video/mod/README.md
+tools/rtx-video/mod/main.luau
+tools/rtx-video/mod/omni-mod.json
+tools/rtx-video/mod/rtx-video.ini
+tools/rtx-video/package.ps1
+tools/rtx-video/src/rtx_video_worker.cpp
 tools/rust_unpack.py
 tools/share_iso.py
 tools/skinff_ee.py

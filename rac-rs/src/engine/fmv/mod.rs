@@ -6,6 +6,7 @@ pub mod feed;
 pub mod pss;
 pub mod mpeg2;
 pub mod player;
+pub(crate) mod rtx_video;
 pub mod present;
 pub mod synclog;
 

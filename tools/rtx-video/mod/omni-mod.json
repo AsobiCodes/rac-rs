@@ -1,0 +1,68 @@
+{
+  "format": 2,
+  "id": "rac-rtx-video",
+  "name": "RTX Video — by Agers",
+  "version": "0.3.0",
+  "author": "Agers",
+  "description": "Optional NVIDIA SDK video enhancement for pre-rendered movies. Requires the companion host patch. Original audio and timing are retained; unavailable GPUs fall back to the original video.",
+  "license": "MIT (own code); NVIDIA RTX SDK license (NVIDIA runtime)",
+  "type": "script",
+  "api": "1.3",
+  "scripts": [
+    "main.luau"
+  ],
+  "games": {
+    "rac1": [
+      "pal"
+    ]
+  },
+  "hooks": [],
+  "settings": [
+    {
+      "key": "scale",
+      "name": "Upscale factor (next movie)",
+      "type": "int",
+      "default": 4,
+      "min": 1,
+      "max": 4,
+      "description": "Output size per side: 2 is faster, 4 is sharper but needs more GPU power. Applies to the next movie."
+    },
+    {
+      "key": "quality",
+      "name": "RTX quality (next movie)",
+      "type": "int",
+      "default": 4,
+      "min": 1,
+      "max": 4,
+      "description": "NVIDIA VSR quality: 1 uses less GPU power, 4 is the highest quality. Applies to the next movie."
+    }
+  ],
+  "presets": [
+    {
+      "id": "performance",
+      "name": "Performance",
+      "values": {
+        "scale": 2,
+        "quality": 1
+      }
+    },
+    {
+      "id": "balanced",
+      "name": "Balanced",
+      "values": {
+        "scale": 3,
+        "quality": 2
+      }
+    },
+    {
+      "id": "default",
+      "name": "Quality",
+      "values": {
+        "scale": 4,
+        "quality": 4
+      }
+    }
+  ],
+  "website": "https://komunitni-preklady.org/",
+  "contact": "agers@komunitni-preklady.org"
+}
