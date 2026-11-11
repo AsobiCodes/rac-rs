@@ -6,9 +6,14 @@
 
 @group(0) @binding(0) var opaque: texture_2d<f32>;
 @group(0) @binding(1) var scene: texture_2d<f32>;
+// [PC] The heat haze's pixels (viewer/heathaze.rs `take_mask`, render size; a 1 x 1 zero texture when the haze did not draw): the
+// wobble has no motion vectors, so its pixels take little history (review S5).
+@group(0) @binding(2) var heat: texture_2d<f32>;
 
 const THRESHOLD: f32 = 0.2;
 const BINARY: f32 = 0.9;
+// Heat at which a hazed pixel is fully reactive.
+const HEAT_FULL: f32 = 0.25;
 
 @vertex fn vs_full(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
 	let x = f32((i << 1u) & 2u);
@@ -26,5 +31,7 @@ fn tonemap(c: vec3<f32>) -> vec3<f32> {
 	let b = tonemap(textureLoad(scene, p, 0).rgb);
 	let d = abs(a - b);
 	let m = max(max(d.r, d.g), d.b);
-	return vec4<f32>(select(0.0, BINARY, m >= THRESHOLD), 0.0, 0.0, 1.0);
+	let hd = vec2<i32>(textureDimensions(heat)) - vec2<i32>(1);
+	let h = BINARY * clamp(textureLoad(heat, min(p, hd), 0).r / HEAT_FULL, 0.0, 1.0);
+	return vec4<f32>(max(select(0.0, BINARY, m >= THRESHOLD), h), 0.0, 0.0, 1.0);
 }

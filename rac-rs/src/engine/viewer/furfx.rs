@@ -24,7 +24,7 @@ use std::sync::OnceLock;
 mod noise;
 mod params;
 mod pick;
-mod pipes;
+pub(super) mod pipes;
 #[cfg(test)]
 mod tests;
 
@@ -58,6 +58,25 @@ pub(crate) struct FurGpu {
 	pipes: OnceLock<Option<pipes::Pipes>>,
 	/// The bind group layout of group 2, shared by the pipeline and every scene's bind groups.
 	layout: OnceLock<wgpu::BindGroupLayout>,
+}
+
+impl FurGpu {
+	/// Lane dlit2-9: `op` on both fire-shadow sets of the fur pipeline once it is built (metalpipe.rs `Gpu::fls_sets`), every build inside
+	/// the fur build guard (test build 7: the background ones too). No fur pipeline, or fur refused, counts as built.
+	/// `fire`: the fire module's set instead (metalpipe.rs `group`).
+	pub(super) fn fls_op(&self, op: metalpipe::Op, fire: bool, device: &wgpu::Device) -> bool {
+		let Some(Some(p)) = self.pipes.get() else { return true };
+		if pipe_guard::off(pipe_guard::Effect::Fur) {
+			return true;
+		}
+		match op {
+			metalpipe::Op::Prewarm => p.pipeline.prewarm_in(true, fire, Some((device, pipe_guard::Effect::Fur))),
+			metalpipe::Op::Warm if !p.pipeline.warmed(true, fire) => drop(pipe_guard::guard(device, pipe_guard::Effect::Fur, || p.pipeline.warm(true, fire))),
+			metalpipe::Op::Warm => {}
+			metalpipe::Op::Warmed => return p.pipeline.warmed(true, fire),
+		}
+		true
+	}
 }
 
 /// The effective level and style (true = Fluffy): Graphics, overridden by RAC_FUR=off|low|medium|high and RAC_FUR_STYLE=soft|fluffy
@@ -101,13 +120,13 @@ impl Gpu {
 		let (q, fluffy) = level(g);
 		let Some(spec) = (crate::pack::get().fur)().filter(|_| crate::splitview::fx(g.enhanced() && q > 0) && !pipe_guard::off(pipe_guard::Effect::Fur)) else { return };
 		let layout = self.fur.layout.get_or_init(|| pipes::layout(&self.device));
-		let Some(p) = self.fur.pipes.get_or_init(|| pipe_guard::guard(&self.device, pipe_guard::Effect::Fur, || pipes::Pipes::new(&self.device, &self.pipeline, &self.tex_layout, layout, self.config.format, self.depth_format))).as_ref() else { return };
+		let Some(p) = self.fur.pipes.get_or_init(|| pipe_guard::guard(&self.device, pipe_guard::Effect::Fur, || { let p = pipes::Pipes::new(&self.device, &self.pipeline, &self.tex_layout, layout, self.config.format, self.depth_format); p.pipeline.fls(); p })).as_ref() else { return };
 		let Some(fm) = fs.gpu.get_or_init(|| pick::realise(&self.device, &self.queue, fs, &scene.marker, &scene.marker_model, layout)).as_ref() else { return };
 		let key = 1 | (q as u16) << 1 | (fluffy as u16) << 4;
 		if fm.written.swap(key, Ordering::Relaxed) != key {
 			self.queue.write_buffer(&fm.params, 0, &params::block(spec, q, fluffy, fm.weld));
 		}
-		pass.set_pipeline(&p.pipeline);
+		pass.set_pipeline(p.pipeline.fls());
 		pass.set_bind_group(0, &self.ubind, &[]);
 		pass.set_vertex_buffer(0, scene.marker.vbuf.slice(..));
 		pass.set_index_buffer(scene.marker.ibuf.slice(..), wgpu::IndexFormat::Uint32);

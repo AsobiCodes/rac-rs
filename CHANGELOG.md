@@ -1,5 +1,77 @@
 # Changelog
 
+## v0.5.1
+
+- Updating from v0.5.0 keeps your saves and settings. Your key settings and controller settings are converted to the new controls on the first start (nothing to redo).
+- Linux: update with one click from the RAC-RS Launcher, or unpack the new release over the game folder and run `sh setup.sh` again. The new RAC-RS Launcher v0.1.6 has rows for the settings that moved out of the game's menu (DLSS preset, Underwater look, Edge smoothing (MSAA), Waves).
+
+### Controls
+
+- New: keyboard and mouse are their own system now (issues #77 and #78). Every game action (Jump, Wrench, Fire, Quick Select, Look, Crouch and the others) has two slots, and each slot can be a key, a mouse button (left, right, middle, and the side buttons Mouse 4 and Mouse 5) or the mouse wheel. Modern menu: Options > Controls is a table (action, 1st, 2nd): Enter or a click captures a slot, Tab picks the 2nd slot, Del clears it, and Pause always keeps at least one key. Classic menu: the Controls pages do the same row by row. On-screen hints and tutorial boxes name the key or mouse button you bound.
+- New: the controller is remapped the same way. Every game action (Jump, Wrench, Fire, Quick Select, Look, Crouch, Map, Pause, the d-pad, L3 / R3, Aim) has two controller slots, each any of the 16 buttons. Modern menu: Options > Controls has a switch "Keyboard & mouse | Controller" over the same table. Classic menu: the pages Controller 1/3 to 3/3 (Cross = 1st slot, Square = 2nd slot, L3 or Del = clear). A button used by two actions shows "x2", and Aim takes over its button while you aim. Menus keep the standard layout whatever you remap (Cross / A confirms everywhere); only gameplay follows your remap.
+- New: the button pictures in gameplay texts follow your controller remap: tutorial and hint boxes, Helpdesk pages, the L1 / R1 of the Quick Select ring, and the pad picture in Help > Controls (changed labels are rewritten in the game's own lettering, with extra lines such as "D-Up: OmniWrench" for buttons the picture has no label for).
+- New: a mouse invert of its own (asked for by DeSynkro in pull request #48). Options > Controls, PC page: "Mouse up/down" and "Mouse left/right", each Like camera (the default, as before), Normal or Inverted. The camera's own Reversed options still flip the controller.
+
+### New graphics options
+
+- New: fire light v2 (Lighting Enhanced, Global illumination Low, Medium or High). Every fire is now a real light: a warm glow of the fire's real size and flame colour (redder as it dies down) that fades naturally over about 8 to 10 m. Near a fire, shaded sides and the sun's shadows light up in its colour on the ground, walls, ships, characters, grass, fur and water; farther away the scene keeps its own shade. Faces turned to the flames glow, charred parts stay dark, and very bright light goes from orange to yellow to white instead of turning Ratchet pink. The light flickers and sways with the flames and stands still while the game is paused. Small flames give a small light too, and the flames of Clank's Thruster-Pack give a small warm glow on Ratchet's back and the ground under him. This replaces the v0.5.0 fire light.
+- New: fire shadows. The strongest fires near you cast soft shadows from the flames themselves, with a blurry edge that widens with distance, so a wreck or Ratchet throws a shadow away from the fire. Global illumination High: up to 4 fires, Medium: 1, Low: none. They fade in and out instead of popping. Dynamic shadows Off also turns the fire shadows off (the fire light stays). Fire shadows cost frame rate only next to fires; Global illumination Medium costs less than High. Lighting Classic and Global illumination Off look exactly as before.
+- New: heat haze (Lighting Enhanced with Fire Medium or High). The air above fires, burning enemies, fireballs, the Pyrocitor's jet and lava wobbles slightly, like real heat. It stands still while the game is paused, stays off under water and costs almost nothing. Fire Low or Off and Lighting Classic: no haze.
+- New: Options > Graphics > Frame Generation (after Upscale quality; classic menu: the Screen page, after Renderer). The graphics card adds generated frames between the real ones, so the frame rate shown goes up 2, 3 or 4 times; the HUD is kept out of the generated frames. It follows the Upscaler: with FSR it offers FSR 2x (AMD frame generation, works on any recent graphics card, NVIDIA too), with DLSS it offers DLSS 2x, 3x and 4x (NVIDIA RTX 40: 2x; RTX 50: up to 4x). Off is the default and gives exactly the game of before. Works with Vulkan and DirectX 12. The first time you switch it on the game needs a restart; after that, switching between Off, 2x, 3x and 4x applies at once. It pauses while the picture has black bars (an Aspect ratio other than Auto, or a fullscreen Resolution smaller than the screen) and comes back when the bars go. If it cannot start on a PC, the game falls back to the normal picture and stops offering it.
+- New: Options > Display > Resolution: Desktop (the default, as before) or one of your monitor's sizes. In a window it sets the window size; in Fullscreen the whole game, HUD included, is drawn at that size and scaled to your screen, without a monitor mode switch, so alt-tab, DLSS / FSR and frame generation keep working. It applies 0.7 seconds after your last press, so there is no flicker while you scroll through the list.
+- New: Options > Display > Picture > Brightness and Contrast (0 to 100, default 50 = the picture of before). Brightness lifts or darkens the shadows and mid-tones (black and white stay); Contrast is a soft S-curve (nothing clips to pure black or white). They change the game picture and the movies, in Lighting Classic and Enhanced and with every upscaler; the HUD and menus keep their colours. They change live while you move the slider.
+- Changed: DLSS preset. Auto now uses preset K (DLSS 4; L at Ultra performance) instead of M: the DLSS step costs about 0.85 ms instead of about 1.4 ms a frame at 2560x1440 DLSS Quality (Veldin 176 -> 197 fps on an RTX 5070 Ti). M, L, K and J can be picked in the RAC-RS Launcher (Settings > Screen and HUD > DLSS preset; GitHub issue #84). DLSS needs an NVIDIA RTX graphics card.
+- Changed: Options > Graphics > Effects > Metal is one row now: Off, Low, Medium or High (was On / Off; Metal On becomes High). High draws the floor reflection of shiny metal at half of v0.5.0's width and height (softer), Medium at a third, Low at a quarter. The sharp mirror of v0.5.0 is no longer offered. Applies at once. The classic Graphics page has the same row.
+- Changed: less gloss on painted metal, such as Novalis' copper floors. Its glossy coat now shows the sky's colour at the floor's own brightness, so a dark floor in the shade no longer gets a pale sheen with sharp edges. Polished, mirror and brushed metal, the floor reflections and the Metal reflections slider are unchanged.
+- Changed: clouds fitted to each planet's own sky, compared with the PS2 picture. Batalia: a flat dark grey overcast (was bright blue-white heaps). Hoven and Oltanis: a dark green-grey storm (was bright white). Gaspar: a golden sky with faint bands (was dark brown heaps). Novalis: deep blue again (was washed out to grey-teal). Veldin's second visit: the game's own painted orange-red sky. Veldin, Kerwan, Eudora, Rilgar, Umbris, Orxon, Pokitaru and Kalebo III already matched and are unchanged.
+- Changed: denser fur. Ratchet's fur is a closed coat with no bald gaps between the tufts, shade deep inside the fur, lighter tips that stand up a little and a soft sheen along the hair. Fur High draws 20 layers with Soft and 32 with Fluffy (was 16 and 24); Low and Medium are unchanged.
+
+### Speed
+
+- Faster: MSAA is now automatic: off while DLSS or FSR runs (they smooth edges themselves; about 5 to 10 % more frames at DLSS native), 4x otherwise. The RAC-RS Launcher's Edge smoothing (MSAA) row can keep 4x on with the upscalers.
+- Faster: the new fire shadows are made cheap for the processor: all shadow passes share one set-up and the fire shadow work runs on a helper thread. Near Novalis' burning buildings at 2560x1440 with DLSS Quality the graphics card no longer waits about 4 ms a frame for the processor.
+- Faster: near burning fires with fire shadows on, at 1440p or more, on NVIDIA with Vulkan, buildings and rocks that end up hidden behind others are no longer lit first. Same picture.
+- Faster: the short hitch about 2 seconds after a level starts is shorter (shader warm-up about 300 ms -> about 115 ms on our PC), and levels without volumetric clouds or fog skip that warm-up.
+- Faster: the floor reflection of shiny metal is drawn smaller (see the Metal row).
+
+### Menus
+
+- Changed: a shorter Options screen (modern menu). The MSAA row is gone (it is automatic now). DLSS preset and Underwater look are set in the RAC-RS Launcher. Waves has no row either: Water sets the waves itself (Medium and High = moving waves, Classic and Low = none, as the Low / Medium / High presets always did); the launcher can still set Waves on its own. Supporter drawings moved from Graphics > More effects to Game > Extras. Rows that need another setting are hidden instead of greyed out: with Lighting Classic the effect rows disappear (the banner on top says why), with Upscaler Off the Upscale quality and Frame Generation rows disappear, Lock-on strength hides with Lock-on Off and the Metal reflections slider hides with Metal Off. The classic Graphics page keeps all its rows, Waves included.
+- New: the modern Help tab has the game's Help topics in the modern style, each with its own text and picture (it was empty in v0.5.0).
+- New: the classic menu has the rows that were modern-only: Aspect ratio and Upscaler (Display page), Quick Select pauses the game (System page).
+- New: the Galactic Map (modern menu) is animated: the galaxy painting slowly turns (one turn in 8 minutes), the core breathes, stars twinkle and the selected planet's ring pulses. The planet markers stay put. The classic menu is unchanged.
+
+### Gameplay
+
+- New: Game > Gameplay > Fast travel (default On). Planet trips go from takeoff through a short black screen straight to the landing (about 12 seconds shorter), and loading a save from the title screen (about 12 seconds shorter) or from the pause menu to another planet (about 3 seconds shorter) skips the flight the same way. No warp sound plays over the black screen. Off gives the original flights.
+
+### Fixes
+
+Problems of v0.5.0 that are fixed. (Problems in the new v0.5.1 features that were found and fixed before this release are not listed.)
+
+- Fixed: the travel sequence after a played movie stayed black (issue #74).
+- Fixed: Eudora music (issue #74): the music could go silent after arriving on a planet, or not start at all when its start fell on the same moment as a sound hush (fast travel, mouse in a menu).
+- Fixed: classic menus (issue #79): the olive / gold frame around every classic menu box is back, also while a menu flies in, changes page or closes. Classic hint boxes no longer cut long German and French words.
+- Fixed: far floors (issue #79): water pools and lava now reach as far as your Draw distance allows (Low, Medium, High) instead of a fixed distance, so on wide screens (21:9) far floors should no longer end early. The sea keeps the original distance. We could not see the problem on our own PC, so please tell us if you still do.
+- Fixed: with the Classic camera, pressing strafe aim no longer makes the camera jump for one frame (the Raised aim too), also when you press it again while the camera is still swinging back.
+- Fixed: Kerwan stairs: with the Modern camera far down the stairs, the near steps no longer lose a wedge. The Classic camera is unchanged.
+- Fixed: a button still held when a menu opens or closes does nothing until you let go (no accidental buy at a vendor).
+- Fixed: enemies that die in an explosion, and scenery explosions such as the three in the Gemlik base, no longer leave fire on the ground or burnt grass; they show the game's own explosion again. Only your own weapons' explosions get the realistic fire: Bomb Glove, Devastator, Mine Glove, Visibomb, R.Y.N.O., Glove of Doom, Drone Device, Decoy Glove, the Suck Cannon's flung enemy and the Pyrocitor.
+- Fixed: Fur: the front of Ratchet's chest has fur again, and the plate and strap of his back harness no longer grow fur.
+- Fixed: Novalis cave: the water of the broken pipe no longer flickers dark and bright, and with Culling On the water reflections no longer flicker or lose the cave ceiling and far walls. Reflections now show everything they can show on every level, with Culling On exactly like Culling Off.
+- Fixed: Batalia: the grey haze over the sea and the island bases is gone; a light haze stays far away, as on the PS2.
+- Fixed: Global illumination on levels with water: ground and walls seen through volumetric fog or smoke were taken for water and got no bounce light. They are now lit as on the other levels.
+- Fixed: DirectX 12 only: far-away textures (rocks, buildings, tree tops, grass, fur) were always drawn at full sharpness, which gave over-sharp, jagged leaf edges on tree tops. They now match Vulkan and the PS2. Vulkan is unchanged.
+
+### Known issues
+
+- Windows: the game built by Setup does not follow the PS2 code to the last digit in gameplay. Replaying exactly the same button presses gives the same game for a moment, then tiny rounding differences (for example in Ratchet's position) grow. Linux builds are not affected. It was the same in v0.5.0; a fix is planned.
+- Issue #70 (needs the reporter's exact spot), #24 (same as on the PS2) and #31 (the PS2 game has no rumble) are not changed.
+- The first start of a new version pauses for about 8 seconds at the first level while shaders compile (once). On the first start after an update or a graphics driver update, fire shadows can show up a few seconds late while they are prepared.
+- Some rarer fires (enemy flamethrowers, ship thruster flames, lava) do not give the new fire light yet.
+- DLSS preset, Underwater look and Edge smoothing (MSAA) are set only in the RAC-RS Launcher.
+- Not tried on a real Steam Deck. Not checked on the USA disc: the modern planet map for every planet, and a planet the map does not name ("????").
+
 ## v0.5.0
 
 - This update rebuilds the whole game once, so it takes longer than usual: about 10 minutes, up to 20 on slower PCs. Your saves and settings are kept.
@@ -23,7 +95,7 @@
 
 - New: modern menus. The title screen, pause menu (tabs, Help, Options, Goodies, Weapons / Gadgets / Items), Gadgetron vendor, Galactic Map, Save / Load, Quick Select (a ring of 8 slots with the game's own item pictures; Q / E or L1 / R1 turn it), Options > Controls (rebind keys) and Options > Mods are redrawn as modern pages. A Menu style row (Graphics) switches back to Classic, which stays as the PS2 menus.
 - New: the modern pause menu has a Map tab. A click on it (or Enter / Cross) closes the pause menu and opens the modern planet map and mission list. Pause > Options (Modern style) has Display, Graphics and Game rows that open the Options screen on that tab.
-- New: Quit to Desktop (issue #53), the last row of Options (pause menu and title screen). It asks first, saves the achievements, then closes.
+- New: Quit to Desktop, the last row of Options (pause menu and title screen). It asks first, saves the achievements, then closes.
 - New: mouse menus: hovering selects a row, a click selects an item at once, you can click other tabs from inside a sub-page, and click Buy, Cancel or the hint bar. Button hints show your keyboard keys on keyboard or mouse and the A/B/X/Y or PlayStation symbols only on a gamepad.
 - Modern menus follow the game's language (a German save gets German menus). The new menus have texts in English, French, German, Spanish and Italian; the French, Spanish and Italian ones have not been checked by native speakers yet.
 - Texture packs now also reach the modern menus, the vendor and Quick Select, and the classic vendor's item icons (issue #66).
@@ -33,7 +105,7 @@
 - New: Camera > Strafe aiming: a fourth choice, Steady (issues #73 and #27), like Ratchet & Clank 2. While you hold the strafe aim (right mouse / R2) the camera stays at its normal height behind Ratchet and does not swing; he faces where the camera looks and side-steps or walks backwards, and there is no aim circle. Shots fly level from his chest along the camera; the Bomb Glove, Mine Glove, Devastator and R.Y.N.O. keep the game's own targeting. The default stays Raised.
 - New: Camera > Aiming > Lock-on strength slider. The lock-on no longer picks targets beyond the weapon's reach (also for the Blaster with the crosshair off); 100 % is the lock as before, within the reach.
 - New: Game > Gameplay > Auto-equip gadgets (issue #76), Off by default. With it On, pressing Circle (fire) at a Swingshot target, a Trespasser lock or a Hydrodisplacer pad takes out the right gadget by itself, and your weapon comes back afterwards.
-- New: Game > Gameplay > Wrench throw (issue #72): Classic (the original) or Moving (like Ratchet & Clank 3: you can run once the wrench has left his hand, and it flies where he aims, even while strafing backwards). Default Classic.
+- New: Game > Gameplay > Wrench throw: Classic (the original) or Moving (like Ratchet & Clank 3: you can run once the wrench has left his hand, and it flies where he aims, even while strafing backwards). Default Classic.
 - New: Game > Gameplay > Quick Select pauses the game (issues #46 and #67), Off by default. With it On, enemies, shots and the world stand still while the Quick Select ring is open.
 - New: the mouse turns the view in first-person (Triangle look) in both camera styles (issue #71).
 - New: lower mouse lag (issue #63): the camera on screen already turns by the mouse movement the game has not used yet.
@@ -46,19 +118,23 @@
 
 ### Fixes
 
-Problems of v0.4.3 that are fixed. (Problems in the new v0.5 features that were found and fixed before this release are not listed.)
-
-- Fixed: the Galactic Map could get stuck (no exit, no travel) and the game could crash on the way to or while landing on a planet. A clean-up of the game thread's call stack could run in the middle of a menu hook; it now waits for a safe moment.
+- Fixed: the Galactic Map could get stuck (no exit, no travel) and the game could crash on the way to or while landing on a planet. A clean-up of the game thread's call stack could run in the middle of a menu hook; it now waits for a safe moment. This could happen in earlier versions too.
 - Fixed: random game sounds after a normal game start (issue #62, PAL and USA): every random sound came out the same, for example Ratchet's third-hit grunt was always the same deep one. They now vary like on the PS2 (about one third hit in three has no grunt). Saves loaded in-game were not affected.
 - Fixed: gold bolt pickup (issue #69): his weapon or wrench no longer shows in his hand while he holds up a gold bolt, as on the PS2.
 - Fixed: smoother picture at 120 to 240 Hz (frame pacing, issues #28 and #57).
-- Fixed: the oxygen meter stayed in the 4:3 area with HUD position Corners (issue #65; details under Gameplay and controls).
-- Fixed: texture packs did not reach the vendor's item icons (issue #66; details under Menus).
-- Fixed: switching Water to Classic while under water could leave fog, clouds, smoke and global illumination switched off on every level until Water was set back to Low or higher.
-- Fixed: Novalis caves: the water reflected a pale sky inside the caves. Under a roof or in a cave it now shows its own colour; open water is unchanged.
-- Fixed: sun shadows (Lighting Enhanced) with a texture pack on: lamp posts cast only a floating head without the pole, and some big objects cast no shadow at all (for example on Pokitaru). Thin objects such as lamp posts now also keep their shadow farther from the camera.
+- Fixed: R.Y.N.O.: the occasional big fire when a shot hit a wall is gone.
+- Fixed: Kalebo III: the floor no longer shines far brighter than on the other planets. Drek's fleet: no more bright sun patches on the ship floors (there is no sun in space).
+- Fixed: Novalis water cave: the water no longer shows a pale sky haze. Pole and thin-object shadows are fixed.
+- Fixed: Switching Water to Classic while under water could leave fog, clouds, smoke and global illumination switched off on every level until Water was set back to Low or higher.
+- Fixed: Galactic Map with Render scale below 100 %: the galaxy painting was drawn too big.
+- Fixed: the mouse on the title screen aimed at twice the real place with DLSS / FSR on or a render scale below 100 %.
 - Fixed: HD texture pack: Gemlik no longer crashes ("device lost").
 - Fixed: menu sound crackle: the paused game's frozen sound level is removed before it reaches your speakers, so short Windows sound stalls no longer click.
+- Fixed: Shop: a fast double click on Buy no longer buys without the confirm box. Vendor and Galactic Map: scrolling with the wheel and then moving the mouse no longer runs the list back to the top. "Buy all ammo" is always the top row of the vendor list.
+- Fixed: German title Options: accented letters no longer show as boxes. Menu texts: the "speed impact" label no longer runs into its bars in German; 14 other menu text fixes.
+- Fixed: modern Load Game / New Game: Up / Down and the d-pad move between save slots; save slot dates no longer show "95/00/00".
+- Fixed: a menu page that stayed blank for 1.5 seconds could lock the mouse; it now falls back to the classic page.
+- Fixed: split view (F10) crashed with the upscaler on.
 
 ### Known issues
 

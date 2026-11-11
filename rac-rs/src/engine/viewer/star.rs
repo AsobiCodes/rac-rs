@@ -108,7 +108,7 @@ impl Gpu {
 			}),
 			primitive: Default::default(),
 			depth_stencil: Some(wgpu::DepthStencilState { format: self.depth_format, depth_write_enabled: Some(false), depth_compare: Some(wgpu::CompareFunction::LessEqual), stencil: Default::default(), bias: Default::default() }),
-			multisample: wgpu::MultisampleState { count: crate::viewer::targets::MSAA, ..Default::default() },
+			multisample: wgpu::MultisampleState { count: crate::viewer::targets::msaa(), ..Default::default() },
 			multiview_mask: None,
 			cache: None,
 		});

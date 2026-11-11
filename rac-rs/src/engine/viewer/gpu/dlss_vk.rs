@@ -68,6 +68,20 @@ pub(super) fn instance(desc: &wgpu::InstanceDescriptor) -> Option<wgpu::Instance
 	if desc.backends != wgpu::Backends::VULKAN || desc.display.is_some() {
 		return None;
 	}
+	// [PC] fgen/sl_vk.rs: a run that starts with DLSS frame generation makes the instance through Streamline (+ NGX's extensions).
+	#[cfg(windows)]
+	if crate::viewer::fgen::sl_vk::wanted() {
+		if !hal_keeps_flags(desc.flags) {
+			eprintln!("fgen: DLSS frame generation on Vulkan: instance flags {:?} differ from wgpu's default: today's Vulkan instance", desc.flags);
+		} else {
+			let ngx = dlss::lib().and_then(|lib| ext_list(|b, c, l| unsafe { (lib.api.rac_ngx_vk_instance_extensions)(&lib.app, b, c, l) }));
+			let extra: Vec<&'static CStr> = ngx.iter().flatten().filter_map(|e| leak(e)).collect();
+			if let Some(i) = crate::viewer::fgen::sl_vk::instance(desc, &extra) {
+				NGX_INSTANCE.store(ngx.is_some(), Ordering::Relaxed);
+				return Some(i);
+			}
+		}
+	}
 	let lib = dlss::lib()?;
 	if !hal_keeps_flags(desc.flags) {
 		eprintln!("gpu: DLSS: instance flags {:?} differ from wgpu's default (Wine or WGPU_* set): wgpu's own Vulkan instance, no DLSS on Vulkan", desc.flags);
@@ -106,12 +120,20 @@ pub(super) fn instance(_: &wgpu::InstanceDescriptor) -> Option<wgpu::Instance> {
 pub(super) fn request_device(adapter: &wgpu::Adapter, desc: &wgpu::DeviceDescriptor<'_>) -> Result<(wgpu::Device, wgpu::Queue), wgpu::RequestDeviceError> {
 	let info = adapter.get_info();
 	let nvidia = info.vendor == dlss::NVIDIA;
+	// [PC] fgen/queues.rs: the frame-generation queues on Vulkan only with Frame Generation FSR (else today's device).
+	#[cfg(not(target_vendor = "apple"))]
+	let fgq = (info.backend == wgpu::Backend::Vulkan && crate::viewer::fgen::queues::wanted_now()).then(|| crate::viewer::fgen::queues::families(adapter)).flatten();
 	#[cfg(not(target_vendor = "apple"))]
 	if nvidia && info.backend == wgpu::Backend::Vulkan && NGX_INSTANCE.load(Ordering::Relaxed) {
-		if let Some(dq) = vk_device(adapter, desc) {
+		if let Some(dq) = vk_device(adapter, desc, fgq.clone()) {
 			dlss::device_made(&dq.0, true);
 			return Ok(dq);
 		}
+	}
+	#[cfg(not(target_vendor = "apple"))]
+	if let Some(dq) = fgq.and_then(|_| crate::viewer::fgen::queues::open_device(adapter, desc)) {
+		dlss::device_made(&dq.0, false);
+		return Ok(dq);
 	}
 	let dq = pollster::block_on(adapter.request_device(desc))?;
 	let ready = nvidia && info.backend == wgpu::Backend::Dx12 && dx12_ready(adapter);
@@ -164,7 +186,7 @@ fn vk_adapter_exts(lib: &dlss::Lib, adapter: &wgpu::Adapter) -> Option<Vec<Strin
 
 /// The device opened with NGX's extensions (None: not available or the open failed: the caller makes the plain one).
 #[cfg(not(target_vendor = "apple"))]
-fn vk_device(adapter: &wgpu::Adapter, desc: &wgpu::DeviceDescriptor<'_>) -> Option<(wgpu::Device, wgpu::Queue)> {
+fn vk_device(adapter: &wgpu::Adapter, desc: &wgpu::DeviceDescriptor<'_>, fgq: Option<Vec<crate::viewer::fgen::queues::Family>>) -> Option<(wgpu::Device, wgpu::Queue)> {
 	use ash::vk;
 	use wgpu::hal;
 	let lib = dlss::lib()?;
@@ -189,6 +211,9 @@ fn vk_device(adapter: &wgpu::Adapter, desc: &wgpu::DeviceDescriptor<'_>) -> Opti
 			}
 			None => {}
 		}
+		if let Some(f) = &fgq {
+			crate::viewer::fgen::queues::add(args.queue_create_infos, f); // [PC] fgen/queues.rs
+		}
 	});
 	let open = {
 		let a = unsafe { adapter.as_hal::<hal::api::Vulkan>() }?;
@@ -203,6 +228,7 @@ fn vk_device(adapter: &wgpu::Adapter, desc: &wgpu::DeviceDescriptor<'_>) -> Opti
 	match unsafe { adapter.create_device_from_hal(open, desc) } {
 		Ok(dq) => {
 			eprintln!("gpu: DLSS: Vulkan device with NGX's extensions {exts:?}");
+			crate::viewer::fgen::queues::commit(); // [PC] fgen/queues.rs: the plan's queues are this device's
 			Some(dq)
 		}
 		Err(e) => {

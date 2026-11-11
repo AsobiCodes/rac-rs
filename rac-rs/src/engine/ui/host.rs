@@ -59,7 +59,7 @@ impl Ui {
 		self.model.front = front;
 		self.model.peek = false;
 		self.model.tab = 0;
-		self.model.focus = self.model.cur_rows().start;
+		self.model.focus = self.model.first_shown();
 		self.model.scroll = 0.0;
 		if let Some(id) = tab {
 			self.model.open_tab(id);
@@ -154,6 +154,7 @@ impl Ui {
 	/// What the user asked for. While peeking only Peek / Back / Confirm do anything (they bring the panels back).
 	pub fn act(&mut self, a: Action) -> Outcome {
 		self.apply_hover(); // a mouse move that came first has moved the focus before the action runs
+		self.model.settle_focus(); // never act on a hidden row
 		let m = &mut self.model;
 		if m.peek {
 			if matches!(a, Action::Peek | Action::Back | Action::Confirm) {
@@ -190,6 +191,7 @@ impl Ui {
 
 	/// Scrolls the list so the focused row is fully visible (the first / last row of a tab goes to the very top / bottom).
 	pub fn fix_scroll(&mut self) {
+		self.model.settle_focus(); // a change may have hidden rows (never the focused one; a direct write may)
 		let (s, map) = screen::build(&self.model);
 		let l = kit::layout_screen(&s, &*self.measure);
 		if let Some(item) = map.row_item(self.model.focus) {
@@ -219,7 +221,11 @@ impl Ui {
 
 	/// Takes the game's current values (see `Model::refresh`).
 	pub fn refresh(&mut self, get: &dyn Fn(&str) -> Option<i32>) {
+		let focus = self.model.focus;
 		self.model.refresh(get);
+		if self.model.focus != focus {
+			self.fix_scroll(); // a value from the game hid the focused row: keep its successor in view
+		}
 	}
 
 	pub fn set_glyphs(&mut self, g: GlyphSet) {

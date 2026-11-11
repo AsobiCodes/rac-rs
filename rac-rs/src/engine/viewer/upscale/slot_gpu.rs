@@ -8,6 +8,17 @@
 /// The window-size picture's format (gamma-space LDR, as the scene).
 pub const MID_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 pub(super) const SHADER: &str = include_str!("slot_gpu.wgsl");
+/// [PC] Brightness / Contrast: `fs_copy_grade` (the copy with the curve; the uniform's second row `k`).
+const GRADE_PART: &str = include_str!("slot_grade.wgsl");
+/// The uniform buffer's size: `SlotUniforms` (the plain shader's `U`) and the graded shader's `k` row after it.
+const UBUF_SIZE: u64 = std::mem::size_of::<SlotUniforms>() as u64 + 16;
+
+/// The graded copy's shader: the plain one with `k` added to `U`, the shared curve and `fs_copy_grade` (the plain shader's text is
+/// untouched, so the 50 / 50 copy is the copy of before).
+pub(super) fn graded_shader() -> String {
+	let s = SHADER.replacen("\tsize: vec4<f32>,\n};", "\tsize: vec4<f32>,\n\tk: vec4<f32>,\n};", 1);
+	format!("{s}\n{}\n{GRADE_PART}", crate::viewer::picture_adjust::CURVE_WGSL)
+}
 
 /// The uniform block (slot_gpu.wgsl `U`, 16 bytes).
 #[repr(C)]
@@ -62,6 +73,8 @@ pub(in crate::viewer) struct SlotGpu {
 	ubuf: wgpu::Buffer,
 	scale_pipe: wgpu::RenderPipeline,
 	copy_pipe: wgpu::RenderPipeline,
+	/// [PC] Brightness / Contrast: `fs_copy_grade`, built the first time a slider is off 50 (None inside = the guard refused it).
+	copy_grade: std::sync::OnceLock<Option<wgpu::RenderPipeline>>,
 	l_scale: wgpu::BindGroupLayout,
 	l_copy: wgpu::BindGroupLayout,
 	targets: Option<Targets>,
@@ -75,26 +88,30 @@ impl SlotGpu {
 		let uniform = wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None };
 		let src = tex_entry(1, wgpu::TextureSampleType::Float { filterable: false }, false);
 		let l_scale = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("upscale scale"), entries: &[uniform, src] });
-		let l_copy = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("upscale copy"), entries: &[uniform, src, tex_entry(2, wgpu::TextureSampleType::Depth, true)] });
-		let pipe = |entry: &'static str, layout: &wgpu::BindGroupLayout, target: wgpu::TextureFormat, depth: Option<wgpu::DepthStencilState>, count: u32| {
-			let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some(entry), bind_group_layouts: &[Some(layout)], immediate_size: 0 });
-			device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-				label: Some(entry),
-				layout: Some(&pl),
-				vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs_full"), compilation_options: Default::default(), buffers: &[] },
-				fragment: Some(wgpu::FragmentState { module: &shader, entry_point: Some(entry), compilation_options: Default::default(), targets: &[Some(wgpu::ColorTargetState { format: target, blend: None, write_mask: wgpu::ColorWrites::ALL })] }),
-				primitive: Default::default(),
-				depth_stencil: depth,
-				multisample: wgpu::MultisampleState { count, ..Default::default() },
-				multiview_mask: None,
-				cache: None,
-			})
-		};
+		let l_copy = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("upscale copy"), entries: &[uniform, src, tex_entry(2, wgpu::TextureSampleType::Depth, crate::viewer::scene_msaa::msaa() > 1)] });
+		let pipe = |entry: &'static str, layout: &wgpu::BindGroupLayout, target: wgpu::TextureFormat, depth: Option<wgpu::DepthStencilState>, count: u32| make_pipe(device, &shader, entry, layout, (target, depth, count));
 		let scale_pipe = pipe("fs_scale", &l_scale, MID_FORMAT, None, 1);
-		let depth = wgpu::DepthStencilState { format: depth_format, depth_write_enabled: Some(true), depth_compare: Some(wgpu::CompareFunction::Always), stencil: Default::default(), bias: Default::default() };
-		let copy_pipe = pipe("fs_copy", &l_copy, format, Some(depth), crate::viewer::targets::MSAA);
-		let ubuf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("upscale slot"), size: std::mem::size_of::<SlotUniforms>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-		SlotGpu { formats: (format, depth_format), ubuf, scale_pipe, copy_pipe, l_scale, l_copy, targets: None, copy: None }
+		let copy_pipe = pipe("fs_copy", &l_copy, format, Some(copy_depth(depth_format)), crate::viewer::targets::msaa());
+		let ubuf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("upscale slot"), size: UBUF_SIZE, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+		SlotGpu { formats: (format, depth_format), ubuf, scale_pipe, copy_pipe, copy_grade: std::sync::OnceLock::new(), l_scale, l_copy, targets: None, copy: None }
+	}
+
+	/// [PC] Brightness / Contrast: the graded copy's pipeline, built on first use (pipe-guarded: None = the copy stays plain).
+	fn grade_pipe(&self, device: &wgpu::Device) -> Option<&wgpu::RenderPipeline> {
+		self.copy_grade
+			.get_or_init(|| {
+				let (format, depth_format) = self.formats;
+				crate::viewer::pipe_guard::guard(device, crate::viewer::pipe_guard::Effect::Grade, || {
+					let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("upscale copy grade"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("slot_grade", graded_shader().into())) });
+					make_pipe(device, &shader, "fs_copy_grade", &self.l_copy, (format, Some(copy_depth(depth_format)), crate::viewer::targets::msaa()))
+				})
+			})
+			.as_ref()
+	}
+
+	/// [PC] Brightness / Contrast: the curve's uniform row (`k`) for this frame's graded copy.
+	pub(super) fn write_grade(&self, queue: &crate::viewer::presenter::GatedQueue, k: [f32; 4]) {
+		queue.write_buffer(&self.ubuf, std::mem::size_of::<SlotUniforms>() as u64, bytemuck::cast_slice(&k));
 	}
 
 	/// The targets at `sizes` = (render, window) (made again only when one changed), the constants, and this frame's copy bind
@@ -104,12 +121,12 @@ impl SlotGpu {
 		if self.targets.as_ref().map_or(true, |t| (t.render, t.win) != sizes) {
 			let (format, depth_format) = self.formats;
 			let ra = wgpu::TextureUsages::RENDER_ATTACHMENT;
-			let input = texture(device, "upscale input", format, render, 1, ra | wgpu::TextureUsages::TEXTURE_BINDING);
+			let input = texture(device, "upscale input", format, render, 1, ra | wgpu::TextureUsages::TEXTURE_BINDING | crate::viewer::scene_msaa::copy_usage());
 			let scale = device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("upscale scale"), layout: &self.l_scale, entries: &[wgpu::BindGroupEntry { binding: 0, resource: self.ubuf.as_entire_binding() }, wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&input) }] });
 			// STORAGE_BINDING: the FidelityFX output (ffx_frame.rs).
 			let mid = texture(device, "upscale mid", MID_FORMAT, win, 1, ra | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING);
-			let msaa = texture(device, "upscale hud colour", format, win, crate::viewer::targets::MSAA, ra);
-			let hud_depth = texture(device, "upscale hud depth", depth_format, win, crate::viewer::targets::MSAA, ra);
+			let msaa = texture(device, "upscale hud colour", format, win, crate::viewer::targets::msaa(), ra | crate::viewer::scene_msaa::copy_usage());
+			let hud_depth = texture(device, "upscale hud depth", depth_format, win, crate::viewer::targets::msaa(), ra);
 			self.targets = Some(Targets { render, win, input, mid, mid_init: std::cell::Cell::new(false), msaa, depth: hud_depth, scale });
 		}
 		queue.write_buffer(&self.ubuf, 0, bytemuck::bytes_of(&uniforms(render, win)));
@@ -152,16 +169,17 @@ impl SlotGpu {
 
 	/// No upscaler recorded this frame: resolve, the plain scale and the copy (every target fully overwritten). `msaa` = the
 	/// scene's MSAA colour at the render size.
-	pub(super) fn encode_plain(&self, enc: &mut wgpu::CommandEncoder, msaa: &wgpu::TextureView) {
+	pub(super) fn encode_plain(&self, device: &wgpu::Device, enc: &mut wgpu::CommandEncoder, msaa: &wgpu::TextureView, grade: bool) {
 		self.resolve(enc, msaa);
 		self.scale(enc);
-		self.copy(enc);
+		self.copy(device, enc, grade);
 	}
 
 	/// The scene's samples averaged into the render-size picture (an empty pass that only resolves).
 	pub(super) fn resolve(&self, enc: &mut wgpu::CommandEncoder, msaa: &wgpu::TextureView) {
 		let Some(t) = &self.targets else { return };
 		drop(pass(enc, "upscale resolve", colour(msaa, Some(&t.input), wgpu::LoadOp::Load), None));
+		crate::viewer::scene_msaa::flush(enc);
 	}
 
 	/// The plain bilinear scale from the render-size picture into `mid`.
@@ -181,8 +199,9 @@ impl SlotGpu {
 		t.mid_init.set(true);
 	}
 
-	/// `mid` into the window-size MSAA target the HUD pass loads, with the scene depth upsampled (nearest).
-	pub(super) fn copy(&self, enc: &mut wgpu::CommandEncoder) {
+	/// `mid` into the window-size MSAA target the HUD pass loads, with the scene depth upsampled (nearest); `grade` = with the
+	/// Brightness / Contrast curve (`write_grade` set it this frame).
+	pub(super) fn copy(&self, device: &wgpu::Device, enc: &mut wgpu::CommandEncoder, grade: bool) {
 		let (Some(t), Some(copy)) = (&self.targets, &self.copy) else { return };
 		let depth = wgpu::RenderPassDepthStencilAttachment {
 			view: &t.depth,
@@ -190,14 +209,36 @@ impl SlotGpu {
 			stencil_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(crate::viewer::shadowvol::STENCIL_CLEAR), store: wgpu::StoreOp::Discard }),
 		};
 		let mut p = pass(enc, "upscale copy", colour(&t.msaa, None, wgpu::LoadOp::Clear(wgpu::Color::BLACK)), Some(depth));
-		p.set_pipeline(&self.copy_pipe);
+		p.set_pipeline(if grade { self.grade_pipe(device).unwrap_or(&self.copy_pipe) } else { &self.copy_pipe });
 		p.set_bind_group(0, copy, &[]);
 		p.draw(0..3, 0..1);
 	}
 }
 
+/// The copy's depth state: the upsampled scene depth written as is.
+fn copy_depth(format: wgpu::TextureFormat) -> wgpu::DepthStencilState {
+	wgpu::DepthStencilState { format, depth_write_enabled: Some(true), depth_compare: Some(wgpu::CompareFunction::Always), stencil: Default::default(), bias: Default::default() }
+}
+
+/// One full-screen pipeline of the slot: fragment `entry` of `shader`, `out` = (target format, depth state, sample count).
+fn make_pipe(device: &wgpu::Device, shader: &wgpu::ShaderModule, entry: &str, layout: &wgpu::BindGroupLayout, out: (wgpu::TextureFormat, Option<wgpu::DepthStencilState>, u32)) -> wgpu::RenderPipeline {
+	let (target, depth, count) = out;
+	let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some(entry), bind_group_layouts: &[Some(layout)], immediate_size: 0 });
+	device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+		label: Some(entry),
+		layout: Some(&pl),
+		vertex: wgpu::VertexState { module: shader, entry_point: Some("vs_full"), compilation_options: Default::default(), buffers: &[] },
+		fragment: Some(wgpu::FragmentState { module: shader, entry_point: Some(entry), compilation_options: Default::default(), targets: &[Some(wgpu::ColorTargetState { format: target, blend: None, write_mask: wgpu::ColorWrites::ALL })] }),
+		primitive: Default::default(),
+		depth_stencil: depth,
+		multisample: wgpu::MultisampleState { count, ..Default::default() },
+		multiview_mask: None,
+		cache: None,
+	})
+}
+
 fn colour<'a>(view: &'a wgpu::TextureView, resolve_target: Option<&'a wgpu::TextureView>, load: wgpu::LoadOp<wgpu::Color>) -> Option<wgpu::RenderPassColorAttachment<'a>> {
-	Some(wgpu::RenderPassColorAttachment { view, resolve_target, depth_slice: None, ops: wgpu::Operations { load, store: wgpu::StoreOp::Store } })
+	Some(crate::viewer::scene_msaa::att(view, resolve_target, wgpu::Operations { load, store: wgpu::StoreOp::Store })) // lane noaa: 1 sample = copy
 }
 
 fn pass(enc: &mut wgpu::CommandEncoder, label: &'static str, c: Option<wgpu::RenderPassColorAttachment<'_>>, d: Option<wgpu::RenderPassDepthStencilAttachment<'_>>) -> wgpu::RenderPass<'static> {

@@ -284,10 +284,18 @@ fn grid_line(start: f32, step: f32) -> [f32; 8] {
 }
 
 /// FUN_0024f2e0 distance test: patch centre (px + 3.5 sx, py + 3.5 sy, oz), strictly inside radius2.
+/// The radius stays retail's at every Draw distance: drawn farther (#79 review, `retail::wide_side::far`) the ocean reached the
+/// horizon with tile seams over the sky (Umbris, test build 6 gate umbris_max); the pools and lava keep their far limit.
 fn patch_near(px: f32, py: f32, d: &Desc, eye: [f32; 3]) -> bool {
+	patch_near_with(px, py, d, eye, |r| r)
+}
+
+/// `patch_near` with the far-limit function given (retail radius in, drawn radius out).
+fn patch_near_with(px: f32, py: f32, d: &Desc, eye: [f32; 3], far: impl Fn(f32) -> f32) -> bool {
 	let c = [px + d.spacing[0] * CELLS as f32 * 0.5, py + d.spacing[1] * CELLS as f32 * 0.5, d.origin[2]];
 	let (dx, dy, dz) = (c[0] - eye[0], c[1] - eye[1], c[2] - eye[2]);
-	dx * dx + dy * dy + dz * dz - d.radius2 < 0.0
+	let r = far(d.radius2.max(0.0).sqrt());
+	dx * dx + dy * dy + dz * dz - (r * r).max(d.radius2) < 0.0
 }
 
 /// Retail mode (retail/oldsim.rs `RamOcean`, the oceans of Batalia, Gaspar, Oltanis, Rilgar and Umbris): the patch strips of
@@ -303,6 +311,16 @@ pub fn ram_strips(d: &Desc, st: &[[f32; 2]; STRIP_LEN], idx: &[u8; STRIP_LEN], f
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// #79: a patch 500 m away is cut by retail's 400 m radius, drawn once the far limit grows; Low (identity) keeps retail's.
+	#[test]
+	fn patch_radius_follows_the_far_limit() {
+		let d = Desc { origin: [0.0, 0.0, 0.0], spacing: [1.0, 1.0], cells: [1, 1], radius2: 160000.0, mask: vec![1], colours: Vec::new() };
+		let eye = [-500.0 + 3.5, 3.5, 0.0];
+		assert!(!patch_near_with(0.0, 0.0, &d, eye, |r| r), "retail: cut at 400 m");
+		assert!(patch_near_with(0.0, 0.0, &d, eye, |r| r * 2.0), "far limit 800 m: drawn");
+		assert!(!patch_near_with(0.0, 0.0, &d, eye, |r| r * 0.5), "never below retail's radius");
+	}
 	use crate::{iso, toc};
 
 	const ISO: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../Ratchet & Clank (Europe) (En,Fr,De,Es,It) (v1.00).iso");

@@ -15,7 +15,7 @@
 use super::*;
 
 /// The full-screen contact pass: the mirror pass's MSAA depth (nearest sample) through the inverse of the mirrored view-projection.
-pub(super) const CONTACT: &str = r#"
+pub(in crate::viewer) const CONTACT: &str = r#"
 struct C { inv: mat4x4<f32>, k: vec4<f32> };
 @group(0) @binding(0) var dep: texture_depth_multisampled_2d;
 @group(0) @binding(1) var<uniform> c: C;
@@ -68,7 +68,14 @@ const PREMULTIPLY: wgpu::BlendState = wgpu::BlendState {
 	alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::Zero, operation: wgpu::BlendOperation::Add },
 };
 
-/// The contact pass's pipeline, uniforms and bind group (over the planar MSAA depth).
+/// The contact pass's pipeline and its group layout: made once with the real set (metalenv.rs `Real`), so remaking the planar
+/// targets (a new render size or Metal reflection detail, metal_detail.rs) compiles nothing.
+pub(super) struct ContactPipe {
+	pipe: wgpu::RenderPipeline,
+	layout: wgpu::BindGroupLayout,
+}
+
+/// The contact pass's uniforms and bind group (over the planar MSAA depth), with the shared pipeline.
 pub(super) struct Contact {
 	pipe: wgpu::RenderPipeline,
 	ubuf: wgpu::Buffer,
@@ -76,20 +83,27 @@ pub(super) struct Contact {
 }
 
 impl Contact {
-	/// `depth`: the planar MSAA depth texture (made with TEXTURE_BINDING); `format`: the planar colour's.
-	pub(super) fn new(device: &wgpu::Device, depth: &wgpu::Texture, format: wgpu::TextureFormat) -> Contact {
+	/// `depth`: the planar MSAA depth texture (made with TEXTURE_BINDING); `cp`: the pipeline (`ContactPipe::new`).
+	pub(super) fn new(device: &wgpu::Device, depth: &wgpu::Texture, cp: &ContactPipe) -> Contact {
+		let ubuf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("metal contact"), size: 80, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+		let dview = depth.create_view(&wgpu::TextureViewDescriptor { aspect: wgpu::TextureAspect::DepthOnly, ..Default::default() });
+		let bind = device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("metal contact"), layout: &cp.layout, entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&dview) }, wgpu::BindGroupEntry { binding: 1, resource: ubuf.as_entire_binding() }] });
+		Contact { pipe: cp.pipe.clone(), ubuf, bind }
+	}
+}
+
+impl ContactPipe {
+	/// `format`: the planar colour's.
+	pub(super) fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> ContactPipe {
 		let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("metal contact"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("metal contact", CONTACT.into())) });
 		let entry = |binding: u32, ty: wgpu::BindingType| wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::FRAGMENT, ty, count: None };
 		let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
 			label: Some("metal contact"),
 			entries: &[
-				entry(0, wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Depth, view_dimension: wgpu::TextureViewDimension::D2, multisampled: true }),
+				entry(0, wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Depth, view_dimension: wgpu::TextureViewDimension::D2, multisampled: crate::viewer::scene_msaa::msaa() > 1 }),
 				entry(1, wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }),
 			],
 		});
-		let ubuf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("metal contact"), size: 80, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-		let dview = depth.create_view(&wgpu::TextureViewDescriptor { aspect: wgpu::TextureAspect::DepthOnly, ..Default::default() });
-		let bind = device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("metal contact"), layout: &layout, entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&dview) }, wgpu::BindGroupEntry { binding: 1, resource: ubuf.as_entire_binding() }] });
 		let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("metal contact"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
 		let pipe = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
 			label: Some("metal contact"),
@@ -102,8 +116,11 @@ impl Contact {
 			multiview_mask: None,
 			cache: None,
 		});
-		Contact { pipe, ubuf, bind }
+		ContactPipe { pipe, layout }
 	}
+}
+
+impl Contact {
 
 	/// The contact weights (by reflection distance) into the alpha of `target` (planar level 0, already resolved); `mvp`: the mirror pass's
 	/// view-projection (mirror.rs `mirrored_clip`), `h`: the mirror plane, `k`: `knobs()`.
@@ -117,7 +134,7 @@ impl Contact {
 			label: Some("metal contact"),
 			color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: target, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } })],
 			depth_stencil_attachment: None,
-			timestamp_writes: None,
+			timestamp_writes: crate::viewer::passtime::rw("metal contact"),
 			occlusion_query_set: None,
 			multiview_mask: None,
 		});

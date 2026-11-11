@@ -45,6 +45,10 @@ pub(super) fn push_mesh_vertices(m: &Mesh, mi: usize, colours: Option<&[Vec<[f32
 	// A moby mesh keeps its decoded vertex normals (retail VU0 prog0 lights with them, lighting_fog.md REN-5c); other
 	// meshes sum their face normals.
 	let normals = m.vertex_normals();
+	// [PC] fire light (flit.wgsl): a terrain vertex carries its retail per-position normal (terrain.rs `fragment_colours`: authored,
+	// smooth across the strips, facing out) in the unused light xyz; `vs_tfrag` hands it to the fire term alone. The face sums above
+	// are flat per strip and some strips wind the other way (a 3-4x light step at grazing fire light, lane dlit3 worker 4).
+	let tf_n = m.lit.as_ref().filter(|l| l.kind == LitKind::Tfrag && colours.is_none() && l.normals.len() == m.positions.len()).map(|l| &l.normals);
 	for (i, p) in m.positions.iter().enumerate() {
 		for j in 0..3 {
 			lo[j] = lo[j].min(p[j]);
@@ -56,7 +60,8 @@ pub(super) fn push_mesh_vertices(m: &Mesh, mi: usize, colours: Option<&[Vec<[f32
 			(None, Some(b)) => [b[0] / 128.0, b[1] / 128.0, b[2] / 128.0, -2.0],
 			(None, None) => [1.0, 1.0, 1.0, -1.0],
 		};
-		verts.push(Vertex { pos: *p, uv: m.uvs[i], normal: normals[i], colour, light: origin });
+		let light = tf_n.map_or(origin, |n| [n[i][0], n[i][1], n[i][2], origin[3]]);
+		verts.push(Vertex { pos: *p, uv: m.uvs[i], normal: normals[i], colour, light });
 	}
 }
 

@@ -25,6 +25,7 @@ use ee_oracle::rec::{register_hand, Hand};
 use std::sync::{atomic::{AtomicBool, Ordering}, Mutex};
 use crate::{fmath::Fm, retail::disc::va};
 pub mod classic;
+mod handback;
 pub mod shoulder;
 pub(crate) mod stamps; mod water_path; pub mod fp_look; pub mod late_look; pub mod steady;
 pub mod sticks;
@@ -47,7 +48,7 @@ pub fn enabled() -> bool {
 	if super::disc::extras_off() || crate::omni::clash::off(crate::omni_bind::MODERN_CAMERA) {
 		return false;
 	}
-	ENABLED.load(Ordering::SeqCst) || std::env::var("RAC_MODERN_CAM").is_ok_and(|v| v != "0" && !v.is_empty()) || super::pcext::enabled()
+	ENABLED.load(Ordering::SeqCst) || *{ static ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new(); ENV.get_or_init(|| std::env::var("RAC_MODERN_CAM").is_ok_and(|v| v != "0" && !v.is_empty())) } || super::pcext::enabled()
 }
 
 /// The PC options' Camera row (pcext.rs): Modern = on, Classic = off. Same effect as F7, set from the remembered value.
@@ -425,6 +426,8 @@ struct St {
 	last: ([f32; 3], f32, f32),
 	/// The camera rows last written (row 0 forward, 1 left, 2 up): the blend-out start while the view is rolled.
 	last_rows: [[f32; 3]; 3],
+	/// Camera Classic's strafe aim press: retail's view fading into the orbit's (classic.rs `LookOff`).
+	look_off: classic::LookOff,
 	/// The orbit frame the yaw / pitch are measured in (hero up and a carried reference axis; world frame on flat ground).
 	fr: Frame,
 	blend: u32,
@@ -468,6 +471,7 @@ static ST: Mutex<St> = Mutex::new(St {
 	pivot: [0.0; 3],
 	last: ([0.0; 3], 0.0, 0.0),
 	last_rows: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+	look_off: classic::LookOff::NONE,
 	fr: FLAT,
 	blend: 0,
 	aiming: false,
@@ -1337,6 +1341,7 @@ fn step(c: &mut Cpu, lv: &'static Lv, rec: u32, st: &mut St) {
 	let why = classic::why(c, lv, rec, st);
 	if let Some(why) = why {
 		st.aiming = false;
+		st.look_off.clear();
 		shoulder::reset(st);
 		if st.live {
 			st.live = false;
@@ -1344,33 +1349,7 @@ fn step(c: &mut Cpu, lv: &'static Lv, rec: u32, st: &mut St) {
 			eprintln!("retail: modcam hands back to retail: {why} (field {})", st.field);
 		}
 		if st.blend > 0 && !fresh {
-			// Blend from the last modern pose to retail's.
-			st.blend -= 1;
-			let t = 1.0 - st.blend as f32 / BLEND as f32;
-			let t = t * t * (3.0 - 2.0 * t);
-			let re = rv(c, rec + 0x30);
-			let (e0, y0, p0) = st.last;
-			let e = [e0[0] + (re[0] - e0[0]) * t, e0[1] + (re[1] - e0[1]) * t, e0[2] + (re[2] - e0[2]) * t];
-			let rr = [rv(c, rec), rv(c, rec + 0x10), rv(c, rec + 0x20)];
-			if st.fr.flat() && rr[1][2].abs() < 1e-4 {
-				let (ry, rp) = rec_angles(c, rec);
-				let y = y0 + wrap(ry - y0) * t;
-				let p = p0 + (rp - p0) * t;
-				st.last_rows = write_pose(c, rec, e, &FLAT, y, p);
-				st.last = (e, y, p);
-			} else {
-				// A rolled view (magnetic wall) on either end: blend the rows themselves and keep them orthonormal.
-				let l = st.last_rows;
-				let mix = |i: usize| [l[i][0] + (rr[i][0] - l[i][0]) * t, l[i][1] + (rr[i][1] - l[i][1]) * t, l[i][2] + (rr[i][2] - l[i][2]) * t];
-				let f = unit3(mix(0));
-				let m2 = mix(2);
-				let d = dot3(m2, f);
-				let u = unit3([m2[0] - f[0] * d, m2[1] - f[1] * d, m2[2] - f[2] * d]);
-				let rows3 = [f, cross3(u, f), u];
-				write_rows(c, rec, e, &rows3);
-				st.last_rows = rows3;
-				st.last = (e, f[1].fatan2(f[0]), (-f[2]).clamp(-1.0, 1.0).fasin());
-			}
+			handback::blend_back(c, rec, st);
 		} else {
 			st.blend = 0;
 		}
@@ -1384,7 +1363,7 @@ fn step(c: &mut Cpu, lv: &'static Lv, rec: u32, st: &mut St) {
 	let piv_goal = fr.lift(hero, PIVOT);
 	if !st.live || fresh {
 		// Seed from the pose on screen (retail's, or the blend-out in progress): no snap.
-		let e = if st.blend > 0 && !fresh { st.last.0 } else { rv(c, rec + 0x30) };
+		let (shown, e) = if st.blend > 0 && !fresh { (true, st.last.0) } else { (false, rv(c, rec + 0x30)) };
 		let d = sub(e, piv_goal);
 		let l = len3(d).max(MIN_LEN);
 		st.yaw = (-dot3(d, fr.b)).fatan2(-dot3(d, fr.a));
@@ -1395,6 +1374,8 @@ fn step(c: &mut Cpu, lv: &'static Lv, rec: u32, st: &mut St) {
 		if !st.live {
 			eprintln!("retail: modcam drives the follow camera (field {})", st.field);
 		}
+		// Camera Classic's strafe aim press keeps retail's view at the seed (the orbit looks at the pivot, retail's camera a little off it; inside a hand-back blend: the blended pose shown).
+		st.look_off.on_seed(classic::no_offset(st.active || fresh, fr.flat()),if shown { (st.last.1, st.last.2) } else { rec_angles(c, rec) });
 		st.live = true;
 		st.blend = 0;
 		shoulder::reset(st);
@@ -1430,7 +1411,7 @@ fn step(c: &mut Cpu, lv: &'static Lv, rec: u32, st: &mut St) {
 	} else {
 		(rs[0], rs[1])
 	};
-	let g = super::modcam_turn::Gains { mouse: MOUSE, sens: sens(), mouse_k, rot: ROTATE_RATE, tilt: TILT_STEP, stick_k, lr, ud };
+	let g = super::modcam_turn::Gains { mouse: MOUSE, sens: sens(), mouse_k, rot: ROTATE_RATE, tilt: TILT_STEP, stick_k, lr, ud, mouse_lr: super::pcmouseinv::signs(lr, ud).0, mouse_ud: super::pcmouseinv::signs(lr, ud).1 };
 	let (dyaw, dpitch) = super::modcam_turn::turn(inp.look, [sx, sy], &g);
 	st.dist = (st.dist - inp.zoom as f32 * 0.5).clamp(ZOOM.0, ZOOM.1);
 	// Aim mode (RMB): the mouse keeps turning the camera as it does without RMB; nothing is picked or framed.
@@ -1539,8 +1520,9 @@ fn step(c: &mut Cpu, lv: &'static Lv, rec: u32, st: &mut St) {
 	};
 	st.tr = [base, safe, rise_goal];
 	let e = fr.eye(pivot_r, st.yaw, pitch, st.len);
-	st.last_rows = write_pose(c, rec, e, &fr, st.yaw, pitch);
-	st.last = (e, st.yaw, pitch);
+	let (ry, rp) = st.look_off.apply(st.yaw, pitch);
+	st.last_rows = write_pose(c, rec, e, &fr, ry, rp);
+	st.last = (e, ry, rp);
 	if log_on() {
 		let chk = dbg_chk(c, lv, piv, pivot_r, e);
 		let d = &st.dy;

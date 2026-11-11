@@ -97,7 +97,7 @@ fn pause_scene(r: &crate::retail::Retail, text: &crate::frontend::Text, lang: us
 	};
 	let pad = crate::retail::prompts::pad_peek().map(|p| mhost::pad_sample(p.buttons, p.sticks));
 	pause_host::begin(pad);
-	let style = crate::modern_menu::btn_text::Style { device: pause_host::device(), glyphs: crate::modern_menu::look::glyph_set() };
+	let style = crate::modern_menu::btn_text::Style { device: pause_host::device(), glyphs: crate::modern_menu::look::glyph_set(), menu: false };
 	let t = |id: u32| crate::modern_menu::btn_text::text(&strings, id, style); // buttons kept as chips (`btn_text`)
 	let ach = ach_facts();
 	let facts = pause::Facts {

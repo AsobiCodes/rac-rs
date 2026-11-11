@@ -34,6 +34,12 @@ const WGSL: &str = include_str!("firefx.wgsl");
 const MAX_GROUND: usize = 256;
 const MAX_QUADS: usize = 1280;
 const MAX_EMIT: usize = 128;
+/// Lane rfire: the small flames weighed for the lights per frame (`FireFx::small`).
+const MAX_SMALL: usize = 64;
+/// Lane rfire worker 5: the smallest flame (sprite size) weighed for the lights (RAC_TUNE fire_small_min). The fire's flying embers
+/// (type 15: the Blaster's red impact embers on Batalia fg1\8_0328, the R.Y.N.O. blast fire's embers on Eudora) pass `flame_like` at
+/// up to 0.27 (fire_pick_log `lit .. max`, 2026-11-07) and must not light: embers are drawn as fire but light nothing.
+const SMALL_MIN: f32 = 0.3;
 /// The lowest part of a tongue's quad below its base (uv.y), so the flame's foot has no hard line.
 const FOOT: f32 = 0.06;
 
@@ -137,8 +143,22 @@ pub struct FireFx {
 	ground: Vec<Emit>,
 	big: Vec<Emit>,
 	lit: Vec<Emit>,
+	/// Lane rfire: the small flames the fire draws this frame (pool flames under `fire_ember_min`: Thruster-Pack exhaust, small burning
+	/// bits; at most `MAX_SMALL`): no embers, only weighed for the lights (by their area, so their lights are small and the big fires
+	/// keep the light cap and the shadow maps first).
+	small: Vec<Emit>,
+	/// Lane rfire review: the pool slots (bit per slot) of this frame's sprites whose type row is `dark` (pack rows,
+	/// `fire_option::sprite_dark`: R&C1's flying embers): drawn as fire, never weighed for the lights.
+	dark: Vec<u64>,
 	/// The fire lights this frame (`gather`: firefx_light.rs `wanted`, Global illumination not Off), also with the Fire row Off.
 	lights: bool,
+	/// [PC] lane dlit2: the surface lights followed from frame to frame (flitlist.rs, `surface_lights`).
+	surf: super::flitlist::Tracker,
+	/// [PC] fire light v2 stage 6: the fires' shadow origins followed from frame to frame (flitsplit.rs, `shadow_origins`).
+	split: super::flitsplit::Split,
+	/// [PC] Lane rfire worker 8: the light-only flames of a carried flame source the pack hook reports (firefx_carried.rs), one small
+	/// carried light each.
+	carried: super::firefx_carried::Carried,
 	/// The frame's horizontal across-the-view direction (`begin_sprites`): the burn flames over the volume cap stand as cards facing it.
 	across: [f32; 3],
 	/// Per sprite of this frame's list (`set_particles`): the fire kind and pool slot of a pool sprite whose effect type is a fire row.
@@ -166,6 +186,8 @@ pub struct FireFx {
 	pub(super) blast: BlastFire,
 	/// The game time of the ground fire, the burnt grass and the jets' memory: stands while the game stands (firefx_gametime.rs).
 	pub(super) game: GameClock,
+	/// [PC] The heat haze over the fires and the lava (heathaze.rs; its pass runs in the post chain, gpu/draw/pass_post.rs).
+	pub(super) haze: super::heathaze::HeatHaze,
 }
 
 pub(super) fn dist(a: [f32; 3], b: [f32; 3]) -> f32 {
@@ -209,6 +231,26 @@ fn classify(rows: &[fire_option::FireRow], pool: impl Iterator<Item = bool>, typ
 	.collect()
 }
 
+/// The pool slots (bit per slot, as `classify` numbers them) whose effect type is a `dark` row (`fire_option::sprite_dark`).
+fn dark_slots(rows: &[fire_option::FireRow], types: &[u8], slots: &[u16]) -> Vec<u64> {
+	let mut out: Vec<u64> = Vec::new();
+	for (at, &ty) in types.iter().enumerate() {
+		if fire_option::sprite_dark(rows, ty) {
+			let s = usize::from(slots.get(at).copied().unwrap_or(at as u16));
+			if out.len() <= s / 64 {
+				out.resize(s / 64 + 1, 0);
+			}
+			out[s / 64] |= 1 << (s % 64);
+		}
+	}
+	out
+}
+
+fn is_dark(dark: &[u64], slot: u16) -> bool {
+	let s = usize::from(slot);
+	dark.get(s / 64).is_some_and(|w| w & (1 << (s % 64)) != 0)
+}
+
 /// A flame-row sprite that looks like a flame (`add_sprite`): a warm or green saturated colour (white beams, grey smoke are not) and
 /// at least `fire_flame_min` (0.25) big (the impacts' sparks and embers, 0.03..0.16, are not; dev knob, 0 = any size).
 pub(super) fn flame_like(c: [f32; 4], size: f32) -> bool {
@@ -231,6 +273,8 @@ fn skipped(ty: u8) -> bool {
 /// as what, the mean size, the first colour and texture, the nearest to the hero (m).
 fn log_picks(now: f64, sprites: &[crate::prims::Sprite], types: &[u8], picks: &[Option<(FireKind, u16)>], hero: Option<[f32; 3]>) {
 	let mut by: BTreeMap<u8, (u32, u32, Option<FireKind>, f32, [f32; 4], u32, f32)> = BTreeMap::new();
+	// Lane rfire: per type, how many flame picks pass `flame_like` (drawn as fire and weighed for the lights) and their largest size.
+	let mut lit: BTreeMap<u8, (u32, f32)> = BTreeMap::new();
 	let mut n = 0;
 	for (sp, p) in sprites.iter().zip(picks) {
 		if sp.pool.is_none() {
@@ -243,10 +287,15 @@ fn log_picks(now: f64, sprites: &[crate::prims::Sprite], types: &[u8], picks: &[
 		(e.0, e.3, e.6) = (e.0 + 1, e.3 + sp.size, e.6.min(d));
 		if let Some((k, _)) = p {
 			(e.1, e.2) = (e.1 + 1, Some(*k));
+			if matches!(k, FireKind::Flame | FireKind::Burn) && sp.colour[3] > 0.004 && flame_like(sp.colour, sp.size) {
+				let l = lit.entry(ty).or_insert((0, 0.0));
+				(l.0, l.1) = (l.0 + 1, l.1.max(sp.size));
+			}
 		}
 	}
 	for (ty, (count, took, kind, size, c, tex, d)) in by {
-		eprintln!("fire_pick: t {now:.3} ty {ty} n {count} took {took} {kind:?} size {:.2} col {:.2} {:.2} {:.2} {:.2} tex {tex} hero {d:.1}", size / count as f32, c[0], c[1], c[2], c[3]);
+		let (ln, lmax) = lit.get(&ty).copied().unwrap_or((0, 0.0));
+		eprintln!("fire_pick: t {now:.3} ty {ty} n {count} took {took} {kind:?} size {:.2} col {:.2} {:.2} {:.2} {:.2} tex {tex} hero {d:.1} lit {ln} max {lmax:.2}", size / count as f32, c[0], c[1], c[2], c[3]);
 	}
 }
 
@@ -284,10 +333,13 @@ impl FireFx {
 		self.sprites.clear();
 		self.svols.clear();
 		self.big.clear();
+		self.small.clear();
+		self.dark.clear();
 		self.held.clear();
 		self.given.clear();
 		self.picks.clear();
 		self.on = active();
+		self.carried.note(fx.map_or(&[][..], |f| f.flame_lights), self.on);
 		// The game time (firefx_gametime.rs); a swapped world (respawn, savestate, a gap with no pool) makes the fire forget what it kept.
 		if !self.on {
 			// (Fire Off: the clock still runs, so the retail-lit fire lights flicker on game time and freeze in a pause; a jump needs no forget.)
@@ -311,10 +363,12 @@ impl FireFx {
 		if ground && !ground_blast_on() {
 			self.blast.burn_only(level);
 		} else {
-			self.blast.watch(ground, level, sprites, fx, view.eye, now);
+			self.blast.watch(self.on, ground, level, sprites, fx, view.eye, now);
 		}
 		if let (true, Some(fx)) = (self.on, fx) {
-			self.picks = classify((crate::pack::get().fire_rows)(level), sprites.iter().map(|s| s.pool.is_some()), fx.sprite_types, fx.sprite_slots, volumes() && super::firesim::on());
+			let rows = (crate::pack::get().fire_rows)(level);
+			self.picks = classify(rows, sprites.iter().map(|s| s.pool.is_some()), fx.sprite_types, fx.sprite_slots, volumes() && super::firesim::on());
+			self.dark = dark_slots(rows, fx.sprite_types, fx.sprite_slots);
 			let q = firefx_jet::quality(fire_option::level());
 			// The jets are built from the shown field's own sprites (`PoolFx::tick`) and blended once by `jet_lerp`; while the smoothing
 			// does not blend (alpha 1, smoothing off) or the field's own list does not fit, from the shown sprites, not blended again.
@@ -363,6 +417,7 @@ impl FireFx {
 		self.ground_track.forget();
 		self.burn.forget();
 		self.sim.forget();
+		self.carried.forget();
 	}
 
 	/// The fire kind and pool slot of sprite `si` of `set_particles`' list; None = draw it as the game does (always None while off).
@@ -398,9 +453,11 @@ impl FireFx {
 				return true;
 			}
 			(FireKind::Burn, slot) => (FireKind::Flame, slot),
-			// An explosion (the fire simulation on, `classify`): a burst emitter under the volume cap, else the retail sprite.
+			// An explosion (the fire simulation on, `classify`): a burst emitter under the volume cap, else the retail sprite. Only the
+			// player's explosive weapons' explosions (`BlastFire::player_blast`): an enemy's own death explosion stays retail (its burst's
+			// particles lay on the ground as fire after the retail explosion was gone, user 2026-11-07 on Kerwan).
 			(FireKind::Blast, slot) => {
-				if !volumes() || !blast_like(s.colour) || self.reserve + self.svols.len() >= firefx_vol::MAX_VOLS {
+				if !volumes() || !blast_like(s.colour) || self.reserve + self.svols.len() >= firefx_vol::MAX_VOLS || !self.blast.player_blast(slot) {
 					return false;
 				}
 				self.held.push(retail);
@@ -457,8 +514,15 @@ impl FireFx {
 		} else {
 			self.sprites.extend(tongue(base, across, size * 1.1, h, tint, colour[3], seed, 1.0));
 		}
+		// A `dark` row's sprite (the flying embers) is drawn but never weighed for the lights or ember emitters; the size gate below
+		// (`SMALL_MIN`) is the second check.
+		if is_dark(&self.dark, slot) {
+			return true;
+		}
 		if h >= tune("fire_ember_min", 1.8) && self.big.len() < MAX_EMIT {
 			self.big.push(Emit { base, h, w: size * 1.1, seed });
+		} else if self.small.len() < MAX_SMALL && size >= tune("fire_small_min", SMALL_MIN) {
+			self.small.push(Emit { base, h, w: size * 1.1, seed });
 		}
 		true
 	}
@@ -605,6 +669,12 @@ impl FireFx {
 		self.vols.iter().chain(self.svols.iter()).map(firefx_vol::core).collect()
 	}
 
+	/// The Fire row draws this frame (not Off, not the Classic half): lane rfire's light changes (licks, dance, flit.rs warm mix) only
+	/// then; Fire Off keeps test build 7's light from the game's own flame billboards.
+	pub(super) fn draws(&self) -> bool {
+		self.on
+	}
+
 	/// The draw clock of the fire shaders, the mesh flames and the High lights' flicker (`GameClock::shown`): game time that moves on
 	/// every display frame, also between two fields.
 	pub(super) fn shown(&self) -> f64 {
@@ -622,23 +692,80 @@ impl FireFx {
 		self.sim.step(env, enc, cam, self.vols.iter().chain(self.svols.iter()), shown, at);
 	}
 
+	/// What the fire lights weigh: the level's fires (`lit`) and, while the Fire row draws, its big and small flames.
+	fn lights_from(&self) -> impl Iterator<Item = &Emit> + Clone {
+		self.lights_tagged().map(|x| x.0)
+	}
+
+	/// `lights_from`, each flame tagged small (`small`: true) or not (flitlist.rs `clusters_tagged`).
+	fn lights_tagged(&self) -> impl Iterator<Item = (&Emit, bool)> + Clone {
+		let on = self.on;
+		self.lit.iter().map(|e| (e, false)).chain(self.big.iter().map(|e| (e, false)).chain(self.small.iter().map(|e| (e, true))).filter(move |_| on))
+	}
+
 	/// The fire's lights (Global illumination level `gi`, firefx_light.rs) first, then the retail effect lights, `FX_LIGHTS` in all.
-	pub(super) fn merge_lights(&self, retail: FxLights, gi: u8) -> FxLights {
+	pub(super) fn merge_lights(&self, retail: FxLights, gi: u8, maps: bool) -> FxLights {
 		if !self.lights || super::firefx_light::count(gi) == 0 {
 			return retail;
 		}
-		let mine = super::firefx_light::lights(self.lit.iter().chain(self.big.iter().filter(|_| self.on)), self.shown(), super::firefx_light::count(gi));
-		super::firefx_light::log(self.lit.len(), self.big.len(), retail.n, &mine);
+		let mine = super::firefx_light::lights(self.lights_from(), self.shown(), super::firefx_light::count(gi), super::firefx_light::sway_max(gi, maps), self.on);
+		super::firefx_light::log(self.lit.len(), self.big.len(), if self.on { self.small.len() } else { 0 }, retail.n, &mine);
 		let mut out = FxLights::default();
 		for l in mine.iter().chain(retail.l[..retail.n].iter()).take(partfx::FX_LIGHTS) {
 			out.l[out.n] = *l;
+			out.fire |= u8::from(out.n < mine.len()) << out.n;
 			out.n += 1;
 		}
 		out
 	}
+
+	/// [PC] lane dlit2: the surface light list of the frame's fires (flitlist.rs): every fire weighed for the lights (`lit`, `big` while
+	/// fire draws) clustered at Global illumination `gi` (`budget`), tracked (`FireFx::surf`), made sphere lights round the eye
+	/// `eye`; `maps`: the light shadow maps may draw (the sway cap, firefx_light.rs `sway_max`). None (and the tracks dropped) when
+	/// the fire lights are off.
+	pub(super) fn surface_lights(&mut self, gi: u8, maps: bool, eye: [f32; 3]) -> Vec<super::flitlist::Light> {
+		let (n, r) = super::flitlist::budget(gi);
+		if !self.lights || n == 0 {
+			self.surf = Default::default();
+			self.carried.forget();
+			return Vec::new();
+		}
+		let cs = super::flitlist::clusters_tagged(self.lights_tagged(), r);
+		super::flitref::tongues(self.lights_from()); // DEV flsh_ref=3
+		let t = self.shown();
+		let mut tracked = self.surf.step(&cs, r, t);
+		// Lane rfire worker 8: the carried light-only flames (firefx_carried.rs), small: after every big fire (`fire_lights`), and in
+		// no fire (worker 9, review H1: flitlist.rs `groups`).
+		self.carried.step(t, &mut tracked);
+		super::flitref::freeze(super::flitlist::fire_lights(&tracked, t, n, super::firefx_light::sway_max(gi, maps), eye, self.on)) // DEV flit_freeze
+	}
 }
 
 impl FireFx {
+	/// [PC] fire light v2 stage 6: the shadow origins of `groups` (flitsplit.rs `Split::step`; `n` maps this frame) at the shown game
+	/// time; points the fire lights of `list` at them.
+	pub(super) fn shadow_origins(&mut self, list: &mut [super::flitlist::Light], groups: &[super::flitlist::Group], eye: [f32; 3], n: usize) -> &[super::flitlist::Group] {
+		let t = self.shown();
+		let lift = crate::devtune::f32("flit_lift", super::flitlist::LIFT).clamp(0.0, 1.0);
+		// Review N6: the tongues only when the fires split (not at Medium / Low), into the split's own buffer. Lane rfire review: the
+		// small flames stay out (GI High's approved big-fire split tongues are test build 7's).
+		self.split.tongues.clear();
+		if super::flitsplit::Split::splits(n) {
+			let on = self.on;
+			self.split.tongues.extend(self.lit.iter().chain(self.big.iter().filter(|_| on)).filter(|e| e.h > 0.0 && e.w > 0.0).map(|e| ([e.base[0], e.base[1], e.base[2] + lift * e.h], e.h * e.w, 0.5 * e.w.max(e.h))));
+		}
+		let out = self.split.step_mut(list, groups, eye, n, t);
+		// Lane rfire (user 2026-11-07: "the shadows should flicker i think because fire flickers"): each shadow origin dances with
+		// its fire (flitlist.rs `fire_dance`: one phase per fire, the same offset its lights take in `flitlist::dance`, so a light
+		// never leaves its origin): the map is drawn from and read at the moved origin, so the shadows the fire casts waver with it.
+		// Only while maps draw (`n` > 0) and the Fire row draws: else the origins stay where test build 7 had them.
+		for g in out.iter_mut().filter(|_| n > 0 && self.on) {
+			let d = super::flitlist::fire_dance(groups, usize::from(g.fire), t);
+			(0..3).for_each(|k| g.pos[k] += d[k]);
+		}
+		out
+	}
+
 	/// Fire Off with the fire lights wanted: the level's flame billboards as the game draws them still light the scene (every tongue
 	/// by its quad's fade, as `gather` weighs them; no tongue is drawn or taken).
 	fn lit_retail(&mut self, level: usize, quads: &[crate::prims::WorldQuad], cam: &Camera) {
@@ -685,7 +812,7 @@ impl Res {
 				}),
 				primitive: Default::default(),
 				depth_stencil: Some(wgpu::DepthStencilState { format: env.depth_format, depth_write_enabled: Some(false), depth_compare: Some(wgpu::CompareFunction::Less), stencil: Default::default(), bias: Default::default() }),
-				multisample: wgpu::MultisampleState { count: MSAA, ..Default::default() },
+				multisample: wgpu::MultisampleState { count: msaa(), ..Default::default() },
 				multiview_mask: None,
 				cache: None,
 			})
@@ -870,7 +997,7 @@ mod tests {
 		assert_eq!(f.sprite(0), None);
 		assert!(!f.skips(0));
 		let l = FxLights::default();
-		assert_eq!(f.merge_lights(l, 3).n, 0, "no fire lights while gather found none to want");
+		assert_eq!(f.merge_lights(l, 3, true).n, 0, "no fire lights while gather found none to want");
 		// Off: settle changes nothing.
 		let mut f = FireFx::default();
 		let mut verts = BTreeMap::new();
@@ -898,6 +1025,37 @@ mod tests {
 		// A dead sprite is taken (nothing to see) but adds and holds nothing; small flames send no embers.
 		assert!(f.add_sprite((FireKind::Flame, 7), &at([0.0; 3], 0.2, 0.0), retail(2.0)));
 		assert_eq!((f.svols.len(), f.held.len(), f.big.len()), (2, 2, 1));
+		assert!(f.small.is_empty(), "a dead flame lights nothing");
+	}
+
+	/// Lane rfire: a small live flame (the Thruster-Pack's exhaust, size 0.4) sends no embers but is weighed for the lights (`small`),
+	/// by its area: its light is far weaker than a big fire's, so the big fires keep the light cap.
+	#[test]
+	fn small_flames_get_small_lights_no_embers() {
+		let mut f = FireFx::default();
+		f.on = true;
+		assert!(f.add_sprite((FireKind::Flame, 5), &at([1.0, 2.0, 3.0], 0.4, 1.0), retail(0.0)));
+		assert_eq!((f.big.len(), f.small.len()), (0, 1));
+		assert_eq!(f.lights_from().count(), 1);
+		assert!(f.add_sprite((FireKind::Flame, 6), &at([30.0, 2.0, 3.0], 3.0, 1.0), retail(1.0)));
+		let ls = super::super::firefx_light::lights(f.lights_from(), 1.0, 1, 0.0, true);
+		assert!((ls[0][0][0] - 30.0).abs() < 2.0, "the one light goes to the big fire: {ls:?}");
+		f.on = false;
+		assert_eq!(f.lights_from().count(), 0, "Fire Off: the game's own billboards only (`lit`)");
+	}
+
+	/// Lane rfire worker 5: a weapon's / a fire's flying ember (type 15, hot red, size up to 0.27, `flame_like` passes at 0.25) is still
+	/// drawn as fire but is never weighed for the lights; a flame from `SMALL_MIN` up is.
+	#[test]
+	fn embers_are_drawn_but_never_light() {
+		let mut f = FireFx::default();
+		f.on = true;
+		let ember = { let mut s = at([0.0; 3], 0.27, 1.0); s.colour = [1.1, 0.1, 0.0, 0.28]; s };
+		assert!(flame_like(ember.colour, ember.size), "the ember passes the flame gate (drawn as fire, as in test build 7)");
+		assert!(f.add_sprite((FireKind::Flame, 5), &ember, retail(0.0)));
+		assert_eq!((f.big.len(), f.small.len(), f.lights_from().count()), (0, 0, 0), "an ember lights nothing");
+		assert!(f.add_sprite((FireKind::Flame, 6), &at([0.0; 3], SMALL_MIN, 1.0), retail(1.0)));
+		assert_eq!(f.small.len(), 1, "a small flame from SMALL_MIN up lights");
 	}
 
 	/// The Pyrocitor's kinds (firefx_jet_quads.rs decided which sprites keep them): a joined stream segment only keeps its retail quad
@@ -929,7 +1087,7 @@ mod tests {
 	fn no_fire_rows_means_nothing_is_taken() {
 		let sprites: Vec<crate::prims::Sprite> = (0..6).map(|i| crate::prims::Sprite { pos: [i as f32 * 0.1, 0.0, 1.0], size: 1.0, rot: 0.0, colour: [1.0, 0.6, 0.2, 0.8], tex: 0, additive: true, pool: Some(0xF0), flat: false }).collect();
 		let (types, slots) = ([12u8; 6], [0u16, 1, 2, 3, 4, 5]);
-		let fx = crate::fxpool::PoolFx { sprite_slots: &slots, sprite_types: &types, sprite_texs: &[], ribbons: &[], lines: &[], line_slots: &[], frames: 0, hero: None, movers: &[], shots: &[], blasts: &[], tick: &[], tick_hero: None };
+		let fx = crate::fxpool::PoolFx { sprite_slots: &slots, sprite_types: &types, sprite_texs: &[], ribbons: &[], lines: &[], line_slots: &[], frames: 0, hero: None, movers: &[], shots: &[], blasts: &[], blast_gate: None, flame_lights: &[], tick: &[], tick_hero: None };
 		let mut f = FireFx::default();
 		let view = View { eye: [0.0, -10.0, 1.0], fwd: [0.0, 1.0, 0.0], up: [0.0, 0.0, 1.0], far: 200.0 };
 		f.begin_sprites(0, &sprites, Some(&fx), &view);
@@ -953,7 +1111,7 @@ mod tests {
 	/// Only POOL sprites are counted for the pool's parallel type list, and a type that is not a fire row stays retail (A21).
 	#[test]
 	fn sprites_are_classified_by_effect_type_over_pool_sprites_only() {
-		let rows = [fire_option::FireRow { key: 19, kind: FireKind::Flame }, fire_option::FireRow { key: 12, kind: FireKind::Burst }, fire_option::FireRow { key: 46, kind: FireKind::Ground }];
+		let rows = [fire_option::FireRow { key: 19, kind: FireKind::Flame, dark: false }, fire_option::FireRow { key: 12, kind: FireKind::Burst, dark: false }, fire_option::FireRow { key: 46, kind: FireKind::Ground, dark: false }];
 		let pool = [false, true, true, false, true, true];
 		let got = classify(&rows, pool.into_iter(), &[19, 5, 12, 46], &[100, 101, 102, 103], false);
 		assert_eq!(got, vec![None, Some((FireKind::Flame, 100)), None, None, Some((FireKind::Burst, 102)), None], "type 5 stays retail, a Ground key is no sprite row; the 4th pool sprite has no type");
@@ -1065,9 +1223,9 @@ mod tests {
 		let mut f = FireFx::default();
 		f.lights = true;
 		f.lit.push(Emit { base: [1.0, 2.0, 3.0], h: 2.0, w: 2.0, seed: 0.0 });
-		let a = f.merge_lights(Default::default(), 3);
+		let a = f.merge_lights(Default::default(), 3, true);
 		std::thread::sleep(std::time::Duration::from_millis(80));
-		let b = f.merge_lights(Default::default(), 3);
+		let b = f.merge_lights(Default::default(), 3, true);
 		assert!(a.n == 1 && a.l[0] == b.l[0], "no field passed: the light does not move");
 	}
 

@@ -17,6 +17,8 @@ static WATCHED: Mutex<Vec<(&'static str, bool)>> = Mutex::new(Vec::new());
 /// nothing is withdrawn).
 static WITHDRAWN: Mutex<Vec<(&'static str, i32)>> = Mutex::new(Vec::new());
 static ANY_WITHDRAWN: AtomicBool = AtomicBool::new(false);
+/// Row notes found out at run time (`set_note`).
+static NOTES: Mutex<Vec<(&'static str, &'static super::T5)>> = Mutex::new(Vec::new());
 
 /// Value `v` of row `id` is offered from now on (`on`) or withdrawn (not offered: skipped, read as the row's default).
 pub fn offer(id: &'static str, v: i32, on: bool) {
@@ -26,6 +28,20 @@ pub fn offer(id: &'static str, v: i32, on: bool) {
 		w.push((id, v));
 	}
 	ANY_WITHDRAWN.store(!w.is_empty(), Ordering::Relaxed);
+}
+
+/// Row `id`'s note reads `note` from now on (None: its static note again; fgen choice.rs: "Not supported on this graphics card").
+pub fn set_note(id: &'static str, note: Option<&'static super::T5>) {
+	let mut n = NOTES.lock().unwrap_or_else(|e| e.into_inner());
+	n.retain(|e| e.0 != id);
+	if let Some(t) = note {
+		n.push((id, t));
+	}
+}
+
+/// The run-time note of row `id` (None: the row's static note).
+pub fn note(id: &str) -> Option<&'static super::T5> {
+	NOTES.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|e| e.0 == id).map(|e| e.1)
 }
 
 /// Whether value `v` of row `id` is offered (every value is, until `offer` withdraws it).
@@ -66,6 +82,17 @@ pub fn watch(id: &'static str) {
 /// Whether the menu asked for a text of watched row `id` since the last call (cleared by this call).
 pub fn seen(id: &str) -> bool {
 	WATCHED.lock().unwrap_or_else(|e| e.into_inner()).iter_mut().find(|w| w.0 == id).is_some_and(|w| std::mem::take(&mut w.1))
+}
+
+/// Tests: whether row `id` is watched, and dropping the watch (a test that called `watch` puts things back as they were).
+#[cfg(test)]
+pub(crate) fn watching(id: &str) -> bool {
+	WATCHED.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|e| e.0 == id)
+}
+
+#[cfg(test)]
+pub(crate) fn unwatch(id: &str) {
+	WATCHED.lock().unwrap_or_else(|e| e.into_inner()).retain(|e| e.0 != id);
 }
 
 #[cfg(test)]

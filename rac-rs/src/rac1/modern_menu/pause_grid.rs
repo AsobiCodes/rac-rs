@@ -333,7 +333,7 @@ pub(super) fn draw_cell(out: &mut Vec<Prim>, f: &Facts, page: Page, p: &Place, c
 }
 
 /// The Cross hint line of the page (the game's "Equip" etc.): its plain text.
-fn cross_hint(f: &Facts) -> Option<String> {
+pub(super) fn cross_hint(f: &Facts) -> Option<String> {
 	let t = f.view.items.iter().find_map(|i| match &i.body {
 		Body::Hint { button: Btn::Cross, text } => Some(text.plain().trim().to_string()),
 		_ => None,
@@ -343,7 +343,7 @@ fn cross_hint(f: &Facts) -> Option<String> {
 
 /// The accent button of the page: the lead (the Cross glyph in the player's glyph set with a pad, the Enter keycap with the keyboard and
 /// mouse) then the label, centred together in `BUTTON`; the same look as the shop's buy button.
-fn draw_button(out: &mut Vec<Prim>, f: &Facts, m: &dyn TextMeasure, label: &str) {
+pub(super) fn draw_button(out: &mut Vec<Prim>, f: &Facts, m: &dyn TextMeasure, label: &str) {
 	let keyboard = f.device == Device::Keyboard;
 	let lw = if keyboard { (run_width(m, FontRole::SemiBold, 13.0, keycaps::name(Cap::Enter), 0.0) + 14.0).max(24.0) } else { 24.0 };
 	let tw = run_width(m, FontRole::Medium, 17.0, label, 0.0);

@@ -114,6 +114,7 @@ pub fn post_field(m: &ee_oracle::Machine) {
 
 fn drive_now(m: &ee_oracle::Machine) -> Drive {
 	let (lr, ud) = (if m.rd8(OPT_LR) == 0 { -1.0 } else { 1.0 }, if m.rd8(OPT_UD) == 0 { -1.0 } else { 1.0 });
+	let (lr, ud) = crate::retail::pcmouseinv::signs(lr, ud);
 	let k = MOUSE * sens() * crate::retail::pcext::mousespeed_scale();
 	if let Some((up, down, gated)) = fp_look::pitch_room(m) {
 		return Drive { on: true, len: 0.0, k: [-k * lr, if gated { 0.0 } else { -k * ud }], room: [up, down] };

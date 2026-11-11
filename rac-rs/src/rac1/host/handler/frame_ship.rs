@@ -47,7 +47,7 @@ fn ship_scene(r: &crate::retail::Retail, text: &crate::frontend::Text, lang: usi
 	let gate = ship::Gate { modern: true, ui_open: ui::is_open(), refused: ui_gpu::refused(), page: Some(m.id) };
 	let stage = ship::stage_of(m.id).filter(|_| ship::wanted(&gate));
 	let strings = Strings(text);
-	let style = crate::modern_menu::btn_text::Style { device: ship_host::device(), glyphs: crate::modern_menu::look::glyph_set() };
+	let style = crate::modern_menu::btn_text::Style { device: ship_host::device(), glyphs: crate::modern_menu::look::glyph_set(), menu: true };
 	let t = |id: u32| crate::modern_menu::btn_text::text(&strings, id, style); // buttons kept as chips (`btn_text`)
 	let v = view(m, &strings);
 	let fresh = match (stage, v.as_ref()) {

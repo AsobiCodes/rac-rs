@@ -125,7 +125,7 @@ impl DryTiles {
 		let uniform = wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None };
 		let c0 = layout("water dry tiles scene", &[
 			entry(0, uniform, c),
-			entry(1, tex(wgpu::TextureSampleType::Depth, true), c),
+			entry(1, tex(wgpu::TextureSampleType::Depth, crate::viewer::scene_msaa::msaa() > 1), c),
 			entry(10, tex(wgpu::TextureSampleType::Float { filterable: false }, false), c),
 		]);
 		let out_l = layout("water dry tiles out", &[entry(1, wgpu::BindingType::StorageTexture { access: wgpu::StorageTextureAccess::WriteOnly, format: wgpu::TextureFormat::R32Uint, view_dimension: wgpu::TextureViewDimension::D2 }, c)]);

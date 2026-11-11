@@ -11,7 +11,7 @@
 //! to the game: the result is pad bits only, exactly like a hand on the pad. Outside menus `retail::pad_from_keys` is
 //! unchanged; a key whose meaning changes when a menu opens or closes and that is held across the switch counts for nothing
 //! until it is released (`Layer`), so the Esc that opened the pause menu does not also go back in it.
-use super::mouse_menu::{Kind, MenuSnap, CIRCLE, CROSS, DOWN, L1, LEFT, R1, RIGHT, TRIANGLE, UP};
+use super::mouse_menu::{Kind, MenuSnap, CIRCLE, CROSS, L1, R1, TRIANGLE};
 use std::sync::atomic::{AtomicU64, Ordering};
 use winit::keyboard::KeyCode as K;
 
@@ -22,6 +22,8 @@ pub const SQUARE: u16 = 0x80;
 /// Page ids (+0x3c of the page struct) of the in-level page menu (decomp/notes/ingame_pause_menu.md) [C].
 pub const ROOT: u32 = 2;
 pub const QUIT_GAME: u32 = 0xd;
+/// Set in the `Screen::id` of a title front-end page.
+pub const FRONT_ID: u32 = 0x80;
 pub const MAP: u32 = 0xb;
 #[cfg(test)]
 pub const QUICK_SELECT: u32 = 5;
@@ -141,7 +143,8 @@ pub const HINTS: [(u16, u16, Role); 10] = [
 /// id 0x1a) shows '\x11 Yes' 0x524f / '\x12 No' 0x524b as the two records of one label item [C, front_mirror.rs P_OVERWRITE],
 /// so there Enter presses Circle (Yes) as on the in-level Overwrite page.
 pub fn screen(m: &MenuSnap) -> Screen {
-	let mut s = Screen { id: m.id, ..DEFAULT };
+	// The title's pages have ids of their own (the pause pages' 3, 5, 0xb ... must not match them: `prompts::legend_limit`).
+	let mut s = Screen { id: if m.front { FRONT_ID | (m.id & 0x3f) } else { m.id }, ..DEFAULT };
 	let hints_only = |i: &&super::mouse_menu::Item| matches!(i.kind, Kind::Hint(_)) || (!i.texts.is_empty() && i.texts.iter().all(|t| HINTS.iter().any(|h| h.0 == *t)));
 	for it in m.items.iter().filter(hints_only) {
 		for &t in &it.texts {
@@ -236,59 +239,21 @@ pub fn front_dialog(yes: u32, no: u32, hint: u32) -> Option<Screen> {
 
 // ---- keys -> pad -----------------------------------------------------------------------------------------------------
 
-/// The keys of the modern scheme (they do not reach `pad_from_keys` in a menu).
-const MODERN: [K; 19] = [
-	K::Space,
-	K::Enter,
-	K::NumpadEnter,
-	K::Escape,
-	K::Backspace,
-	K::Tab,
-	K::KeyQ,
-	K::KeyE,
-	K::KeyZ,
-	K::KeyX,
-	K::ArrowUp,
-	K::ArrowDown,
-	K::ArrowLeft,
-	K::ArrowRight,
-	K::KeyW,
-	K::KeyA,
-	K::KeyS,
-	K::KeyD,
-	K::Delete,
-];
-
 /// Keys whose pad meaning differs between a menu and play.
 const SWITCH: [K; 8] = [K::Space, K::Enter, K::NumpadEnter, K::Escape, K::Backspace, K::Tab, K::KeyQ, K::KeyE];
 
 /// The pad a keyboard gives on screen `s`: (buttons, sticks [rx, ry, lx, ly]).
 pub fn menu_pad(s: &Screen, held: &dyn Fn(K) -> bool) -> (u16, [u8; 4]) {
-	let (mut b, _) = super::pad_from_keys(|k| !MODERN.contains(&k) && held(k), false, false);
-	let any = |ks: &[K]| ks.iter().any(|&k| held(k));
-	let wasd = !s.sticks;
-	for (arrow, letter, bit) in [(K::ArrowUp, K::KeyW, UP), (K::ArrowDown, K::KeyS, DOWN), (K::ArrowLeft, K::KeyA, LEFT), (K::ArrowRight, K::KeyD, RIGHT)] {
-		if held(arrow) || (wasd && held(letter)) {
-			b |= bit;
-		}
-	}
-	if any(&[K::Enter, K::NumpadEnter, K::Space]) {
-		b |= s.confirm;
-	}
-	if any(&[K::Escape, K::Backspace]) {
-		b |= s.back;
-	}
-	if held(K::KeyQ) {
-		b |= L1;
-	}
-	if held(K::KeyE) {
-		b |= R1;
-	}
-	if s.alt != 0 && held(K::Tab) {
-		b |= s.alt;
-	}
-	let sticks = if s.sticks { super::pad_from_keys(|k| !matches!(k, K::KeyQ | K::KeyE) && held(k), false, false).1 } else { [0x80; 4] };
-	(b, sticks)
+	menu_pad_in(&rac_engine::input::kbm::binds(), s, held)
+}
+
+/// `menu_pad` under the given bindings (the tests use this one: the live bindings are shared by all tests).
+pub fn menu_pad_in(b: &rac_engine::input::kbm::Binds, s: &Screen, held: &dyn Fn(K) -> bool) -> (u16, [u8; 4]) {
+	use rac_engine::input::kbm::{Ctx, Input, MenuCtx};
+	crate::kbm_actions::install();
+	let ctx = Ctx { contexts: 0, menu: Some(MenuCtx { confirm: s.confirm, back: s.back, alt: s.alt, sticks: s.sticks }) };
+	let o = rac_engine::input::kbm::eval(rac_engine::input::kbm::table(), b, &|i| matches!(i, Input::Key(k) if held(k)), &ctx);
+	(o.buttons, o.sticks)
 }
 
 /// Dev log (`RAC_MENU_LOG=1`, off unless set): a line whenever the page, its state word or the pad bits of the keyboard change
@@ -347,6 +312,7 @@ impl Layer {
 #[cfg(test)]
 mod tests {
 	use super::super::mouse_menu::Item;
+	use super::super::mouse_menu::{DOWN, LEFT, RIGHT, UP};
 	use super::*;
 
 	fn page(id: u32, hints: &[(u16, u16)]) -> MenuSnap {

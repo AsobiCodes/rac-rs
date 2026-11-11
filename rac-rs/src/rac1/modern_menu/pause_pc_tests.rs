@@ -32,18 +32,16 @@ fn the_pc_pages_are_modern_and_belong_to_the_options_tab() {
 #[test]
 fn controls_rows_show_the_bindings_and_the_game_cursor() {
 	let b = built(Page::PcControls, controls(), 1).unwrap();
-	let Panel::Rows { caption, rows } = &b.screen.panel else { panic!("rows panel") };
-	assert_eq!(caption, "Controls");
-	assert_eq!(rows.len(), 4);
-	assert_eq!((rows[1].label.as_str(), rows[1].value.as_str()), ("Cross", "Space"));
-	assert!(rows[0].value.contains("Keyboard buttons 1/2") && rows[0].value.contains('\u{2039}'), "the stepper row has arrows");
-	assert_eq!(rows.iter().position(|r| r.selected), Some(1));
-	assert!(!b.screen.footer.is_empty(), "the how-to line is on the Controls page");
+	assert!(matches!(b.screen.panel, Panel::None), "the Controls page is the keys table, not a rows panel");
+	let k = b.keys.as_ref().expect("the keys table");
+	assert!(k.rows.iter().any(|r| matches!(r, super::pause_keys::Row::Action { .. })));
+	assert!(b.items.is_empty() && b.screen.footer.is_empty());
 }
 
 #[test]
 fn a_row_without_a_value_cannot_be_chosen() {
-	let b = built(Page::PcControls, controls(), 0).unwrap();
+	let pc = PcPage { kind: PcKind::Mods, ..controls() };
+	let b = built(Page::PcMods, pc, 0).unwrap();
 	assert_eq!(b.items.len(), 4);
 	assert!(b.items[..3].iter().all(|t| t.is_some()), "stepper and bindings are chosen by (item, row)");
 	assert_eq!(b.items[2], Some((super::pause_tests::ADDR, 2)));
@@ -67,14 +65,6 @@ fn a_page_whose_rows_do_not_match_the_game_list_stays_classic() {
 	let view = values_of(Page::PcMods, 4, 0);
 	assert!(build(&facts(&view, &extra, &text_of)).is_none(), "the rows are the Controls page's");
 	assert!(build(&facts(&view, &Extra::default(), &text_of)).is_none(), "no rows read at all");
-}
-
-#[test]
-fn the_how_to_line_is_in_all_five_languages() {
-	let view = values_of(Page::PcControls, 4, 0);
-	let extra = Extra { pc: Some(controls()), ..Default::default() };
-	let lines: Vec<String> = (0..5).map(|l| super::pause_pc::footer(&Facts { lang: l, ..facts(&view, &extra, &text_of) })).collect();
-	assert!(lines.iter().all(|s| !s.is_empty()) && (1..5).all(|i| lines[i] != lines[0]));
 }
 
 #[test]

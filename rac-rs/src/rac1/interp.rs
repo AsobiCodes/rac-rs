@@ -558,6 +558,12 @@ fn blend_fx(a: &RetailFx, b: &RetailFx, t: f32, quads: &[Vec<(u32, u32)>; 2]) ->
 			s.pos = lerp3(p.pos, s.pos, t);
 		}
 	}
+	// [PC] Fire light: the Thruster-Pack's light (retail/strafe/pack_light.rs), by id.
+	for s in o.flame_lights.iter_mut() {
+		if let Some(p) = a.flame_lights.iter().find(|p| p.id == s.id).filter(|p| near(p.pos, s.pos)) {
+			s.pos = lerp3(p.pos, s.pos, t);
+		}
+	}
 	// Queue-A / queue-B quads (Taunter rings, tube fade, the effects layer's quads, ...): k-th quad of a texture and blend.
 	lerp_quads(&a.qa, &mut o.qa, t, &quads[0]);
 	lerp_quads(&a.qb, &mut o.qb, t, &quads[1]);
@@ -684,6 +690,18 @@ mod tests {
 		// t = 1 is the newest field exactly.
 		let o = blend_fx(&a, &b, 1.0, &Default::default());
 		assert_eq!(o.sprites[0].pos, b.sprites[0].pos);
+	}
+
+	/// Lane rfire worker 9 (review L4): the carried flame lights blend by id: the same id lerped, a new id at its latest place, a
+	/// removed id gone (firefx_carried.rs fades it out where it last stood), a jump (teleport) not blended.
+	#[test]
+	fn flame_lights_blend_by_id() {
+		let l = |id: u32, x: f32| crate::fxpool::FlameLight { id, pos: [x, 0.0, 0.0], area: 0.05 };
+		let a = RetailFx { flame_lights: vec![l(1, 0.0), l(2, 5.0), l(4, 0.0)], ..Default::default() };
+		let b = RetailFx { flame_lights: vec![l(3, 9.0), l(1, 2.0), l(4, 500.0)], ..Default::default() };
+		let o = blend_fx(&a, &b, 0.25, &Default::default());
+		assert_eq!(o.flame_lights, vec![l(3, 9.0), l(1, 0.5), l(4, 500.0)]);
+		assert_eq!(blend_fx(&a, &b, 1.0, &Default::default()).flame_lights, b.flame_lights, "t = 1 is the newest field");
 	}
 
 	#[test]

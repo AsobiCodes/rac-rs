@@ -72,6 +72,10 @@ impl Cascade {
 	pub(super) fn reaches(&self, b: &Aabb) -> bool {
 		let c = [0, 1, 2].map(|k| 0.5 * (b.lo[k] + b.hi[k]));
 		let h = [0, 1, 2].map(|k| 0.5 * (b.hi[k] - b.lo[k]));
+		// [PC] lane dlit: a point light's cube face (omni.rs) takes the box's sphere.
+		if self.eye.is_some() {
+			return self.touches(c, (h[0] * h[0] + h[1] * h[1] + h[2] * h[2]).sqrt() * 1.001 + 0.01);
+		}
 		let ext = |a: [f32; 3]| (a[0].abs() * h[0] + a[1].abs() * h[1] + a[2].abs() * h[2]) * 1.001 + 0.01;
 		let dot = |a: [f32; 3]| a[0] * c[0] + a[1] * c[1] + a[2] * c[2];
 		let [right, up, d] = self.basis;

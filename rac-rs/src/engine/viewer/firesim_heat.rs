@@ -83,7 +83,7 @@ impl HeatRes {
 		let buf = |label: &str, size: u64| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
 		let (u0, soft, hu) = (buf("fire heat view", U0_SIZE), buf("fire heat soft", SOFT_SIZE), buf("fire heat comp", std::mem::size_of::<HeatU>() as u64));
 		let u0_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("fire heat view"), entries: &[entry(0, vf, UNIFORM)] });
-		let depth_ms = wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Depth, view_dimension: wgpu::TextureViewDimension::D2, multisampled: true };
+		let depth_ms = wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Depth, view_dimension: wgpu::TextureViewDimension::D2, multisampled: crate::viewer::scene_msaa::msaa() > 1 };
 		let soft_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("fire heat soft"), entries: &[entry(0, vf, UNIFORM), entry(1, fs, depth_ms)] });
 		let tex = wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false };
 		let comp_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("fire heat comp"), entries: &[entry(0, fs, UNIFORM), entry(1, fs, tex), entry(2, fs, wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering))] });
@@ -121,7 +121,7 @@ impl HeatRes {
 			}),
 			primitive: Default::default(),
 			depth_stencil: Some(wgpu::DepthStencilState { format: env.depth_format, depth_write_enabled: Some(false), depth_compare: Some(wgpu::CompareFunction::Always), stencil: Default::default(), bias: Default::default() }),
-			multisample: wgpu::MultisampleState { count: MSAA, ..Default::default() },
+			multisample: wgpu::MultisampleState { count: msaa(), ..Default::default() },
 			multiview_mask: None,
 			cache: None,
 		});

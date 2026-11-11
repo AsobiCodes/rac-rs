@@ -148,3 +148,16 @@ fn set_saves_once_and_round_trips() {
 	assert_eq!(PcOptions::parse(&opts.to_text()).extra_get(KEY), Some("auto"));
 	init(&PcOptions::new());
 }
+
+#[test]
+fn the_resolution_picture() {
+	// No chosen size: exactly `fit`.
+	assert_eq!(picture((2560, 1440), Ratio::Auto, None), ((2560, 1440), Rect::full((2560, 1440))));
+	assert_eq!(picture((2560, 1440), Ratio::R4x3, None), ((1920, 1440), r(320, 0, 1920, 1440)));
+	// 1920 x 1080 on a 2560 x 1440 screen: drawn at 1920 x 1080, scaled over the whole screen.
+	assert_eq!(picture((2560, 1440), Ratio::Auto, Some((1920, 1080))), ((1920, 1080), Rect::full((2560, 1440))));
+	// 1280 x 1024 (5:4) on 16:9: bars left and right, the picture keeps its shape.
+	assert_eq!(picture((2560, 1440), Ratio::Auto, Some((1280, 1024))), ((1280, 1024), r(380, 0, 1800, 1440)));
+	// With an Aspect ratio too: the shape's box inside the chosen size.
+	assert_eq!(picture((2560, 1440), Ratio::R4x3, Some((1920, 1080))), ((1440, 1080), r(320, 0, 1920, 1440)));
+}

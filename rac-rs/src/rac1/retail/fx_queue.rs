@@ -199,6 +199,10 @@ pub struct RetailFx {
 	pub shots: Vec<rac_engine::shot_rows::ShotPoint>,
 	/// [PC] Fire: the thrown bombs that went off this field (bomb_blast.rs), for the ground fire after explosions; set by `snap`.
 	pub blasts: Vec<crate::fxpool::BlastPoint>,
+	/// [PC] Fire: the player's explosive shots of this field (blast_gate.rs): only explosions born near one leave a ground fire; set by `snap`.
+	pub blast_gate: Vec<crate::fxpool::ShotZone>,
+	/// [PC] Fire light: the Thruster-Pack's light while it fires (retail/strafe/pack_light.rs); set by `snap`.
+	pub flame_lights: Vec<crate::fxpool::FlameLight>,
 }
 
 impl RetailFx {
@@ -213,7 +217,7 @@ impl RetailFx {
 
 	/// The effect pool as the engine's particle pass reads it (engine/fxpool.rs `PoolFx`).
 	pub fn pool_fx(&self) -> crate::fxpool::PoolFx<'_> {
-		crate::fxpool::PoolFx { sprite_slots: &self.sprite_slots, sprite_types: &self.sprite_types, sprite_texs: &self.sprite_texs, ribbons: &self.ribbons, lines: &self.lines, line_slots: &self.line_slots, frames: self.frames, hero: self.hero, movers: &self.movers, shots: &self.shots, blasts: &self.blasts, tick: &[], tick_hero: None }
+		crate::fxpool::PoolFx { sprite_slots: &self.sprite_slots, sprite_types: &self.sprite_types, sprite_texs: &self.sprite_texs, ribbons: &self.ribbons, lines: &self.lines, line_slots: &self.line_slots, frames: self.frames, hero: self.hero, movers: &self.movers, shots: &self.shots, blasts: &self.blasts, blast_gate: Some(&self.blast_gate), flame_lights: &self.flame_lights, tick: &[], tick_hero: None }
 	}
 }
 

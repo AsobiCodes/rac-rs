@@ -1,8 +1,10 @@
-//! The Graphics tab, part 1: Quality, Lighting and shadows, World. Effect rows carry `needs: Lighting >= Enhanced`; Waves and
-//! Underwater look `needs: Water >= Low` (`NEEDS_WATER`; Water needs Lighting, so they dim with either).
+//! The Graphics tab, part 1: Quality, Lighting and shadows, World. Effect rows carry `needs: Lighting >= Enhanced` (hidden while
+//! Lighting is Classic). No Waves or Underwater look row since 2026-11-08 (user: "too many options", "Water: one row"): the Water
+//! row sets waves too (on at Medium and High, as the presets did; retail/pcext/ui_bridge.rs `drain`); Underwater look stays the
+//! options file key `underwater` (GitHub #64; the launcher's row).
 use super::costs;
 use super::text::*;
-use rac_engine::ui::{Cost, NeedsRule, RowKind, UiRow, T5};
+use rac_engine::ui::{Cost, RowKind, UiRow, T5};
 
 const LIGHT_VALUES: &[T5] = &[CLASSIC, ["Enhanced", "Am\u{e9}lior\u{e9}", "Verbessert", "Mejorado", "Migliorato"]];
 const VEG_VALUES: &[T5] = &[OFF, ["Moderate", "Mod\u{e9}r\u{e9}e", "M\u{e4}\u{df}ig", "Moderada", "Moderata"], ["Lush", "Luxuriante", "\u{dc}ppig", "Frondosa", "Rigogliosa"]];
@@ -109,7 +111,7 @@ pub static SHADING: [UiRow; 4] = [
 	),
 ];
 
-pub static WORLD: [UiRow; 8] = [
+pub static WORLD: [UiRow; 6] = [
 	row(
 		"draw",
 		CH,
@@ -163,48 +165,16 @@ pub static WORLD: [UiRow; 8] = [
 		CH,
 		["Water", "Eau", "Wasser", "Agua", "Acqua"],
 		[
-			"Classic is the original water. Low to High use the improved water with reflections.",
-			"Classique est l'eau d'origine. Faible \u{e0} \u{c9}lev\u{e9} utilisent l'eau am\u{e9}lior\u{e9}e avec reflets.",
-			"Klassisch ist das Originalwasser. Niedrig bis Hoch nutzen das verbesserte Wasser mit Spiegelungen.",
-			"Cl\u{e1}sico es el agua original. De Baja a Alta usan el agua mejorada con reflejos.",
-			"Classico \u{e8} l'acqua originale. Da Bassa ad Alta usano l'acqua migliorata con riflessi.",
+			"Classic is the original water. Low to High use the improved water with reflections; Medium and High add moving waves.",
+			"Classique est l'eau d'origine. Faible \u{e0} \u{c9}lev\u{e9} utilisent l'eau am\u{e9}lior\u{e9}e avec reflets ; Moyen et \u{c9}lev\u{e9} ajoutent des vagues.",
+			"Klassisch ist das Originalwasser. Niedrig bis Hoch nutzen das verbesserte Wasser mit Spiegelungen; Mittel und Hoch mit Wellen.",
+			"Cl\u{e1}sico es el agua original. De Baja a Alta usan el agua mejorada con reflejos; Media y Alta a\u{f1}aden olas.",
+			"Classico \u{e8} l'acqua originale. Da Bassa ad Alta usano l'acqua migliorata con riflessi; Media e Alta aggiungono onde.",
 		],
 		QC,
 		3,
 		costs::WATER,
 		LIGHT,
-	),
-	row(
-		"waves",
-		TOG,
-		["Waves", "Vagues", "Wellen", "Olas", "Onde"],
-		[
-			"Moving waves on the water surface.",
-			"Vagues mobiles \u{e0} la surface de l'eau.",
-			"Bewegte Wellen auf der Wasseroberfl\u{e4}che.",
-			"Olas en movimiento sobre la superficie del agua.",
-			"Onde in movimento sulla superficie dell'acqua.",
-		],
-		NO,
-		1,
-		costs::WAVES,
-		WATER,
-	),
-	row(
-		"underwater",
-		TOG,
-		["Underwater look", "Rendu sous l'eau", "Unterwasser-Optik", "Aspecto submarino", "Aspetto subacqueo"],
-		[
-			"Fog while the camera is under water, caustics from Water Medium, light shafts at High. Off is the original there; the surface stays improved.",
-			"Brouillard quand la cam\u{e9}ra est sous l'eau, caustiques d\u{e8}s l'eau en Moyen, rayons de lumi\u{e8}re en \u{c9}lev\u{e9}. Avec Non, c'est l'original ; la surface reste am\u{e9}lior\u{e9}e.",
-			"Nebel unter Wasser, Lichtmuster ab Wasser Mittel, Lichtstrahlen bei Hoch. Aus ist das Original, die Oberfl\u{e4}che bleibt verbessert.",
-			"Niebla con la c\u{e1}mara bajo el agua, c\u{e1}usticas desde el agua en Media y haces de luz en Alta. Con No se mantiene el original; la superficie sigue mejorada.",
-			"Nebbia con la telecamera sott'acqua, caustiche dall'acqua Media e fasci di luce con Alta. Con No resta l'originale; la superficie rimane migliorata.",
-		],
-		NO,
-		1,
-		costs::UNDERWATER,
-		WATER,
 	),
 	row(
 		"fog",
@@ -239,19 +209,3 @@ pub static WORLD: [UiRow; 8] = [
 		LIGHT,
 	),
 ];
-
-/// Waves and Underwater look are dimmed while Water is Classic (they change only the improved water). No banner over the tab: only
-/// the row's box says why.
-pub const NEEDS_WATER: NeedsRule = NeedsRule {
-	row: "water",
-	set_to: 3,
-	banner: t(""),
-	detail: [
-		"Applies to the improved water. Water is {} now.",
-		"S'applique \u{e0} l'eau am\u{e9}lior\u{e9}e. L'eau est sur {} pour l'instant.",
-		"Gilt f\u{fc}r das verbesserte Wasser. Das Wasser steht auf {}.",
-		"Se aplica al agua mejorada. Ahora est\u{e1} en {}.",
-		"Vale per l'acqua migliorata. Ora \u{e8} su {}.",
-	],
-	button: ["Switch Water to High", "Passer l'eau en \u{c9}lev\u{e9}", "Wasser auf Hoch stellen", "Poner el agua en Alta", "Imposta l'acqua su Alta"],
-};

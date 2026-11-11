@@ -48,6 +48,9 @@ impl Gpu {
 		}
 		self.metalenv.write_uniforms(&mut u, self.level);
 		self.metalenv.plan_planar(&mut u, &scene.metal_floors, cam.pos, scene.warp_shown); // [PC] Metal: the planar floor reflection (metalplanar.rs)
+		if !crate::splitview::classic() {
+			self.waterfx.mirror_cull.set_metal(self.metalenv.planar_height()); // [PC] lane pwat: next frame's tfrag cull (gpu/mirror_cull.rs), not the Classic half's
+		}
 		[u.keep_tail[2], u.keep_tail[3]] = super::super::moby_fire::words(!super::super::moby_fire::classes(self.level).is_empty(), self.firefx.shown());
 		u.sun_q[3] = crate::texfilter::enabled(post_on) as u8 as f32;
 		// [PC] Volumetric fog (volfog/frame.rs `Plan`): decided here, from the inputs the pass is drawn with, so retail's own fog is faded
@@ -153,11 +156,12 @@ impl Gpu {
 		};
 		let view = match &frame {
 			// [PC] Render scale (rscale.rs): below / above 100 % the frame is drawn into the offscreen picture and copied to `frame` in frame_finish.
-			Some(f) => self.rscale_view().or_else(|| self.abox_view()).unwrap_or_else(|| f.texture.create_view(&Default::default())), // [PC] or the Aspect ratio box picture (aspect_pass.rs)
+			Some(f) => self.rscale_view().or_else(|| self.abox_view()).unwrap_or_else(|| f.texture().create_view(&Default::default())), // [PC] or the Aspect ratio box picture (aspect_pass.rs)
 			None => super::split::view()?,
 		};
 		let (frame, view) = self.frame_sizes_check(frame, view)?; // [PC] frame_sizes.rs: targets of another plan = frame skipped, planned again
 		let scene = self.scene.as_ref()?;
+		let sp_tgt = super::profile::span("e_tgt");
 		let mut enc = self.device.create_command_encoder(&Default::default());
 		if let Some(g) = &scene.tie_gpu {
 			g.encode(&mut enc);
@@ -176,13 +180,16 @@ impl Gpu {
 				self.ubind = level_bind(&self.device, &self.volfog.soft, &self.sun, &self.ubuf, &self.metalenv);
 			}
 		}
+		drop(sp_tgt);
 		if let Some(f) = &sun {
 			let skin = Some((&self.props_gpu.bind, scene.props_sj.as_ref()));
 			self.sun.encode(&self.device, &self.queue, &mut enc, scene, f, skin);
 			cuts.cut(&self.device, &mut enc, "f_sun");
 		}
+		let sp_tgt = super::profile::span("e_tgt");
 		self.draw_item_panel(&mut enc, cam, scene);
 		cuts.cut(&self.device, &mut enc, "f_pre");
+		drop(sp_tgt);
 		let rs = !crate::splitview::classic() && !self.rscale.scaled() && !self.upscale.slot_on() && !self.abox_on() && self.reshade_begin(); // ReShade only at render scale 100 %, never with RAC_UPSCALE or an Aspect ratio box
 		Some((DrawTarget { frame, view, enc, cuts, gi_level, rs }, warp_hud))
 	}
@@ -190,12 +197,15 @@ impl Gpu {
 	/// The next window image. The surface holds one acquired image at a time: the previous frame's present (on the present thread)
 	/// must have returned before the next acquire, or wgpu panics "Surface image is already acquired" (seen 2026-10-19 on
 	/// fg1/1_0016, dev s49). None = skip the frame (surface outdated / lost: reconfigured).
-	fn acquire_frame(&self) -> Option<wgpu::SurfaceTexture> {
+	fn acquire_frame(&mut self) -> Option<crate::viewer::fgen::present::FrameImage> {
+		use crate::viewer::fgen::present::Acquired;
 		self.presenter.flush();
+		self.screen.clear_pending(); // [PC] fgen/present.rs: a dropped frame's generation inputs never reach this frame
 		let acquire = crate::runlog::waiting("the GPU driver's next window image (vsync / swapchain)");
-		let frame = match self.surface.get_current_texture() {
-			wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
-			wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+		self.screen.sl_begin(); // [S3] fgen/sl.rs: DLSS frame generation's frame token, Reflex sleep and markers
+		let frame = match self.screen.acquire() { // [PC] fgen/present.rs: wgpu's surface texture or our own swapchain's image
+			Acquired::Frame(f) => f,
+			Acquired::Outdated => {
 				self.presenter.flush();
 				self.reconfigure_surface();
 				self.presenter.settle_listed(true); // [PC] ntex: no hand-over for this frame: its writes are applied, not kept
@@ -212,6 +222,7 @@ impl Gpu {
 	}
 
 	pub(super) fn frame_buffers(&mut self, warp_hud: Vec<Quad>) -> Option<DrawBufs> {
+		let _sp = super::profile::span("e_bufs");
 		self.ach_icons_ensure();
 		let scene = self.scene.as_ref()?;
 		// Overlay quads to clip space, one draw per run of the same texture.
@@ -270,10 +281,8 @@ impl Gpu {
 		drop(sp_args);
 		let sharp_pipes = hd.iter().any(|(d, _)| d.inst != 0).then(|| super::hudsharp::pipelines(&self.device, &self.pipeline, &self.tex_layout, self.config.format, self.depth_format)).flatten();
 		let hud_buffers = (!hv.is_empty()).then(|| {
-			let vb = buffer(&self.device, "hud vertices", bytemuck::cast_slice(&hv), wgpu::BufferUsages::VERTEX);
-			self.queue.write_buffer(&vb, 0, bytemuck::cast_slice(&hv));
-			let ib = buffer(&self.device, "hud indices", bytemuck::cast_slice(&hi), wgpu::BufferUsages::INDEX);
-			self.queue.write_buffer(&ib, 0, bytemuck::cast_slice(&hi));
+			let vb = crate::viewer::framebuf::upload(&self.device, &self.queue, "hud vertices", bytemuck::cast_slice(&hv), wgpu::BufferUsages::VERTEX);
+			let ib = crate::viewer::framebuf::upload(&self.device, &self.queue, "hud indices", bytemuck::cast_slice(&hi), wgpu::BufferUsages::INDEX);
 			(vb, ib)
 		});
 		Some(DrawBufs { sw, sh, hd, split_group, multi, sharp_pipes, hud_buffers })

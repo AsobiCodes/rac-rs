@@ -44,11 +44,37 @@ fn hud_rects_scale_round_and_stay_inside() {
 	assert_eq!(Prep::default().hud_rect(r), r);
 }
 
+/// Review REVIEW3 F1: the idle check (`upscaler_needs_idle`) and `slot_begin` both take the DLSS key from `dlss_key`, which uses
+/// the preset latched once per frame (`dlss_row`), never the live row: a menu change mid-frame cannot make the two keys differ.
+#[test]
+fn the_dlss_key_uses_the_latched_preset() {
+	use super::super::{dlss_frame::key_of, dlss_preset};
+	let sizes = ((1280, 720), (1920, 1080));
+	let p = Prep { dlss_row: 2, ..Default::default() }; // L, latched in upscale_begin
+	let first = p.dlss_key(sizes, 1.5);
+	assert_eq!(first, key_of(sizes, 1.5, 2));
+	let before = dlss_preset::get();
+	let mut o = crate::pcopts::PcOptions::new();
+	dlss_preset::set(&mut o, 3); // the worker stores K between the idle check and slot_begin
+	assert_eq!(p.dlss_key(sizes, 1.5), first, "same frame, same key");
+	assert_ne!(key_of(sizes, 1.5, 3), first, "K is another feature: only the next frame's latch sees it");
+	dlss_preset::set(&mut o, before as i32);
+}
+
 #[test]
 fn slot_constants() {
 	assert_eq!(slot_gpu::uniforms((853, 480), (1280, 720)).size, [853.0, 480.0, 1280.0, 720.0]);
 	assert_eq!(slot_gpu::uniforms((0, 0), (0, 0)).size, [1.0; 4], "never a zero size in the shader");
 	assert_eq!(std::mem::size_of::<slot_gpu::SlotUniforms>(), 16);
+}
+
+/// [PC] Brightness / Contrast: the graded copy validates (the plain `U` gains `k`, the curve and `fs_copy_grade` appended).
+#[test]
+fn the_graded_copy_validates() {
+	let g = slot_gpu::graded_shader();
+	assert!(g.contains("k: vec4<f32>,") && g.contains("fn fs_copy_grade(") && g.contains("fn grade_curve("));
+	let m = naga::front::wgsl::parse_str(&g).expect("wgsl parse");
+	naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).expect("wgsl validate");
 }
 
 fn module() -> (naga::Module, naga::valid::ModuleInfo) {

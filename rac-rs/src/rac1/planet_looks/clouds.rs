@@ -4,6 +4,9 @@
 
 use crate::looks::CloudLook as Look;
 
+/// Veldin 2 (level 18): true = candidate A, the retail painted sky with no volumetric clouds; false = candidate B (the retuned deck).
+pub(super) const VELDIN2_PAINTED: bool = true;
+
 /// The cloud look of level `level` (the loaded level index: veldin novalis aridia kerwan eudora rilgar nebula_g34 umbris batalia
 /// gaspar orxon pokitaru hoven gemlik (in space) oltanis quartu kalebo fleet veldin2), chosen after each planet's painted sky; None
 /// for levels without a sky to speak of (space, the dark interiors): those keep the retail sky.
@@ -48,8 +51,12 @@ pub(super) fn look(level: usize) -> Option<Look> {
 		// Veldin at dusk: a broken stratocumulus deck and altocumulus bands, dark blue-grey
 		// bodies with gold fringes from the low sun, few heaps.
 		0 => Some(Look { cu: 0.3, sc: 0.5, ac: 0.15, ci: 0.12, cc: 0.0, tower: 0.15, base: 1900.0, top: 3800.0, density: 3.1, haze: 24000.0, wind: 30.0, heading: 2.2, sun: 2.5, hue: 1.0, dusk: 1.0, ..fair }),
-		// Veldin 2 under its dark red sky: dimmer, many small scattered heaps high up, no deck.
-			18 => Some(Look { cu: 0.3, sc: 0.0, ac: 0.04, ci: 0.06, cc: 0.08, tower: 0.1, base: 2400.0, top: 4300.0, density: 2.0, haze: 24000.0, wind: 30.0, heading: 2.2, sun: 1.4, hue: 1.0, dusk: 1.0, size: 0.8, ..fair }),
+		// Veldin 2 under its dark red sky (user 2026-11-05: the bright pink cotton-ball heaps looked out of place): candidate B, a low,
+		// murky, soft broken deck in the sky's own red-brown over the retail dome, like the painted streaks (dark red-brown on the
+		// orange glow): dim bodies lit only by the sky, feathered edges (no holes), no silver lining or lit rims, darker undersides.
+		// `VELDIN2_PAINTED` = true gives candidate A, the retail painted sky whole (no volumetric clouds on this level).
+		18 if VELDIN2_PAINTED => None,
+		18 => Some(Look { cu: 0.1, sc: 0.5, ac: 0.1, ci: 0.0, cc: 0.0, tower: 0.0, base: 2400.0, top: 4000.0, density: 0.8, haze: 16000.0, wind: 25.0, heading: 2.2, sun: 0.15, hue: 1.0, dusk: 0.8, dusk_amb: 0.8, amb: 0.25, size: 1.3, farcov: 0.05, expo: 0.4, tint: Some([0.9, 0.4, 0.25]), rim: 0.1, lining: 0.0, under: 0.4, feather: 0.9, ..fair }),
 		// Kerwan: hazy, flatter heaps over a thin deck, altocumulus.
 		3 => Some(Look { cu: 0.62, sc: 0.22, ac: 0.12, ci: 0.12, cc: 0.0, tower: 0.3, haze: 24000.0, ..fair }),
 		// Eudora: fuller cumulus, some congestus.
@@ -67,22 +74,22 @@ pub(super) fn look(level: usize) -> Option<Look> {
 		7 => Some(Look { cu: 0.2, sc: 0.48, ac: 0.25, ci: 0.0, cc: 0.0, tower: 0.0, base: 1700.0, top: 3300.0, density: 0.625, haze: 12000.0, wind: 25.0, heading: 1.0, sun: 0.08, hue: 0.6, dusk: 0.8, dusk_amb: 0.3, amb: 0.15, size: 1.4, farcov: 0.1, expo: 0.35, tint: Some([0.85, 0.5, 0.28]), rim: 0.375, lining: 0.0, under: 0.5, feather: 0.6, ..fair }),
 		// Batalia: a heavy dark storm deck under the rain with towering storm clouds (the cumulonimbus form) rising out of it, a
 		// cool blue-grey light, strong dark undersides and softly lit tops (no silver lining or rims); the painted storm band stays.
-		8 => Some(Look { cu: 0.5, sc: 0.55, ac: 0.0, ci: 0.0, cc: 0.0, tower: 0.7, base: 900.0, top: 3600.0, mid: 6400.0, density: 3.0, haze: 13000.0, wind: 70.0, heading: 1.1, sun: 0.85, hue: 0.0, dusk: 0.3, dusk_amb: 5.0, amb: 0.45, size: 1.2, farcov: 0.15, expo: 0.6, tint: Some([0.62, 0.72, 0.9]), form: 1.0, rim: 0.0, lining: 0.0, under: 0.3, feather: 0.35, ..fair }),
+		8 => Some(Look { cu: 0.5, sc: 0.85, ac: 0.0, ci: 0.0, cc: 0.0, tower: 0.3, base: 900.0, top: 3600.0, mid: 6400.0, density: 3.0, haze: 13000.0, wind: 70.0, heading: 1.1, sun: 0.4, hue: 0.0, dusk: 0.3, dusk_amb: 5.0, amb: 0.3, size: 1.2, farcov: 0.15, expo: 0.35, tint: Some([0.62, 0.72, 0.9]), form: 1.0, rim: 0.0, lining: 0.0, under: 0.3, feather: 0.6, ..fair }),
 		// Gaspar at sunset: the retail sky stays whole (the painted streaks, the planet, the stars); dark-brown cloud banks (small to
 		// big heaps, a stratocumulus deck and altocumulus rows) over it, their bodies dark and only the fringes lit by the low orange sun.
-		9 => Some(Look { cu: 0.37, sc: 0.45, ac: 0.3, ci: 0.0, cc: 0.0, tower: 0.2, base: 1800.0, top: 3600.0, density: 3.75, haze: 20000.0, wind: 30.0, sun: 1.9, hue: 0.65, dusk: 1.0, dusk_amb: 0.15, amb: 0.1, size: 0.86, farcov: 0.0, expo: 0.8, rim: 3.0, under: 0.5, ..fair }),
+		9 => Some(Look { cu: 0.02, sc: 0.45, ac: 0.15, ci: 0.0, cc: 0.0, tower: 0.0, base: 1800.0, top: 3600.0, density: 1.0, haze: 20000.0, wind: 30.0, sun: 0.7, hue: 1.0, dusk: 1.0, dusk_amb: 0.15, amb: 0.3, size: 0.86, farcov: 0.0, expo: 0.7, rim: 0.2, under: 0.5, feather: 0.9, ..fair }),
 		// Orxon: the retail painted toxic sky stays whole (`sky_mask`); a broken, soft, low murky overcast over it in the sky's
 		// green, darker undersides, no lit rims.
 		10 => Some(Look { cu: 0.32, sc: 0.32, ac: 0.0, ci: 0.0, cc: 0.0, tower: 0.2, base: 850.0, top: 3000.0, density: 0.9, haze: 11000.0, wind: 50.0, heading: 2.6, sun: 0.2, hue: 0.3, dusk: 0.4, dusk_amb: 2.0, amb: 0.3, size: 1.2, farcov: 0.1, expo: 0.5, tint: Some([0.75, 0.85, 0.55]), rim: 0.0, lining: 0.3, under: 0.4, feather: 0.8, ..fair }),
-		// Hoven and Oltanis: stormy; cumulonimbus towers (each leaning its own way, of its own height and width, cauliflower
+		// Hoven and Oltanis: stormy, dark as the retail storm sky (2026-11-06, vs PCSX2 14_0692): cumulonimbus towers (each leaning its own way, of its own height and width, cauliflower
 		// crowns) over a dark deck, dark bodies with lit fringes.
-		12 | 14 => Some(Look { cu: 0.62, sc: 0.5, ac: 0.15, ci: 0.08, cc: 0.0, tower: 1.0, base: 1600.0, top: 6400.0, mid: 7400.0, high: 10500.0, density: 2.5, haze: 20000.0, sun: 0.7, hue: 0.0, dusk: 0.6, dusk_amb: 8.0, form: 1.0, under: 0.6, feather: 0.08, ..fair }),
+		12 | 14 => Some(Look { cu: 0.62, sc: 0.85, ac: 0.15, ci: 0.08, cc: 0.0, tower: 0.6, base: 1600.0, top: 6400.0, mid: 7400.0, high: 10500.0, density: 2.5, haze: 20000.0, sun: 0.25, hue: 0.0, dusk: 0.6, dusk_amb: 8.0, amb: 0.3, expo: 0.3, form: 1.0, under: 0.6, feather: 0.6, ..fair }),
 		// Kalebo III: bright heaps building into big towers, cirrocumulus patches; thinner, lighter bodies against the bright haze.
 		16 => Some(Look { cu: 0.75, sc: 0.1, ac: 0.08, ci: 0.15, cc: 0.15, tower: 0.8, density: 0.85, sun: 2.6, amb: 1.2, ..fair }),
 		// Novalis: after the planet's 2016 look, a near-continuous broken deck of big billowy banks with blue gaps high up, smaller
 		// flatter clouds and haze low over the mountains; soft grey-white bodies with large blue-grey shaded parts under a paler,
 		// hazier sky.
-		1 => Some(Look { cu: 0.75, tower: 0.2, farcov: 0.3, sun: 1.4, amb: 0.8, expo: 0.9, soft: 0.05, pale: 1.0, ..fair }),
+		1 => Some(Look { cu: 0.75, tower: 0.2, farcov: 0.3, sun: 1.4, amb: 0.8, expo: 0.9, soft: 0.05, pale: 0.2, ..fair }),
 		_ => Some(fair),
 	}
 }
@@ -134,7 +141,8 @@ mod tests {
 		for l in [2, 6, 13, 15, 17] {
 			assert!(look(l).is_none(), "level {l}");
 		}
-		for l in [0, 1, 3, 4, 5, 7, 8, 9, 10, 11, 12, 14, 16, 18] {
+		assert_eq!(look(18).is_none(), VELDIN2_PAINTED);
+		for l in [0, 1, 3, 4, 5, 7, 8, 9, 10, 11, 12, 14, 16] {
 			let k = look(l).unwrap_or_else(|| panic!("level {l}"));
 			assert!(k.top > k.base && k.base > 0.0 && [k.cu, k.sc, k.ac, k.ci, k.cc, k.tower].iter().all(|c| (0.0..=1.0).contains(c)) && k.mid > k.top && k.high > k.mid, "level {l}");
 		}

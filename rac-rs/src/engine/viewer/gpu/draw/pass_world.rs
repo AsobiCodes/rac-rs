@@ -90,7 +90,7 @@ impl Gpu {
 					if let Some((bl, tex_array)) = array {
 						pass.set_bind_group(1, tex_array, &[]);
 						if let Some((ties, _, _)) = &multi {
-							bl.multi_draw_set(&mut pass, ties, &bl.tie[tp]);
+							crate::viewer::tiez::draw_ties(pass, bl, ties, tp, self.msaa.texture().size()); // [PC] lane tpre (tiez.rs): + the exact depth pre-pass of the Z-writing tie batch, where it pays
 							continue;
 						}
 						for d in &batch.draws {

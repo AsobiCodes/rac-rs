@@ -13,6 +13,8 @@
 //! glyphtex.rs: the title and front-end menus, front dialogs, omni mod text). A cell shows the picture of the physical button its
 //! function is played on NOW (`binds::pad_map`), so a rebound function is shown as the button it was moved to; with retail's
 //! pictures too (decision for the user: with no rebinds and PlayStation nothing is touched at all).
+//! SINCE v0.5.1 (controller remap as actions) the cells show the STANDARD layout only (menus keep it); gameplay text under a remap
+//! gets other glyph codes (`prompt_pad.rs`).
 //!
 //! Ported ideas (DeSynkro, github DeSynkro/rac-rs-linux, commits 7cd8b7c9 / b1dfb689 and the xglyphs.rs / gscap font.rs they build
 //! on; their code was only read, ours is re-derived, their pictures are not used): the ten cells (retail glyph code, sheet place),
@@ -27,7 +29,7 @@ use std::sync::{Arc, Mutex};
 
 /// The Button glyphs row's byte (0 PlayStation, 1 Letters, 2 Letters (Switch layout)); pcctl's block.
 pub(super) const GLYPH_B: u32 = CBASE + 0x1d;
-/// Text ids: the label and the three values (0x7fab..0x7faf are free in the Debug pool range `pcctl::ID_DBG0..ID_DBG_END`).
+/// Text ids: the label and the three values (0x7fab..0x7fae, inside the Debug pool range `pcctl::ID_DBG0..ID_DBG_END`; 0x7faf is Metal).
 pub(super) const ID_GLYPHS: u32 = 0x7fab;
 pub(super) const ID_PS: u32 = 0x7fac;
 pub(super) const ID_LETTERS: u32 = 0x7fad;
@@ -49,7 +51,9 @@ pub fn style() -> u8 {
 
 /// What the cells should show now: the style and the controller bindings.
 pub fn wanted() -> (u8, [u8; NP]) {
-	(style(), if style() == 0 && !super::pcext::enabled() { DEFAULT_PAD } else { super::binds::pad_map() })
+	// The cells always show the STANDARD layout: menus read the controller that way. Gameplay text under a remap changes its glyph codes
+	// instead (`prompt_pad.rs`).
+	(style(), DEFAULT_PAD)
 }
 
 /// Whether `(style, map)` is retail's own sheet (nothing to draw).
@@ -82,6 +86,11 @@ pub const CELLS: [(u8, usize, usize); 10] = [
 fn function_of(k: usize) -> Option<usize> {
 	use super::binds as b;
 	[b::CROSS, b::SQUARE, b::TRIANGLE, b::CIRCLE, b::L1, b::L2, b::R1, b::R2].get(k).copied()
+}
+
+/// The glyph code of the cell that shows physical button `p` in the standard layout (None: no cell, e.g. Start, Back, the d-pad).
+pub fn std_code(p: u8) -> Option<u8> {
+	(0..8).find(|&s| function_of(s).is_some_and(|g| DEFAULT_PAD[g] == p)).map(|s| CELLS[s].0)
 }
 
 /// What a picture is: a letter on a disc, a bumper or trigger pill with two letters, a stick cell with two letters.

@@ -1,5 +1,5 @@
-//! [PC] The player's Underwater look row (GitHub #64; no retail counterpart): R&C1 Graphics -> World -> "Underwater look"
-//! (rac1 modern_menu/rows_graphics.rs; set and published by rac1 retail/pcext/ui_bridge_more.rs). On (the default) = the look of
+//! [PC] The player's Underwater look choice (GitHub #64; no retail counterpart): the launcher's row; no game menu row since
+//! 2026-11-08 (user: "too many options", was R&C1 Graphics -> World -> "Underwater look"). On (the default) = the look of
 //! underwater.rs at the Water quality; Off = the pass sees a dry camera, so under water the frame is the retail picture (retail's
 //! fog words at full strength and its tint sprite; the volumetric fog stays off under water at any setting, prepare.rs
 //! `frame_uniforms` reads the raw flag) while the water surface keeps the chosen Water quality. Kept in the options file only
@@ -33,16 +33,6 @@ pub fn on() -> bool {
 	ON.load(Ordering::Relaxed)
 }
 
-/// The menu set the row: in force from the next frame and remembered; true = the options file changed.
-pub fn set_from_ui(opts: &mut PcOptions, on: bool) -> bool {
-	if ON.swap(on, Ordering::Relaxed) == on {
-		return false;
-	}
-	opts.extra_set(KEY, Some(if on { "on" } else { "off" }.to_string()));
-	eprintln!("underwater: PC options: Underwater look {}", if on { "on" } else { "off" });
-	true
-}
-
 /// The camera water flag the underwater look and the water views' sky map see (read once per frame, pass_post.rs): the frame's flag
 /// with the row On, a dry camera with it Off. The volumetric fog, clouds, smoke and GI gates keep the raw flag.
 pub(crate) fn look(under_flag: bool) -> bool {
@@ -63,24 +53,14 @@ mod tests {
 	}
 
 	#[test]
-	fn set_saves_once_and_round_trips() {
+	fn init_reads_the_file() {
 		let _guard = crate::pcopts::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-		let mut opts = PcOptions::new();
-		init(&opts);
-		assert!(on() && look(true) && !look(false));
-		assert!(!set_from_ui(&mut opts, true), "already On: nothing written");
-		assert_eq!(opts.extra_get(KEY), None);
-		assert!(set_from_ui(&mut opts, false));
-		assert!(!on() && !look(true));
-		assert!(!set_from_ui(&mut opts, false));
-		let saved = opts.to_text();
-		assert!(saved.contains("underwater=off\n"), "{saved}");
 		init(&PcOptions::new());
+		assert!(on() && look(true) && !look(false));
+		init(&PcOptions::parse("underwater=off\n"));
+		assert!(!on() && !look(true));
+		init(&PcOptions::parse("underwater=on\n"));
 		assert!(on());
-		init(&PcOptions::parse(&saved));
-		assert!(!on());
-		assert!(set_from_ui(&mut opts, true));
-		assert_eq!(PcOptions::parse(&opts.to_text()).extra_get(KEY), Some("on"));
 		init(&PcOptions::new());
 	}
 }

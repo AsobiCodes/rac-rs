@@ -33,9 +33,8 @@
 //!   (Original) with today's Medium draw distance. The picture of the row is help_ss 5 (the lit planet), from the same ToC.
 //! - Paged Graphics / Controls (pcctl.rs): Graphics shows at most 8 rows, row 0 is a "Page" selector (Left / Right
 //!   or Cross steps and wraps): Graphics has Picture, Effects, More effects (Fur, Fur style), Screen, Display and System sections. Effects includes Metal;
-//!   Vegetation and Metal are both on Effects, Frame smoothing on Display. Controls has ten sections (pcctl.rs).
-//!   `HUD: Sharp / Original` is a byte of the pcctl block that `sync` applies
-//!   to `hud_sharp_now()` and `hud=` in the file. The title's Graphics page shows the same sections and rows (`pcext/titlegfx.rs`, v0.4.2).
+//!   Vegetation and Metal are both on Effects, Frame smoothing on Display. Controls has eleven sections (pcctl.rs).
+//!   `HUD: Sharp / Original` is a byte of the pcctl block that `sync` applies to `hud_sharp_now()` and `hud=` in the file. The title's Graphics page shows the same sections and rows (`pcext/titlegfx.rs`, v0.4.2).
 //! - Preset row (Graphics -> Picture, `presets.rs`): Low / Medium / High / Custom from ONE data file, `assets/gfx_presets.txt`
 //!   (the RAC-RS Launcher shows the same table). `sync` calls `presets::choose` before the rows are stepped (a chosen preset writes its
 //!   values into the rows and the HUD row) and `presets::show` at its end (the row shows the preset that matches the rows now, else
@@ -399,12 +398,12 @@ pub fn init(cold: bool) {
 		ee_oracle::cold::set_language(l.osd());
 		eprintln!("retail: PC options: cold boot in the {from} language ({})", l.code());
 	}
-	super::binds::init(opts.extra_get("keys"), opts.extra_get("pad"));
+	super::binds::init_kbm(opts.extra_get("kbm"), opts.extra_get("keys"), opts.extra_get("pad"), opts.extra_get("gamepad"));
 	CAM_MODERN.store(opts.camera_modern(), Ordering::Relaxed);
 	STRAFE_ON.store(opts.strafe_on(), Ordering::Relaxed);
 	BUYALL_ON.store(opts.buyall_on(), Ordering::Relaxed);
 	HUD_SHARP.store(opts.hud_sharp(), Ordering::Relaxed);
-	super::pcrender::init(&opts); super::pcintro::init(&opts); super::pcskip::init(&opts); super::pcdisp::init(&opts); super::pcinput::init(&opts); super::glyphs::init(&opts); super::pcmetal::init(&opts); super::pcsupp::init(&opts); super::wrench_throw::init(&opts); rac_engine::viewer::upscale_choice::init(&opts); rac_engine::viewer::under_choice::init(&opts); rac_engine::viewer::aspect_box::init(&opts); crate::modern_menu::style::init(&opts); super::qs_pause::init(&opts); super::auto_gadget::init(&opts);
+	super::pcrender::init(&opts); super::pcintro::init(&opts); super::pcskip::init(&opts); super::pcdisp::init(&opts); super::pcinput::init(&opts); super::glyphs::init(&opts); super::pcmetal::init(&opts); super::pcsupp::init(&opts); super::wrench_throw::init(&opts); super::fast_travel::init(&opts); rac_engine::viewer::upscale_choice::init(&opts); rac_engine::viewer::fgen_choice::init(&opts); rac_engine::viewer::under_choice::init(&opts); crate::retail::pcmetal::init_detail(&opts); rac_engine::viewer::aspect_box::init(&opts); rac_engine::viewer::resolution::init(&opts); rac_engine::viewer::picture_adjust::init(&opts); crate::modern_menu::style::init(&opts); super::qs_pause::init(&opts); super::auto_gadget::init(&opts); super::pcmouseinv::init(&opts);
 	let rows = furopt::rows(&opts);
 	GFX.store(pack_gfx(swap_rows(rows)), Ordering::Relaxed);
 	(fogopt::set(rows[13]), cloudopt::set(rows[14]), furopt::set(rows[15], rows[16]), fireopt::set(rows[17]), smokeopt::set(rows[18]));
@@ -511,14 +510,14 @@ fn sync(mem: &mut Mem, level: u32, toggle: bool, s: &mut St) -> bool {
 	patch_rows(mem, level);
 	patch_graphics(mem, level); achrow::sync_desc(mem, OPT_DESC); // the Achievements row's description says so once the session cheated
 	// The title Graphics page's stepper (titlegfx.rs); the Controls page (pcctl.rs) is the pause menu's, its magic outlives a level.
-	if !in_level { titlegfx::sync(mem); } else { super::pcctl::sync(mem); }
+	if !in_level { titlegfx::sync(mem); } else { super::pcctl::sync(mem); super::help_ctl::sync(mem, level); }
 	super::pcmods::sync(mem, level);
 	if let Some(sharp) = super::pcctl::hud_sharp(mem).filter(|&h| HUD_SHARP.swap(h, Ordering::Relaxed) != h) {
 		eprintln!("retail: PC options: HUD {}", if sharp { "Sharp" } else { "Original" });
 		s.opts.hud = Some(sharp);
 		s.save();
 	}
-	if super::pcrender::sync(mem, &mut s.opts) | super::pcintro::sync(mem, &mut s.opts) | super::pcskip::sync(mem, &mut s.opts) | super::pcdisp::sync(mem, &mut s.opts) | super::pcinput::sync(mem, &mut s.opts) | super::glyphs::sync(mem, &mut s.opts) | super::pcmetal::sync(mem, &mut s.opts) | super::pcsupp::sync(mem, &mut s.opts) | super::pcmrefl::sync(&mut s.opts) | mstyle::sync(mem, &mut s.opts) { s.save(); } // Renderer (pcrender.rs), Skip intro (pcintro.rs), Start skips cutscenes (pcskip.rs), Display rows (pcdisp.rs), Quick Select mouse / Stick dead zone (pcinput.rs); no short circuit
+	if super::pcrender::sync(mem, &mut s.opts) | super::pcintro::sync(mem, &mut s.opts) | super::pcskip::sync(mem, &mut s.opts) | super::pcdisp::sync(mem, &mut s.opts) | super::pcinput::sync(mem, &mut s.opts) | super::glyphs::sync(mem, &mut s.opts) | super::pcmetal::sync(mem, &mut s.opts) | super::pcsupp::sync(mem, &mut s.opts) | super::pcmore::sync(mem, &mut s.opts) | super::pcmrefl::sync(&mut s.opts) | mstyle::sync(mem, &mut s.opts) | super::pcmouseinv::sync(mem, &mut s.opts) { s.save(); } // Renderer (pcrender.rs), Skip intro (pcintro.rs), Start skips cutscenes (pcskip.rs), Display rows (pcdisp.rs), Quick Select mouse / Stick dead zone (pcinput.rs); no short circuit
 	// Debug mode (Controls -> Debug): the row's byte opens / closes the dev tools and debug keys at once and is remembered (`debug=on`).
 	if let (true, Some(on)) = (in_level, super::pcctl::debug_on(mem)) {
 		if super::devtools::set_menu(on, true) {
@@ -527,10 +526,12 @@ fn sync(mem: &mut Mem, level: u32, toggle: bool, s: &mut St) -> bool {
 			s.save();
 		}
 	}
-	if let Some((keys, pad)) = super::binds::take_changes() {
-		eprintln!("retail: PC options: controls keys {} pad {}", keys.as_deref().unwrap_or("(default)"), pad.as_deref().unwrap_or("(default)"));
-		s.opts.extra_set("keys", keys);
-		s.opts.extra_set("pad", pad);
+	if let Some((kbm, pad)) = super::binds::take_changes_kbm() {
+		eprintln!("retail: PC options: controls kbm {} gamepad {}", kbm.as_deref().unwrap_or("(default)"), pad.as_deref().unwrap_or("(default)"));
+		s.opts.extra_set("kbm", kbm);
+		s.opts.extra_set("keys", None); // the old function-per-key line is replaced by `kbm=` (binds.rs / kbm/file.rs convert it on read)
+		s.opts.extra_set("pad", None); // the old function-per-button line is replaced by `gamepad=` (kbm/padfile.rs converts it on read)
+		s.opts.extra_set("gamepad", pad);
 		s.save();
 	}
 	if in_level { presets::show(mem, s); } // the title page shows its Preset from `detect_now`
@@ -888,7 +889,7 @@ fn text_hook(c: &mut Cpu) -> bool {
 	}
 	let lang = lang_of(&mut c.mem);
 	// The Controls page's texts (pcctl.rs): they follow the bindings at every look; the Debug section's ids have a pool of their own.
-	if (0x7f40..super::pcctl::ID_LAST).contains(&id) || (super::pcctl::ID_DBG0..super::pcctl::ID_DBG_END).contains(&id) || (super::pcdisp::ID0..super::pcdisp::ID_END).contains(&id) {
+	if (0x7f40..super::pcctl::ID_LAST).contains(&id) || (super::pcctl::ID_DBG0..super::pcctl::ID_DBG_END).contains(&id) || super::pcdisp::serves(id) {
 		return super::pcctl::text_hook(c, id, lang);
 	}
 	// The Culling warning in the Graphics title bar (cullwarn.rs).
@@ -1257,15 +1258,15 @@ mod tests {
 		assert_eq!(row(mem, 2), [ID_WAVES, WAVES, ID_ON, ID_OFF, 0, 0]);
 		assert_eq!(row(mem, 3), [ID_PARTICLES, PARTICLES, ID_PART_CLASSIC, ID_HIGH, ID_MEDIUM, ID_LOW]);
 		assert_eq!(row(mem, 4), [ID_VEGETATION, VEG, ID_OFF, ID_VEG_MODERATE, ID_VEG_LUSH, 0]);
-		assert_eq!((row(mem, 5), row(mem, 6), row(mem, 7), row(mem, 8)), (vec![0x7faf, super::super::pcctl::METAL_B, ID_OFF, ID_ON, 0, 0], vec![ID_FOG, fogopt::FOG, ID_CLASSIC, ID_HIGH, ID_MEDIUM, ID_LOW], vec![ID_CLOUDS, cloudopt::CLOUDS, ID_CLASSIC, ID_HIGH, ID_MEDIUM, ID_LOW], vec![0; 6]));
+		assert_eq!((row(mem, 5), row(mem, 6), row(mem, 7), row(mem, 8)), (vec![0x7faf, super::super::pcctl::METAL_B, ID_OFF, ID_HIGH, ID_MEDIUM, ID_LOW], vec![ID_FOG, fogopt::FOG, ID_CLASSIC, ID_HIGH, ID_MEDIUM, ID_LOW], vec![ID_CLOUDS, cloudopt::CLOUDS, ID_CLASSIC, ID_HIGH, ID_MEDIUM, ID_LOW], vec![0; 6]));
 		super::super::pcctl::test_gfx_section(mem, 3, &ROWS, GTAB);
 		assert_eq!(row(mem, 1), [ID_DISPLAY, DISPLAY, ID_WINDOWED, ID_FULLSCREEN, 0, 0]);
 		assert_eq!(row(mem, 2), [ID_DRAW, DRAW, ID_MEDIUM, ID_HIGH, ID_LOW, 0]);
 		assert_eq!(row(mem, 3), [ID_CULLING, CULL, ID_ON, ID_OFF, 0, 0]);
-		assert_eq!(row(mem, 4)[0], 0x7f79);
 		let rend = row(mem, 4); assert_eq!((rend[0], rend[2], rend[3], rend[4], rend[5], row(mem, 5) == [0; 6]), (0x7f79, 0x7f7a, 0x7f7b, 0, 0, false)); // Renderer (pcrender.rs): label, menu byte, Vulkan, DirectX 12
-		assert_eq!(row(mem, 5), [0x7f76, gb + 1, 0x7f77, 0x7f78, 0, 0], "the HUD row closes the Screen page");
-		assert_eq!(row(mem, 6), [0; 6]);
+		assert_eq!(row(mem, 5), [0x7f9e, gb + 0x1e, 0x7f9f, 0x7f9f, 0, 0], "Frame Generation (pcfgen.rs) follows Renderer");
+		assert_eq!(row(mem, 6), [0x7f76, gb + 1, 0x7f77, 0x7f78, 0, 0], "the HUD row closes the Screen page");
+		assert_eq!(row(mem, 7), [0; 6]);
 		super::super::pcctl::test_gfx_section(mem, 0, &ROWS, GTAB);
 		assert_eq!(GROWS.map(|a| mem.rd8(a)), DEFAULT_ROWS, "new player: Classic, the effect rows at High, Windowed, smoothing On, Moderate, culling On, GI Off, waves On, draw distance Medium");
 		assert_eq!(DEFAULT_ROWS, [0, 1, 1, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 0, 1, 1], "today's menu bytes (culling On = 0, global illumination Off = 0, waves On = 0, draw distance Medium = 0, fog, clouds and fur High = 1, fur style Soft = 0)");
@@ -1463,7 +1464,6 @@ mod tests {
 		let dirp = scratch("title");
 		let mut s = St { opts: PcOptions::default(), path: Some(dirp.join("pc_options.txt")), last: None, glast: None, lang_seen: None, warned: false };
 		let item = 0x1d47e8;
-
 		let mut m = fresh(true);
 		assert!(code_at(&mut m));
 		assert_eq!(build_title(&mut m, pc, item, &mut s), Some(9));

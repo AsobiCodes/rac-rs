@@ -64,6 +64,9 @@ impl FireKind {
 pub struct FireRow {
 	pub key: u32,
 	pub kind: FireKind,
+	/// Drawn as its kind, but never weighed for the fire light (lane rfire review: the fire image's flying embers, which pass the
+	/// colour and size gates at their largest; viewer/firefx.rs `add_sprite`).
+	pub dark: bool,
 }
 
 /// The texture key without the clamp / no-mip variant bits.
@@ -82,6 +85,11 @@ pub fn sprite_kind(rows: &[FireRow], ty: u8) -> Option<FireKind> {
 	rows.iter().find(|r| r.key == ty as u32 && r.kind.is_sprite()).map(|r| r.kind)
 }
 
+/// Whether a pool sprite of effect type `ty` is drawn as fire but lights nothing (a `dark` sprite row).
+pub fn sprite_dark(rows: &[FireRow], ty: u8) -> bool {
+	rows.iter().any(|r| r.key == ty as u32 && r.kind.is_sprite() && r.dark)
+}
+
 /// Whether a pool sprite of effect type `ty` is an explosion that starts a ground fire: a `Blast` row; with `bursts` (the dev knob
 /// `fire_blast55`) the `Burst` rows too (their type is not verified as an explosion, so they stay off by default).
 pub fn blast_type(rows: &[FireRow], ty: u8, bursts: bool) -> bool {
@@ -98,9 +106,9 @@ mod tests {
 	use super::*;
 
 	const ROWS: [FireRow; 3] = [
-		FireRow { key: 46, kind: FireKind::Ground },
-		FireRow { key: 19, kind: FireKind::Flame },
-		FireRow { key: 12, kind: FireKind::Burst },
+		FireRow { key: 46, kind: FireKind::Ground, dark: false },
+		FireRow { key: 19, kind: FireKind::Flame, dark: false },
+		FireRow { key: 12, kind: FireKind::Burst, dark: false },
 	];
 
 	#[test]
@@ -122,11 +130,11 @@ mod tests {
 	#[test]
 	fn the_jet_kinds_are_sprite_kinds() {
 		let rows = [
-			FireRow { key: 12, kind: FireKind::Jet },
-			FireRow { key: 2, kind: FireKind::JetBurst },
-			FireRow { key: 25, kind: FireKind::JetSpark },
-			FireRow { key: 4, kind: FireKind::Burn },
-			FireRow { key: 46, kind: FireKind::Ground },
+			FireRow { key: 12, kind: FireKind::Jet, dark: false },
+			FireRow { key: 2, kind: FireKind::JetBurst, dark: false },
+			FireRow { key: 25, kind: FireKind::JetSpark, dark: false },
+			FireRow { key: 4, kind: FireKind::Burn, dark: false },
+			FireRow { key: 46, kind: FireKind::Ground, dark: false },
 		];
 		for (ty, kind) in [(12, FireKind::Jet), (2, FireKind::JetBurst), (25, FireKind::JetSpark), (4, FireKind::Burn)] {
 			assert_eq!(sprite_kind(&rows, ty), Some(kind));
@@ -141,10 +149,10 @@ mod tests {
 	#[test]
 	fn blast_rows_are_watched_not_drawn() {
 		let rows = [
-			FireRow { key: 5, kind: FireKind::Blast },
-			FireRow { key: 55, kind: FireKind::Burst },
-			FireRow { key: 12, kind: FireKind::Jet },
-			FireRow { key: 46, kind: FireKind::Ground },
+			FireRow { key: 5, kind: FireKind::Blast, dark: false },
+			FireRow { key: 55, kind: FireKind::Burst, dark: false },
+			FireRow { key: 12, kind: FireKind::Jet, dark: false },
+			FireRow { key: 46, kind: FireKind::Ground, dark: false },
 		];
 		assert!(!FireKind::Blast.is_sprite());
 		assert_eq!(sprite_kind(&rows, 5), None, "a blast keeps its retail draw");

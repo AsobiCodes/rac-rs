@@ -150,9 +150,13 @@ impl Prep {
 		}
 		// [PC] DLSS (dlss_frame.rs): NGX once on the window's device (else no upscaler, logged), the feature for these sizes and mode.
 		if s.kind == Kind::Dlss {
-			self.dlss_on = super::dlss_frame::ready(&mut self.dlss, device, queue, (sizes, super::dlss::ngx_quality(s.ratio)));
+			let key = super::dlss_frame::key_of(sizes, s.ratio, self.dlss_row); // = `dlss_key` (the borrow of `slot` is live here)
+			self.dlss_on = super::dlss_frame::ready(&mut self.dlss, device, queue, key, self.dlss_row);
 		} else if let Some(d) = self.dlss.as_mut() {
 			d.drop_feat();
+		}
+		if !(self.ffx_on || self.dlss_on) {
+			crate::viewer::scene_msaa::no_upscaler(); // lane noaa: a 1-sample run whose upscaler refused (one log line)
 		}
 		gpu.prepare(device, queue, depth, sizes);
 		self.sharp = s.sharp;
@@ -162,8 +166,14 @@ impl Prep {
 	/// the GPU must be idle first.
 	pub(in crate::viewer) fn upscaler_needs_idle(&self, want: Option<Setting>, sizes: ((u32, u32), (u32, u32))) -> bool {
 		let ffx = want.filter(|s| s.kind == Kind::Fsr).map(|_| sizes);
-		let dlss = want.filter(|s| s.kind == Kind::Dlss).map(|s| (sizes, super::dlss::ngx_quality(s.ratio)));
+		let dlss = want.filter(|s| s.kind == Kind::Dlss).map(|s| self.dlss_key(sizes, s.ratio));
 		self.ffx.as_ref().is_some_and(|f| f.needs_idle(ffx)) || self.dlss.as_ref().is_some_and(|d| d.needs_idle(dlss))
+	}
+
+	/// The DLSS feature key of this frame at `sizes` and window / render `ratio`, with the preset latched in `upscale_begin`
+	/// (`dlss_row`), never a fresh read: the idle check and `slot_begin` must see the same key (review REVIEW3 F1).
+	pub(super) fn dlss_key(&self, sizes: ((u32, u32), (u32, u32)), ratio: f32) -> super::dlss_frame::Key {
+		super::dlss_frame::key_of(sizes, ratio, self.dlss_row)
 	}
 
 	/// This frame runs FSR 3.1 / 4 (FidelityFX) or DLSS in the slot, so it needs the temporal inputs (jitter, motion vectors, depth).
@@ -214,9 +224,10 @@ impl Prep {
 	/// reactive mask, the FidelityFX dispatch (ffx_frame.rs), the copy; DLSS the same without the mask. A frame in which neither
 	/// records (its runtime refused just now; the slot is off from the next plan, `active`) gets the plain bilinear scale.
 	pub(super) fn slot_encode(&mut self, device: &wgpu::Device, enc: &mut wgpu::CommandEncoder, cuts: &mut crate::viewer::presenter::Cuts, msaa: &wgpu::TextureView) {
+		let grade = self.grade.is_some();
 		let Some(g) = self.slot.as_ref().filter(|_| self.slot_on) else { return };
 		if !self.ffx_on && !self.dlss_on {
-			g.encode_plain(enc, msaa);
+			g.encode_plain(device, enc, msaa, grade);
 			return;
 		}
 		g.resolve(enc, msaa);
@@ -236,7 +247,7 @@ impl Prep {
 				let opaque = self.opaque.as_ref().filter(|_| self.opaque_fresh.get()).map(|o| &o.1);
 				// Like with like (review R16 F2): the scene before post when the post passes ran (`alpha_copy`), else the resolved input.
 				let after = self.alpha.as_ref().filter(|_| self.alpha_fresh.get()).map_or(g.input(), |a| &a.1);
-				let reactive = opaque.map(|o| ffx.reactive.encode(device, enc, o, after, render).clone());
+				let reactive = opaque.map(|o| ffx.reactive.encode(device, enc, (o, after, self.heat.take().as_ref()), render).clone());
 				let io = super::ffx_frame::Io { color, depth: mg.depth_view().texture(), motion: mg.motion_view().texture(), reactive: reactive.as_ref(), output };
 				ffx.dispatch(device, enc, cuts, &io, &f)
 			}
@@ -245,7 +256,16 @@ impl Prep {
 		if !ran {
 			g.scale(enc);
 		}
-		g.copy(enc);
+		g.copy(device, enc, grade);
+	}
+
+	/// [PC] Brightness / Contrast (gpu/grade_pass.rs `grade_k`, upscale.rs `upscale_encode`): this frame's curve for the slot's copy,
+	/// its uniform written now; None = the plain copy (50 / 50).
+	pub(in crate::viewer) fn set_grade(&mut self, queue: &crate::viewer::presenter::GatedQueue, k: Option<[f32; 4]>) {
+		self.grade = k;
+		if let (Some(k), Some(g)) = (k, self.slot()) {
+			g.write_grade(queue, k);
+		}
 	}
 }
 

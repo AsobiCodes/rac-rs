@@ -251,7 +251,11 @@ fn pick(want: &str) -> Option<Dev> {
     let w = if dx12 && matches!(want, "own" | "low") { "1" } else { want };
     if w != "own" {
         if let Some(s) = BOARD.wait(WAIT).filter(|s| uses_window(w, &s.info.name)) {
-            if second_device_wanted(w, std::env::var("RAC_GSCAP_GPU").ok().as_deref(), std::env::var("RAC_GSCAP_DEV").ok().as_deref(), s.info.backend, s.info.vendor) {
+            // A Vulkan window made through Streamline (DLSS frame generation, fgen/sl_vk.rs) keeps ONE device: a second VkDevice on
+            // that instance goes through Streamline's vkCreateDevice proxy, which re-runs its plugin start on the wrong device.
+            if second_device_wanted(w, std::env::var("RAC_GSCAP_GPU").ok().as_deref(), std::env::var("RAC_GSCAP_DEV").ok().as_deref(), s.info.backend, s.info.vendor)
+                && !sl_instance()
+            {
                 // Same VkInstance and adapter as the window, a device (and queue) of the capture's own: its GPU work no longer waits
                 // behind the window's frames. NOT a second `wgpu::Instance` (that froze RTSS / AMD, GitHub #12).
                 if let Some(d) = second_device(&s.adapter) {
@@ -344,6 +348,22 @@ pub(crate) fn second_device_wanted(want: &str, gpu_env: Option<&str>, dev_env: O
         Some("window") => false,
         Some("second") => true,
         _ => vendor == NVIDIA && gpu_env.is_none_or(str::is_empty),
+    }
+}
+
+/// The window's Vulkan instance was made through Streamline (DLSS frame generation): the capture then takes the window's device.
+fn sl_instance() -> bool {
+    #[cfg(windows)]
+    {
+        let made = crate::viewer::fgen::sl_vk::instance_made();
+        if made {
+            eprintln!("gscap gpu: the Vulkan window runs DLSS frame generation (Streamline): the capture takes the window's device");
+        }
+        made
+    }
+    #[cfg(not(windows))]
+    {
+        false
     }
 }
 

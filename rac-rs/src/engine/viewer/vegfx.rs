@@ -26,6 +26,7 @@ pub(super) mod burn;
 pub(super) mod burnmap;
 mod cover;
 mod meshes;
+pub(super) mod pipes;
 mod shader;
 use meshes::{clump, kelp, leaf_cluster};
 
@@ -362,9 +363,8 @@ struct Plan {
 }
 
 pub struct VegFx {
-	blade: wgpu::RenderPipeline,
-	mesh: wgpu::RenderPipeline,
-	leaf: wgpu::RenderPipeline,
+	/// Blade, mesh, leaf per fire-shadow set (vegfx/pipes.rs).
+	pipes: metalpipe::Pipes<pipes::Set>,
 	ubuf: wgpu::Buffer,
 	ubind: wgpu::BindGroup,
 	/// The burn map texture (burnmap.rs; group 3 binding 1).
@@ -385,42 +385,19 @@ pub struct VegFx {
 
 impl VegFx {
 	pub(super) fn new(device: &wgpu::Device, ulayout: &wgpu::BindGroupLayout, tex_layout: &wgpu::BindGroupLayout, format: wgpu::TextureFormat, depth_format: wgpu::TextureFormat) -> VegFx {
-		let src = format!("{}{}", super::volfog::soft::level_source(SHADER, super::volfog::soft::early(device)), shader::WGSL);
-		let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("veg"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("veg", src.into())) });
+		let src = super::texfilter::frag_w_fix(pipes::source_with(super::volfog::soft::early(device)));
+		let shader = super::flitquad::Modules::new(device, "veg", src); // [PC] lane fshade: plain + fire module (flitquad.rs)
 		let vlayout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
 			label: Some("veg"),
 			entries: &[wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::VERTEX_FRAGMENT, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None }, burnmap::BurnTex::layout_entry()],
 		});
 		let empty = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("veg empty"), entries: &[] });
 		let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("veg"), bind_group_layouts: &[Some(ulayout), Some(tex_layout), Some(&empty), Some(&vlayout)], immediate_size: 0 });
-		let make = |vs: &str, fs: &str, a2c: bool| {
-			device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-				label: Some(vs),
-				layout: Some(&layout),
-				vertex: wgpu::VertexState {
-					module: &shader,
-					entry_point: Some(vs),
-					compilation_options: Default::default(),
-					buffers: &[
-						Some(wgpu::VertexBufferLayout { array_stride: std::mem::size_of::<VegVertex>() as u64, step_mode: wgpu::VertexStepMode::Vertex, attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2, 2 => Float32x2, 3 => Float32x4, 4 => Float32x2] }),
-						Some(wgpu::VertexBufferLayout { array_stride: std::mem::size_of::<VegInst>() as u64, step_mode: wgpu::VertexStepMode::Instance, attributes: &wgpu::vertex_attr_array![5 => Float32x4, 6 => Float32x4, 7 => Float32x4, 8 => Float32x4] }),
-					],
-				},
-				fragment: Some(wgpu::FragmentState { module: &shader, entry_point: Some(fs), compilation_options: Default::default(), targets: &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })] }),
-				primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
-				depth_stencil: Some(wgpu::DepthStencilState { format: depth_format, depth_write_enabled: Some(true), depth_compare: Some(wgpu::CompareFunction::LessEqual), stencil: Default::default(), bias: Default::default() }),
-				multisample: wgpu::MultisampleState { count: MSAA, mask: !0, alpha_to_coverage_enabled: a2c },
-				multiview_mask: None,
-				cache: None,
-			})
-		};
-		let blade = make("vs_veg_blade", "fs_veg_blade", false);
-		let mesh = make("vs_veg_mesh", "fs_veg_mesh", true);
-		let leaf = make("vs_veg_leaf", "fs_veg_blade", false);
+		let pipes = pipes::pipes(device, layout, shader, format, depth_format);
 		let ubuf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("veg uniforms"), size: std::mem::size_of::<VegU>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
 		let burntex = burnmap::BurnTex::new(device);
 		let ubind = device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("veg"), layout: &vlayout, entries: &[wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() }, wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&burntex.view) }] });
-		VegFx { blade, mesh, leaf, ubuf, ubind, burntex, start: std::time::Instant::now(), plan: None, src: None, job: None, draws: Vec::new(), trail: Vec::new(), hero: None, objs: Vec::new() }
+		VegFx { pipes, ubuf, ubind, burntex, start: std::time::Instant::now(), plan: None, src: None, job: None, draws: Vec::new(), trail: Vec::new(), hero: None, objs: Vec::new() }
 	}
 
 	/// Every frame (the game's frame upload, with the particles): the hero's position (R&C1 `RetailFx::hero`) and the mobys the
@@ -524,13 +501,14 @@ impl VegFx {
 		pass.set_vertex_buffer(1, plan.inst.slice(..));
 		pass.set_index_buffer(plan.ibuf.slice(..), wgpu::IndexFormat::Uint32);
 		let mut cur: Option<u8> = None;
+		let [blade, mesh, leaf] = self.pipes.fls();
 		for &(m, first, n) in &self.draws {
 			let model = &plan.models[m as usize];
 			if cur != Some(model.kind) {
 				pass.set_pipeline(match model.kind {
-					KIND_MESH => &self.mesh,
-					KIND_LEAF => &self.leaf,
-					_ => &self.blade,
+					KIND_MESH => mesh,
+					KIND_LEAF => leaf,
+					_ => blade,
 				});
 				cur = Some(model.kind);
 			}

@@ -278,7 +278,7 @@ mod tests {
 	/// pass must keep the Enhanced pass's history or target (a feature uses `fx`).
 	#[test]
 	fn every_enhanced_module_obeys_the_split_switch() {
-		const CLASSIC_READERS: [&str; 6] = ["gpu/draw/passes.rs", "gpu/draw/prepare.rs", "metalenv.rs", "volclouds.rs", "volfog/frame.rs", "volsmoke.rs"];
+		const CLASSIC_READERS: [&str; 8] = ["fgen/frame.rs", "gpu/culling.rs", "gpu/draw/passes.rs", "gpu/draw/prepare.rs", "metalenv.rs", "volclouds.rs", "volfog/frame.rs", "volsmoke.rs"];
 		let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join("src/engine/viewer");
 		let (mut files, mut todo, mut bad) = (Vec::new(), vec![root.clone()], Vec::new());
 		while let Some(d) = todo.pop() {

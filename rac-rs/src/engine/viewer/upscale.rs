@@ -19,11 +19,12 @@ use std::sync::OnceLock;
 pub(in crate::viewer) mod motion;
 pub mod choice;
 pub(in crate::viewer) mod dlss;
+pub mod dlss_preset;
 mod dlss_frame;
-mod ffx;
-mod ffx_abi;
+pub(in crate::viewer) mod ffx;
+pub(in crate::viewer) mod ffx_abi;
 #[cfg(windows)]
-mod ffx_dx12;
+pub(in crate::viewer) mod ffx_dx12;
 mod ffx_frame;
 mod ffx_reactive;
 pub(in crate::viewer) mod slot;
@@ -113,6 +114,8 @@ pub struct View {
 	pub display: (u32, u32),
 	pub eye: [f32; 3],
 	pub fwd: [f32; 3],
+	/// The view's up hint (Camera::up: Z except under a rolled camera); not part of `is_cut`.
+	pub up: [f32; 3],
 }
 
 /// Whether the history must be dropped going from `prev` to `cur` (no previous view counts as a cut).
@@ -180,6 +183,8 @@ pub(in crate::viewer) struct Prep {
 	/// The upscaler slot (slot.rs, RAC_UPSCALE): its GPU side and whether this frame runs it.
 	slot: Option<slot_gpu::SlotGpu>,
 	slot_on: bool,
+	/// [PC] Brightness / Contrast: this frame's curve for the slot's copy (None = 50 / 50: the plain copy; `set_grade`).
+	grade: Option<[f32; 4]>,
 	/// The object motion pass (velocity.rs) and the opaque-only picture before the particles (`opaque_copy`), render size.
 	vel: Option<velocity::VelocityGpu>,
 	opaque: Option<((u32, u32), wgpu::TextureView)>,
@@ -190,6 +195,8 @@ pub(in crate::viewer) struct Prep {
 	/// resolved input is that same picture).
 	alpha: Option<((u32, u32), wgpu::TextureView)>,
 	alpha_fresh: std::cell::Cell<bool>,
+	/// [PC] FSR 3: this frame's heat haze pixels for the reactive mask (heathaze.rs `take_mask`; review S5), taken by the slot.
+	heat: Option<wgpu::TextureView>,
 	/// [PC] FSR 3.1 / 4 (ffx_frame.rs): the FidelityFX side (None until first chosen, and while the runtime is missing) and
 	/// whether this frame runs it; the slot's sharpening (stops), the camera's far plane and vertical fov for the dispatch.
 	ffx: Option<ffx_frame::FfxGpu>,
@@ -197,6 +204,9 @@ pub(in crate::viewer) struct Prep {
 	/// [PC] DLSS (dlss_frame.rs): the NGX side (None until first chosen, and while NGX is missing) and whether this frame runs it.
 	dlss: Option<dlss_frame::DlssGpu>,
 	dlss_on: bool,
+	/// [PC] The DLSS preset row value of this frame (dlss_preset.rs `in_force`), read ONCE in `upscale_begin`: the idle check and
+	/// the feature's key (slot.rs `dlss_key`) use this one value, so a menu change between them cannot drop a feature in use.
+	dlss_row: u8,
 	sharp: f32,
 	cam: (f32, f32),
 }
@@ -261,8 +271,9 @@ impl Prep {
 	pub(in crate::viewer) fn opaque_copy(&self, enc: &mut wgpu::CommandEncoder, msaa: &wgpu::TextureView) {
 		let Some((_, view)) = self.opaque.as_ref().filter(|_| self.on) else { return };
 		self.opaque_fresh.set(true);
-		let att = wgpu::RenderPassColorAttachment { view: msaa, resolve_target: Some(view), depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } };
+		let att = crate::viewer::scene_msaa::att(msaa, Some(view), wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store });
 		drop(enc.begin_render_pass(&wgpu::RenderPassDescriptor { label: Some("upscale opaque"), color_attachments: &[Some(att)], depth_stencil_attachment: None, timestamp_writes: super::passtime::rw("upscale opaque"), occlusion_query_set: None, multiview_mask: None }));
+		crate::viewer::scene_msaa::flush(enc);
 	}
 
 	/// [PC] FSR 3, at the start of the post passes (passes.rs, after the particles, fire and pool lines): the MSAA scene resolved
@@ -277,8 +288,14 @@ impl Prep {
 			return;
 		};
 		self.alpha_fresh.set(true);
-		let att = wgpu::RenderPassColorAttachment { view: msaa, resolve_target: Some(view), depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } };
+		let att = crate::viewer::scene_msaa::att(msaa, Some(view), wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store });
 		drop(enc.begin_render_pass(&wgpu::RenderPassDescriptor { label: Some("upscale alpha"), color_attachments: &[Some(att)], depth_stencil_attachment: None, timestamp_writes: super::passtime::rw("upscale alpha"), occlusion_query_set: None, multiview_mask: None }));
+		crate::viewer::scene_msaa::flush(enc);
+	}
+
+	/// [PC] The heat haze's FSR reactive input of this frame (pass_post.rs, before `encode`); None = no haze drawn.
+	pub(in crate::viewer) fn set_heat(&mut self, heat: Option<wgpu::TextureView>) {
+		self.heat = heat;
 	}
 
 	/// The FidelityFX side refused a create or dispatch this run (the menu then stops offering FSR, review R16 F5).
@@ -310,12 +327,25 @@ impl Prep {
 		let g = self.gpu.as_ref().filter(|_| self.on)?;
 		Some((g.motion_view(), g.depth_view(), self.jitter, self.reset))
 	}
+
+	/// [S2] Frame generation (fgen/frame.rs): the camera's far plane and vertical fov (radians) of this frame.
+	#[cfg(windows)]
+	pub(in crate::viewer) fn fg_cam(&self) -> (f32, f32) {
+		self.cam
+	}
+
+	/// [S2] Frame generation: this frame's camera eye, forward direction and up hint (world units; the up the world matrices use).
+	#[cfg(windows)]
+	pub(in crate::viewer) fn fg_view(&self) -> Option<([f32; 3], [f32; 3], [f32; 3])> {
+		// `apply` (frame_uniforms) moved this frame's view into `last` before the HUD pass.
+		self.view.as_ref().or(self.last.as_ref().map(|l| &l.1)).filter(|_| self.on).map(|v| (v.eye, v.fwd, v.up))
+	}
 }
 
 /// The render-size single-sample picture `opaque_copy` resolves into (the MSAA colour's format).
 fn opaque_target(device: &wgpu::Device, format: wgpu::TextureFormat, size: (u32, u32)) -> wgpu::TextureView {
 	let size = wgpu::Extent3d { width: size.0.max(1), height: size.1.max(1), depth_or_array_layers: 1 };
-	let usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
+	let usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | crate::viewer::scene_msaa::copy_usage();
 	device.create_texture(&wgpu::TextureDescriptor { label: Some("upscale opaque"), size, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format, usage, view_formats: &[] }).create_view(&Default::default())
 }
 
@@ -362,7 +392,9 @@ impl Gpu {
 			Some(scene) => velocity::Objects::of(scene, &self.props_gpu),
 			None => velocity::Objects::default(),
 		};
+		self.upscale.set_grade(&self.queue, self.grade_k()); // [PC] Brightness / Contrast: the slot's copy grades (gpu/grade_pass.rs)
 		self.upscale.encode(&self.device, enc, cuts, &self.msaa, objs);
+		self.fg_encode(enc, cuts); // [S2] fgen/frame.rs: the frame generation inputs (nothing without RAC_FG=fsr)
 	}
 
 	/// [PC] FSR 3.1 / 4: before a FidelityFX context is dropped, nothing of it may still run on the GPU (presenter flush: the
@@ -394,9 +426,11 @@ impl Gpu {
 
 	/// [PC] RAC_UPSCALE_PREP (upscale.rs): the frame's cut test, jitter and motion targets; nothing when the switch is off.
 	pub(in crate::viewer) fn upscale_begin(&mut self, cam: &Camera) {
+		self.upscale.set_heat(None); // [PC] heathaze.rs: only this frame's post pass hands its mask over (a frame without post has none; review TB6 N1)
 		let (sizes, enhanced) = (((self.config.width, self.config.height), self.win_size()), crate::splitview::fx(true));
 		// [PC] The upscaler the sizes were planned with (rscale.rs `planned`), never a fresh read of the option: `config` is its render size.
 		let planned = self.rscale.planned().filter(|_| enhanced);
+		self.upscale.dlss_row = dlss_preset::in_force(); // [PC] the DLSS preset, latched for the whole frame (review REVIEW3 F1)
 		if enhanced && self.upscale.upscaler_needs_idle(planned, sizes) {
 			self.upscale_idle(); // [PC] FSR 3.1 / 4 / DLSS: the old context / feature goes in slot_begin (other sizes, or none now)
 		}
@@ -412,6 +446,9 @@ impl Gpu {
 		// [PC] FSR 3.1 / 4 needs the temporal inputs: jitter, motion vectors (camera + objects), depth, the opaque picture.
 		let m = match mode() {
 			Mode::Off if self.upscale.temporal_on() => Mode::On,
+			// [S2] FSR frame generation (fgen/frame.rs) needs motion vectors and depth too, without jitter when nothing upscales.
+			// Lane fglive: only while generation can run (RAC_FG, or a value in force): no Still work for paused frames.
+			Mode::Off if self.screen.fg_wants() && crate::viewer::fgen::follow::generates() => Mode::Still,
 			m => m,
 		};
 		if m == Mode::Off || !enhanced {
@@ -419,7 +456,7 @@ impl Gpu {
 			return;
 		}
 		self.upscale.cam = (self.world_far(), 2.0 * cam.tan_half.atan());
-		let view = View { level: self.level, render: (self.config.width, self.config.height), display: self.win_size(), eye: cam.pos, fwd: super::forward(cam) };
+		let view = View { level: self.level, render: (self.config.width, self.config.height), display: self.win_size(), eye: cam.pos, fwd: super::forward(cam), up: cam.up };
 		self.upscale.begin(&self.device, &self.depth, self.config.format, view, m);
 	}
 
@@ -438,6 +475,8 @@ impl Drop for Gpu {
 	fn drop(&mut self) {
 		self.upscale_idle();
 		self.upscale.slot_drop();
+		#[cfg(windows)]
+		crate::viewer::fgen::sl::shutdown(&self.device); // [PC] fgen/sl.rs: Streamline before NGX (else nvngx_dlssg.dll crashes at quit)
 		dlss::shutdown(&self.device);
 	}
 }

@@ -95,7 +95,7 @@ impl ShadowPipes {
 					stencil: wgpu::StencilState { front: face, back: face, read_mask: 0xff, write_mask: if volume { 0xff } else { 0 } },
 					bias: Default::default(),
 				}),
-				multisample: wgpu::MultisampleState { count: MSAA, ..Default::default() },
+				multisample: wgpu::MultisampleState { count: msaa(), ..Default::default() },
 				multiview_mask: None,
 				cache: None,
 			})
@@ -291,7 +291,7 @@ mod tests {
 		let vb = buffer(&device, "v", bytemuck::cast_slice(&tri), wgpu::BufferUsages::VERTEX);
 		queue.write_buffer(&vb, 0, bytemuck::cast_slice(&tri));
 		let size = wgpu::Extent3d { width: 8, height: 8, depth_or_array_layers: 1 };
-		let tex = |format| device.create_texture(&wgpu::TextureDescriptor { label: None, size, mip_level_count: 1, sample_count: MSAA, dimension: wgpu::TextureDimension::D2, format, usage: wgpu::TextureUsages::RENDER_ATTACHMENT, view_formats: &[] }).create_view(&Default::default());
+		let tex = |format| device.create_texture(&wgpu::TextureDescriptor { label: None, size, mip_level_count: 1, sample_count: msaa(), dimension: wgpu::TextureDimension::D2, format, usage: wgpu::TextureUsages::RENDER_ATTACHMENT, view_formats: &[] }).create_view(&Default::default());
 		let (cv, dv) = (tex(colour), depth_view(&device, 8, 8, depth));
 		let mut enc = device.create_command_encoder(&Default::default());
 		{

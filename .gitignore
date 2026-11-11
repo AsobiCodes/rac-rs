@@ -19,3 +19,5 @@
 /bundled/amd_fidelityfx_*.dll
 /bundled/nvngx_dlss.dll
 /bundled/rac_ngx.dll
+/bundled/nvngx_dlssg.dll
+/bundled/sl.*.dll

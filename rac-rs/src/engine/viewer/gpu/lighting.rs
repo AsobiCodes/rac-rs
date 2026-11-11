@@ -101,6 +101,7 @@ impl Gpu {
 			sun_q: [0.0; 4],
 			keep_tail: [0.0; 4],
 			metal: [[0.0; 4]; 14],
+			flit: bytemuck::Zeroable::zeroed(),
 		}
 	}
 

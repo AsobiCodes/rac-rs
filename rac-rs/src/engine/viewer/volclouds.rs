@@ -129,6 +129,20 @@ fn view_close(prev: &[[f32; 4]; 4], now: &[[f32; 4]; 4]) -> bool {
 }
 
 impl VolClouds {
+	/// Warm-up (v0.5.1): the noise and the cloud pipelines on the first frame Clouds could draw (quality 1..3), not on the first march
+	/// in the middle of play (a cold shader cache stalled the first level ~8 s on slow GPUs). A driver that refuses turns the clouds off.
+	pub(super) fn warm(&mut self, device: &wgpu::Device, quality: u8, level: usize) {
+		if params::quality(quality).is_none() || params::look(level).is_none() { // no look: `march` never runs on this level
+			return;
+		}
+		if self.noise.is_none() {
+			self.noise = super::pipe_guard::guard(device, super::pipe_guard::Effect::VolClouds, || noise3d::Noise::new(device));
+		}
+		if self.pipes.is_none() && self.noise.is_some() {
+			self.pipes = super::pipe_guard::guard(device, super::pipe_guard::Effect::VolClouds, || self.build(device));
+		}
+	}
+
 	pub(super) fn new(format: wgpu::TextureFormat, depth_format: wgpu::TextureFormat) -> VolClouds {
 		VolClouds { format, depth_format, pipes: None, noise: None, ubuf: None, t: None, prev: None, prev_time: 0.0, frames: 0, flip: 0, level: usize::MAX, ref_z: 0.0, timer: None, ready: None, skipped: false, sky: Default::default() }
 	}
@@ -168,7 +182,7 @@ impl VolClouds {
 				primitive: Default::default(),
 				// The apply step draws inside the level pass (4x MSAA, its depth target untouched).
 				depth_stencil: level.then(|| wgpu::DepthStencilState { format: self.depth_format, depth_write_enabled: Some(false), depth_compare: Some(wgpu::CompareFunction::Always), stencil: Default::default(), bias: Default::default() }),
-				multisample: wgpu::MultisampleState { count: if level { crate::viewer::targets::MSAA } else { 1 }, ..Default::default() },
+				multisample: wgpu::MultisampleState { count: if level { crate::viewer::targets::msaa() } else { 1 }, ..Default::default() },
 				multiview_mask: None,
 				cache: None,
 			})

@@ -33,6 +33,10 @@ mod propcut;
 pub(super) mod bounds;
 mod view;
 mod grow;
+pub(super) mod omni;
+pub(super) mod omni_mom;
+#[cfg(test)]
+mod omni_msm;
 
 pub const CASCADES: usize = 3;
 /// Shadow map size per cascade (the allocation; Low and Medium draw into the corner of it, see `Quality`).
@@ -73,12 +77,20 @@ const MIN_RISE: f32 = 0.5736;
 /// Time constant of the light's turn towards a new zone's (seconds).
 const TURN_TAU: f32 = 0.25;
 
+/// [PC] The bind groups of every shadow pipeline (one layout prefix for all, `SunShadow::new`): the scene's texture array (None in
+/// the layout without bindless), the view's uniform, the posed props. The array stays bound and valid across the pipeline changes
+/// and the per-view uniform rebinds of a pass (wgpu re-flushes groups from the changed index up), so wgpu walks its `TEX_CAP` views
+/// once a pass instead of at every texel-alpha run of every face (FIRE_CPU_HANDOFF.md: ~31 us a flush, 5.8 ms a 4-fire frame).
+pub(super) const G_ARR: u32 = 0;
+pub(super) const G_SU: u32 = 1;
+pub(super) const G_SKIN: u32 = 2;
+
 /// The cascade uniform (`grow::uniform`) and `sh_grow`, the head of both shader modules (`SUN_SHADER`, `shrub_shader`).
 macro_rules! su_wgsl {
 	() => {
 		r#"
 struct SU { vp: mat4x4<f32>, grow: vec4<f32> };
-@group(0) @binding(0) var<uniform> su: SU;
+@group(1) @binding(0) var<uniform> su: SU;
 
 // [PC] lane nsun: a moby or shrub vertex at clip position `c` moved `su.grow.x` world units along its normal `n`, across the light
 // only (the depth stays), so a thin caster keeps a shadow wider than the far cascades' texels (sunshadow/grow.rs).
@@ -102,8 +114,8 @@ const SUN_SHADER: &str = concat!(
 // vs_props' placement (viewer.rs SHADER), position only; a hidden or faded slot casts nothing. Kind 4 (`gpuskin::KIND_CAST`):
 // a moby the game camera alone culled, placed as a prop (kind 1) and drawn by this pass only.
 struct PropInst { m0: vec4<f32>, m1: vec4<f32>, m2: vec4<f32>, m3: vec4<f32>, light: vec4<f32>, tint: vec4<f32>, ptint: vec4<f32>, a: vec4<f32>, k: vec4<u32> };
-@group(1) @binding(0) var<storage, read> insts: array<PropInst>;
-@group(1) @binding(1) var<storage, read> poses: array<f32>;
+@group(2) @binding(0) var<storage, read> insts: array<PropInst>;
+@group(2) @binding(1) var<storage, read> poses: array<f32>;
 
 // The draw alpha of a slot (`moby_alpha` in viewer.rs).
 fn sh_alpha(s: PropInst) -> f32 {
@@ -153,8 +165,8 @@ fn shrub_shader() -> String {
 	format!(
 		r#"enable wgpu_binding_array;
 {su}
-@group(1) @binding(0) var texs: binding_array<texture_2d<f32>, {cap}>;
-@group(1) @binding(1) var samp: sampler;
+@group(0) @binding(0) var texs: binding_array<texture_2d<f32>, {cap}>;
+@group(0) @binding(1) var samp: sampler;
 struct SOut {{ @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, @location(1) @interpolate(flat) ti: u32 }};
 
 @vertex fn vs_sh_shrub(@location(0) p: vec3<f32>, @location(1) uv: vec2<f32>, @builtin(instance_index) inst: u32) -> SOut {{
@@ -202,6 +214,9 @@ pub struct Cascade {
 	c: [f32; 2],
 	r: f32,
 	z: [f32; 2],
+	/// [PC] lane dlit: a point light's cube face (omni.rs `face`): the light's position; then `r` is the face's projection scale and
+	/// `z` (near, far). None: a sun cascade.
+	eye: Option<[f32; 3]>,
 }
 
 fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
@@ -262,11 +277,14 @@ impl Cascade {
 			[right[2] / r, up[2] / r, d[2] / zr, 0.0],
 			[-cx / r, -cy / r, -zmin / zr, 1.0],
 		];
-		Cascade { vp, texel, basis: [right, up, d], c: [cx, cy], r, z: [zmin, zmax] }
+		Cascade { vp, texel, basis: [right, up, d], c: [cx, cy], r, z: [zmin, zmax], eye: None }
 	}
 
 	/// Whether a sphere can cast into the cascade.
 	pub fn touches(&self, centre: [f32; 3], radius: f32) -> bool {
+		if let Some(p) = self.eye {
+			return omni::face_touches(self, p, centre, radius);
+		}
 		let [right, up, d] = self.basis;
 		(dot3(centre, right) - self.c[0]).abs() <= self.r + radius && (dot3(centre, up) - self.c[1]).abs() <= self.r + radius && {
 			let z = dot3(centre, d);
@@ -432,6 +450,8 @@ struct Scratch {
 }
 
 pub struct SunShadow {
+	/// [PC] lane dlit: the fire / weapon lights' cube shadows (omni.rs), drawn with these pipelines into the map's last layer.
+	pub(super) omni: omni::Omni,
 	tex: wgpu::Texture,
 	layers: [wgpu::TextureView; CASCADES],
 	/// The whole array, sampled by the world shaders (bound in the level's group 0 with `cmp`).
@@ -454,6 +474,9 @@ pub struct SunShadow {
 	pipeline_moby_tcut: Option<wgpu::RenderPipeline>,
 	/// [PC] lane nsun: the posed props by texel alpha (propcut.rs); needs both the props' storage group and the texture array.
 	pipeline_props_cut: Option<wgpu::RenderPipeline>,
+	/// [PC] `G_ARR` of a pass whose scene has no texture array (`Scene::sun_tex` None; the texel-alpha runs are skipped then): one 1 x 1
+	/// texture in every slot, never sampled. None without bindless (no array in the layouts).
+	arr_fill: Option<wgpu::BindGroup>,
 	/// Per-frame draw-list buffers, kept between frames (no allocation per cascade).
 	scratch: Scratch,
 	indirect: Option<wgpu::Buffer>,
@@ -476,7 +499,7 @@ impl SunShadow {
 		let make_map = |res: u32| {
 			device.create_texture(&wgpu::TextureDescriptor {
 				label: Some("sun shadow map"),
-				size: wgpu::Extent3d { width: res, height: res, depth_or_array_layers: CASCADES as u32 },
+				size: wgpu::Extent3d { width: res, height: res, depth_or_array_layers: CASCADES as u32 + 1 },
 				mip_level_count: 1,
 				sample_count: 1,
 				dimension: wgpu::TextureDimension::D2,
@@ -495,6 +518,8 @@ impl SunShadow {
 			}
 		};
 		let layers = std::array::from_fn(|k| tex.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2), base_array_layer: k as u32, array_layer_count: Some(1), ..Default::default() }));
+		// [PC] lane dlit: layer CASCADES = the point lights' shadow atlas (omni.rs), read by flitshadow.wgsl through the same array.
+		let atlas = tex.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2), base_array_layer: CASCADES as u32, array_layer_count: Some(1), ..Default::default() });
 		let array = tex.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() });
 		let cmp = device.create_sampler(&wgpu::SamplerDescriptor {
 			label: Some("sun shadow compare"),
@@ -534,20 +559,21 @@ impl SunShadow {
 				cache: None,
 			})
 		};
-		let pipeline = make(&[Some(&ulayout)], "vs_sh", &[Some(vertex.clone())]);
-		let pipeline_props = skin_layout.map(|sl| make(&[Some(&ulayout), Some(sl)], "vs_sh_props", &[Some(vun.clone()), Some(sj)]));
+		// Every pipeline: groups `G_ARR`, `G_SU` (+ `G_SKIN` with the posed props), the array in the layout also where the shader
+		// does not read it (the depth-only ones), so no pipeline change of a pass invalidates it.
+		let pipeline = make(&[array_layout, Some(&ulayout)], "vs_sh", &[Some(vertex.clone())]);
+		let pipeline_props = skin_layout.map(|sl| make(&[array_layout, Some(&ulayout), Some(sl)], "vs_sh_props", &[Some(vun.clone()), Some(sj)]));
 		// The texel-alpha module's pipelines: `vs` its vertex entry (`vs_sh_shrub`, or `vs_sh_grow` with the normal), `fs` the cut
-		// (None: depth only, without the group-1 texture array in the layout: the vertex entries do not touch it).
+		// (None: depth only; the vertex entries do not touch the array).
 		let cut = array_layout.map(|al| {
 			let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("sun shadow texel alpha"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("sun shadow texel alpha", shrub_shader().into())) });
-			let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("sun shadow texel alpha"), bind_group_layouts: &[Some(&ulayout), Some(al)], immediate_size: 0 });
-			let plain = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("sun shadow depth only"), bind_group_layouts: &[Some(&ulayout)], immediate_size: 0 });
-			(module, pl, plain)
+			let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("sun shadow texel alpha"), bind_group_layouts: &[Some(al), Some(&ulayout)], immediate_size: 0 });
+			(module, pl)
 		});
-		let make_cut = |vs: &str, fs: Option<&str>| cut.as_ref().map(|(module, pl, plain)| {
+		let make_cut = |vs: &str, fs: Option<&str>| cut.as_ref().map(|(module, pl)| {
 			device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
 				label: Some(fs.unwrap_or("vs_sh_shrub depth only")),
-				layout: Some(if fs.is_some() { pl } else { plain }),
+				layout: Some(pl),
 				vertex: wgpu::VertexState { module, entry_point: Some(vs), compilation_options: Default::default(), buffers: &[Some(vun.clone())] },
 				fragment: fs.map(|fs| wgpu::FragmentState { module, entry_point: Some(fs), compilation_options: Default::default(), targets: &[] }),
 				primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
@@ -568,23 +594,25 @@ impl SunShadow {
 		// mobys' texel-alpha casts with the terrain cut, widened.
 		let (pipeline_plain, pipeline_plain_grow, pipeline_moby_tcut) = (make_cut("vs_sh_shrub", None), make_cut("vs_sh_grow", None), make_cut("vs_sh_grow", Some("fs_sh_tfrag")));
 		let pipeline_props_cut = skin_layout.zip(array_layout).map(|(sl, al)| propcut::pipeline(device, &ulayout, sl, al));
-		SunShadow { tex, layers, array, cmp, ubuf, ubind, pipeline, pipeline_props, pipeline_shrub, pipeline_tfrag, pipeline_tie, pipeline_plain, pipeline_plain_grow, pipeline_moby_tcut, pipeline_props_cut, scratch: Scratch::default(), indirect: None, cap: 0, dir: None, scene_id: 0, last: None, soft_off: super::volfog::soft::off_buffer(device) }
+		let omni = omni::Omni::new(device, &ulayout, atlas);
+		let arr_fill = array_layout.map(|al| array_fill(device, al));
+		SunShadow { omni, tex, layers, array, cmp, ubuf, ubind, pipeline, pipeline_props, pipeline_shrub, pipeline_tfrag, pipeline_tie, pipeline_plain, pipeline_plain_grow, pipeline_moby_tcut, pipeline_props_cut, arr_fill, scratch: Scratch::default(), indirect: None, cap: 0, dir: None, scene_id: 0, last: None, soft_off: super::volfog::soft::off_buffer(device) }
 	}
 
 	/// The level's group-0 entries: `ubuf` at binding 0, the cascades and their compare sampler at 1 and 2, at 3 the fog's no-Z
-	/// texel buffer of size 0 (the level pass binds the real one: `entries_soft`), at 4..8 the metal look's sources (metalenv.rs).
-	pub(super) fn entries<'a>(&'a self, ubuf: &'a wgpu::Buffer, metal: &'a super::metalenv::MetalEnv) -> [wgpu::BindGroupEntry<'a>; 10] {
+	/// texel buffer of size 0 (the level pass binds the real one: `entries_soft`), at 4..9 the metal look's sources (metalenv.rs), at 10 the fire maps' moment cubes (omni_mom.rs).
+	pub(super) fn entries<'a>(&'a self, ubuf: &'a wgpu::Buffer, metal: &'a super::metalenv::MetalEnv) -> [wgpu::BindGroupEntry<'a>; 11] {
 		self.entries_soft(ubuf, &self.soft_off, metal, false)
 	}
 
 	/// `entries` of the level pass's group (the planar floor reflection at binding 9, metalenv.rs `entries_for`).
-	pub(super) fn entries_level<'a>(&'a self, ubuf: &'a wgpu::Buffer, metal: &'a super::metalenv::MetalEnv) -> [wgpu::BindGroupEntry<'a>; 10] {
+	pub(super) fn entries_level<'a>(&'a self, ubuf: &'a wgpu::Buffer, metal: &'a super::metalenv::MetalEnv) -> [wgpu::BindGroupEntry<'a>; 11] {
 		self.entries_soft(ubuf, &self.soft_off, metal, true)
 	}
 
 	/// `entries` with the fog's no-Z texel buffer `soft` (volfog/soft.rs `Soft::prepare`) at binding 3; `level` = the level pass's
 	/// group (metalenv.rs `entries_for`: the planar floor reflection at binding 9).
-	pub(super) fn entries_soft<'a>(&'a self, ubuf: &'a wgpu::Buffer, soft: &'a wgpu::Buffer, metal: &'a super::metalenv::MetalEnv, level: bool) -> [wgpu::BindGroupEntry<'a>; 10] {
+	pub(super) fn entries_soft<'a>(&'a self, ubuf: &'a wgpu::Buffer, soft: &'a wgpu::Buffer, metal: &'a super::metalenv::MetalEnv, level: bool) -> [wgpu::BindGroupEntry<'a>; 11] {
 		let [m4, m5, m6, m7, m8, m9] = metal.entries_for(level);
 		[
 			wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() },
@@ -592,6 +620,8 @@ impl SunShadow {
 			wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.cmp) },
 			wgpu::BindGroupEntry { binding: 3, resource: soft.as_entire_binding() },
 			m4, m5, m6, m7, m8, m9,
+			// [PC] fire light v2 stage 4: the fire maps' moment cubes (omni_mom.rs, flitshadow.wgsl `fls_mom`).
+			wgpu::BindGroupEntry { binding: omni_mom::BINDING, resource: wgpu::BindingResource::TextureView(&self.omni.mom.cube) },
 		]
 	}
 
@@ -653,7 +683,8 @@ impl SunShadow {
 
 	/// The draw lists of this frame into `sc`: per cascade, per batch (`Src`), the merged index ranges of the casters as indirect-draw
 	/// arguments, and the runs (cascade, batch, first argument's byte offset, number of draws).
-	fn lists(&self, scene: &Scene, f: &SunFrame, sc: &mut Scratch) {
+	/// `pre` (light faces, tb4 fix S1): per light (`omni::FACES` cascades each) its casters in reach; only those are tested.
+	fn lists(&self, scene: &Scene, cs: &[Cascade], view: Option<&view::View>, f: Option<&SunFrame>, pre: Option<&[omni::Reach]>, sc: &mut Scratch) {
 		let Scratch { args, runs, cut_l, plain_l, props_runs, props_out } = sc;
 		args.clear();
 		runs.clear();
@@ -696,15 +727,15 @@ impl SunShadow {
 			}
 		};
 		// RAC_SUN_FRUSTUM: a caster whose shadow cannot enter the camera's view pyramid (view.rs).
-		let seen_out = |c: [f32; 3], r: f32| f.view.is_some_and(|v| v.rejects_sphere(c, r));
+		let seen_out = |c: [f32; 3], r: f32| view.is_some_and(|v| v.rejects_sphere(c, r));
 		// A tie / shrub box (bounds.rs) that cannot reach the cascade (not with RAC_SUN_NOCULL) or the view (RAC_SUN_FRUSTUM).
-		let box_out = |c: &Cascade, b: Option<&bounds::Aabb>| b.is_some_and(|b| (!nocull && !c.reaches(b)) || f.view.is_some_and(|v| v.rejects_box(b)));
+		let box_out = |c: &Cascade, b: Option<&bounds::Aabb>| b.is_some_and(|b| (!nocull && !c.reaches(b)) || view.is_some_and(|v| v.rejects_box(b)));
 		// [PC] lane nsun: a tie or terrain piece no camera cell shows is never drawn (hidden by design, `Occlusion::ever_visible`, as
 		// `Gpu::cull_ties` / `cull_tfrags` hide it even with Culling Off: `!passes && !ever_visible`, culling.rs), so it casts nothing
 		// either; while the cell mask falls back to all on (`passes`), the main pass draws it and it casts (RAC_SUN_UNSEEN=1: always).
 		let unseen = super::gfxq::sun_unseen();
 		let hidden = |occ: (u8, u8)| !unseen && !scene.occ.passes(occ) && !scene.occ.ever_visible(occ);
-		for (k, c) in f.cascades.iter().enumerate().take(f.q.cascades) {
+		for (k, c) in cs.iter().enumerate() {
 			// tfrag_ranges[i]: 0 far, 1 mid, 2 near. A fragment casts with the LOD `Gpu::cull_tfrags` drew it with this frame (its
 			// receiving surface: a coarser mesh lying above the drawn one shadowed it in dots and jagged bands that came and went as
 			// the camera moved); an undrawn one (off screen) with the near mesh.
@@ -712,8 +743,11 @@ impl SunShadow {
 				Some(l) if l < 3 => l as usize,
 				_ => 2,
 			};
-			diag::near_ray(scene, f, k, c);
-			let tf = scene.tfrag_set.iter().enumerate().filter(|(_, t)| c.touches(t.cull.centre, t.cull.radius) && !seen_out(t.cull.centre, t.cull.radius) && !hidden(t.cull.occ)).flat_map(|(i, _)| {
+			if let Some(f) = f {
+				diag::near_ray(scene, f, k, c);
+			}
+			let pr = pre.map(|p| &p[k / omni::FACES]);
+			let tf = omni::ix(scene.tfrag_set.len(), pr.map(|r| &r.tf[..])).map(|i| (i, &scene.tfrag_set[i])).filter(|(_, t)| c.touches(t.cull.centre, t.cull.radius) && !seen_out(t.cull.centre, t.cull.radius) && !hidden(t.cull.occ)).flat_map(|(i, _)| {
 				let lod = tlod(i);
 				scene.tfrag_draws[scene.tfrag_ranges[i][lod].start as usize..scene.tfrag_ranges[i][lod].end as usize].iter()
 			});
@@ -726,7 +760,7 @@ impl SunShadow {
 				_ => 0,
 			};
 			let tie_in = |i: usize, t: &crate::ties::TieCull| c.touches(t.centre, t.radius) && !seen_out(t.centre, t.radius) && !hidden(t.occ) && !box_out(c, scene.sun_bb.ties.get(i).and_then(|b| b[ilod(i)].as_ref()));
-			let ties = scene.tie_cull.iter().enumerate().filter(|(i, t)| tie_in(*i, t)).flat_map(|(i, _)| {
+			let ties = omni::ix(scene.tie_cull.len(), pr.map(|r| &r.tie[..])).map(|i| (i, &scene.tie_cull[i])).filter(|(i, t)| tie_in(*i, t)).flat_map(|(i, _)| {
 				let lod = ilod(i);
 				scene.tie_draws[scene.tie_ranges[i][lod].start as usize..scene.tie_ranges[i][lod].end as usize].iter()
 			});
@@ -736,7 +770,7 @@ impl SunShadow {
 			whole(cut_l, &scene.world.draws, &|_| true);
 			push(args, runs, k, Src::World, cut_l);
 			if self.pipeline_shrub.is_some() && scene.sun_tex().is_some() && grow::shrubs_cast(k) {
-				let sh = scene.shrub_cull.iter().enumerate().filter(|(i, s)| c.touches(s.centre, s.radius) && !seen_out(s.centre, s.radius) && !box_out(c, scene.sun_bb.shrubs.get(*i).and_then(|b| b.as_ref()))).flat_map(|(i, _)| scene.shrubs.draws[scene.shrub_ranges[i].0.clone()].iter());
+				let sh = omni::ix(scene.shrub_cull.len(), pr.map(|r| &r.shrub[..])).map(|i| (i, &scene.shrub_cull[i])).filter(|(i, s)| c.touches(s.centre, s.radius) && !seen_out(s.centre, s.radius) && !box_out(c, scene.sun_bb.shrubs.get(*i).and_then(|b| b.as_ref()))).flat_map(|(i, _)| scene.shrubs.draws[scene.shrub_ranges[i].0.clone()].iter());
 				split(&mut { sh }, SHRUB_OPAQUE, true, cut_l, plain_l);
 				push(args, runs, k, Src::Shrubs, cut_l);
 				push(args, runs, k, Src::ShrubsPlain, plain_l);
@@ -748,7 +782,7 @@ impl SunShadow {
 				// [PC] lane nsun: a draw whose texture goes below the cut casts by texel alpha, an additive slot not at all (propcut.rs;
 				// the additive rule needs no texture, so it holds without the texture array too). Clipped props and debris take the
 				// terrain cut (`fs_sh_tfrag`, texel alpha alone), hence the terrain's threshold.
-				props::draws(scene, (!nocull).then_some(c), f.view.as_ref(), super::gfxq::sun_propcut(), &solid, props_runs, props_out);
+				props::draws(scene, (!nocull).then_some(c), view, super::gfxq::sun_propcut(), &solid, pr.map(|r| &r.slots[..]), props_runs, props_out);
 				propcut::split(&scene.props.draws, &scene.sun_alpha, props_out, mcut, plain_ok, cut_l, plain_l);
 				push(args, runs, k, Src::PropsCut, cut_l);
 				push(args, runs, k, Src::Props, plain_l);
@@ -771,7 +805,7 @@ impl SunShadow {
 	pub(super) fn encode(&mut self, device: &wgpu::Device, queue: &GatedQueue, enc: &mut wgpu::CommandEncoder, scene: &Scene, f: &SunFrame, skin: Option<(&wgpu::BindGroup, Option<&wgpu::Buffer>)>) {
 		let _s = super::profile::span("sun_shadow");
 		let mut sc = std::mem::take(&mut self.scratch);
-		self.lists(scene, f, &mut sc);
+		self.lists(scene, &f.cascades[..f.q.cascades.min(CASCADES)], f.view.as_ref(), Some(f), None, &mut sc);
 		self.encode_lists(device, queue, enc, scene, f, skin, &sc.args, &sc.runs);
 		self.scratch = sc;
 	}
@@ -804,86 +838,132 @@ impl SunShadow {
 				// Low / Medium: the corner of the map (the receivers read it scaled, `write_uniforms`).
 				pass.set_viewport(0.0, 0.0, f.q.res as f32, f.q.res as f32, 0.0, 1.0);
 			}
-			pass.set_bind_group(0, &self.ubind[k], &[]);
+			pass.set_bind_group(G_SU, &self.ubind[k], &[]);
 			crate::viewer::passtime::lap(&mut pass, "start"); // [probe] RAC_GPU_PASSES laps: one row per caster batch of each cascade
-			for &(_, src, off, n) in runs.iter().filter(|r| r.0 == k) {
-				let batch = match src {
-					Src::World => &scene.world,
-					Src::Tfrags | Src::TfragsPlain => &scene.tfrags,
-					Src::Ties | Src::TiesPlain => &scene.ties,
-					Src::Props | Src::PropsCut => &scene.props,
-					Src::Marker => &scene.marker,
-					Src::Clip | Src::ClipCut => &scene.clip_batch,
-					Src::Shrubs | Src::ShrubsPlain => &scene.shrubs,
-					Src::Debris | Src::DebrisCut => match &scene.debris {
-						Some(b) => b,
-						None => continue,
-					},
-				};
-				match (src, &self.pipeline_props, skin) {
-					(Src::Props, Some(p), Some((bind, Some(sj)))) => {
-						pass.set_pipeline(p);
-						pass.set_bind_group(1, bind, &[]);
-						pass.set_vertex_buffer(1, sj.slice(..));
-					}
-					(Src::PropsCut, _, Some((bind, Some(sj)))) => match (&self.pipeline_props_cut, scene.sun_tex()) {
-						(Some(p), Some(arr)) => {
-							pass.set_pipeline(p);
-							pass.set_bind_group(1, bind, &[]);
-							pass.set_bind_group(2, arr, &[]);
-							pass.set_vertex_buffer(1, sj.slice(..));
-						}
-						_ => continue,
-					},
-					// GPU-posed props without their slot attribute: model space, nothing to cast.
-					(Src::Props | Src::PropsCut, _, Some(_)) => continue,
-					// World-space mobys (CPU-posed props, clipped props, debris) by texel alpha: the terrain cut, the same 95.5/128.
-					(Src::PropsCut | Src::ClipCut | Src::DebrisCut, _, _) if mcut => match (&self.pipeline_moby_tcut, scene.sun_tex()) {
-						(Some(p), Some(arr)) => {
-							pass.set_pipeline(p);
-							pass.set_bind_group(1, arr, &[]);
-						}
-						_ => continue,
-					},
-					(Src::TfragsPlain | Src::TiesPlain, _, _) => match &self.pipeline_plain {
-						Some(p) => pass.set_pipeline(p),
-						None => continue,
-					},
-					(Src::ShrubsPlain, _, _) => match &self.pipeline_plain_grow {
-						Some(p) => pass.set_pipeline(p),
-						None => continue,
-					},
-					// [PC] lane nsun: world-space mobys depth-only, widened (grow.rs); without the texture array as before.
-					(Src::Props | Src::Clip | Src::Debris, _, _) => pass.set_pipeline(self.pipeline_plain_grow.as_ref().unwrap_or(&self.pipeline)),
-					(Src::Shrubs, _, _) => match (&self.pipeline_shrub, scene.sun_tex()) {
-						(Some(p), Some(arr)) => {
-							pass.set_pipeline(p);
-							pass.set_bind_group(1, arr, &[]);
-						}
-						_ => continue,
-					},
-					(Src::Tfrags | Src::Ties, _, _) if cut => {
-						let p = if matches!(src, Src::Tfrags) { &self.pipeline_tfrag } else { &self.pipeline_tie };
-						if let (Some(p), Some(arr)) = (p, scene.sun_tex()) {
-							pass.set_pipeline(p);
-							pass.set_bind_group(1, arr, &[]);
-						}
-					}
-					_ => pass.set_pipeline(&self.pipeline),
-				}
-				pass.set_vertex_buffer(0, batch.vbuf.slice(..));
-				pass.set_index_buffer(batch.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-				pass.multi_draw_indexed_indirect(ind, off, n);
-				crate::viewer::passtime::lap_with(&mut pass, || format!("sun c{k} {}", src.name()));
-			}
+			self.draw_runs(&mut pass, &mut Bound::default(), scene, skin, ind, runs, k, (cut, mcut));
 		}
 		let _ = &self.tex;
 	}
+
+	/// The runs of view `k` (`lists`) into `pass`, each batch with its pipeline; `cuts` = (`cuts`, `moby_cut`) of this frame. The sun
+	/// cascades and the point lights' cube faces (omni.rs) alike. `bound`: the pass's groups `G_ARR` and `G_SKIN` (one `Bound` per
+	/// pass); the caller binds the view's uniform at `G_SU`.
+	#[allow(clippy::too_many_arguments)]
+	fn draw_runs(&self, pass: &mut wgpu::RenderPass<'_>, bound: &mut Bound, scene: &Scene, skin: Option<(&wgpu::BindGroup, Option<&wgpu::Buffer>)>, ind: &wgpu::Buffer, runs: &[(usize, Src, u64, u32)], k: usize, cuts: (bool, bool)) {
+		let (cut, mcut) = cuts;
+		// Every pipeline's layout holds the array (when there is bindless): the scene's, or the stand-in when it has none.
+		if let Some(fill) = &self.arr_fill {
+			bound.set(pass, G_ARR, scene.sun_tex().unwrap_or(fill));
+		}
+		for &(_, src, off, n) in runs.iter().filter(|r| r.0 == k) {
+			let batch = match src {
+				Src::World => &scene.world,
+				Src::Tfrags | Src::TfragsPlain => &scene.tfrags,
+				Src::Ties | Src::TiesPlain => &scene.ties,
+				Src::Props | Src::PropsCut => &scene.props,
+				Src::Marker => &scene.marker,
+				Src::Clip | Src::ClipCut => &scene.clip_batch,
+				Src::Shrubs | Src::ShrubsPlain => &scene.shrubs,
+				Src::Debris | Src::DebrisCut => match &scene.debris {
+					Some(b) => b,
+					None => continue,
+				},
+			};
+			match (src, &self.pipeline_props, skin) {
+				(Src::Props, Some(p), Some((bind, Some(sj)))) => {
+					pass.set_pipeline(p);
+					bound.set(pass, G_SKIN, bind);
+					pass.set_vertex_buffer(1, sj.slice(..));
+				}
+				(Src::PropsCut, _, Some((bind, Some(sj)))) => match (&self.pipeline_props_cut, scene.sun_tex()) {
+					(Some(p), Some(_)) => {
+						pass.set_pipeline(p);
+						bound.set(pass, G_SKIN, bind);
+						pass.set_vertex_buffer(1, sj.slice(..));
+					}
+					_ => continue,
+				},
+				// GPU-posed props without their slot attribute: model space, nothing to cast.
+				(Src::Props | Src::PropsCut, _, Some(_)) => continue,
+				// World-space mobys (CPU-posed props, clipped props, debris) by texel alpha: the terrain cut, the same 95.5/128.
+				(Src::PropsCut | Src::ClipCut | Src::DebrisCut, _, _) if mcut => match (&self.pipeline_moby_tcut, scene.sun_tex()) {
+					(Some(p), Some(_)) => pass.set_pipeline(p),
+					_ => continue,
+				},
+				(Src::TfragsPlain | Src::TiesPlain, _, _) => match &self.pipeline_plain {
+					Some(p) => pass.set_pipeline(p),
+					None => continue,
+				},
+				(Src::ShrubsPlain, _, _) => match &self.pipeline_plain_grow {
+					Some(p) => pass.set_pipeline(p),
+					None => continue,
+				},
+				// [PC] lane nsun: world-space mobys depth-only, widened (grow.rs); the array is bound at `G_ARR` (shared layout) but not read.
+				(Src::Props | Src::Clip | Src::Debris, _, _) => pass.set_pipeline(self.pipeline_plain_grow.as_ref().unwrap_or(&self.pipeline)),
+				(Src::Shrubs, _, _) => match (&self.pipeline_shrub, scene.sun_tex()) {
+					(Some(p), Some(_)) => pass.set_pipeline(p),
+					_ => continue,
+				},
+				(Src::Tfrags | Src::Ties, _, _) if cut => {
+					let p = if matches!(src, Src::Tfrags) { &self.pipeline_tfrag } else { &self.pipeline_tie };
+					if let (Some(p), Some(_)) = (p, scene.sun_tex()) {
+						pass.set_pipeline(p);
+					}
+				}
+				_ => pass.set_pipeline(&self.pipeline),
+			}
+			pass.set_vertex_buffer(0, batch.vbuf.slice(..));
+			pass.set_index_buffer(batch.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+			pass.multi_draw_indexed_indirect(ind, off, n);
+			crate::viewer::passtime::lap_with(pass, || format!("sun c{k} {}", src.name()));
+		}
+	}
+}
+
+/// [PC] The groups `G_ARR` and `G_SKIN` a shadow pass has bound, so `draw_runs` binds a group only when it changes. A bind of the
+/// scene's texture array (bindless.rs, `TEX_CAP` views) costs wgpu a walk over all its views at `finish` (usage merge, then the init
+/// check of every view at the next draw); bound once per pass it stays bound across pipeline changes (WebGPU; the one layout
+/// prefix of `G_ARR`), so the draws and the picture are those of a bind per run.
+#[derive(Default)]
+pub(super) struct Bound([Option<wgpu::BindGroup>; 3]);
+
+impl Bound {
+	fn set(&mut self, pass: &mut wgpu::RenderPass<'_>, i: u32, g: &wgpu::BindGroup) {
+		let s = &mut self.0[i as usize];
+		if s.as_ref() != Some(g) {
+			pass.set_bind_group(i, g, &[]);
+			*s = Some(g.clone());
+		}
+	}
+}
+
+/// `SunShadow::arr_fill`: a texture-array group (bindless.rs `layout`) with one 1 x 1 texture in every slot and one sampler.
+fn array_fill(device: &wgpu::Device, layout: &wgpu::BindGroupLayout) -> wgpu::BindGroup {
+	let t = device.create_texture(&wgpu::TextureDescriptor { label: Some("sun shadow array fill"), size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 }, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba8Unorm, usage: wgpu::TextureUsages::TEXTURE_BINDING, view_formats: &[] });
+	let v = t.create_view(&Default::default());
+	let s = device.create_sampler(&Default::default());
+	let list = vec![&v; super::bindless::TEX_CAP as usize];
+	let samp = |binding: u32| wgpu::BindGroupEntry { binding, resource: wgpu::BindingResource::Sampler(&s) };
+	device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("sun shadow array fill"), layout, entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureViewArray(&list) }, samp(1), samp(2), samp(3), samp(4)] })
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// The shaders' group numbers are `G_ARR`, `G_SU`, `G_SKIN` (the one layout prefix of every shadow pipeline).
+	#[test]
+	fn the_shaders_use_the_shared_group_numbers() {
+		let (tex, cut) = (shrub_shader(), propcut::shader());
+		for src in [SUN_SHADER, tex.as_str(), cut.as_str()] {
+			assert!(src.contains(&format!("@group({G_SU}) @binding(0) var<uniform> su: SU;")));
+		}
+		assert!(SUN_SHADER.contains(&format!("@group({G_SKIN}) @binding(0) var<storage, read> insts")) && SUN_SHADER.contains(&format!("@group({G_SKIN}) @binding(1) var<storage, read> poses")));
+		for src in [&tex, &cut] {
+			assert!(src.contains(&format!("@group({G_ARR}) @binding(0) var texs:")) && src.contains(&format!("@group({G_ARR}) @binding(1) var samp:")));
+		}
+		assert_eq!((G_ARR, G_SU, G_SKIN), (0, 1, 2), "the array below the per-view uniform: a uniform rebind never re-flushes it");
+	}
 
 	#[test]
 	fn cascade_covers_its_slice_and_snaps_to_texels() {

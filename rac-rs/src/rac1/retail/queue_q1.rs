@@ -164,7 +164,7 @@ fn hoven_pools(m: &Machine, out: &mut Vec<WorldStrip>) {
 		if n < 3 || n > 0xb4 || vp == 0 || up == 0 || np == 0 {
 			continue;
 		}
-		if sphere_visible(m, far, [m.rdf(r), m.rdf(r + 4), m.rdf(r + 8), m.rdf(r + 0xc)]) < 0 {
+		if sphere_visible(m, super::wide_side::far(far), [m.rdf(r), m.rdf(r + 4), m.rdf(r + 8), m.rdf(r + 0xc)]) < 0 {
 			continue;
 		}
 		let pos: Vec<[f32; 3]> = (0..n as u32).map(|j| m.rdv3(vp + 12 * j)).collect();

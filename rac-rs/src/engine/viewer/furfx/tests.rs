@@ -10,7 +10,7 @@ fn vert(x: f32, y: f32, z: f32) -> Vertex {
 const MASK: FurMask = FurMask { hue: [18.0, 75.0], sat: 0.4, val: 0.45, pale: [45.0, 80.0, 0.2, 0.6], erode: 0, add: &[], cut: &[], zones: &[] };
 
 fn spec() -> FurSpec {
-	const PART: FurPart = FurPart { name: "t", len: [0.01, 0.04], comb: [0.0, 0.01], density: 50.0, thick: [0.8, 1.0], halo: [1.5, 2.5], tip: [1.1, 1.0, 0.9], root: 0.4, sheen: [0.5, 0.7] };
+	const PART: FurPart = FurPart { name: "t", len: [0.01, 0.04], comb: [0.0, 0.01], density: 50.0, thick: [0.8, 1.0], halo: [1.5, 2.5], tip: [1.1, 1.0, 0.9], root: 0.4, sheen: [0.5, 0.7], occ: 0.5, spec: 0.6, spec_exp: 48.0, lift: 0.4, sharp: 0.45, strand: 0.3 };
 	static PARTS: [FurPart; 2] = [PART, PART];
 	static ROWS: [FurRow; 2] = [FurRow { hash: 7, part: 1, mask: MASK }, FurRow { hash: 9, part: 0, mask: MASK }];
 	FurSpec { rows: &ROWS, parts: &PARTS }
@@ -104,7 +104,7 @@ fn the_noise_tapers_and_has_every_mip() {
 	}
 	let mean = |c: usize| lv[0].iter().skip(c).step_by(4).map(|&v| v as f32 / 255.0).sum::<f32>() / (noise::SIZE * noise::SIZE) as f32;
 	let m = [mean(0), mean(1), mean(2), mean(3)];
-	assert!(m[0] > 0.2 && m[0] < 0.8, "root coverage {m:?}");
+	assert!(m[0] > 0.4 && m[0] < 0.98, "root coverage {m:?}");
 	assert!(m[0] > m[1] && m[1] > m[2] && m[2] > m[3] && m[3] > 0.0, "taper {m:?}");
 	assert!((lv.last().unwrap()[0] as f32 / 255.0 - m[0]).abs() < 0.02, "1x1 mip = the mean");
 }

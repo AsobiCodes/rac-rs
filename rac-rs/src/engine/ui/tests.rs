@@ -19,8 +19,10 @@ fn model() -> Model {
 	Model::new(menu(), 0)
 }
 
+/// Navigation walks the shown rows: with Lighting Classic, Shadows and Bloom are hidden and skipped (user 2026-11-08: hidden, not
+/// dimmed); with Lighting Enhanced every row is visited.
 #[test]
-fn model_nav_wraps_and_skips_nothing() {
+fn model_nav_wraps_and_skips_hidden_rows() {
 	let mut m = model();
 	assert_eq!((m.tab, m.focus), (0, 0));
 	m.focus_step(-1);
@@ -28,15 +30,15 @@ fn model_nav_wraps_and_skips_nothing() {
 	m.focus_step(1);
 	assert_eq!(m.focus, PRESET);
 	let mut seen = vec![m.focus];
-	for _ in 0..4 {
+	for _ in 0..2 {
 		m.focus_step(1);
 		seen.push(m.focus);
 	}
-	assert_eq!(seen, vec![0, 1, 2, 3, 4], "blocked rows (shadows, bloom) are visited too");
+	assert_eq!(seen, vec![PRESET, LIGHTING, FOV], "hidden rows (shadows, bloom) are skipped");
 	m.focus_step(1);
 	assert_eq!(m.focus, 0);
-	m.focus_page(1, 3);
-	assert_eq!(m.focus, 3);
+	m.focus_page(1, 1);
+	assert_eq!(m.focus, LIGHTING);
 	m.focus_page(1, 9);
 	assert_eq!(m.focus, FOV, "page down clamps to the tab");
 	m.focus_edge(false);
@@ -44,6 +46,20 @@ fn model_nav_wraps_and_skips_nothing() {
 	assert!(m.is_first() && !m.is_last());
 	m.focus_edge(true);
 	assert!(m.is_last());
+	m.set_value(LIGHTING, 1);
+	m.focus_edge(false);
+	let mut seen = vec![m.focus];
+	for _ in 0..4 {
+		m.focus_step(1);
+		seen.push(m.focus);
+	}
+	assert_eq!(seen, vec![0, 1, 2, 3, 4], "every row once Lighting is Enhanced");
+	m.focus_page(-1, 3);
+	assert_eq!(m.focus, LIGHTING);
+	m.focus = BLOOM;
+	m.set_value(LIGHTING, 0);
+	m.settle_focus();
+	assert_eq!(m.focus, LIGHTING, "a focus on a row that became hidden moves to the shown row above it");
 }
 
 #[test]
@@ -197,25 +213,32 @@ fn needs_row_marks_blocked_exactly_when_lighting_classic() {
 }
 
 #[test]
-fn screen_builds_banner_dim_rows_and_detail() {
+fn screen_builds_banner_hidden_rows_and_detail() {
 	let mut m = model();
-	m.focus_to(SHADOWS);
+	m.focus_to(LIGHTING);
 	let (s, map) = screen::build(&m);
 	assert!(matches!(s.items[0], super::kit::Item::Banner(_)));
 	assert_eq!(map.item_row.len(), s.items.len());
 	assert_eq!(map.row(0), None);
-	assert_eq!(map.row_item(SHADOWS), s.focus);
-	let dims: Vec<bool> = s.items.iter().filter_map(|i| if let super::kit::Item::Row(r) = i { Some(r.dim) } else { None }).collect();
-	assert_eq!(dims, vec![false, false, true, true, false]);
+	assert_eq!(map.row_item(LIGHTING), s.focus);
+	let rows: Vec<Option<usize>> = map.item_row.iter().copied().filter(Option::is_some).collect();
+	assert_eq!(rows, vec![Some(PRESET), Some(LIGHTING), Some(FOV)], "Shadows and Bloom are hidden with Lighting Classic");
+	assert!(s.items.iter().all(|i| !matches!(i, super::kit::Item::Row(r) if r.dim)), "a shown row is never dimmed");
+	assert_eq!(s.detail.as_ref().unwrap().path, "Graphics \u{b7} Look");
+	assert!(s.detail.unwrap().boxed.is_none());
+	// A focus written straight onto a hidden row (no `settle_focus`): no focused item, the detail panel keeps its box.
+	m.focus = SHADOWS;
+	let (s, map) = screen::build(&m);
+	assert_eq!((map.row_item(SHADOWS), s.focus), (None, None));
 	let d = s.detail.unwrap();
-	assert_eq!(d.path, "Graphics \u{b7} Look");
 	assert_eq!(d.boxed.unwrap().text, "This only shows with Lighting set to Enhanced. Lighting is Classic now.");
 	assert_eq!(d.meter.unwrap().level, 2);
 	assert_eq!(s.hints.len(), 5);
 	assert_eq!(s.notice, None);
 	m.set_value(LIGHTING, 1);
-	let (s, _) = screen::build(&m);
+	let (s, map) = screen::build(&m);
 	assert!(!matches!(s.items[0], super::kit::Item::Banner(_)), "the banner goes with the dependency");
+	assert_eq!(map.row_item(SHADOWS), s.focus, "Shadows is shown again");
 	assert!(s.detail.unwrap().boxed.is_none());
 	m.set_tab(3);
 	m.set_value(9, 1);

@@ -10,7 +10,8 @@
 //! relocated fields masked: `hs_reloc.rs`; spec from tools/mkreloc.py, checked against all 19 levels). With the keyboard as the
 //! device and a glyph in the string it points a2 at a pool copy with the glyphs spelled out (`prompts::spell_arg`, the same
 //! substitution and pool as the lookup), then declines: retail's own wrapper measures, wraps and draws the copy, so the box is
-//! sized for the key names. A gamepad: nothing is touched. The wrapper is also called with strings that came out of the lookup:
+//! sized for the key names. A gamepad under a remap (v0.5.1): the same copy with the glyph codes / names of the buttons the actions are
+//! on now (`prompt_pad`); an unmapped gamepad: nothing is touched. The wrapper is also called with strings that came out of the lookup:
 //! those hold no glyph any more, so nothing changes for them.
 //! Registered relocatable hands (PC hooks) are installed whatever `RAC_HS` says: it switches only the built-in speed hands (oracle `rec::Table::build`).
 
@@ -33,8 +34,9 @@ fn box_text(c: &mut Cpu) -> bool {
 
 /// `box_text` with the device given (tests): always declines; on the keyboard with a3 = -1 a2 may point at the pool copy.
 fn box_text_for(c: &mut Cpu, keyboard: bool) -> bool {
-	if keyboard && c.g(7) as u32 == u32::MAX {
-		super::prompts::spell_arg(c, 6);
+	// A keyboard: key names. A controller under a remap: the glyph codes / names of the buttons the actions are on now (B1, v0.5.1).
+	if c.g(7) as u32 == u32::MAX {
+		super::prompts::spell_arg_for(c, 6, keyboard);
 	}
 	false
 }
@@ -49,11 +51,12 @@ pub fn register() {
 mod tests {
 	use super::*;
 
-	/// The hand's behaviour: the keyboard + a glyph string + a3 = -1 points a2 at a pool copy with key names; a gamepad, another a3, a string
+	/// The hand's behaviour: the keyboard + a glyph string + a3 = -1 points a2 at a pool copy with key names; an unmapped gamepad, another a3, a string
 	/// without a glyph or one outside RAM change nothing; the hand always declines (retail measures and draws).
 	#[test]
 	fn the_hand_copies_for_the_keyboard_and_declines() {
 		use ee_oracle::mem::Mem;
+		let _g = crate::retail::pcopts::globals_guard(); // the pad-remap tests share the kbm / device globals
 		let at = 0x0030_0000u32;
 		let put = |c: &mut Cpu, a: u32, s: &[u8]| {
 			for (i, b) in s.iter().chain(&[0u8]).enumerate() {
@@ -77,10 +80,95 @@ mod tests {
 		assert_eq!(copy, b"Press LMB to fire");
 		assert_eq!(c.mem.rd8(at + 6), 0x11, "the retail string is untouched");
 		assert_eq!(call(&mut c, false, at, u64::MAX), (true, at), "gamepad: nothing");
+		// A controller under a remap (Jump on B): the Cross glyph becomes the Circle cell in the copy.
+		{
+			use rac_engine::input::kbm;
+			kbm::init(None, None, None, None);
+			crate::kbm_actions::install();
+			let jump = kbm::table().index("jump").unwrap();
+			kbm::assign_pad(jump, 0, 1);
+			put(&mut c, at + 0x200, b"Press \x10 to jump");
+			let (declined, a2) = call(&mut c, false, at + 0x200, u64::MAX);
+			assert!(declined && a2 != at + 0x200, "remapped pad: a pool copy");
+			let mut copy = Vec::new();
+			while c.mem.rd8(a2 + copy.len() as u32) != 0 {
+				copy.push(c.mem.rd8(a2 + copy.len() as u32));
+			}
+			assert_eq!(copy, b"Press \x11 to jump");
+			kbm::init(None, None, None, None);
+		}
 		assert_eq!(call(&mut c, true, at, 20), (true, at), "a3 is a length: nothing");
 		put(&mut c, at + 0x100, b"No glyph here");
 		assert_eq!(call(&mut c, true, at + 0x100, u64::MAX), (true, at + 0x100), "no glyph: nothing");
 		assert_eq!(call(&mut c, true, 0x1000, u64::MAX), (true, 0x1000), "not in RAM: nothing");
+	}
+
+	/// TB2-B1 / S1: a string the lookup answered under a pad remap is a pool copy; both wrapper hooks (box text and font line) leave it
+	/// alone, so a swap (Jump on B, Fire on A) or a 3-cycle shows each button once-rewritten, not permuted twice. A string in the pool that
+	/// the lookup kept standard (a menu id) stays standard too.
+	#[test]
+	fn pool_copies_are_not_rewritten_again_on_either_hook() {
+		use ee_oracle::mem::Mem;
+		use rac_engine::input::kbm;
+		let _g = crate::retail::pcopts::globals_guard();
+		crate::retail::prompts::test_set_pad_device(true);
+		let read = |c: &mut Cpu, a: u32| {
+			let mut v = Vec::new();
+			while c.mem.rd8(a + v.len() as u32) != 0 {
+				v.push(c.mem.rd8(a + v.len() as u32));
+			}
+			v
+		};
+		let put = |c: &mut Cpu, a: u32, s: &[u8]| {
+			for (i, b) in s.iter().chain(&[0u8]).enumerate() {
+				c.mem.wr8(a + i as u32, *b);
+			}
+		};
+		// (assignments as (action, pad slot-0 PHYS index)), the retail string, what ONE rewrite gives.
+		let cases: [(&[(&str, usize)], &[u8], &[u8]); 2] = [
+			(&[("jump", 1), ("fire", 0)], b"\x10 jump \x11 fire", b"\x11 jump \x10 fire"),
+			(&[("jump", 1), ("fire", 2), ("wrench", 0)], b"\x10 jump \x11 fire \x13 swing", b"\x11 jump \x13 fire \x10 swing"),
+		];
+		for (assigns, retail, once) in cases {
+			kbm::init(None, None, None, None);
+			crate::kbm_actions::install();
+			for (name, p) in assigns {
+				let a = kbm::table().index(name).unwrap();
+				kbm::assign_pad(a, 0, *p);
+			}
+			let mut c = Cpu::new(Mem::new());
+			let (src, copy) = (0x0030_0000u32, crate::retail::prompts::POOL + 0x400 * 3);
+			put(&mut c, src, retail);
+			// The retail string through each hook once: the rewrite.
+			c.s(6, src as u64);
+			c.s(7, u64::MAX);
+			assert!(!box_text_for(&mut c, false));
+			let at = c.g(6) as u32;
+			assert_eq!(read(&mut c, at), once, "box hook: one rewrite");
+			c.s(7, src as u64);
+			assert!(!crate::retail::prompts::glyph_draw_hook(&mut c));
+			let at7 = c.g(7) as u32;
+			assert_eq!(read(&mut c, at7), once, "font hook: one rewrite");
+			// The lookup's pool copy (made by the same rewrite) through each hook: unchanged, same pointer.
+			put(&mut c, copy, once);
+			c.s(6, copy as u64);
+			c.s(7, u64::MAX);
+			box_text_for(&mut c, false);
+			assert_eq!((c.g(6) as u32, read(&mut c, copy)), (copy, once.to_vec()), "box hook: pool copy untouched");
+			c.s(7, copy as u64);
+			crate::retail::prompts::glyph_draw_hook(&mut c);
+			assert_eq!((c.g(7) as u32, read(&mut c, copy)), (copy, once.to_vec()), "font hook: pool copy untouched");
+			// A menu text the lookup kept standard sits in the pool with its standard glyphs: the hooks do not apply the gameplay layout.
+			put(&mut c, copy, retail);
+			c.s(6, copy as u64);
+			c.s(7, u64::MAX);
+			box_text_for(&mut c, false);
+			c.s(7, copy as u64);
+			crate::retail::prompts::glyph_draw_hook(&mut c);
+			assert_eq!((c.g(6) as u32, c.g(7) as u32, read(&mut c, copy)), (copy, copy, retail.to_vec()), "standard pool copy stays standard");
+		}
+		kbm::init(None, None, None, None);
+		crate::retail::prompts::test_set_pad_device(false);
 	}
 
 	/// The 27 code words of Veldin's FUN_001fc058 and of Novalis' twin (0x21dbd8): different `jal` targets and font table address,

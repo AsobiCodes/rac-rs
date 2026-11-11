@@ -19,6 +19,7 @@ impl Gpu {
 	/// sprites in one depth-sorted walk (fxpool.rs `pool_walk`); `lines` / `ribbons` are rac-rs's own.
 	pub fn set_particles(&mut self, sprites: &[crate::prims::Sprite], ribbons: &[crate::prims::Ribbon], lines: &[crate::prims::Line], mobys: &[crate::prims::EffectMoby], cam: &Camera, fx: Option<crate::fxpool::PoolFx<'_>>) {
 		let _s = super::profile::span("set_particles");
+		crate::diag::count(crate::diag::PARTICLES, sprites.len() + ribbons.len() + lines.len()); // [PC] RAC_DIAG perf.csv
 		let f = [cam.pitch.cos() * cam.yaw.cos(), cam.pitch.cos() * cam.yaw.sin(), cam.pitch.sin()];
 		let (slots, pool_ribbons, pool_lines, line_slots) = fx.map_or((&[][..], &[][..], &[][..], &[][..]), |x| (x.sprite_slots, x.ribbons, x.lines, x.line_slots));
 		// [PC] Water Enhanced contact rings and wakes (waterfx.rs `Rings`, `Wakes`): the hero, the pool particles (a line by its

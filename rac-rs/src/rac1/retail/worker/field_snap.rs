@@ -132,6 +132,7 @@ impl Worker {
 			}
 		}
 		s.sound = take_sound_of(&mut m);
+		crate::retail::snd::log_kons(&s.sound, field);
 		crate::retail::snd::hush_batch(&mut s.sound);
 		wperf.lap(6);
 		self.pooled = pooled;

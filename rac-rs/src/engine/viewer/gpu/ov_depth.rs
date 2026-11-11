@@ -92,7 +92,7 @@ impl OvDepth {
 			fragment: Some(wgpu::FragmentState { module: &module, entry_point: Some("fs"), compilation_options: Default::default(), targets: &[Some(wgpu::ColorTargetState { format, blend: Some(blend), write_mask: wgpu::ColorWrites::ALL })] }),
 			primitive: wgpu::PrimitiveState::default(),
 			depth_stencil: Some(wgpu::DepthStencilState { format: depth_format, depth_write_enabled: Some(false), depth_compare: Some(wgpu::CompareFunction::LessEqual), stencil: Default::default(), bias: Default::default() }),
-			multisample: wgpu::MultisampleState { count: MSAA, ..Default::default() },
+			multisample: wgpu::MultisampleState { count: msaa(), ..Default::default() },
 			multiview_mask: None,
 			cache: None,
 		});

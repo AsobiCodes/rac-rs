@@ -62,7 +62,13 @@ unsafe impl Sync for Runtime {}
 /// Opens `dir`'s loader DLL for `b` and resolves its entry points; Err says what is missing.
 pub fn load(dir: &Path, b: Backend) -> Result<(libloading::Library, Fns), String> {
 	let (loader, upscaler) = dll_names(b);
-	for f in [loader, upscaler] {
+	load_with(dir, loader, upscaler)
+}
+
+/// Opens `dir`'s `loader` DLL when the effect DLL `effect` is next to it (fgen/ffx_fg.rs: frame generation's) and resolves its
+/// entry points; Err says what is missing.
+pub fn load_with(dir: &Path, loader: &str, effect: &str) -> Result<(libloading::Library, Fns), String> {
+	for f in [loader, effect] {
 		if !dir.join(f).is_file() {
 			return Err(format!("{f} not found in {}", dir.display()));
 		}
@@ -149,9 +155,14 @@ impl BackendDesc {
 
 /// The upscaler versions the loader offers on this device: two calls (count, then ids + names).
 pub fn versions(fns: &Fns, b: Backend, d: &DeviceHandles) -> Vec<(u64, String)> {
+	versions_of(fns, b, d, abi::CREATE_UPSCALE)
+}
+
+/// The versions the loader offers on this device for the effect whose create desc type is `create_desc_type`.
+pub fn versions_of(fns: &Fns, b: Backend, d: &DeviceHandles, create_desc_type: u64) -> Vec<(u64, String)> {
 	let (mut count, mut vk) = (0u64, d.vk_context());
 	let device = query_device(b, d, &mut vk); // R9-1: `vk` outlives both queries below
-	let mut q = abi::QueryVersions { header: abi::Header::of(abi::QUERY_GET_VERSIONS), create_desc_type: abi::CREATE_UPSCALE, device, output_count: &mut count, version_ids: std::ptr::null_mut(), version_names: std::ptr::null_mut() };
+	let mut q = abi::QueryVersions { header: abi::Header::of(abi::QUERY_GET_VERSIONS), create_desc_type, device, output_count: &mut count, version_ids: std::ptr::null_mut(), version_names: std::ptr::null_mut() };
 	if unsafe { (fns.query)(std::ptr::null_mut(), &mut q.header) } != abi::RETURN_OK || count == 0 || count > 64 {
 		return Vec::new();
 	}

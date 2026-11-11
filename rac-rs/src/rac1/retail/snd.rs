@@ -27,12 +27,51 @@ pub fn hush(fields: u32) {
 }
 
 /// [PC] Worker, once per field right after the field's sound batch is drained (worker/field_snap.rs): a hushed field's batch starts
-/// no voice (`hush`).
+/// no bank voice (`hush`). Stream voices still start: a stream's key-on follows its `Reg::StreamSrc` in the same batch
+/// (snd989 streams.rs `key_on`), and the later parts of a stream play on gapless without a new key-on, so a dropped stream
+/// key-on silenced a whole music track (#74: Eudora music after a fast travel or a menu click). The hush is only for the menu
+/// step's and the skipped warp's bank sounds.
 pub fn hush_batch(b: &mut SndBatch) {
-	if HUSH.load(Ordering::Relaxed) > 0 {
-		HUSH.fetch_sub(1, Ordering::Relaxed);
-		b.ev.retain(|e| e.w.reg != ee_oracle::snd989::voices::Reg::Kon);
+	use ee_oracle::snd989::voices::Reg;
+	if HUSH.load(Ordering::Relaxed) == 0 {
+		return;
 	}
+	HUSH.fetch_sub(1, Ordering::Relaxed);
+	let mut stream = [0u32; 2]; // per core: voices that got a stream this batch
+	for e in b.ev.iter().filter(|e| e.w.reg == Reg::StreamSrc) {
+		let v = e.w.index as usize;
+		if v < 48 {
+			stream[v / 24] |= 1 << (v % 24);
+		}
+	}
+	b.ev.retain_mut(|e| {
+		if e.w.reg != Reg::Kon {
+			return true;
+		}
+		e.w.value &= stream.get(e.w.index as usize).copied().unwrap_or(0);
+		e.w.value != 0
+	});
+}
+
+/// RAC_RETAIL_SNDLOG, worker, each field before `hush_batch` (worker/field_snap.rs): the field's voice starts (SPU2 key-on
+/// writes: core, voice mask, bank) and whether the field is hushed.
+pub fn log_kons(b: &SndBatch, field: u32) {
+	if !crate::audio::voice_log() {
+		return;
+	}
+	use ee_oracle::snd989::voices::Reg;
+	let k: Vec<(u8, u32, u32)> = b.ev.iter().filter(|e| e.w.reg == Reg::Kon).map(|e| (e.w.index, e.w.value, e.w.bank)).collect();
+	if !k.is_empty() {
+		eprintln!("retail: snd field {field} key-on {k:x?} hushed {}", hushing());
+	}
+	for s in &b.streams {
+		eprintln!("retail: snd field {field} stream {s:?}");
+	}
+}
+
+/// [PC] Worker, before a field (fast_travel.rs: the skipped warp's sound): like `hush`, but a longer hush already armed stays.
+pub fn hush_at_least(fields: u32) {
+	HUSH.fetch_max(fields, Ordering::Relaxed);
 }
 
 /// Worker: are fields still hushed (`hush`)? A quiet request's Cross waits for the end (mouse_instant.rs `quiet`).
@@ -75,6 +114,26 @@ mod tests {
 			hush_batch(&mut b);
 			assert_eq!(regs(&b), want);
 		}
+		assert_eq!(hushed(), 0);
+	}
+
+	/// #74: a hushed field keeps the key-on bits of the voices that got a stream in the same batch (music), and strips the rest.
+	#[test]
+	fn a_hush_keeps_stream_key_ons() {
+		use ee_oracle::snd989::voices::{Reg, SpuWrite};
+		let ev = |reg: Reg, index: u8, value: u32| crate::spumix::Ev { w: SpuWrite { tick: 0, reg, index, value, bank: 0 }, bank: None, stream: None };
+		let _g = crate::retail::menu_model::cmd::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+		// stream on voices 26 / 27 (core 1 bits 2 / 3), a bank SFX on voice 0 (core 0) and voice 24 (core 1 bit 0)
+		let mut b = SndBatch { ev: vec![ev(Reg::StreamSrc, 26, 7), ev(Reg::StreamSrc, 27, 8), ev(Reg::Kon, 0, 1), ev(Reg::Kon, 1, 0xd)], ..Default::default() };
+		hush(1);
+		hush_batch(&mut b);
+		let k: Vec<(u8, u32)> = b.ev.iter().filter(|e| e.w.reg == Reg::Kon).map(|e| (e.w.index, e.w.value)).collect();
+		assert_eq!(k, vec![(1, 0xc)]);
+		assert_eq!(b.ev.iter().filter(|e| e.w.reg == Reg::StreamSrc).count(), 2);
+		// not hushed: untouched
+		let mut b = SndBatch { ev: vec![ev(Reg::Kon, 0, 1)], ..Default::default() };
+		hush_batch(&mut b);
+		assert_eq!(b.ev.len(), 1);
 		assert_eq!(hushed(), 0);
 	}
 

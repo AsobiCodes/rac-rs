@@ -19,13 +19,15 @@ const SLACK: f32 = 0.01;
 /// kept between frames by the caller). `c` None (RAC_SUN_NOCULL): no sphere test. `solid`: the draws that cast at all (see-through
 /// shells do not). `no_add` (lane nsun): an additive slot (`moby_add.rs`: beams, glows, Fire flames; light, not matter) casts
 /// nothing, shown or not (`TailOrder::light_only`: a cast-only one behind the camera too). A slot the records do not cover is taken; without a per-slot radius no sphere test is made.
+/// `slots` (tb4 fix S1): only these slots (a light's `omni::Reach`, ascending), None = all.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn draws(scene: &Scene, c: Option<&Cascade>, view: Option<&View>, no_add: bool, solid: &dyn Fn(&Draw) -> bool, cut: &mut Vec<(u32, u32, u32)>, out: &mut Vec<(u32, u32, u32)>) {
+pub(super) fn draws(scene: &Scene, c: Option<&Cascade>, view: Option<&View>, no_add: bool, solid: &dyn Fn(&Draw) -> bool, slots: Option<&[u32]>, cut: &mut Vec<(u32, u32, u32)>, out: &mut Vec<(u32, u32, u32)>) {
 	let runs = &scene.slot_runs;
 	let (skip, log) = (super::super::gfxq::sun_skip(), super::diag::on());
 	cut.clear();
 	out.clear();
-	for (s, r) in runs.iter().enumerate() {
+	for s in super::omni::ix(runs.len(), slots) {
+		let r = &runs[s];
 		// Slots past the records (spare room of the pool) are kept as they are: the vertex shader reads whatever record they hold.
 		if let Some(inst) = scene.props_inst.get(s) {
 			if !casts(inst.k[0]) || (no_add && scene.tail.light_only(s)) || skipped(skip, scene.props_class.get(s).copied()) {
@@ -55,6 +57,17 @@ pub(super) fn draws(scene: &Scene, c: Option<&Cascade>, view: Option<&View>, no_
 			_ => out.push((start, count, di)),
 		}
 	}
+}
+
+/// [PC] tb4 fix S1: the slots `draws` could keep for some face of the light `reach` = (position, far) (`omni::in_reach` on the same
+/// sphere `draws` tests; a slot without a record or a sphere is kept), into `out`; None (RAC_SUN_NOCULL) = every slot.
+pub(super) fn reach_slots(scene: &Scene, reach: Option<([f32; 3], f32)>, out: &mut Vec<u32>) {
+	out.clear();
+	out.extend((0..scene.slot_runs.len() as u32).filter(|&s| {
+		let Some((p, far)) = reach else { return true };
+		let sp = scene.props_inst.get(s as usize).and_then(|inst| scene.sun_rad.get(s as usize).and_then(|&m| sphere(inst, m)));
+		sp.is_none_or(|(centre, rad)| super::omni::in_reach(p, far, centre, rad * 1.001 + SLACK))
+	}));
 }
 
 /// RAC_SUN_SKIP (diagnosis): the slot's class is one of the listed.

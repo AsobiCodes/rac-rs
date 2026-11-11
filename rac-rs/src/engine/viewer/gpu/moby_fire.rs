@@ -71,7 +71,7 @@ fn moby_fire_look(i: VOut, c: vec4<f32>, ra: f32) -> vec4<f32> {
 	let octaves = clamp(i32(u.keep_tail.w + 0.5) + 1, 2, 4);
 	let t = u.keep_tail.z;
 	let blend = fract(u.keep_tail.w) * 4.0;
-	let base = clamp(dot(moby_rgb(i, c), vec3<f32>(0.3, 0.59, 0.11)) * ra * MF_GAIN, 0.0, 1.0);
+	let base = clamp(dot(moby_lit_rgb(i, c), vec3<f32>(0.3, 0.59, 0.11)) * ra * MF_GAIN, 0.0, 1.0);
 	var heat = mf_heat(i.w, base, t, octaves);
 	// The clock wraps every period: its last seconds ease into the picture the wrap lands on (firefx_clock.rs).
 	if (blend > 0.0) {
@@ -131,7 +131,8 @@ pub(super) fn pipelines(make: MakeProps) -> [wgpu::RenderPipeline; 2] {
 #[derive(Clone)]
 pub(in crate::viewer) struct PropsMaker {
 	pub layout: wgpu::PipelineLayout,
-	pub shader: wgpu::ShaderModule,
+	/// The level modules: plain and the fire-shadow sets' (flitquad.rs `Modules`; `make` = plain: single-set pipelines).
+	pub mods: crate::viewer::flitquad::Modules,
 	pub format: wgpu::TextureFormat,
 	pub depth_format: wgpu::TextureFormat,
 }
@@ -139,23 +140,30 @@ pub(in crate::viewer) struct PropsMaker {
 impl PropsMaker {
 	/// A props pipeline: `vs_props`, the fragment entry point `fs`, `blend`, depth write / compare and the face culling.
 	pub(super) fn make(&self, device: &wgpu::Device, fs: &str, blend: Option<wgpu::BlendState>, depth_write: bool, compare: wgpu::CompareFunction, cull: Option<wgpu::Face>) -> wgpu::RenderPipeline {
-		self.make_on(device, true, fs, blend, depth_write, compare, cull)
+		self.build(device, &self.mods.plain, crate::viewer::metalpipe::set(true, true), fs, blend, depth_write, compare, cull)
 	}
 
-	/// The lazily built Metal On / Off sets (metalpipe.rs) of `set` over the props layout (`vs_props`; the set's vertex entry is unused).
+	/// The lazily built Metal x fire-shadow sets (metalpipe.rs) of `set` over the props layout (`vs_props`; the set's vertex entry is unused).
 	pub(in crate::viewer) fn pipes<T: 'static>(&self, device: &wgpu::Device, set: fn(crate::viewer::metalpipe::Mk, wgpu::CompareFunction) -> T, z: wgpu::CompareFunction) -> crate::viewer::metalpipe::Pipes<T> {
 		let (m, dev) = (self.clone(), device.clone());
-		crate::viewer::metalpipe::Pipes::new(move |on| set(&|_vs, fs, blend, dw, cmp, cull| m.make_on(&dev, on, fs, blend, dw, cmp, cull), z))
+		crate::viewer::metalpipe::Pipes::new(move |s| set(&|_vs, fs, blend, dw, cmp, cull| m.make_on(&dev, s, fs, blend, dw, cmp, cull), z))
 	}
 
-	/// `make` with the Metal set `on`'s fragment constants (metalpipe.rs `constants`).
+	/// `make` with set `set`'s fragment constants (metalpipe.rs `constants`).
 	#[allow(clippy::too_many_arguments)]
-	pub(in crate::viewer) fn make_on(&self, device: &wgpu::Device, on: bool, fs: &str, blend: Option<wgpu::BlendState>, depth_write: bool, compare: wgpu::CompareFunction, cull: Option<wgpu::Face>) -> wgpu::RenderPipeline {
+	pub(in crate::viewer) fn make_on(&self, device: &wgpu::Device, set: usize, fs: &str, blend: Option<wgpu::BlendState>, depth_write: bool, compare: wgpu::CompareFunction, cull: Option<wgpu::Face>) -> wgpu::RenderPipeline {
+		self.mods.with(set, |module| self.build(device, module, set, fs, blend, depth_write, compare, cull))
+	}
+
+	/// A props pipeline from `module`.
+	#[allow(clippy::too_many_arguments)]
+	fn build(&self, device: &wgpu::Device, module: &wgpu::ShaderModule, set: usize, fs: &str, blend: Option<wgpu::BlendState>, depth_write: bool, compare: wgpu::CompareFunction, cull: Option<wgpu::Face>) -> wgpu::RenderPipeline {
+		let cache = crate::viewer::pipewarm::cache();
 		device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
 			label: Some("vs_props"),
 			layout: Some(&self.layout),
 			vertex: wgpu::VertexState {
-				module: &self.shader,
+				module,
 				entry_point: Some("vs_props"),
 				compilation_options: Default::default(),
 				buffers: &[
@@ -168,9 +176,9 @@ impl PropsMaker {
 				],
 			},
 			fragment: Some(wgpu::FragmentState {
-				module: &self.shader,
+				module,
 				entry_point: Some(fs),
-				compilation_options: wgpu::PipelineCompilationOptions { constants: crate::viewer::metalpipe::constants(on), ..Default::default() },
+				compilation_options: wgpu::PipelineCompilationOptions { constants: crate::viewer::metalpipe::constants(set), ..Default::default() },
 				targets: &[Some(wgpu::ColorTargetState { format: self.format, blend, write_mask: wgpu::ColorWrites::ALL })],
 			}),
 			primitive: wgpu::PrimitiveState { cull_mode: cull, ..Default::default() },
@@ -181,9 +189,9 @@ impl PropsMaker {
 				stencil: Default::default(),
 				bias: Default::default(),
 			}),
-			multisample: wgpu::MultisampleState { count: MSAA, ..Default::default() },
+			multisample: wgpu::MultisampleState { count: msaa(), ..Default::default() },
 			multiview_mask: None,
-			cache: None,
+			cache: cache.as_ref().map(|c| &c.cache),
 		})
 	}
 }
@@ -291,7 +299,7 @@ mod tests {
 	/// the flame fades out towards the mesh's silhouette.
 	#[test]
 	fn the_mesh_flame_follows_retail_light_and_has_no_rim() {
-		assert!(WGSL.contains("dot(moby_rgb(i, c), vec3<f32>(0.3, 0.59, 0.11)) * ra * MF_GAIN"), "heat from the light retail adds");
+		assert!(WGSL.contains("dot(moby_lit_rgb(i, c), vec3<f32>(0.3, 0.59, 0.11)) * ra * MF_GAIN"), "heat from the light retail adds");
 		assert!(!WGSL.contains("* 1.5 + 0.15"), "no heat floor on faint texels");
 		assert!(WGSL.contains("heat = heat * mf_rim(i, heat);") && WGSL.contains("fn mf_rim("), "fades out at the silhouette");
 		assert!(WGSL.contains("(n - 0.5) * 0.25 * min(base * 4.0, 1.0)"), "no noise glow where retail is dark");

@@ -22,6 +22,23 @@ pub(in crate::viewer) struct WaterDraw {
 	pub bounds: Option<[f32; 6]>,
 }
 
+/// [PC] Heat haze (heathaze.rs): the box (min x, y, z, max x, y, z) of an ocean draw's points `pos` when the level's ocean liquid is
+/// lava (the pack's liquid table, as `WaterDraw::liquid` reads it), else None. Taken from the ocean draws themselves, so the haze does
+/// not need Water Enhanced (review S4). Lava drawn as level terrain (`terrain_liquid`, `WaterDraw::range`) has no box: no haze.
+pub(in crate::viewer) fn lava_ocean_box(level: usize, pos: impl Iterator<Item = [f32; 3]>) -> Option<[f32; 6]> {
+	if liquid_slot(level) != Some(super::levels::LAVA_SLOT) {
+		return None;
+	}
+	let mut b = [f32::MAX, f32::MAX, f32::MAX, f32::MIN, f32::MIN, f32::MIN];
+	for p in pos {
+		for k in 0..3 {
+			b[k] = b[k].min(p[k]);
+			b[k + 3] = b[k + 3].max(p[k]);
+		}
+	}
+	(b[0] <= b[3]).then_some(b)
+}
+
 impl WaterDraw {
 	pub(in crate::viewer) fn new(vb: wgpu::Buffer, ib: wgpu::Buffer, n: u32, pos: impl Iterator<Item = [f32; 3]> + Clone) -> WaterDraw {
 		let mut b = [f32::MAX, f32::MAX, f32::MAX, f32::MIN, f32::MIN, f32::MIN];

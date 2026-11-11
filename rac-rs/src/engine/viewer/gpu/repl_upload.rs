@@ -230,6 +230,7 @@ impl SceneCtx {
 	/// The GPU texture of a chain, uploaded as it is. A BC chain needs `TEXTURE_COMPRESSION_BC`; without it the loader has decoded the
 	/// chain already (`repl::set_bc_native`), so a BC chain here means the two disagree and the slot keeps the original.
 	fn repl_texture(&self, t: &ReplTex) -> Result<wgpu::Texture, String> {
+		crate::diag::cause(crate::diag::TEXTURE); // [PC] RAC_DIAG spikes.txt
 		if t.fmt.compressed() && !self.device.features().contains(wgpu::Features::TEXTURE_COMPRESSION_BC) {
 			return Err("the device has no BC texture support".into());
 		}

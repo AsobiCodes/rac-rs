@@ -1,10 +1,13 @@
-//! The Graphics tab's Resolution section (lane ndlss, stage 5): Upscaler and Upscale quality. No RAM byte: the choice lives in the
-//! engine (`rac_engine::viewer::upscale_choice`, options file keys `upscaler` / `upscale_q`), set and published by
-//! `retail/pcext/ui_bridge_more.rs`; a change applies at the next frame. Modern menu only: the classic Graphics page is mirrored
-//! in RAM and has no row for it yet.
+//! The Graphics tab's Resolution section (lane ndlss, stage 5): Upscaler and Upscale quality; Frame Generation (lane fgen, S4). No
+//! RAM byte: the choices live in the engine (`rac_engine::viewer::upscale_choice`, options file keys `upscaler` / `upscale_q`;
+//! `rac_engine::viewer::fgen_choice`, key `framegen`), set and published by `retail/pcext/ui_bridge_more.rs`. An upscaler change
+//! applies at the next frame; Frame Generation follows it, live where the running maker allows (rows_fgen.rs, the row's note). Classic copies: Upscaler in
+//! `retail/pcmore.rs`, Frame Generation in `retail/pcfgen.rs`; Upscale quality is modern-only. No DLSS preset or MSAA row since
+//! 2026-11-08 (user: "too many options"): DLSS preset stays the engine's options file key `dlss_preset` (Auto = K; the launcher's
+//! row), MSAA is the pack's mode (engine scene_msaa.rs: R&C1 off while DLSS / FSR runs, else 4x).
 use super::costs;
 use super::text::*;
-use rac_engine::ui::{Needs, NeedsRule, UiRow, T5};
+use rac_engine::ui::{Cost, Needs, NeedsRule, UiRow, T5};
 
 /// Off, the newest FSR of the PC's FidelityFX runtime (the engine shows its version, "FSR 3.1" / "FSR 4.1", engine ui/live.rs,
 /// once known; the name below until then) and DLSS (lane dlss2: "DLSS 4.5" once NVIDIA's NGX reported the model). Product names:
@@ -20,7 +23,12 @@ const Q_VALUES: &[T5] = &[
 	["Ultra performance (33%)", "Ultra performance (33 %)", "Ultra-Leistung (33 %)", "Ultra rendimiento (33 %)", "Ultra prestazioni (33%)"],
 ];
 
-pub static UPSCALING: [UiRow; 2] = [
+/// Frame Generation's values in `fgen_choice::KINDS` order: Off, FSR 2x (AMD FidelityFX frame generation), DLSS 2x / 3x / 4x
+/// (NVIDIA DLSS frame generation, S3). Product names, the same in all 5 languages; a value this PC cannot run is not offered (engine
+/// fgen/choice.rs `set_runs` -> ui/live.rs `offer`), so with no DLLs the row offers Off only.
+pub const FG_VALUES: &[T5] = &[OFF, t("FSR 2x"), t("DLSS 2x"), t("DLSS 3x"), t("DLSS 4x")];
+
+pub static UPSCALING: [UiRow; 3] = [
 	row(
 		"upscaler",
 		CH,
@@ -54,13 +62,34 @@ pub static UPSCALING: [UiRow; 2] = [
 		costs::UPSCALE_Q,
 		Some(Needs { row: "upscaler", min: 1, max: i32::MAX }),
 	),
+	UiRow {
+		note: Some([
+			"Applies after a restart",
+			"S'applique apr\u{e8}s un red\u{e9}marrage",
+			"Gilt nach einem Neustart",
+			"Se aplica al reiniciar",
+			"Si applica dopo il riavvio",
+		]),
+		..row(
+			"framegen",
+			CH,
+			["Frame Generation", "G\u{e9}n\u{e9}ration d'images", "Frame-Generierung", "Generaci\u{f3}n de fotogramas", "Generazione di frame"],
+			super::rows_fgen::DESC, // lane fglive: follows the Upscaler (rows_fgen.rs)
+			FG_VALUES,
+			0,
+			Cost::None,
+			Some(super::rows_fgen::NEEDS), // lane fglive: hidden while the Upscaler is Off
+		)
+	},
 ];
 
-/// Upscale quality is dimmed while the Upscaler is Off. No banner over the tab (empty `banner`): the default Off is not a problem
-/// to point at, only the row's box says why it is dimmed.
+/// Upscale quality is hidden while the Upscaler is Off. No banner over the tab (empty `banner`): the default
+/// Off is not a problem to point at.
 pub const NEEDS_UPSCALER: NeedsRule = NeedsRule {
 	row: "upscaler",
 	set_to: rac_engine::viewer::upscale_choice::FFX_VALUE,
+	for_row: "",
+	fix: None,
 	banner: t(""),
 	detail: [
 		"Applies while an upscaler runs. Upscaler is {} now.",
@@ -90,6 +119,8 @@ mod tests {
 		let r = &UPSCALING[0];
 		assert_eq!(r.id, KEY);
 		assert_eq!(r.values.len(), 3);
+		// 2026-11-08: Upscaler, Upscale quality, Frame Generation; no DLSS preset or MSAA row (user: "too many options").
+		assert_eq!(UPSCALING.each_ref().map(|r| r.id), [KEY, "upscale_q", "framegen"]);
 		assert_eq!(r.values.len(), KINDS.len(), "one value per engine kind");
 		assert_eq!(r.values[0], OFF);
 		assert!(r.values[FFX_VALUE as usize].iter().all(|s| s.starts_with("FSR")));

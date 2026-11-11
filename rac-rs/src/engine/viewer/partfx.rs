@@ -35,6 +35,12 @@ const SMOKE: f32 = 1.2;
 pub(super) struct FxLights {
 	pub l: [[[f32; 4]; 2]; FX_LIGHTS],
 	pub n: usize,
+	/// [PC] tb4 fix S2: bit i = light i is a weapon / shot light (shotlight.rs `merged`): it lights surfaces but takes no cube shadow
+	/// map (sunshadow/omni.rs `candidates`; a fast bolt cannot hold a map track).
+	pub shot: u8,
+	/// [PC] lane dlit2: bit i = light i is one of the fire's own lights (firefx.rs `merge_lights`): the volumetric smoke takes the
+	/// fires from the surface light list instead (flitlist.rs `smoke`).
+	pub fire: u8,
 }
 
 impl FxLights {
@@ -164,7 +170,7 @@ impl PartFx {
 			label: Some("soft particles"),
 			entries: &[
 				wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
-				wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Depth, view_dimension: wgpu::TextureViewDimension::D2, multisampled: true }, count: None },
+				wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Depth, view_dimension: wgpu::TextureViewDimension::D2, multisampled: crate::viewer::scene_msaa::msaa() > 1 }, count: None },
 			],
 		});
 		let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("soft particles"), bind_group_layouts: &[Some(ulayout), Some(tex_layout), Some(&layout)], immediate_size: 0 });
@@ -192,7 +198,7 @@ impl PartFx {
 				primitive: wgpu::PrimitiveState { topology, ..Default::default() },
 				// As `part_pipelines` / `line_pipeline`: depth-tested, no writes.
 				depth_stencil: Some(wgpu::DepthStencilState { format: depth_format, depth_write_enabled: Some(false), depth_compare: Some(wgpu::CompareFunction::Less), stencil: Default::default(), bias: Default::default() }),
-				multisample: wgpu::MultisampleState { count: MSAA, ..Default::default() },
+				multisample: wgpu::MultisampleState { count: msaa(), ..Default::default() },
 				multiview_mask: None,
 				cache: None,
 			})
@@ -240,7 +246,7 @@ impl PartFx {
 		let key = (tex.width(), tex.height(), generation);
 		if self.t.as_ref().is_none_or(|t| t.key != key) {
 			let glow_ms = device
-				.create_texture(&wgpu::TextureDescriptor { label: Some("particle glow"), size: wgpu::Extent3d { width: key.0, height: key.1, depth_or_array_layers: 1 }, mip_level_count: 1, sample_count: MSAA, dimension: wgpu::TextureDimension::D2, format: GLOW_FORMAT, usage: wgpu::TextureUsages::RENDER_ATTACHMENT, view_formats: &[] })
+				.create_texture(&wgpu::TextureDescriptor { label: Some("particle glow"), size: { let (width, height) = crate::viewer::scene_msaa::ms_size(key.0, key.1); wgpu::Extent3d { width, height, depth_or_array_layers: 1 } }, mip_level_count: 1, sample_count: crate::viewer::scene_msaa::msaa(), dimension: wgpu::TextureDimension::D2, format: GLOW_FORMAT, usage: wgpu::TextureUsages::RENDER_ATTACHMENT, view_formats: &[] })
 				.create_view(&Default::default());
 			let depth_only = depth.texture().create_view(&wgpu::TextureViewDescriptor { aspect: wgpu::TextureAspect::DepthOnly, ..Default::default() });
 			let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -255,8 +261,8 @@ impl PartFx {
 		let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
 			label: Some("particles"),
 			color_attachments: &[
-				Some(wgpu::RenderPassColorAttachment { view: msaa, resolve_target: Some(resolve), depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Discard } }),
-				Some(wgpu::RenderPassColorAttachment { view: &t.glow_ms, resolve_target: Some(glow), depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Discard } }),
+				Some(crate::viewer::scene_msaa::att(msaa, Some(resolve), wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Discard })), // lane noaa: 1 sample = copy
+				Some(crate::viewer::scene_msaa::att_direct(&t.glow_ms, glow, wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Discard })),
 			],
 			depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: depth, depth_ops: None, stencil_ops: None }),
 			timestamp_writes: crate::viewer::passtime::rw("particles"),

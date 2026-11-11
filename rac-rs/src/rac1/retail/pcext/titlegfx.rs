@@ -122,8 +122,11 @@ pub(super) fn sync(mem: &mut Mem) {
 	}
 	if section() == pcctl::GFX_DISPLAY {
 		crate::retail::pcdisp::field(mem, u32::MAX, [false; 2]);
+		crate::retail::pcmore::field(mem, u32::MAX, [false; 2]);
 	} else if section() == pcctl::GFX_MORE {
 		crate::retail::pcmrefl::field(mem, u32::MAX, [false; 2]);
+	} else if section() == pcctl::SEC_SCREEN {
+		crate::retail::pcfgen::field(mem, u32::MAX, [false; 2]);
 	}
 }
 
@@ -141,8 +144,10 @@ fn row_byte(i: usize, v: &[u8; 19]) -> u8 {
 		c::WHEEL_ROW => pcinput::wheel_mouse() as u8,
 		c::STICK_ROW => pcinput::stick_byte(),
 		c::GLYPH_ROW => crate::retail::glyphs::byte(),
-		c::METAL_ROW => crate::retail::pcmetal::enabled() as u8,
+		c::METAL_ROW => crate::retail::pcmetal::byte(),
 		c::SUPP_ROW => crate::retail::pcsupp::enabled() as u8,
+		c::QSP_ROW => crate::retail::qs_pause::on() as u8,
+		c::FT_ROW => crate::retail::fast_travel::on() as u8,
 		c::MSTYLE_ROW => super::mstyle::byte(),
 		_ if i < v.len() => v[i],
 		_ => 0, // the steppers have one value text
@@ -180,7 +185,7 @@ pub(super) fn rows() -> Vec<(u32, u32)> {
 /// The mirror inserts them into its text map each frame while the page is drawn (the steppers' texts follow the settings).
 pub(crate) fn texts(lang: usize) -> Vec<(u32, String)> {
 	let mut out = pcctl::title_texts(lang, section());
-	for id in crate::retail::pcdisp::ID0..crate::retail::pcdisp::ID_END {
+	for id in (crate::retail::pcdisp::ID0..crate::retail::pcdisp::ID_END).chain(crate::retail::pcmore::IDS) {
 		let t = crate::retail::pcdisp::text(id, lang);
 		if !t.is_empty() {
 			out.push((id, t.iter().map(|&b| b as char).collect()));

@@ -241,7 +241,7 @@ fn lava_patches(m: &Machine, level: u32, desc: u32) -> (Vec<RamPatch>, [f32; 4])
 		.filter_map(|i| {
 			let a = elems + 0x20 * i;
 			let n = m.rd32(a + 0x1c) as i32;
-			if sphere_vis(m, a, far) < 0 || !(3..=256).contains(&n) {
+			if sphere_vis(m, a, super::wide_side::far(far)) < 0 || !(3..=256).contains(&n) {
 				return None;
 			}
 			let (vp, sp) = (m.rd32(a + 0x10) & 0x01ff_ffff, m.rd32(a + 0x14) & 0x01ff_ffff);

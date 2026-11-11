@@ -68,9 +68,9 @@ fn size_of(t: &wgpu::Texture) -> (u32, u32) {
 
 impl Gpu {
 	/// This frame's sizes (`frame` = the acquired window image, `view` = the picture the frame is drawn into).
-	fn frame_sizes(&self, frame: &wgpu::SurfaceTexture, view: &wgpu::TextureView) -> Sizes {
+	fn frame_sizes(&self, frame: &crate::viewer::fgen::present::FrameImage, view: &wgpu::TextureView) -> Sizes {
 		Sizes {
-			frame: size_of(&frame.texture),
+			frame: size_of(frame.texture()),
 			real: self.real_size(),
 			config: (self.config.width, self.config.height),
 			msaa: size_of(self.msaa.texture()),
@@ -84,7 +84,7 @@ impl Gpu {
 	/// `frame_target`, right after the frame's picture is chosen: the frame and picture back when the sizes agree (or no window
 	/// image: the Classic half of a split view), else None: both dropped unpresented and the sizes planned again (the frame is
 	/// skipped; at most `MAX_SKIPS` in a row).
-	pub(super) fn frame_sizes_check(&mut self, frame: Option<wgpu::SurfaceTexture>, view: wgpu::TextureView) -> Option<(Option<wgpu::SurfaceTexture>, wgpu::TextureView)> {
+	pub(super) fn frame_sizes_check(&mut self, frame: Option<crate::viewer::fgen::present::FrameImage>, view: wgpu::TextureView) -> Option<(Option<crate::viewer::fgen::present::FrameImage>, wgpu::TextureView)> {
 		let Some(f) = &frame else { return Some((frame, view)) };
 		let s = self.frame_sizes(f, &view);
 		let Some(why) = disagree(&s) else {

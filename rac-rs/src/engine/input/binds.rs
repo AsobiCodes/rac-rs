@@ -18,11 +18,12 @@
 //! cancels the capture), so it keeps no binding once it has been taken off Start, and "Reset" brings it back.
 //!
 //! File (`pc_options.txt`, see `pcopts.rs`): only what differs from the defaults is written, so a player who never opens the page has
-//! no line. `keys=cross:KeyK,start:Escape+Enter` (function:winit key names, `+` between the keys of one function) and
-//! `pad=cross:b,l2:lb` (function:controller button). Function names are `ID`, key names `KEYS`, button names `PHYS`; anything
-//! that cannot be read is skipped; every entry binds its function alone, as the menu does (a file written before v0.4.1 lists the
-//! functions a swap had moved, so it reads as it did).
-use std::sync::Mutex;
+//! no line. `kbm=` (v0.5.1, `kbm/file.rs`: two inputs per action, keys and mouse buttons) holds the keyboard and mouse bindings; a
+//! v0.5.0 `keys=cross:KeyK,start:Escape+Enter` line (function:winit key names, `+` between the keys of one function) is still read
+//! and converted (`kbm::file::convert_old`), and the next save writes `kbm=` instead. `pad=cross:b,l2:lb` (function:controller
+//! button) is unchanged. Function names are `ID`, key names `KEYS`, button names `PHYS`; anything that cannot be read is skipped.
+//! This file keeps the 24-function view (`KbBinds`, built by `kbm::file::legacy_view`) for the Controls page and the key prompts.
+use super::kbm;
 use winit::keyboard::KeyCode as K;
 
 /// Functions the keyboard drives, and the ones a controller drives (the first `NP`).
@@ -52,7 +53,7 @@ pub const ID: [&str; NK] = [
 ];
 
 /// The stick axis (index into `[rx, ry, lx, ly]`) and direction (the axis moves from 0x80 by 0x7f times this) of stick function `f - LSTICK`.
-const STICK: [(usize, i32); 8] = [(3, -1), (3, 1), (2, -1), (2, 1), (1, -1), (1, 1), (0, -1), (0, 1)];
+pub(crate) const STICK: [(usize, i32); 8] = [(3, -1), (3, 1), (2, -1), (2, 1), (1, -1), (1, 1), (0, -1), (0, 1)];
 
 const fn k1(a: K) -> [Option<K>; 3] {
 	[Some(a), None, None]
@@ -148,6 +149,7 @@ fn norm(a: [Option<K>; 3]) -> [Option<K>; 3] {
 }
 
 impl KbBinds {
+	#[cfg(test)]
 	/// The DualShock report of the keys `held` (plus the mouse's `circle` / `triangle`): (buttons, [rx, ry, lx, ly]).
 	pub fn pad(&self, held: impl Fn(K) -> bool, circle: bool, triangle: bool) -> (u16, [u8; 4]) {
 		let on = |f: usize| self.0[f].iter().flatten().any(|&k| held(k));
@@ -293,9 +295,9 @@ pub fn pad_shown(p: u8, playstation: bool) -> &'static str {
 	}
 }
 
-// ---- the live bindings and the capture ---------------------------------------------------------------------------------
+// ---- the live bindings and the capture (the classic Controls page's view; the state is `kbm::live`) -------------------------
 
-/// What the Controls page waits for: the next fresh key (`Key`) or controller button (`Pad`) for function `f`.
+/// What the classic Controls page waits for: the next fresh key (`Key`) or controller button (`Pad`) for function `f`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Cap {
 	Idle,
@@ -303,151 +305,91 @@ pub enum Cap {
 	Pad(usize),
 }
 
-/// Fields (one per `tick_keys`, 20 ms) a capture waits before it gives up: 8 s.
-pub const CAP_FIELDS: u32 = 400;
+pub use super::kbm::CAP_FIELDS;
 
-/// Everything the page and the input share: the bindings, the change flag and the capture.
-struct Live {
-	kb: KbBinds,
-	pad: [u8; NP],
-	/// A binding changed since the worker last looked (it writes the options file).
-	dirty: bool,
-	cap: Cap,
-	/// Fields the capture has waited.
-	fields: u32,
-	/// The capture ended (bound, cancelled or timed out) since the worker last looked.
-	ended: bool,
-}
-
-impl Live {
-	const START: Live = Live { kb: KbBinds(DEFAULT_KEYS), pad: DEFAULT_PAD, dirty: false, cap: Cap::Idle, fields: 0, ended: false };
-
-	fn assign_key(&mut self, f: usize, k: K) {
-		if f < NK && bindable(k) {
-			self.kb.assign(f, [Some(k), None, None]);
-			self.dirty = true;
-		}
-	}
-
-	fn assign_pad(&mut self, f: usize, p: usize) {
-		if f < NP && p < NP {
-			pad_assign(&mut self.pad, f, p);
-			self.dirty = true;
-		}
-	}
-}
-
-/// The one live state: a mutex in the game; in tests a thread-local (each test runs on a thread of its own, so a test that remaps
-/// never disturbs another one reading the defaults).
-#[cfg(not(test))]
-fn live<R>(f: impl FnOnce(&mut Live) -> R) -> R {
-	static L: Mutex<Live> = Mutex::new(Live::START);
-	f(&mut L.lock().unwrap_or_else(|e| e.into_inner()))
-}
-#[cfg(test)]
-fn live<R>(f: impl FnOnce(&mut Live) -> R) -> R {
-	thread_local! { static L: std::cell::RefCell<Live> = const { std::cell::RefCell::new(Live::START) }; }
-	L.with(|l| f(&mut l.borrow_mut()))
-}
-
-/// The keyboard bindings now (the defaults until `init`, and always with the extension off).
+/// The keyboard bindings now as the old 24-function view (keys only; the defaults until `init`).
 pub fn kb() -> KbBinds {
-	live(|l| l.kb)
+	let (t, b) = (kbm::table(), kbm::binds());
+	kbm::file::legacy_view(t, &b)
 }
 
 pub fn pad_map() -> [u8; NP] {
-	live(|l| l.pad)
+	kbm::pad_map()
 }
 
-/// pcext::init: the options file's `keys` / `pad` values.
+/// pcext::init: the options file's `keys` (old format, converted) and `pad` values.
 pub fn init(keys: Option<&str>, pad: Option<&str>) {
-	live(|l| {
-		l.kb = keys.map_or_else(KbBinds::default, KbBinds::from_text);
-		l.pad = pad.map_or(DEFAULT_PAD, pad_from_text);
-		l.dirty = false;
-	});
+	kbm::init(None, keys, pad, None);
 }
 
-/// The menu bound `k` to keyboard function `f`.
+/// pcext::init with the new `kbm` and `gamepad` values (they win over `keys` and `pad`).
+pub fn init_kbm(kbm_text: Option<&str>, keys: Option<&str>, pad: Option<&str>, gamepad: Option<&str>) {
+	kbm::init(kbm_text, keys, pad, gamepad);
+}
+
+/// The classic page bound `k` to keyboard function `f`: it takes the function's first key slot (else the first slot without a mouse input).
 pub fn assign_key(f: usize, k: K) {
-	live(|l| l.assign_key(f, k));
+	if f < NK && bindable(k) {
+		let (t, b) = (kbm::table(), kbm::binds());
+		if let Some((a, s)) = kbm::file::legacy_slot(t, &b, f) {
+			kbm::assign(a, s, kbm::Input::Key(k));
+		}
+	}
 }
 
-/// The menu bound physical button `p` to controller function `f`.
+/// The menu bound physical button `p` to controller function `f`: slot 1 of the action that drives it (else the first filled slot).
 pub fn assign_pad(f: usize, p: usize) {
-	live(|l| l.assign_pad(f, p));
+	let (t, b) = (kbm::table(), kbm::binds());
+	if let Some((a, s)) = kbm::padfile::legacy_slot(t, &b, f) {
+		kbm::assign_pad(a, s, p);
+	}
 }
 
 pub fn reset_keys() {
-	live(|l| {
-		l.kb = KbBinds::default();
-		l.dirty = true;
-	});
+	kbm::reset_kbm();
 }
 
 pub fn reset_pad() {
-	live(|l| {
-		l.pad = DEFAULT_PAD;
-		l.dirty = true;
-	});
+	kbm::reset_pad();
 }
 
-/// Worker: Some((`keys` value, `pad` value)) once after a change (a None value = the defaults: the line goes).
+/// Worker: Some((`keys` value, `pad` value)) once after a change; the first is the old function-per-key text (keys alone).
 pub fn take_changes() -> Option<(Option<String>, Option<String>)> {
-	live(|l| std::mem::take(&mut l.dirty).then(|| (l.kb.to_text(), pad_to_text(&l.pad))))
+	kbm::take_changes_legacy()
+}
+
+/// Worker: Some((`kbm` value, `gamepad` value)) once after a change (a None value = the defaults: the line goes).
+pub fn take_changes_kbm() -> Option<(Option<String>, Option<String>)> {
+	kbm::take_changes()
 }
 
 /// Worker: the player pressed Confirm on a row: wait for the next key or button.
 pub fn capture_begin(c: Cap) {
-	live(|l| {
-		l.cap = c;
-		l.fields = 0;
-		l.ended = false;
-	});
-}
-
-/// Worker: stops a capture (the page was left, the section changed).
-pub fn capture_cancel() {
-	live(|l| {
-		if l.cap != Cap::Idle {
-			l.cap = Cap::Idle;
-			l.ended = true;
-		}
-	});
-}
-
-/// Window thread: a capture is waiting, so the game gets a neutral pad this field.
-pub fn capturing() -> bool {
-	live(|l| l.cap != Cap::Idle)
-}
-
-/// Worker: true once when the capture ended (the row's byte goes back to 0).
-pub fn capture_ended() -> bool {
-	live(|l| std::mem::take(&mut l.ended))
-}
-
-/// Window thread, every field while `capturing`: `keys` are the keys pressed fresh this field, `phys` the controller buttons
-/// (`PHYS` masks) that went down this field. Binds the first, or ends on Esc / the time limit.
-pub fn capture_poll(keys: &[K], phys: u32) {
-	live(|l| {
-		if l.cap == Cap::Idle {
-			return;
-		}
-		l.fields += 1;
-		let done = if keys.contains(&K::Escape) || l.fields > CAP_FIELDS {
-			true
-		} else {
-			match l.cap {
-				Cap::Key(f) => keys.iter().copied().find(|&k| bindable(k)).map(|k| l.assign_key(f, k)).is_some(),
-				Cap::Pad(f) => (0..NP).find(|&p| phys & PHYS[p].1 != 0).map(|p| l.assign_pad(f, p)).is_some(),
-				Cap::Idle => false,
+	match c {
+		Cap::Idle => kbm::capture_cancel(),
+		Cap::Pad(f) => {
+			let (t, b) = (kbm::table(), kbm::binds());
+			match kbm::padfile::legacy_slot(t, &b, f) {
+				Some((a, s)) => kbm::capture_begin(kbm::Cap::Pad(a, s)),
+				None => kbm::capture_cancel(),
 			}
-		};
-		if done {
-			l.cap = Cap::Idle;
-			l.ended = true;
 		}
-	});
+		Cap::Key(f) => {
+			let (t, b) = (kbm::table(), kbm::binds());
+			match kbm::file::legacy_slot(t, &b, f) {
+				Some((a, s)) => kbm::capture_begin(kbm::Cap::Kbm(a, s)),
+				None => kbm::capture_cancel(),
+			}
+		}
+	}
+}
+
+pub use kbm::{capture_cancel, capture_ended, capturing};
+
+/// Window thread, every field while `capturing`: `keys` are the keys pressed fresh this field, `phys` the controller buttons.
+pub fn capture_poll(keys: &[K], phys: u32) {
+	let v: Vec<kbm::Input> = keys.iter().map(|&k| kbm::Input::Key(k)).collect();
+	kbm::capture_poll(&v, phys);
 }
 
 // ---- prompts ---------------------------------------------------------------------------------------------------------

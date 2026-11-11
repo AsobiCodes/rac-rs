@@ -13,6 +13,8 @@ pub const METAL_BRUSHED: u8 = 2;
 pub const METAL_PAINTED: u8 = 3;
 
 pub struct Pack {
+	/// The keyboard + mouse action table (`input/kbm`); `NONE` and packs without their own use the generic PS2 table.
+	pub kbm: &'static crate::input::kbm::Table,
 	/// The Graphics page's verdict before the split view (render thread, every frame; `gfx::graphics`).
 	pub graphics: fn() -> Graphics,
 	/// The game's Debug mode is on: the split view's keys work and texture packs keep the original textures (`splitview`).
@@ -96,6 +98,11 @@ pub struct Pack {
 	pub ui: Option<&'static crate::ui::UiPack>,
 	/// [PC] A sound of the modern UI (move, select, back); default none.
 	pub ui_sound: fn(crate::ui::UiSound),
+	/// [PC] RAC_DIAG (diag.rs): the game's facts for the diagnostic record (level, paused / menu, hero, camera); default none.
+	pub diag_facts: fn() -> crate::diag::Facts,
+	/// [PC] The scene MSAA mode when the options file has no `scene_msaa` (viewer/scene_msaa.rs `NAMES` index; no menu row): 0 = 4x,
+	/// 1 = Off while DLSS / FSR runs; default 4x.
+	pub scene_msaa_default: u8,
 }
 
 /// [PC] A game's size options (`Pack::reset_sizes`; R&C1: rac1/retail/pcext/ui_bridge.rs `reset_sizes`).
@@ -129,6 +136,7 @@ pub struct WorldArt {
 
 /// No game: the Classic picture, no Debug mode, no vegetation, no GS capture, no shop, moby pool or world art, the retail looks.
 pub static NONE: Pack = Pack {
+	kbm: &crate::input::kbm::generic::TABLE,
 	graphics: classic,
 	debug_mode: no,
 	running: no,
@@ -168,6 +176,8 @@ pub static NONE: Pack = Pack {
 	achievements: None,
 	ui: None,
 	ui_sound: |_| {},
+	diag_facts: crate::diag::Facts::default,
+	scene_msaa_default: 0,
 };
 
 fn classic() -> Graphics {

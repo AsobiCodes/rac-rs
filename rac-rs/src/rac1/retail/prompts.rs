@@ -14,9 +14,9 @@
 //! same instructions on the hand (stack write, search, registers) and answers a rewritten copy from a pool in reserved RAM
 //! (`POOL`) only for strings that hold a glyph, written only when the slot differs; nothing else in RAM changes.
 //!
-//! Key names come from the keyboard bindings of `retail::pad_from_keys` (the `BINDINGS` table below is checked against it by
-//! the unit tests): the English keycap names, in all five languages (a key name is a label on a physical key, not a word of the
-//! sentence, and the pad's glyphs were language-free as well).
+//! Key names come from the live bindings (`prompt_names.rs`: the first bound input of the action that drives the button, so a
+//! rebound key or mouse button and the keyboard layout show): the English keycap names, in all five languages (a key name is a
+//! label on a physical key, not a word of the sentence, and the pad's glyphs were language-free as well).
 //! Exception: a short legend line that starts with Cross ("Select file", "Seleccionar") gets "Spc" (or "Sp") instead of "Space" when
 //! "Space" plus the label would be wider than retail's legend box (see `substitute`).
 //!
@@ -69,13 +69,11 @@ pub const LSTICK: u8 = 0x19;
 
 // ---- key names (the keyboard bindings) --------------------------------------------------------------------------------
 
-/// One glyph and its binding in `retail::pad_from_keys`: the PS2 pad bit, the keys that set it, the name shown.
+/// One glyph and the PS2 pad bit its button sets (the key shown comes from the live bindings, `prompt_names.rs`).
 pub struct Binding {
 	pub code: u8,
-	/// DualShock bit(s) of `pad_from_keys` (the sticks: the axis indices instead, see `Binding::axes`).
+	/// DualShock bit of the button (the sticks: 0).
 	pub bit: u16,
-	pub keys: &'static [KeyCode],
-	pub name: &'static str,
 }
 
 /// The glyphs a text can hold. Circle also has the left mouse button (fire) and, in a menu, the right one (back); a menu line
@@ -83,16 +81,16 @@ pub struct Binding {
 /// is the mouse with the Modern camera and Q/E/Z/X otherwise (both always work, see `key_name`); Triangle also has the middle
 /// mouse button.
 pub const BINDINGS: [Binding; 10] = [
-	Binding { code: CROSS, bit: 0x40, keys: &[KeyCode::Space], name: "Space" },
-	Binding { code: CIRCLE, bit: 0x20, keys: &[KeyCode::KeyG], name: "LMB" },
-	Binding { code: TRIANGLE, bit: 0x10, keys: &[KeyCode::KeyT], name: "T" },
-	Binding { code: SQUARE, bit: 0x80, keys: &[KeyCode::KeyF], name: "F" },
-	Binding { code: L1, bit: 4, keys: &[KeyCode::KeyC], name: "C" },
-	Binding { code: R1, bit: 8, keys: &[KeyCode::ControlLeft], name: "Ctrl" },
-	Binding { code: L2, bit: 1, keys: &[KeyCode::KeyV], name: "V" },
-	Binding { code: R2, bit: 2, keys: &[KeyCode::KeyB], name: "B" },
-	Binding { code: RSTICK, bit: 0, keys: &[KeyCode::KeyQ, KeyCode::KeyE, KeyCode::KeyZ, KeyCode::KeyX], name: "Q/E/Z/X" },
-	Binding { code: LSTICK, bit: 0, keys: &[KeyCode::KeyW, KeyCode::KeyA, KeyCode::KeyS, KeyCode::KeyD], name: "WASD" },
+	Binding { code: CROSS, bit: 0x40 },
+	Binding { code: CIRCLE, bit: 0x20 },
+	Binding { code: TRIANGLE, bit: 0x10 },
+	Binding { code: SQUARE, bit: 0x80 },
+	Binding { code: L1, bit: 4 },
+	Binding { code: R1, bit: 8 },
+	Binding { code: L2, bit: 1 },
+	Binding { code: R2, bit: 2 },
+	Binding { code: RSTICK, bit: 0 },
+	Binding { code: LSTICK, bit: 0 },
 ];
 
 /// What the player sees of the world when a name is chosen.
@@ -104,36 +102,15 @@ pub struct Ctx {
 	pub menu: Option<super::menu_keys::Screen>,
 }
 
-/// The binding function (`binds::CROSS` ..) of a button glyph code (Cross .. R2); None for the sticks and other bytes.
-fn bound_function(code: u8) -> Option<usize> {
-	use super::binds as b;
-	Some(match code {
-		CROSS => b::CROSS,
-		CIRCLE => b::CIRCLE,
-		TRIANGLE => b::TRIANGLE,
-		SQUARE => b::SQUARE,
-		L1 => b::L1,
-		R1 => b::R1,
-		L2 => b::L2,
-		R2 => b::R2,
-		_ => return None,
-	})
-}
-
-/// The key name of a glyph code for the keyboard; None for a byte that is not a button glyph. A remapped function (Pause ->
-/// Options -> Controls, `binds`) shows the key it was given; one that still has its default key keeps the name of `BINDINGS`.
+/// The key name of a glyph code for the keyboard, from the live bindings (`prompt_names.rs`: the first bound input of the action that
+/// drives the button); None for a byte that is not a button glyph. The right stick says "Mouse" with the Modern camera.
 pub fn key_name(code: u8, ctx: Ctx) -> Option<Cow<'static, [u8]>> {
-	use super::binds as b;
-	let own = |n: Option<String>| n.map(|n| Cow::Owned(n.into_bytes()));
-	let stick = |first: usize| match own(b::stick_name(first)) {
-		Some(n) => Some(n),
-		None => BINDINGS.iter().find(|k| k.code == if first == b::LSTICK { LSTICK } else { RSTICK }).map(|k| Cow::Borrowed(k.name.as_bytes())),
-	};
+	use super::prompt_names as pn;
 	match code {
 		RSTICK if ctx.modern_camera => Some(Cow::Borrowed(&b"Mouse"[..])),
-		RSTICK => stick(b::RSTICK),
-		LSTICK => stick(b::LSTICK),
-		c => own(bound_function(c).and_then(b::prompt_name)).or_else(|| BINDINGS.iter().find(|k| k.code == c).map(|k| Cow::Borrowed(k.name.as_bytes()))),
+		RSTICK => Some(Cow::Owned(pn::stick_name(false).into_bytes())),
+		LSTICK => Some(Cow::Owned(pn::stick_name(true).into_bytes())),
+		c => BINDINGS.iter().find(|k| k.code == c && k.bit != 0).and_then(|k| pn::glyph_name(k.bit)).map(|n| Cow::Owned(n.into_bytes())),
 	}
 }
 
@@ -147,6 +124,21 @@ pub fn key_name(code: u8, ctx: Ctx) -> Option<Cow<'static, [u8]>> {
 const LEGEND_FIT_PX: u32 = 129;
 const LEGEND_MAX_BYTES: usize = 24;
 const LEGEND_NAMES: [&[u8]; 3] = [b"Space", b"Spc", b"Sp"];
+
+/// The legend box width (px of the title font) of in-level page `id`, read off the retail pictures (the weapons box is the width of
+/// retail's widest German line, the map's the width of its track line); every other box is the Load / Options one.
+fn legend_limit(id: u32) -> u32 {
+	match id {
+		// Weapons (3) and Quick Select (5): the same 111 px box (pictured 2026-11-05, German: "Enter Ausrues" clipped at 129).
+		3 | 5 => 111,
+		super::menu_keys::MAP => 173,
+		_ => LEGEND_FIT_PX,
+	}
+}
+
+fn vendor_screen(sc: &super::menu_keys::Screen) -> bool {
+	*sc == super::menu_keys::VENDOR
+}
 
 /// Advance (px) of each font byte in the title font (table 0x1defd0 of the front-end bin, byte +3 of each 4-byte entry).
 const FONT_ADV: [u8; 256] = [
@@ -211,7 +203,14 @@ pub fn substitute_text(s: &[u8], ctx: Ctx, id: u32) -> Option<Vec<u8>> {
 	}
 	let short_line = (CROSS..=LSTICK).contains(&s[0]) && s.len() <= LEGEND_MAX_BYTES;
 	if let Some(sc) = ctx.menu.filter(|_| short_line || MENU_TEXTS.contains(&(id as u16))) {
-		let rest = &s[1..1 + s.iter().skip(1).take_while(|&&b| b >= 0x20).count()];
+		// What follows the first glyph on the line, later glyphs spelled out: the box must hold all of it.
+		let rest: Vec<u8> = s[1..].iter().take_while(|&&b| b != 0x01 && b != 0x08 && b != 0x0c).flat_map(|&b| match menu_name(b, &sc, false) {
+			Some(n) if (CROSS..=LSTICK).contains(&b) => n.to_vec(),
+			// No menu key: the output prints the play key name, so measure that.
+			_ => key_name(b, ctx).map(|k| k.into_owned()).unwrap_or_else(|| vec![b]),
+		}).collect();
+		let rest = &rest[..];
+		let limit = legend_limit(sc.id);
 		let mut o = Vec::with_capacity(s.len() + 16);
 		for (i, &b) in s.iter().enumerate() {
 			let name = if i == 0 && short_line {
@@ -219,12 +218,15 @@ pub fn substitute_text(s: &[u8], ctx: Ctx, id: u32) -> Option<Vec<u8>> {
 				// does not fit with "Ent" either names the other confirm key, Space, as "Sp" (de "Sp Umschalten" 130 px; "Ent
 				// Umschalten" 135 loses its last letter). The vendor's plates (font 2, 89 px) always take the short one; the
 				// mode-4 dialogs centre their lines with no box, so they keep the long name.
-				let fits = |n: &[u8]| super::menu_keys::is_dialog(&sc) || text_px(n) + text_px(rest) <= LEGEND_FIT_PX;
+				let fits = |n: &[u8]| super::menu_keys::is_dialog(&sc) || text_px(n) + text_px(rest) <= limit;
+				let boxed = !vendor_screen(&sc) && !super::menu_keys::is_dialog(&sc);
 				let vendor = sc == super::menu_keys::VENDOR;
 				menu_name(b, &sc, false)
 					.filter(|n| !vendor && fits(n))
 					.or_else(|| menu_name(b, &sc, true).filter(|n| vendor || fits(n)))
-					.or_else(|| BINDINGS.iter().any(|k| k.code == b && k.bit == sc.confirm && k.bit != 0).then_some(&b"Sp"[..]))
+					.or_else(|| BINDINGS.iter().any(|k| k.code == b && k.bit == sc.confirm && k.bit != 0).then_some(&b"Sp"[..]).filter(|n| !boxed || text_px(n) + text_px(rest) <= limit + 1))
+					// Nothing fits the box (a long German / French label): the label alone beats a clipped one.
+					.or_else(|| (boxed && menu_name(b, &sc, false).is_some()).then_some(&b""[..]))
 					.or_else(|| menu_name(b, &sc, true))
 			} else {
 				menu_name(b, &sc, false)
@@ -238,7 +240,7 @@ pub fn substitute_text(s: &[u8], ctx: Ctx, id: u32) -> Option<Vec<u8>> {
 	}
 	let mut legend: Option<&'static [u8]> = None;
 	// A remapped Cross names its key as it is (no "Spc").
-	if s[0] == CROSS && s.len() <= LEGEND_MAX_BYTES && super::binds::prompt_name(super::binds::CROSS).is_none() {
+	if s[0] == CROSS && s.len() <= LEGEND_MAX_BYTES && super::prompt_names::jump_is_space() {
 		let rest = &s[1..1 + s.iter().skip(1).take_while(|&&b| b >= 0x20).count()];
 		let px = text_px(rest);
 		legend = LEGEND_NAMES.iter().copied().find(|n| text_px(n) + px <= LEGEND_FIT_PX).or(LEGEND_NAMES.last().copied());
@@ -282,6 +284,7 @@ fn ctx_now() -> Ctx {
 /// A bank text the PC draws itself (the title front end's mirror, frontend.rs; each char is one byte of the bank): its glyphs
 /// spelled out as key names while the keyboard is the device (the menu keys while a page menu is open), unchanged otherwise.
 pub fn for_text(s: &str) -> String {
+	// A controller: the front end is a menu, whose pictures are the STANDARD layout whatever the remap (v0.5.1): untouched.
 	if !keyboard_now() {
 		return s.to_string();
 	}
@@ -296,9 +299,26 @@ pub fn for_text(s: &str) -> String {
 /// glyphs while the keyboard is the device, None while the gamepad is or when it holds no glyph.
 pub fn for_device(s: &[u8]) -> Option<Vec<u8>> {
 	if !keyboard_now() {
-		return None;
+		return None; // the shop plates are a menu: the standard pictures
 	}
 	substitute(s, ctx_now())
+}
+
+/// Menu choices longer than a legend that name a controller button (the title's "Continue without saving", the New Game+ choices): they
+/// keep the standard pictures under a remap, the menu reads the standard layout.
+const PAD_MENU_TEXTS: [u16; 3] = [0x5232, 0x5184, 0x5185];
+
+/// The controller's counterpart of `substitute_text` (only under a controller remap): menu legend and hint lines keep the standard
+/// cells; a text that describes play gets the glyph codes / names of the buttons its actions are on now (`prompt_pad.rs`).
+pub fn substitute_pad(s: &[u8], ctx: Ctx, id: u32) -> Option<Vec<u8>> {
+	if s.is_empty() || !s.iter().any(|&b| (CROSS..=R2).contains(&b)) {
+		return None;
+	}
+	let short_line = (CROSS..=LSTICK).contains(&s[0]) && s.len() <= LEGEND_MAX_BYTES;
+	if MENU_TEXTS.contains(&(id as u16)) || PAD_MENU_TEXTS.contains(&(id as u16)) || (ctx.menu.is_some() && short_line) {
+		return None;
+	}
+	super::prompt_pad::rewrite(s)
 }
 
 /// Glyph strings that never pass the text lookup (the Quick Select ring's "L1" / "R1", literal one-byte strings 0x14 / 0x15 of the
@@ -308,14 +328,13 @@ pub fn for_device(s: &[u8]) -> Option<Vec<u8>> {
 /// (`substitute_text`: in a menu its keys, so the ring says "Q" / "E"); the hand then declines and retail's own wrapper draws
 /// it. With a gamepad, or no glyph: nothing is touched.
 pub fn glyph_draw_hook(c: &mut Cpu) -> bool {
-	if keyboard_now() {
-		spell_glyphs(c);
-	}
+	// A controller under a remap: the ring's L1 / R1 name the buttons the Look / Crouch actions are on now (`substitute_pad`).
+	spell_glyphs(c);
 	// Decline: retail's own wrapper draws (the Eudora hands that used to take the draw are gone).
 	false
 }
 
-/// Keyboard: a3 -> a pool copy of the string with its glyphs spelled out (nothing when it holds no glyph).
+/// a3 -> a pool copy of the string with its glyphs spelled out for the device (nothing when it holds no glyph, or on an unmapped pad).
 fn spell_glyphs(c: &mut Cpu) {
 	spell_arg(c, 7);
 }
@@ -324,9 +343,24 @@ fn spell_glyphs(c: &mut Cpu) {
 /// (nothing changes when the string holds no glyph or is not in RAM). Used by the font line wrapper and the box text hook
 /// (`prompts_box`).
 pub(super) fn spell_arg(c: &mut Cpu, reg: usize) {
-	let p = c.g(reg) as u32;
-	if !(0x10_0000..0x0200_0000).contains(&p) {
+	spell_arg_for(c, reg, keyboard_now());
+}
+
+/// True when `p` lies in the lookup's text pool: a string there was already made for the device (spelled out, rewritten for the pad
+/// remap, or kept standard on purpose) and must not be substituted again by the wrapper hooks.
+pub(super) fn in_pool(p: u32) -> bool {
+	(POOL..POOL + SLOT * SLOTS as u32).contains(&p)
+}
+
+/// `spell_arg` with the device given: the keyboard's key names, or (a controller under a remap) the glyph codes / names of the
+/// buttons the actions are on now (`prompt_pad`); an unmapped controller changes nothing.
+pub(super) fn spell_arg_for(c: &mut Cpu, reg: usize, kb: bool) {
+	if !kb && !super::prompt_pad::remapped() {
 		return;
+	}
+	let p = c.g(reg) as u32;
+	if !(0x10_0000..0x0200_0000).contains(&p) || in_pool(p) {
+		return; // not RAM, or already the pool copy made for this device (TB2-B1: a second rewrite would permute the glyphs again)
 	}
 	let mut s = Vec::new();
 	for i in 0..SLOT - 1 {
@@ -341,7 +375,8 @@ pub(super) fn spell_arg(c: &mut Cpu, reg: usize) {
 		return;
 	}
 	let ctx = ctx_now();
-	let Some(n) = substitute_text(&s, ctx, 0).filter(|n| n.len() < SLOT as usize - 1) else { return };
+	let sub = if kb { substitute_text(&s, ctx, 0) } else { substitute_pad(&s, ctx, 0) };
+	let Some(n) = sub.filter(|n| n.len() < SLOT as usize - 1) else { return };
 	let at = place(&mut c.mem, (p, fnv(&s), ctx.modern_camera, ctx.menu.map_or(0, super::menu_keys::pack) ^ fnv(&n)), &n);
 	if at != 0 {
 		c.s(reg, at as u64);
@@ -376,6 +411,12 @@ pub static GLYPH_HANDS: [Hand; 21] = [
 	Hand { entry: 0x1f6438, end: 0x1f64b4, hash: 0xb08b0a46f9e2e11b, est: 31, f: glyph_draw_hook }, // boot ELF
 	Hand { entry: 0x1f6178, end: 0x1f61f4, hash: 0xb7a8f00bac1f759b, est: 31, f: glyph_draw_hook }, // frontbin
 ];
+
+/// Tests: makes the controller (true) or the keyboard (false) the device of the current field.
+#[cfg(test)]
+pub(super) fn test_set_pad_device(pad: bool) {
+	FIELD.store(if pad { PAD } else { KB }, Ordering::Relaxed);
+}
 
 /// True while the keyboard is the device of the current field.
 pub fn keyboard_now() -> bool {
@@ -653,11 +694,13 @@ fn place(mem: &mut Mem, key: (u32, u64, bool, u64), s: &[u8]) -> u32 {
 pub fn lookup(c: &mut Cpu) -> bool {
 	let id = c.g(4) as u32;
 	super::map_seen::note(id, FIELD_NO.load(Ordering::Relaxed));
+	super::help_seen::note(id, FIELD_NO.load(Ordering::Relaxed));
 	let log = lookup_log(FIELD_NO.load(Ordering::Relaxed));
 	if log {
 		eprintln!("prompts: lookup field {} id {:#x} {}", FIELD_NO.load(Ordering::Relaxed), c.g(4) as u32, if keyboard_now() { "kb" } else { "pad" });
 	}
-	if !keyboard_now() {
+	let kb = keyboard_now();
+	if !kb && !super::prompt_pad::remapped() {
 		return false;
 	}
 	let pc = c.pc;
@@ -706,7 +749,11 @@ pub fn lookup(c: &mut Cpu) -> bool {
 			s.push(b);
 		}
 		let ctx = ctx_now();
-		if let Some(n) = substitute_text(&s, ctx, id).filter(|n| n.len() < SLOT as usize - 1) {
+		let sub = if kb { substitute_text(&s, ctx, id) } else { substitute_pad(&s, ctx, id) };
+		// Under a pad remap a glyph string the rules declined (menu ids, legends) is still answered as a pool copy with the SAME bytes,
+		// so the wrapper hooks skip it and never apply the gameplay binding to it (TB2-S1).
+		let sub = sub.or_else(|| (!kb && s.iter().any(|&b| (CROSS..=R2).contains(&b))).then(|| s.clone()));
+		if let Some(n) = sub.filter(|n| n.len() < SLOT as usize - 1) {
 			let at = place(&mut c.mem, (ptr, fnv(&s), ctx.modern_camera, ctx.menu.map_or(0, super::menu_keys::pack) ^ fnv(&n)), &n);
 			c.s(2, at as i32 as i64 as u64);
 		}
@@ -737,6 +784,13 @@ pub fn phys_fresh() -> u32 {
 pub fn phys_now() -> u32 {
 	PHYS_NOW.load(Ordering::Relaxed)
 }
+
+/// The controller's PS2 buttons at the last `poll_pad` call in the STANDARD layout, whatever the player remapped: the skip of a scene
+/// or flight reads them (`Retail::tick_keys`, pcskip.rs), like the movie skip (`pad_buttons`).
+pub fn std_buttons() -> u16 {
+	STD_NOW.load(Ordering::Relaxed)
+}
+static STD_NOW: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
 
 /// [PC] The connected gamepad's state now, without the prompt-device bookkeeping. Read once per display frame on the main thread by
 /// the four modern hosts (frame_vendor.rs, frame_pause.rs, frame_ship.rs, front_modern.rs: their pad sample) and by the dev free
@@ -774,40 +828,79 @@ fn r2_route(pad_r2: bool, gameplay: bool, ratchet: bool, aim_button: bool) -> (b
 	(strip && pad_r2, pad_r2 && !strip)
 }
 
-/// Bit 0: the pad's R2 is held (this field's `poll_pad`); bit 1: the keyboard's R2 key (B) is held in the same field (never stripped).
-static R2_HELD: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+/// What the controller gave this field, for `apply_r2` (the aim decides later, where the newest snapshot is known).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct PadRoute {
+	/// A controller button bound to the Aim is held (today's "the pad's R2").
+	pub aim: bool,
+	/// The PS2 buttons the controller gave.
+	pub all: u16,
+	/// The same without the outputs of the Aim's buttons (what stays for the game while the aim has them).
+	pub free: u16,
+	/// The keyboard's PS2 buttons of the field (never taken by the aim).
+	pub kb: u16,
+}
 
-/// Takes the pad's R2 out of `buttons` when the aim has it (the call of `Retail::tick_inner`, after the newest snapshot is taken, so
-/// the mode / body form are those of the field just finished: no lag in lockstep; with run-ahead (depth > 1) a mode change reaches
-/// the pad up to depth - 1 fields late, `Retail::pad_gameplay`) and sets the modern camera's aim mode.
-/// `buttons` holds the pad's R2 from `poll_pad`; the keyboard's R2 key stays.
+impl PadRoute {
+	fn pack(self) -> u64 {
+		self.aim as u64 | (self.all as u64) << 1 | (self.free as u64) << 17 | (self.kb as u64) << 33
+	}
+	fn unpack(v: u64) -> Self {
+		PadRoute { aim: v & 1 != 0, all: (v >> 1) as u16, free: (v >> 17) as u16, kb: (v >> 33) as u16 }
+	}
+}
+
+static ROUTE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Takes the controller's Aim buttons out of `buttons` when the aim has them (the call of `Retail::tick_inner`, after the newest snapshot
+/// is taken, so the mode / body form are those of the field just finished: no lag in lockstep; with run-ahead (depth > 1) a mode change
+/// reaches the pad up to depth - 1 fields late, `Retail::pad_gameplay`) and sets the modern camera's aim mode. Decided 2026-11-05: the
+/// aim CONSUMES every output of its buttons (not only R2); the keyboard's buttons and what another button also gives stay.
 pub fn route_r2(buttons: &mut u16, gameplay: bool, ratchet: bool) {
-	let down = apply_r2(buttons, R2_HELD.load(Ordering::Relaxed), gameplay, ratchet, super::modcam::classic::aim_button());
+	let down = apply_r2(buttons, PadRoute::unpack(ROUTE.load(Ordering::Relaxed)), gameplay, ratchet, super::modcam::classic::aim_button());
 	super::modcam::pad_aim(down);
 }
 
-/// `route_r2` without the globals: `held` as `R2_HELD`; returns whether the aim mode is down.
-fn apply_r2(buttons: &mut u16, held: u8, gameplay: bool, ratchet: bool, aim_button: bool) -> bool {
-	let (aim_down, to_game) = r2_route(held & 1 != 0, gameplay, ratchet, aim_button);
-	if held & 3 == 1 && !to_game {
-		*buttons &= !2;
+/// `route_r2` without the globals; returns whether the aim mode is down. The aim has the buttons exactly while it is the aim's field
+/// (`r2_stripped`): then the controller's outputs that only the Aim's buttons give are removed; elsewhere they are retail's.
+pub(super) fn apply_r2(buttons: &mut u16, route: PadRoute, gameplay: bool, ratchet: bool, aim_button: bool) -> bool {
+	let strip = r2_stripped(r2_is_aim(gameplay, aim_button), ratchet);
+	if strip && route.aim {
+		*buttons &= !(route.all & !route.free & !route.kb);
 	}
-	aim_down
+	strip && route.aim
+}
+
+/// The controller's actions for the physical buttons `phys` (v0.5.1): the player's remap in gameplay, the STANDARD layout (the
+/// defaults) in `menu` (a menu screen, a dialog, the shop, the front end: the keyboard's Menu context, `menu_keys`). Returns the PS2
+/// buttons and the route (`kb` filled in by `poll_pad`).
+pub(super) fn pad_actions(phys: u32, menu: bool) -> (u16, PadRoute) {
+	use rac_engine::input::kbm;
+	let t = kbm::table();
+	let ev = kbm::eval_pad(t, &if menu { kbm::Binds::defaults(t) } else { kbm::binds() }, phys, Some(crate::kbm_actions::AIM));
+	(ev.buttons, PadRoute { aim: ev.pc & (1 << crate::kbm_actions::AIM) != 0, all: ev.buttons, free: ev.free, kb: 0 })
 }
 
 /// Gamepad input for this field (Retail::tick_keys, window thread): merges the pad's buttons and sticks into the keyboard's and
-/// makes the gamepad the device when `pad_activity` says so. Nothing without a connected pad. The pad's R2 is merged like the other
-/// buttons and noted (`R2_HELD`); whether the aim keeps it from the game is decided later, where the newest snapshot is known
-/// (`route_r2`).
-pub fn poll_pad(buttons: &mut u16, sticks: &mut [u8; 4]) {
+/// makes the gamepad the device when `pad_activity` says so. Nothing without a connected pad. The buttons are the controller's actions
+/// (`pad_actions`; `menu`: the standard layout). The Aim's buttons are merged like the other buttons and noted (`ROUTE`); whether the
+/// aim keeps them from the game is decided later, where the newest snapshot is known (`route_r2`). Under a remap, a button held when
+/// the layout switches (menu <-> gameplay) or when a movie skip ended does nothing until it is released (`pad_stale`).
+pub fn poll_pad(buttons: &mut u16, sticks: &mut [u8; 4], menu: bool) {
 	let pr = pad_read();
 	PHYS_PREV.store(PHYS_NOW.load(Ordering::Relaxed), Ordering::Relaxed);
 	PHYS_NOW.store(pr.map_or(0, |r| r.1), Ordering::Relaxed);
-	let Some((p, _)) = pr else {
-		R2_HELD.store(0, Ordering::Relaxed);
+	let Some((p, phys)) = pr else {
+		ROUTE.store(0, Ordering::Relaxed);
+		STD_NOW.store(0, Ordering::Relaxed);
+		super::pad_stale::step(0, menu, false);
 		return;
 	};
-	R2_HELD.store((p.buttons & 2 != 0) as u8 | (((*buttons & 2 != 0) as u8) << 1), Ordering::Relaxed);
+	STD_NOW.store(p.buttons, Ordering::Relaxed);
+	let phys = super::pad_stale::step(phys, menu, super::prompt_pad::remapped());
+	let (pad_buttons, mut route) = pad_actions(phys, menu);
+	route.kb = *buttons;
+	ROUTE.store(route.pack(), Ordering::Relaxed);
 	static PREV: Mutex<PadState> = Mutex::new(PadState::IDLE);
 	if let Ok(mut prev) = PREV.lock() {
 		if pad_activity(&prev, &p) {
@@ -816,7 +909,7 @@ pub fn poll_pad(buttons: &mut u16, sticks: &mut [u8; 4]) {
 		}
 		*prev = p;
 	}
-	(*buttons, *sticks) = merge((*buttons, *sticks), &p);
+	(*buttons, *sticks) = merge((*buttons, *sticks), &PadState { buttons: pad_buttons, sticks: p.sticks });
 }
 
 #[cfg(test)]
@@ -848,22 +941,28 @@ mod tests {
 		assert_eq!(r2_route(false, false, false, false), (false, false));
 	}
 
-	/// The field's buttons through `apply_r2`: R2 is retail's in the pause (mode 3), none of it in gameplay as Ratchet, and the
-	/// keyboard's B key is never taken. Leaving the pause with R2 held gives retail no crouch (gameplay at once), entering it keeps R2.
+	/// The field's buttons through `apply_r2`: the aim's buttons are retail's in the pause (mode 3), none of their outputs reach the
+	/// game in gameplay as Ratchet, and the keyboard's B key is never taken. Leaving the pause with R2 held gives retail no crouch
+	/// (gameplay at once), entering it keeps R2. Every other output of an Aim button goes too (decided 2026-11-05).
 	#[test]
-	fn apply_r2_takes_only_the_pads_r2_and_only_when_the_aim_has_it() {
-		let go = |held: u8, b: u16, gameplay: bool, ratchet: bool, aim_button: bool| {
+	fn apply_r2_takes_the_outputs_of_the_aim_buttons_and_only_when_the_aim_has_it() {
+		let route = |aim: bool, all: u16, free: u16, kb: u16| PadRoute { aim, all, free, kb };
+		let go = |r: PadRoute, b: u16, gameplay: bool, ratchet: bool, aim_button: bool| {
 			let mut b = b;
-			let down = apply_r2(&mut b, held, gameplay, ratchet, aim_button);
+			let down = apply_r2(&mut b, r, gameplay, ratchet, aim_button);
 			(b, down)
 		};
-		assert_eq!(go(1, 0x12, true, true, true), (0x10, true), "gameplay as Ratchet: R2 is the aim's");
-		assert_eq!(go(1, 0x12, false, true, true), (0x12, false), "the pause menu: retail gets R2 (L1 + R2 scanner)");
-		assert_eq!(go(1, 0x12, true, false, true), (0x12, false), "Clank: retail gets R2, modcam's aim stays up");
-		assert_eq!(go(1, 0x12, true, true, false), (0x12, false), "no aim button: retail's R2");
-		assert_eq!(go(3, 0x02, true, true, true), (0x02, true), "the keyboard's B key (R2) is not the pad's and stays");
-		assert_eq!(go(0, 0x02, true, true, true), (0x02, false), "B alone: untouched, no pad aim");
-		assert_eq!(go(0, 0x00, true, true, true), (0x00, false));
+		let rt = route(true, 2, 0, 0);
+		assert_eq!(go(rt, 0x12, true, true, true), (0x10, true), "gameplay as Ratchet: R2 is the aim's");
+		assert_eq!(go(rt, 0x12, false, true, true), (0x12, false), "the pause menu: retail gets R2 (L1 + R2 scanner)");
+		assert_eq!(go(rt, 0x12, true, false, true), (0x12, false), "Clank: retail gets R2, modcam's aim stays up");
+		assert_eq!(go(rt, 0x12, true, true, false), (0x12, false), "no aim button: retail's R2");
+		assert_eq!(go(route(true, 2, 0, 2), 0x02, true, true, true), (0x02, true), "the keyboard's B key (R2) is not the pad's and stays");
+		assert_eq!(go(route(false, 0, 0, 2), 0x02, true, true, true), (0x02, false), "B alone: untouched, no pad aim");
+		assert_eq!(go(route(false, 0, 0, 0), 0x00, true, true, true), (0x00, false));
+		assert_eq!(go(route(true, 0x42, 0, 0), 0x52, true, true, true), (0x10, true), "Jump on the aim's button goes with the R2");
+		assert_eq!(go(route(true, 0x42, 0x02, 0), 0x42, true, true, true), (0x02, true), "R2 also from another button: that stays");
+		assert_eq!(go(route(true, 0x42, 0, 0), 0x42, false, true, true), (0x42, false), "gate off: all retail's");
 	}
 
 	const KBD: Ctx = Ctx { modern_camera: true, menu: None };
@@ -904,7 +1003,30 @@ mod tests {
 	/// Menu legends name the keys of the screen's table (menu_keys.rs): the Quit Game answers, the default page legends,
 	/// the map; help sentences keep the play keys; every result fits the legend box.
 	#[test]
+	fn legend_boxes_per_page_and_the_title_never_matches() {
+		assert_eq!((legend_limit(3), legend_limit(5), legend_limit(super::super::menu_keys::MAP), legend_limit(8)), (111, 111, 173, LEGEND_FIT_PX));
+		let front = |id| super::super::menu_keys::screen(&super::super::mouse_menu::MenuSnap { front: true, id, ..Default::default() }).id;
+		for id in [3, 5, 0xb, 0x1a] {
+			assert_eq!(legend_limit(front(id)), LEGEND_FIT_PX, "title page {id:#x} keeps the default box");
+		}
+	}
+
+	#[test]
+	fn a_glyph_without_a_menu_key_keeps_its_play_name() {
+		let _g = super::super::pcopts::globals_guard();
+		// Square has no menu key on a plain page: the legend keeps the play key name (not dropped as if it did not fit).
+		let sc = super::super::menu_keys::DEFAULT;
+		let ctx = Ctx { modern_camera: false, menu: Some(sc) };
+		let name = key_name(SQUARE, ctx).expect("a play key").into_owned();
+		let mut s = vec![SQUARE];
+		s.extend_from_slice(b" X");
+		let out = substitute_text(&s, ctx, 0x4eec).unwrap();
+		assert!(out.starts_with(&name), "{:?}", String::from_utf8_lossy(&out));
+	}
+
+	#[test]
 	fn menu_lines_name_the_menu_keys() {
+		let _g = crate::retail::pcopts::globals_guard(); // the key names follow the process-wide bindings
 		use super::super::menu_keys::{screen, Screen, DEFAULT, MAP, QUIT_GAME};
 		let page = |id| super::super::mouse_menu::MenuSnap { id, ..Default::default() };
 		let ctx = |s: Screen| Ctx { modern_camera: true, menu: Some(s) };
@@ -949,10 +1071,27 @@ mod tests {
 		assert_eq!(substitute_text(b"\x12 Exit", KBD, 0x4ee0).unwrap(), b"T Exit");
 	}
 
+	/// A legend line the box cannot hold with any key name loses the name instead of its last letters (Weapons page, German
+	/// "Ausruesten", the box is the width of retail's own "glyph + word"); a line that fits keeps its key; the map's track line
+	/// (two glyphs) keeps the zoom keys.
+	#[test]
+	fn a_legend_line_too_long_for_its_box_drops_the_key_name() {
+		let _g = crate::retail::pcopts::globals_guard();
+		use super::super::menu_keys::{screen, Screen, DEFAULT, MAP};
+		let weapons = Ctx { modern_camera: true, menu: Some(Screen { id: 3, ..DEFAULT }) };
+		assert_eq!(substitute_text(b"\x10 Ausr\x81sten", weapons, 0x4eec).unwrap(), b" Ausr\x81sten");
+		assert_eq!(substitute_text(b"\x10 Equip", weapons, 0x4eec).unwrap(), b"Enter Equip");
+		let page = |id| super::super::mouse_menu::MenuSnap { id, ..Default::default() };
+		let map = Ctx { modern_camera: true, menu: Some(screen(&page(MAP))) };
+		assert_eq!(substitute_text(b"\x19\x18 Pfad/Zoom", map, 0x4f57).unwrap(), b"Z/X Pfad/Zoom");
+		assert_eq!(substitute_text(b"\x19 \x18 Track", map, 0x4f57).unwrap(), b"WASD Z/X Track");
+	}
+
 	/// A remapped function names its new key in the prompts; the others keep their names; the sticks name their four keys; the
 	/// menu names (fixed keys) do not change.
 	#[test]
 	fn remapped_keys_name_the_new_key() {
+		let _g = crate::retail::pcopts::globals_guard(); // the bindings are process-wide
 		use super::super::binds;
 		binds::init(Some("cross:KeyK,l1:Digit5,forward:KeyI,strafe_left:KeyJ,back:KeyK2,strafe_right:KeyL"), None);
 		assert_eq!(substitute(b" Select", KBD).unwrap(), b"K Select", "no Spc for a remapped Cross");
@@ -973,22 +1112,24 @@ mod tests {
 		}
 	}
 
-	/// The names are the keyboard's real bindings: the key of each entry sets the entry's pad bit in `pad_from_keys`; the sticks
-	/// move the right axes; the mouse buttons are the `circle` / `triangle` arguments.
+	/// The glyphs' pad bits are the keyboard's real bindings: the default key of each sets the bit in `pad_from_keys`; the sticks
+	/// move the right axes and are named as the manual lists them; the mouse buttons are the `circle` / `triangle` arguments.
 	#[test]
 	fn names_follow_pad_from_keys() {
 		use crate::retail::pad_from_keys;
+		let _g = crate::retail::pcopts::globals_guard(); // the bindings are process-wide
+		super::super::binds::init(None, None);
 		for b in BINDINGS.iter().filter(|b| b.bit != 0) {
-			for &k in b.keys {
-				assert_eq!(pad_from_keys(|x| x == k, false, false).0 & b.bit, b.bit, "{} / {k:?}", b.name);
-			}
+			let n = String::from_utf8(key_name(b.code, KBD).unwrap().into_owned()).unwrap();
+			let k = if n == "LMB" { Some(KeyCode::KeyG) } else { rac_engine::input::binds::KEYS.iter().find(|e| e.2 == n).map(|e| e.0) };
+			let k = k.unwrap_or_else(|| panic!("{n}"));
+			assert_eq!(pad_from_keys(|x| x == k, false, false).0 & b.bit, b.bit, "{n}");
 		}
 		// Left stick: A D move lx (2), W S move ly (3); right stick: Q E move rx (0), Z X move ry (1).
 		for (k, axis) in [(KeyCode::KeyA, 2), (KeyCode::KeyD, 2), (KeyCode::KeyW, 3), (KeyCode::KeyS, 3), (KeyCode::KeyQ, 0), (KeyCode::KeyE, 0), (KeyCode::KeyZ, 1), (KeyCode::KeyX, 1)] {
 			assert_ne!(pad_from_keys(|x| x == k, false, false).1[axis], 0x80, "{k:?}");
-			let name = if axis >= 2 { "WASD" } else { "Q/E/Z/X" };
-			assert!(BINDINGS.iter().any(|b| b.name == name && b.keys.contains(&k)), "{k:?}");
 		}
+		assert_eq!((key_name(LSTICK, KBD).unwrap().into_owned(), key_name(RSTICK, Ctx { modern_camera: false, menu: None }).unwrap().into_owned()), (b"WASD".to_vec(), b"Q/E/Z/X".to_vec()));
 		// Mouse: left = Circle, middle = Triangle; both also stay on their keys (G, T).
 		assert_eq!(pad_from_keys(|_| false, true, false).0, 0x20);
 		assert_eq!(pad_from_keys(|_| false, false, true).0, 0x10);

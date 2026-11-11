@@ -10,7 +10,9 @@
 //!   `0x16cca0`; the warp camera is the render camera (`camera_globals`).
 //! - The level byte already names the target during the warp, but the overlay in memory is still the departed level's
 //!   (the tick counter sits at Eudora's -0x300 while the byte says 6) [C: log 2026-10-12]. `OV_LEVEL` keeps the level of
-//!   the last field outside substates 4-6.
+//!   the overlay in memory: the level byte of the first field outside substates 4-6 after the overlay code changed
+//!   (`track_overlay`; corrected 2026-11-06: was the byte of every such field, which after an in-game Load to another planet
+//!   named the LOADED level while the old overlay still ran: the mirror read that warp at the wrong overlay's addresses).
 //! - The target's overlay is read in during the no-present fields after the warp (Aridia 0164a f1321-1326 [C log]).
 //!   Its warp state starts empty (tick 0, no actors), and the load fields that follow (f1327-1344, draw mask 0x15f3f4
 //!   = 0) show the last warp picture with only the banner redrawn (gsfull f1320 vs f1330 / f1344: the pixels differ
@@ -23,8 +25,9 @@ use crate::retail::disc::va;
 
 type V3 = [f32; 3];
 
-/// The level whose overlay is in memory (worker thread; see the module doc).
+/// The level whose overlay is in memory (worker thread; see the module doc) and the `code_sig` it was taken at.
 static OV_LEVEL: AtomicU32 = AtomicU32::new(u32::MAX);
+static OV_TAKEN: AtomicU64 = AtomicU64::new(0);
 /// `code_sig` of the departed overlay, taken at the first field of substates 4-6 (0 = not taken).
 static OV_SIG: AtomicU64 = AtomicU64::new(0);
 /// The last warp field read from the departed overlay; handed out again once the target's overlay is in memory.
@@ -33,7 +36,7 @@ static LOADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::ne
 
 /// A fingerprint of the overlay code in memory: words spread over the overlay's text (every level's code covers
 /// 0x1f0000..0x280000; Eudora's main loop sits at 0x1e95d8.., its scene code at 0x2897b0 [C]).
-fn code_sig(m: &ee_oracle::Machine) -> u64 {
+pub(super) fn code_sig(m: &ee_oracle::Machine) -> u64 {
 	(0x1f_0000u32..0x28_0000).step_by(0x8000).fold(0xcbf2_9ce4_8422_2325u64, |h, a| (h ^ m.rd32(a + 0x40) as u64).wrapping_mul(0x0100_0000_01b3)) | 1
 }
 
@@ -209,11 +212,28 @@ fn rand_back(mut s: u32, n: usize) -> Vec<u32> {
 	out
 }
 
+/// Pure: the overlay in memory as (level, `code_sig`), in a field outside the arrival (mode 6 substates 4..=6, where the level
+/// byte already names the target): the one last taken while the overlay code is the same, else the level byte of this field.
+/// The byte alone is not enough: an in-game Load sets it to the loaded save's level while the old overlay still runs, up to
+/// the arrival warp of that load (decomp/notes/level_transition.md section 6, "Loading a save runs the same warp").
+pub(super) fn track_overlay(known: Option<(u32, u64)>, level: u32, sig: u64) -> (u32, u64) {
+	match known {
+		Some((l, s)) if s == sig => (l, s),
+		_ => (level, sig),
+	}
+}
+
 /// The warp state of this field: Some only in mode 6, substate 4. Call once per field (it tracks `OV_LEVEL`).
 pub fn read(m: &ee_oracle::Machine, mode: u32, level: u32) -> Option<WarpRam> {
 	let sub = if mode == 6 { m.rd32(SHIP_STATE) } else { 0 };
 	if !(mode == 6 && (4..=6).contains(&sub)) {
-		OV_LEVEL.store(level, Ordering::Relaxed);
+		let known = match OV_LEVEL.load(Ordering::Relaxed) {
+			u32::MAX => None,
+			l => Some((l, OV_TAKEN.load(Ordering::Relaxed))),
+		};
+		let (ov, sig) = track_overlay(known, level, code_sig(m));
+		OV_LEVEL.store(ov, Ordering::Relaxed);
+		OV_TAKEN.store(sig, Ordering::Relaxed);
 		OV_SIG.store(0, Ordering::Relaxed);
 		LOADED.store(false, Ordering::Relaxed);
 	} else {
@@ -332,5 +352,22 @@ mod tests {
 			fwd.push(s >> 16 & 0x7fff);
 		}
 		assert_eq!(super::rand_back(s, 9), fwd);
+	}
+
+	/// The overlay in memory follows the overlay code, not the level byte alone (in-game Load, fast_travel.rs uses it too).
+	#[test]
+	fn the_overlay_follows_the_code_not_the_level_byte() {
+		use super::track_overlay as t;
+		let (kerwan, eudora) = (0x1111u64, 0x2222u64);
+		assert_eq!(t(None, 3, kerwan), (3, kerwan), "first field: the level byte");
+		// In-game Load on Kerwan of a save on Eudora: the byte says 4 while Kerwan's code still runs (pause menu, mode 3).
+		assert_eq!(t(Some((3, kerwan)), 4, kerwan), (3, kerwan), "loaded level byte, old code: still Kerwan");
+		// After the arrival the landing runs Eudora's code.
+		assert_eq!(t(Some((3, kerwan)), 4, eudora), (4, eudora), "new code: the level byte");
+		// A trip: the byte names the departed level up to the warp, so nothing changes there.
+		assert_eq!(t(Some((4, eudora)), 4, eudora), (4, eudora));
+		// The front end (byte 0xff) and a level after it.
+		assert_eq!(t(Some((4, eudora)), 0xff, 0x3333), (0xff, 0x3333));
+		assert_eq!(t(Some((0xff, 0x3333)), 6, 0x4444), (6, 0x4444));
 	}
 }

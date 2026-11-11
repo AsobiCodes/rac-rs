@@ -9,6 +9,7 @@
 //! 0) show "????", a hollow ring, and are never a target. Only facts the game keeps are shown (its location and planet texts, "you are
 //! here" = the level the ship is over; the gold bolts found and the visited flag come from the worker's `extra.ship`, `ShipFacts`).
 use super::pause_grid::holed_panel;
+use super::ship_anim::{clock_s, pulse, travel};
 use super::ship_marks::{gold_total, mark, planet_of};
 use super::ship_pic;
 use super::title::{word, BACK, SELECT};
@@ -291,7 +292,7 @@ fn mark_at(r: &Row) -> Option<(f32, f32)> {
 /// The markers on the painting: a dot per planet (a hollow ring for a greyed one), the chosen planet last with its ring and the leader
 /// line to the right panel.
 fn marks(b: &mut Built, f: &Facts) {
-	let rows = &f.list.rows;
+	let (rows, t) = (&f.list.rows, clock_s());
 	let order = (0..rows.len()).filter(|&i| i != b.sel || !rows[i].enabled).chain((b.sel < rows.len() && rows[b.sel].enabled).then_some(b.sel));
 	for i in order {
 		let r = &rows[i];
@@ -302,14 +303,24 @@ fn marks(b: &mut Built, f: &Facts) {
 			rrect(out, dot, 5.0, CLEAR, Some((1.5, Rgba::rgba(255, 255, 255, 0.35))));
 			continue;
 		}
+		let here = is_here(f, r);
 		if i == b.sel {
-			let line = DETAIL.x - x - 22.0;
+			// Alive (ship_anim.rs, display time): the ring breathes, a light runs along the leader line to the card.
+			let (p, line) = (pulse(t, 2.4, 0.0), DETAIL.x - x - 22.0);
 			if line > 0.0 {
-				rrect(out, Rect::new(x + 22.0, y - 1.0, line, 2.0), 0.0, ACCENT.tint(0.55), None);
+				rrect(out, Rect::new(x + 22.0, y - 1.0, line, 2.0), 0.0, ACCENT.tint(0.40 + 0.15 * p), None);
+				let (k, w) = (travel(t, 2.2), 28.0_f32.min(line));
+				let lx = (x + 22.0 + (line - w) * k).max(x + 22.0);
+				rrect(out, Rect::new(lx, y - 2.0, w, 4.0), 2.0, ACCENT.tint(0.85 * (k * std::f32::consts::PI).sin()), None);
 			}
-			rrect(out, Rect::new(x - 22.0, y - 22.0, 44.0, 44.0), 22.0, ACCENT.tint(0.10), Some((2.0, ACCENT)));
+			let d = 44.0 + 6.0 * p;
+			rrect(out, Rect::new(x - d * 0.5, y - d * 0.5, d, d), d * 0.5, ACCENT.tint(0.06 + 0.06 * (1.0 - p)), Some((2.0, ACCENT.tint(0.55 + 0.45 * (1.0 - p)))));
+		} else if here {
+			// The current planet: a slow halo round its green dot.
+			let (p, d) = (pulse(t, 3.2, 0.0), 14.0 + 12.0 * pulse(t, 3.2, 0.0));
+			rrect(out, Rect::new(x - d * 0.5, y - d * 0.5, d, d), d * 0.5, CLEAR, Some((1.5, TEAL.tint(0.65 * (1.0 - p)))));
 		}
-		let col = if i == b.sel { ACCENT } else if is_here(f, r) { TEAL } else { STAR };
+		let col = if i == b.sel { ACCENT } else if here { TEAL.tint(0.82 + 0.18 * pulse(t, 3.2, 0.5)) } else { STAR.tint(0.72 + 0.28 * pulse(t, 2.0 + 0.37 * (i % 5) as f64, 0.173 * i as f64)) };
 		rrect(out, dot, 5.0, col, None);
 		b.marks.push((i, Rect::new(x - MARK_HIT * 0.5, y - MARK_HIT * 0.5, MARK_HIT, MARK_HIT)));
 	}

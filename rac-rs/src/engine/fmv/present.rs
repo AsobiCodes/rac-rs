@@ -1,6 +1,8 @@
 //! Movie presentation: Y/Cb/Cr planes as R8 textures, converted in the shader (BT.601 limited range),
 //! drawn in its own pass over the surface, fitted by height (or width if too wide) at the movie's own
 //! display aspect, black bars around. The surface format is non-sRGB, so values are written as is.
+//! [PC] Brightness / Contrast (viewer/picture_adjust.rs): off 50 / 50 the movie is drawn by a graded copy of the shader
+//! (`graded_shader`, the game picture's `grade_curve`), built on first use; at 50 / 50 the plain shader as before.
 
 use super::mpeg2::Frame;
 use wgpu::util::DeviceExt;
@@ -29,6 +31,37 @@ struct V { @builtin(position) p: vec4<f32>, @location(0) uv: vec2<f32> };
 }
 ";
 
+/// The plain shader's uniform end and return, replaced in the graded copy.
+const U_PLAIN: &str = "tint: vec4<f32> };";
+const U_GRADED: &str = "tint: vec4<f32>, k: vec4<f32> };";
+const RETURN_PLAIN: &str = "return vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)) * u.tint.a + u.tint.rgb, 1.0);";
+const RETURN_GRADED: &str = "return vec4<f32>(grade_curve(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)) * u.tint.a + u.tint.rgb, u.k), 1.0);";
+
+/// [PC] The movie shader with the Brightness / Contrast curve (viewer/picture_adjust.rs) on its output; `k` follows `tint`.
+fn graded_shader() -> String {
+	SHADER.replace(U_PLAIN, U_GRADED).replace(RETURN_PLAIN, RETURN_GRADED) + crate::viewer::picture_adjust::CURVE_WGSL
+}
+
+fn make_pipeline(device: &wgpu::Device, label: &str, src: String, pl: &wgpu::PipelineLayout, format: wgpu::TextureFormat) -> wgpu::RenderPipeline {
+	let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some(label), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl(label, src.into())) });
+	device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+		label: Some(label),
+		layout: Some(pl),
+		vertex: wgpu::VertexState { module: &module, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[] },
+		fragment: Some(wgpu::FragmentState {
+			module: &module,
+			entry_point: Some("fs"),
+			compilation_options: Default::default(),
+			targets: &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+		}),
+		primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleStrip, ..Default::default() },
+		depth_stencil: None,
+		multisample: wgpu::MultisampleState::default(),
+		multiview_mask: None,
+		cache: None,
+	})
+}
+
 struct Planes {
 	size: (u32, u32),
 	tex: [wgpu::Texture; 3],
@@ -54,6 +87,13 @@ impl QueueWrites for wgpu::Queue {
 pub struct Presenter {
 	pipeline: wgpu::RenderPipeline,
 	layout: wgpu::BindGroupLayout,
+	pl: wgpu::PipelineLayout,
+	format: wgpu::TextureFormat,
+	/// [PC] Brightness / Contrast: the next draw's curve (None at 50 / 50), the graded pipeline (built on first use) and whether
+	/// the pipe guard refused it (movies then stay ungraded for the run).
+	grade: Option<[f32; 4]>,
+	p_grade: Option<wgpu::RenderPipeline>,
+	grade_refused: bool,
 	sampler: wgpu::Sampler,
 	ubuf: wgpu::Buffer,
 	planes: Option<Planes>,
@@ -90,27 +130,11 @@ impl Presenter {
 				wgpu::BindGroupLayoutEntry { binding: 4, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
 			],
 		});
-		let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("movie"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("movie", SHADER.into())) });
 		let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("movie"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
-		let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-			label: Some("movie"),
-			layout: Some(&pl),
-			vertex: wgpu::VertexState { module: &module, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[] },
-			fragment: Some(wgpu::FragmentState {
-				module: &module,
-				entry_point: Some("fs"),
-				compilation_options: Default::default(),
-				targets: &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
-			}),
-			primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleStrip, ..Default::default() },
-			depth_stencil: None,
-			multisample: wgpu::MultisampleState::default(),
-			multiview_mask: None,
-			cache: None,
-		});
+		let pipeline = make_pipeline(device, "movie", SHADER.into(), &pl, format);
 		let sampler = device.create_sampler(&wgpu::SamplerDescriptor { mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, ..Default::default() });
-		let ubuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("movie rect"), contents: &[0u8; 32], usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST });
-		Presenter { pipeline, layout, sampler, ubuf, planes: None, aspect: 4.0 / 3.0, active: false, black: false, tint: [0.0, 0.0, 0.0, 1.0] }
+		let ubuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("movie rect"), contents: &[0u8; 48], usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST });
+		Presenter { pipeline, layout, pl, format, grade: None, p_grade: None, grade_refused: false, sampler, ubuf, planes: None, aspect: 4.0 / 3.0, active: false, black: false, tint: [0.0, 0.0, 0.0, 1.0] }
 	}
 
 	/// Uploads a decoded frame and shows it from the next `draw` on. A decoded frame is a playing movie's picture, never a
@@ -168,6 +192,21 @@ impl Presenter {
 		self.tint = [0.0, 0.0, 0.0, 1.0];
 	}
 
+	/// [PC] Brightness / Contrast for the next `draw`: `k` = `picture_adjust::frame_k()` (None at 50 / 50: the plain shader).
+	pub fn set_grade(&mut self, device: &wgpu::Device, k: Option<[f32; 4]>) {
+		self.grade = k.filter(|_| !self.grade_refused);
+		if self.grade.is_none() || self.p_grade.is_some() {
+			return;
+		}
+		let (pl, format) = (&self.pl, self.format);
+		self.p_grade = crate::viewer::pipe_guard::guard(device, crate::viewer::pipe_guard::Effect::Grade, || make_pipeline(device, "movie graded", graded_shader(), pl, format));
+		self.grade_refused = self.p_grade.is_none();
+		if self.grade_refused {
+			eprintln!("picture: Brightness / Contrast for movies refused: movies stay as they are");
+			self.grade = None;
+		}
+	}
+
 	/// Draws black plus the picture into `view` (window size `sw` x `sh`); no-op when inactive or
 	/// before the first frame.
 	pub fn draw(&self, queue: &impl QueueWrites, enc: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, sw: f32, sh: f32) {
@@ -190,6 +229,13 @@ impl Presenter {
 		let (x, y) = ((sw - pw) / 2.0, (sh - ph) / 2.0);
 		let rect = [x / sw * 2.0 - 1.0, 1.0 - y / sh * 2.0, (x + pw) / sw * 2.0 - 1.0, 1.0 - (y + ph) / sh * 2.0];
 		queue.write_buffer(&self.ubuf, 0, bytemuck::cast_slice(&[rect, self.tint]));
+		let pipeline = match (self.grade, &self.p_grade) {
+			(Some(k), Some(p)) => {
+				queue.write_buffer(&self.ubuf, 32, bytemuck::cast_slice(&k));
+				p
+			}
+			_ => &self.pipeline,
+		};
 		let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
 			label: Some("movie"),
 			color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -203,8 +249,21 @@ impl Presenter {
 			occlusion_query_set: None,
 			multiview_mask: None,
 		});
-		pass.set_pipeline(&self.pipeline);
+		pass.set_pipeline(pipeline);
 		pass.set_bind_group(0, &p.bind, &[]);
 		pass.draw(0..4, 0..1);
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	#[test]
+	fn the_graded_movie_shader_validates() {
+		let g = super::graded_shader();
+		let m = naga::front::wgsl::parse_str(&g).expect("wgsl parse");
+		naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).expect("wgsl validate");
+		assert_eq!(super::SHADER.matches(super::RETURN_PLAIN).count(), 1);
+		assert_eq!(super::SHADER.matches(super::U_PLAIN).count(), 1);
+		assert!(g.contains(super::RETURN_GRADED) && g.contains(super::U_GRADED) && !super::SHADER.contains("grade_curve"));
 	}
 }

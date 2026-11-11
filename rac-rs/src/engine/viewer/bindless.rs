@@ -61,6 +61,8 @@ pub(super) struct Bindless {
 	pub pipeline: super::metalpipe::Pipes<wgpu::RenderPipeline>,
 	pub pipeline_cull: super::metalpipe::Pipes<[wgpu::RenderPipeline; 2]>,
 	pub shrub_faded: super::metalpipe::Pipes<[wgpu::RenderPipeline; 2]>,
+	/// [PC] lane tpre: the tie depth pre-pass (tiez.rs; with `indirect` only).
+	pub tiez: Option<super::tiez::TieZ>,
 	/// The frame's indirect draw arguments and their capacity (None: one `draw_indexed` per draw).
 	pub indirect: Option<(wgpu::Buffer, usize)>,
 }
@@ -90,6 +92,28 @@ pub(super) fn first_instance(d: &Draw) -> u32 {
 }
 
 impl Bindless {
+	/// The array path's layout and pipelines over the level source `level_src` (`multi`: multi-draw-indirect runs, `ai` the adapter;
+	/// moved here from gpu/setup.rs `Gpu::new` by lane tpre, which adds the tie pre-pass `tiez`).
+	pub(super) fn new(device: &wgpu::Device, ulayout: &wgpu::BindGroupLayout, level_src: &str, (multi, ai): (bool, &wgpu::AdapterInfo), (format, depth_format): (wgpu::TextureFormat, wgpu::TextureFormat)) -> Bindless {
+		let bl_layout = Bindless::layout(device);
+		let src = shader_source(level_src);
+		let module = super::flitquad::Modules::new(device, "level bindless", src.clone());
+		let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("level bindless"), bind_group_layouts: &[Some(ulayout), Some(&bl_layout)], immediate_size: 0 });
+		// The same states as `pipeline`, `pipeline_cull`, `shrub_pipelines[0..2]` and `tie_pipelines`, per Metal set (metalpipe.rs).
+		let bl = super::metalpipe::LevelMaker { device: device.clone(), layout: pl, mods: module, format, depth_format };
+		let z = crate::gs_state::ztest();
+		Bindless {
+			tie: bl.pipes(super::metalpipe::ties, z),
+			pipeline: bl.pipes(super::metalpipe::opaque, z),
+			pipeline_cull: bl.pipes(super::metalpipe::opaque_cull, z),
+			shrub_faded: bl.pipes(super::metalpipe::shrub_faded, z),
+			layout: bl_layout,
+			// [PC] lane tpre: the tie pre-pass's maker (pipelines built on the first frame that takes it; Vulkan + NVIDIA only).
+			tiez: (multi && super::tiez::backend_ok(ai)).then(|| super::tiez::TieZ::new(super::tiez::Maker { device: device.clone(), layout: bl.layout.clone(), src, format, depth_format })),
+			indirect: multi.then(|| (device.create_buffer(&wgpu::BufferDescriptor { label: Some("indirect draws"), size: 20 * 1024, usage: wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }), 1024)),
+		}
+	}
+
 	pub(super) fn layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
 		device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
 			label: Some("texture array"),

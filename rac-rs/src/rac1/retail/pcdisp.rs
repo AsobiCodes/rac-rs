@@ -35,9 +35,10 @@ const SCALE_ROW: u32 = 2;
 const FPS_ROW: u32 = 3;
 const RS_ROW: u32 = 4;
 
-/// The text pool: ids `ID0..ID_END`, one 0x40-byte slot each, BASE + 0xE000 .. + 0xE400.
+/// The text pool: ids `ID0..ID_END`, one 0x40-byte slot each, BASE + 0xE000 .. + 0xE400, then the eight slots of pcmore.rs's ids
+/// (0x7f98..=0x7f9f; the last two are pcfgen.rs's) up to + 0xE600. `serves` says which ids this pool answers, `slot` where an id's text goes.
 pub const POOL: u32 = super::pcext::BASE + 0xE000;
-pub const RANGE: std::ops::Range<u32> = POOL..POOL + 0x400;
+pub const RANGE: std::ops::Range<u32> = POOL..POOL + 0x600;
 const SLOT: u32 = 0x40;
 pub const ID0: u32 = 0x7fb0;
 pub const ID_END: u32 = 0x7fc0;
@@ -283,7 +284,18 @@ static OFF: T5 = [b"Off", b"Sans limite", b"Aus", b"Sin l\x94mite", b"Nessuno"];
 /// The section's name on the Graphics page's stepper.
 pub(super) static SECTION: T5 = [b"Display", b"Interface", b"Anzeige", b"Visualizaci\x9cn", b"Visualizzazione"];
 
-/// The text of `id` (`ID0..ID_END`) in language `l` (0 En .. 4 It); empty for the free ids.
+/// True for the ids the text hook answers from this pool: `ID0..ID_END` and pcmore.rs's eight (two are pcfgen.rs's).
+pub fn serves(id: u32) -> bool {
+	(ID0..ID_END).contains(&id) || super::pcmore::IDS.contains(&id)
+}
+
+/// The pool slot of a served id: pcmore's eight follow the 16 slots of `ID0..ID_END`.
+fn slot(id: u32) -> u32 {
+	let k = if id >= ID0 { id - ID0 } else { (ID_END - ID0) + (id - super::pcmore::ID_ASPECT) };
+	POOL + SLOT * k
+}
+
+/// The text of `id` (`ID0..ID_END`, pcmore's) in language `l` (0 En .. 4 It); empty for the free ids.
 pub fn text(id: u32, l: usize) -> Vec<u8> {
 	let l = l.min(4);
 	let stepper = |s: Vec<u8>| [b"< ".as_slice(), &s, b" >"].concat();
@@ -305,6 +317,7 @@ pub fn text(id: u32, l: usize) -> Vec<u8> {
 		}
 		super::pcmrefl::ID_MREFL | super::pcmrefl::ID_VMREFL => super::pcmrefl::text(id, l),
 		super::pcsupp::ID_SUPP => super::pcsupp::text(id, l),
+		_ if super::pcmore::IDS.contains(&id) => super::pcmore::text(id, l),
 		_ => super::pcinput::text(id, l),
 	}
 }
@@ -314,7 +327,8 @@ pub fn text(id: u32, l: usize) -> Vec<u8> {
 pub fn text_key() -> u64 {
 	let (w, h) = (WIN_W.load(Ordering::Relaxed) as u64, WIN_H.load(Ordering::Relaxed) as u64);
 	let a = SCALE.load(Ordering::Relaxed) as u64 | (RSCALE.load(Ordering::Relaxed) as u64) << 8 | (REFRESH.load(Ordering::Relaxed) as u64) << 16;
-	let a = a | (rac_engine::metal_option::reflect_pct() as u64) << 40;
+	// The Frame Generation row's key (pcfgen.rs, 7 bits) at bits 32..38: free below the metal slider (pcmore's key shifted by 48 has no room).
+	let a = a | (rac_engine::metal_option::reflect_pct() as u64) << 40 ^ super::pcmore::text_key() << 48 ^ super::pcfgen::text_key() << 32;
 	a.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ (FPS.load(Ordering::Relaxed) as u64) << 1 ^ w << 32 ^ h << 48
 }
 
@@ -322,7 +336,7 @@ pub fn text_key() -> u64 {
 /// its address into v0.
 pub fn text_hook(c: &mut Cpu, id: u32, lang: usize) -> bool {
 	let s = text(id, lang);
-	let at = POOL + SLOT * (id - ID0);
+	let at = slot(id);
 	let n = s.len().min(SLOT as usize - 1);
 	for (i, b) in s[..n].iter().enumerate() {
 		c.mem.wr8(at + i as u32, *b);

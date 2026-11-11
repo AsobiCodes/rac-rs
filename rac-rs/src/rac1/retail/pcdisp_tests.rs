@@ -65,12 +65,12 @@ fn every_text_is_short_font_bytes_in_every_language() {
 	note_refresh(144);
 	note_window_size(3440, 1440);
 	for lang in 0..5 {
-		for id in ID0..ID_END {
+		for id in (ID0..ID_END).chain(crate::retail::pcmore::IDS) {
 			let s = text(id, lang);
 			assert!(s.len() < SLOT as usize - 1 && s.len() <= 22, "{id:#x} {lang}: {s:?}");
 			assert!(s.iter().all(|&b| (0x20..0x7f).contains(&b) || (0x80..=0xb0).contains(&b)), "{id:#x} {lang}: {s:?}");
 			assert!(!s.contains(&b'%'), "0x25 draws the Cross glyph: {s:?}");
-			assert_eq!(s.is_empty(), id > ID_VRS && !crate::retail::pcinput::IDS.contains(&id) && !crate::retail::pcmrefl::IDS.contains(&id) && id != crate::retail::pcsupp::ID_SUPP, "{id:#x} {lang}: ids 0x7fb0..=0x7fb8 (pcdisp), 0x7fba..0x7fbd (pcinput), 0x7fb9 / 0x7fbe (pcmrefl) and 0x7fbf (pcsupp) have text");
+			assert_eq!(s.is_empty(), id > ID_VRS && id < ID_END && !crate::retail::pcinput::IDS.contains(&id) && !crate::retail::pcmrefl::IDS.contains(&id) && id != crate::retail::pcsupp::ID_SUPP, "{id:#x} {lang}: ids 0x7fb0..=0x7fb8 (pcdisp), 0x7fba..0x7fbd (pcinput), 0x7fb9 / 0x7fbe (pcmrefl) and 0x7fbf (pcsupp) have text; pcmore's 0x7f98..=0x7f9c too");
 		}
 		assert!(LABELS.iter().all(|t| t[lang].len() <= 21) && SECTION[lang].len() <= 21);
 	}
@@ -95,8 +95,8 @@ fn every_text_is_short_font_bytes_in_every_language() {
 #[test]
 fn the_pool_and_bytes_fit_the_reserved_block() {
 	let _g = guard();
-	assert_eq!(RANGE, POOL..POOL + 0x400);
-	assert_eq!(POOL + SLOT * (ID_END - ID0), RANGE.end);
+	assert_eq!(RANGE, POOL..POOL + 0x600);
+	assert_eq!(POOL + SLOT * (ID_END - ID0 + crate::retail::pcmore::IDS.len() as u32), RANGE.end);
 	assert!(RANGE.start >= super::super::pcmods::RANGE.end && RANGE.end <= super::super::pcext::BASE + 0x10000);
 	assert!(RANGE.start >= super::super::pcctl::DBG_RANGE.end);
 	for b in [POS_B, SCALE_B, FPS_B, RS_B] {

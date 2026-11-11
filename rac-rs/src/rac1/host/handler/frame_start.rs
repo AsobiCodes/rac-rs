@@ -58,6 +58,8 @@ impl App {
 		let dt = test_clock::dt(test_clock::Site::Frame, || self.last.elapsed().as_secs_f32()).min(0.1);
 		self.last = Instant::now();
 		frame_clock::frame_started();
+		// [PC] lane kst: Modern camera = whole guard-clipped polygons (engine/viewer/clip.rs; Classic = retail's strip).
+		rac_engine::viewer::set_complete_polys(self.retail.is_some() && crate::retail::modcam::on());
 		self.pause_frame(dt);
 		// The pause menu and the Quick Select wheel freeze the world.
 		let paused = self.pause.is_some() || self.wheel.is_some() || self.travel.is_some();
@@ -106,6 +108,9 @@ impl App {
 					let _ = g.window.request_inner_size(winit::dpi::PhysicalSize::new(w, h)); // RAC_TEST_FULLSCREEN (display.rs)
 				}
 			}
+		}
+		if self.retail.is_some() {
+			self.display_res_frame(); // [PC] Graphics -> Display -> Resolution (display_res.rs)
 		}
 		// Listener velocity ring (60 Hz ticks, FUN_0029ff68) and the underwater flag (the camera water probe
 		// FUN_0020e8f0, sound.rs `update_water`).
@@ -224,6 +229,7 @@ impl App {
 				if let Some(p) = &mut self.movie {
 					if let (Some(f), Some(g)) = (p.poll(), &mut self.gpu) {
 						g.movie.upload(&g.device, &g.queue, &f);
+						super::shot_movie::frame_shown();
 					}
 					skip_press |= p.finished;
 				}
@@ -238,9 +244,11 @@ impl App {
 						// Retail keeps the movie's last picture up until the main loop presents again (Retail::holds,
 						// no-present word 0x15f5b8): the presenter stays on until then (cleared after `r.sync`).
 						MOVIE_HOLD.store(true, std::sync::atomic::Ordering::Relaxed);
+						super::movie_hold::reset();
 						if let Some(a) = &mut self.audio {
 							a.pause_all(false);
 						}
+						super::shot_movie::ended(skip);
 						eprintln!("retail: movie {} at field {} play tick {}", if skip { "skipped" } else { "finished" }, r.field_count(), self.play_ticks);
 						r.end_movie();
 					}

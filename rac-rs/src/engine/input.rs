@@ -2,6 +2,7 @@
 //! pad function (`binds`), and the gamepads as a PS2 pad (`pad`: an XInput controller, `pspad`: PlayStation controllers over
 //! HID). A game turns these into its pad words; the bindings page and the device prompts are the game's.
 pub mod binds;
+pub mod kbm;
 pub mod pad;
 pub mod pspad;
 mod xinput;

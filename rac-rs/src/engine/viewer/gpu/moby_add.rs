@@ -36,14 +36,14 @@ pub(in crate::viewer) const WGSL: &str = r#"
 	let c = moby_texel(i);
 	let ra = moby_a(i, c);
 	if (ra * 128.0 < 96.0) { discard; }
-	return vec4<f32>(moby_rgb(i, c), ra);
+	return vec4<f32>(moby_lit_rgb(i, c), ra);
 }
 
 @fragment fn fs_moby_add_b(i: VOut) -> @location(0) vec4<f32> {
 	let c = moby_texel(i);
 	let ra = moby_a(i, c);
 	if (ra * 128.0 >= 96.0) { discard; }
-	return vec4<f32>(moby_rgb(i, c), ra);
+	return vec4<f32>(moby_lit_rgb(i, c), ra);
 }
 "#;
 

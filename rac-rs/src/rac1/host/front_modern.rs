@@ -84,7 +84,7 @@ fn modern_page(g: &mut crate::viewer::Gpu, fe: &FrontEnd, fr: &FrontRam, m: &Men
 	let pad = crate::retail::prompts::pad_peek().map(|p| mhost::pad_sample(p.buttons, p.sticks));
 	title_host::begin(pad);
 	let sel = sel_of(m, page, fr.slot_cur);
-	let style = crate::modern_menu::btn_text::Style { device: title_host::device(), glyphs: crate::modern_menu::look::glyph_set() };
+	let style = crate::modern_menu::btn_text::Style { device: title_host::device(), glyphs: crate::modern_menu::look::glyph_set(), menu: true };
 	let t = |id: u32| crate::modern_menu::btn_text::text(&Strings(&fe.text), id, style); // buttons kept as chips (`btn_text`)
 	// The rows and the header are font bytes (`frontend::Text`): decoded like the page's other texts, or an accent byte shows as a
 	// box (the German Sound page's volume rows).

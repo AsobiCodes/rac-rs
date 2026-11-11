@@ -8,6 +8,7 @@ mod texpack_dump_tests;
 mod texpack_extra;
 mod fire_defs_tests;
 mod hero_fur_discs;
+mod planet_names_discs;
 
 mod omni_data_map;
 mod omni_window;

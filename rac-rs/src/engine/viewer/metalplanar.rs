@@ -2,8 +2,8 @@
 //! Classic or a pack without metal textures). The screen-space walk (metalfx.wgsl `metal_ssr`) can only reflect what is already on
 //! screen: on a metal floor it tore the hero's reflection into blocky pieces, drew posts as long streaks and flickered while
 //! walking (user 2026-11-03). So, as the water mirror (mirror.rs), the level is drawn a second time, mirrored about the height of
-//! the flat metal floor most of the view looks at, at the reflection source's size (half the render size), before the level
-//! pass; its colour gets a short mip chain (glossy blur by roughness), and the metal pixels lying on that plane read it instead of
+//! the flat metal floor most of the view looks at, at a divisor of the render size (metal_detail.rs: half at Full, the engine default;
+//! the R&C1 row's High / Medium / Low a quarter, a sixth, an eighth), before the level pass; its colour gets a short mip chain (glossy blur by roughness), and the metal pixels lying on that plane read it instead of
 //! the screen walk (metalfx.wgsl `metal_planar`). No such floor in view = no pass.
 //!
 //! - `Floors` (per level, built with the scene): the heights of the level's flat (normal within 5 degrees of up) metal faces
@@ -141,7 +141,7 @@ impl Floors {
 	}
 }
 
-/// The planar targets at the reflection source's size: MSAA colour and depth, the resolved colour (all mips bound to the level
+/// The planar targets at the Metal reflection detail's size (metal_detail.rs `planar_size`): MSAA colour and depth, the resolved colour (all mips bound to the level
 /// shader at binding 9, level 0 the resolve target) and per level 1..: (level below, target level).
 pub(super) struct Planar {
 	ms: wgpu::TextureView,
@@ -151,17 +151,43 @@ pub(super) struct Planar {
 	mips: Vec<(wgpu::BindGroup, wgpu::TextureView)>,
 	/// The contact weights into level 0's alpha (metalcontact.rs), from `depth`.
 	contact: super::contact::Contact,
+	/// The reflection source size it was made for and its Metal reflection detail (metal_detail.rs).
+	made_for: ((u32, u32), crate::viewer::metal_detail::Detail),
 }
 
 impl Planar {
-	pub(super) fn new(device: &wgpu::Device, mip_layout: &wgpu::BindGroupLayout, samp: &wgpu::Sampler, (format, depth_format): (wgpu::TextureFormat, wgpu::TextureFormat), (w, h): (u32, u32)) -> Planar {
+	/// The targets for the reflection source size `src` at the Metal reflection detail `d` (metal_detail.rs `planar_size`: Full =
+	/// `src` with `PL_MIPS` levels, the v0.5 targets; the others smaller with fewer levels). `real`: the mip and contact pipelines.
+	pub(super) fn new(device: &wgpu::Device, real: &Real, samp: &wgpu::Sampler, (format, depth_format): (wgpu::TextureFormat, wgpu::TextureFormat), src: (u32, u32), d: crate::viewer::metal_detail::Detail) -> Planar {
+		let ((w, h), pl_mips) = crate::viewer::metal_detail::planar_size(src, PL_MIPS, d);
 		let ra = wgpu::TextureUsages::RENDER_ATTACHMENT;
-		let ms = make_tex(device, "metal planar msaa", (w, h, 1), 1, crate::viewer::targets::MSAA, format, ra).create_view(&Default::default());
-		let dt = make_tex(device, "metal planar depth", (w, h, 1), 1, crate::viewer::targets::MSAA, depth_format, ra | wgpu::TextureUsages::TEXTURE_BINDING);
-		let (depth, contact) = (dt.create_view(&Default::default()), super::contact::Contact::new(device, &dt, format));
-		let t = make_tex(device, "metal planar", (w, h, 1), PL_MIPS, 1, format, ra | wgpu::TextureUsages::TEXTURE_BINDING);
-		let mips = (1..PL_MIPS).map(|m| mip_step(device, mip_layout, samp, &t, 0, m)).collect();
-		Planar { ms, depth, all: t.create_view(&Default::default()), l0: layer(&t, 0, 0), mips, contact }
+		let ms = make_tex(device, "metal planar msaa", { let (w, h) = crate::viewer::scene_msaa::ms_size(w, h); (w, h, 1) }, 1, crate::viewer::targets::msaa(), format, ra | crate::viewer::scene_msaa::copy_usage()).create_view(&Default::default());
+		let dt = make_tex(device, "metal planar depth", (w, h, 1), 1, crate::viewer::targets::msaa(), depth_format, ra | wgpu::TextureUsages::TEXTURE_BINDING);
+		let (depth, contact) = (dt.create_view(&Default::default()), super::contact::Contact::new(device, &dt, &real.contact));
+		let t = make_tex(device, "metal planar", (w, h, 1), pl_mips, 1, format, ra | wgpu::TextureUsages::TEXTURE_BINDING | crate::viewer::scene_msaa::copy_usage());
+		let mips = (1..pl_mips).map(|m| mip_step(device, &real.mip_layout, samp, &t, 0, m)).collect();
+		Planar { ms, depth, all: t.create_view(&Default::default()), l0: layer(&t, 0, 0), mips, contact, made_for: (src, d) }
+	}
+
+	/// The shader's mip pick goes down this many levels (u.metal[13].w, metalfx.wgsl `metal_planar`): 0 at Full, the v0.5 uniforms.
+	pub(super) fn lod_bias(&self) -> f32 {
+		self.made_for.1.lod_bias()
+	}
+}
+
+impl MetalEnv {
+	/// From `alloc`, after the reflection source exists: (re)make the planar targets when there are none, the source changed size or
+	/// the Metal reflection detail row changed (metal_detail.rs; read each frame, so the row applies on the next frame). True = made:
+	/// the level pass's group (binding 9) must be rebound, and the mirror pass's group is remade on its next pass.
+	pub(super) fn alloc_planar(&mut self) -> bool {
+		let (Some((src, _)), Some(real)) = (self.ssr.as_ref(), self.real.get()) else { return false };
+		let want = (*src, crate::viewer::metal_detail::get());
+		if self.planar.as_ref().is_some_and(|p| p.made_for == want) {
+			return false;
+		}
+		self.planar = Some(Planar::new(&self.device, real, &self.samp, (self.format, self.depth_format), want.0, want.1));
+		self.planar_mirror.get_mut().take();
+		true
 	}
 }
 
@@ -171,6 +197,11 @@ fn planar_on() -> bool {
 }
 
 impl MetalEnv {
+	/// The planar floor mirror's height of the frame (None without one): gpu/mirror_cull.rs culls the tfrags it can show.
+	pub(in crate::viewer) fn planar_height(&self) -> Option<f32> {
+		self.plane.get()
+	}
+
 	/// After `write_uniforms`: this frame's floor (`Floors::pick` from the camera `eye` and the level's view-projection), kept for
 	/// `Gpu::metal_planar`, and u.metal[12] = (on, height, planar gloss share, blur in mips per roughness). Off, no targets or no
 	/// floor in view: zero (the shader keeps the screen walk) and no pass.
@@ -187,6 +218,10 @@ impl MetalEnv {
 			Some(h) => [w, h, knob("metal_planar_pop", 0.6), knob("metal_planar_blur", 9.0)],
 			None => [0.0; 4],
 		};
+		// The smaller targets' mip pick (metal_detail.rs); u.metal[13].w is 0 otherwise (metalcontact.rs `knobs`).
+		if h.is_some() {
+			u.metal[13][3] = self.planar.as_ref().map_or(0.0, Planar::lod_bias);
+		}
 	}
 }
 
@@ -219,7 +254,7 @@ impl Gpu {
 				label: Some("metal planar mip"),
 				color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: target, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store } })],
 				depth_stencil_attachment: None,
-				timestamp_writes: None,
+				timestamp_writes: crate::viewer::passtime::rw("metal planar mip"),
 				occlusion_query_set: None,
 				multiview_mask: None,
 			});

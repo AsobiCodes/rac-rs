@@ -3,8 +3,8 @@
 
 use super::*;
 
-/// 4x MSAA for the scene pass (port extra: modern display, no PS2 aliasing).
-pub(crate) const MSAA: u32 = 4;
+/// 4x MSAA for the scene pass (port extra: modern display, no PS2 aliasing); 1 sample in the upscaler cut (scene_msaa.rs).
+pub(crate) use super::scene_msaa::msaa;
 
 /// REN-9b: the shop item-panel render target (retail 512x128 at GS 0x3be000): 4x MSAA colour and depth resolved into a
 /// sampled texture. `bind` samples the resolved colour; the HUD draws it for `Quad.tex == ITEM_PANEL_TEX`.
@@ -38,6 +38,10 @@ pub const RETAIL_HD_TEX: usize = usize::MAX - 5;
 /// `Quad.tex` selecting the menu art picture (`Gpu::set_menu_art`: a full-page painting a modern menu page lays over the world, opaque,
 /// texture colour times the quad's colour; a pack hands the picture over, the engine only draws it).
 pub const MENU_ART_TEX: usize = usize::MAX - 6;
+/// `Quad.tex` selecting the menu art picture drawn by the animation pipeline (gpu/menu_art_anim.rs `set_menu_art_anim`): the same
+/// painting as `MENU_ART_TEX`, with its disc turning, core breathing and stars twinkling. Falls back to the plain draw without a set
+/// animation.
+pub const MENU_ART_ANIM_TEX: usize = usize::MAX - 7;
 
 /// The multisampled colour target, resolved into the swapchain image.
 pub(crate) fn msaa_view(device: &wgpu::Device, format: wgpu::TextureFormat, w: u32, h: u32) -> wgpu::TextureView {
@@ -46,10 +50,10 @@ pub(crate) fn msaa_view(device: &wgpu::Device, format: wgpu::TextureFormat, w: u
 			label: Some("msaa"),
 			size: wgpu::Extent3d { width: w.max(1), height: h.max(1), depth_or_array_layers: 1 },
 			mip_level_count: 1,
-			sample_count: MSAA,
+			sample_count: msaa(),
 			dimension: wgpu::TextureDimension::D2,
 			format,
-			usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+			usage: wgpu::TextureUsages::RENDER_ATTACHMENT | super::scene_msaa::copy_usage(), // lane noaa: resolve copies at 1 sample
 			view_formats: &[],
 		})
 		.create_view(&Default::default())
@@ -87,7 +91,7 @@ pub(crate) fn depth_view(device: &wgpu::Device, w: u32, h: u32, format: wgpu::Te
 			label: Some("depth"),
 			size: wgpu::Extent3d { width: w.max(1), height: h.max(1), depth_or_array_layers: 1 },
 			mip_level_count: 1,
-			sample_count: MSAA,
+			sample_count: msaa(),
 			dimension: wgpu::TextureDimension::D2,
 			format,
 			// [PC] Sampled by the Enhanced image (post.rs): its occlusion reads the level's depth.

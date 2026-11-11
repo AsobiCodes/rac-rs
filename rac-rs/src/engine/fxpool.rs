@@ -121,6 +121,29 @@ pub struct BlastPoint {
 	pub size: f32,
 }
 
+/// [PC] Fire light (lane rfire worker 8): a flame the game draws too small to light by its sprites (R&C1: the Thruster-Pack's
+/// exhaust while it fires, rac1/retail/strafe/pack_light.rs), lit as ONE small fire light while the Fire row draws
+/// (viewer/firefx_carried.rs): `id` stays the same while it burns (the frame smoothing pairs two fields' points by it, the light
+/// fades in and out by it), `area` = its flame area (m^2, h x w as viewer/firefx.rs `Emit`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FlameLight {
+	pub id: u32,
+	pub pos: [f32; 3],
+	pub area: f32,
+}
+
+/// [PC] Fire: one of the player's explosive shots the pack sees this field (R&C1: rac1/retail/blast_gate.rs). With `PoolFx::blast_gate`
+/// a blast-type pool sprite starts a ground fire only when it appears within `reach` (m) of such a shot, or of where one was a moment
+/// ago (viewer/firefx_blast.rs `Gate`): an enemy dying in its own explosion lights nothing. `id` names the shot while it lives, `kind` is
+/// the pack's own label of its sort (R&C1: the moby class): a slot that changes kind holds a different shot.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShotZone {
+	pub id: u32,
+	pub kind: u32,
+	pub pos: [f32; 3],
+	pub reach: f32,
+}
+
 /// One field's effect pool as the particle pass reads it (viewer/gpu/particle_fx.rs `set_particles`; R&C1 builds it from its
 /// `RetailFx`, retail/fx_queue.rs `pool_fx`): the pool slot of each pool sprite (the sprites are in the frame's sprite list),
 /// the mode-3 ribbons and mode-2 lines with their slots, and for the Water Enhanced contact rings the level frame counter, the
@@ -141,6 +164,11 @@ pub struct PoolFx<'a> {
 	pub shots: &'a [crate::shot_rows::ShotPoint],
 	/// [PC] Fire: the pack's explosions of this field that are no pool sprites (`BlastPoint`); may be empty.
 	pub blasts: &'a [BlastPoint],
+	/// [PC] Fire: the player's explosive shots of this field (`ShotZone`). Some = only blast-type pool sprites born near one start a
+	/// ground fire; None = every one does (a game that names no shots).
+	pub blast_gate: Option<&'a [ShotZone]>,
+	/// [PC] Fire light: the pack's light-only flames of this field (`FlameLight`); may be empty.
+	pub flame_lights: &'a [FlameLight],
 	/// [PC] With frame smoothing: the shown field's own pool sprites and hero position, before the smoothing blended them with the
 	/// field before (parallel to `sprite_slots`; empty / None = the sprites as given). The Pyrocitor's jets are built from these and
 	/// blended once, node by node (viewer/firefx_jet_lerp.rs): built from the blended sprites and blended again, the stream stood

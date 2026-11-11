@@ -22,10 +22,12 @@ pub enum Site {
 	Frame,
 	Sun,
 	Under,
+	/// [PC] lane dlit: the point-light shadows' fade (sunshadow/omni.rs).
+	Flit,
 }
 
 const UNSET: u64 = u64::MAX;
-static LAST: [AtomicU64; 3] = [AtomicU64::new(UNSET), AtomicU64::new(UNSET), AtomicU64::new(UNSET)];
+static LAST: [AtomicU64; 4] = [AtomicU64::new(UNSET), AtomicU64::new(UNSET), AtomicU64::new(UNSET), AtomicU64::new(UNSET)];
 
 fn env_on(cell: &'static OnceLock<bool>, name: &str) -> bool {
 	*cell.get_or_init(|| std::env::var(name).is_ok_and(|v| v == "1"))

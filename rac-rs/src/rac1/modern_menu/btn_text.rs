@@ -15,6 +15,9 @@ use rac_engine::ui::input::{Device, GlyphSet};
 pub struct Style {
 	pub device: Device,
 	pub glyphs: GlyphSet,
+	/// A menu screen (title, ship, Galactic Map): a controller's pictures are the STANDARD layout there (the menus read it that way).
+	/// Gameplay text (pause Help / Moves bodies, descriptions) follows the player's remap.
+	pub menu: bool,
 }
 
 /// A legend line is at most this many bytes long (retail's rule, `prompts` LEGEND_MAX_BYTES).
@@ -42,6 +45,13 @@ pub fn chip(b: Btn, style: Style, key: &dyn Fn(Btn) -> String) -> String {
 		let k = key(b);
 		return inline::key(if k.is_empty() { b.label() } else { &k });
 	}
+	// A remapped controller: the sentence names the button its action is on now (`prompt_pad.rs`).
+	let b = match (!style.menu && crate::retail::prompt_pad::remapped()).then(|| crate::retail::prompt_pad::shown(b.pad_bit(), style.glyphs == GlyphSet::PlayStation)).flatten() {
+		Some(crate::retail::prompt_pad::Shown::Cell(c)) => Btn::from_glyph(c).unwrap_or(b),
+		Some(crate::retail::prompt_pad::Shown::Name(n)) => return inline::key(&n),
+		Some(crate::retail::prompt_pad::Shown::Unbound) => return inline::key("-"),
+		None => b,
+	};
 	if let Some(sym) = b.symbol() {
 		return inline::pad(sym, style.glyphs);
 	}
@@ -82,7 +92,7 @@ mod tests {
 	use rac_engine::ui::inline::{pieces, Chip, Piece};
 	use rac_engine::ui::prim::Symbol;
 
-	const PAD: Style = Style { device: Device::Pad, glyphs: GlyphSet::PlayStation };
+	const PAD: Style = Style { device: Device::Pad, glyphs: GlyphSet::PlayStation, menu: false };
 
 	fn kb_key(b: Btn) -> String {
 		match b {
@@ -99,15 +109,16 @@ mod tests {
 	/// The German Hoverboard text of pp\itm.png ("springst du mit . Wenn du springst und , , und in") keeps its buttons.
 	#[test]
 	fn a_sentence_keeps_its_buttons_as_chips_in_the_hint_style() {
+		let _g = crate::retail::pcopts::globals_guard(); // the pad remap (prompt_pad::remapped) is process-wide
 		let r = decode_bytes(b"Du springst mit \x10. Halte \x15, \x16 und \x19\x01gedr\xa7ckt.");
 		let pad = page_text(&r, false, PAD, &kb_key);
 		assert_eq!(inline::plain(&pad), "Du springst mit . Halte R1, L2 und LS gedr\u{fc}ckt.");
 		let want = vec![Chip::Pad(Symbol::Cross, GlyphSet::PlayStation), Chip::Key("R1".into()), Chip::Key("L2".into()), Chip::Key("LS".into())];
 		assert_eq!(chips(&pad), want);
 		assert!(pad.starts_with("Du springst mit \u{e000}"), "the chip sits where the glyph was: {pad:?}");
-		let letters = page_text(&r, false, Style { device: Device::Pad, glyphs: GlyphSet::Letters }, &kb_key);
+		let letters = page_text(&r, false, Style { device: Device::Pad, glyphs: GlyphSet::Letters, menu: false }, &kb_key);
 		assert_eq!(chips(&letters)[..3], [Chip::Pad(Symbol::Cross, GlyphSet::Letters), Chip::Key("RB".into()), Chip::Key("LT".into())]);
-		let kb = page_text(&r, false, Style { device: Device::Keyboard, glyphs: GlyphSet::PlayStation }, &kb_key);
+		let kb = page_text(&r, false, Style { device: Device::Keyboard, glyphs: GlyphSet::PlayStation, menu: false }, &kb_key);
 		// The keyboard: the play keys; a key without a name falls back to the button's own name.
 		assert_eq!(chips(&kb), vec![Chip::Key("Space".into()), Chip::Key("Ctrl".into()), Chip::Key("L2".into()), Chip::Key("Left stick".into())]);
 	}
@@ -124,6 +135,21 @@ mod tests {
 		assert!(!is_legend(&long), "a long sentence that starts with a button is not a legend");
 		let r = decode_bytes(b"  Gold-Bolts\x01gefunden  ");
 		assert_eq!(page_text(&r, false, PAD, &kb_key), "Gold-Bolts gefunden");
+	}
+
+	/// A menu screen (Galactic Map rows, title, ship) shows the STANDARD pictures under a controller remap; gameplay text follows it (R2-S2).
+	#[test]
+	fn a_menu_style_keeps_the_standard_pictures_under_a_remap() {
+		use rac_engine::input::kbm;
+		let _g = crate::retail::pcopts::globals_guard();
+		kbm::init(None, None, None, None);
+		crate::kbm_actions::install();
+		let jump = kbm::table().index("jump").unwrap();
+		kbm::assign_pad(jump, 0, 1); // Jump on B
+		let menu = Style { menu: true, ..PAD };
+		assert_eq!(chips(&chip(Btn::Cross, menu, &kb_key)), vec![Chip::Pad(Symbol::Cross, GlyphSet::PlayStation)]);
+		assert_eq!(chips(&chip(Btn::Cross, PAD, &kb_key)), vec![Chip::Pad(Symbol::Circle, GlyphSet::PlayStation)]);
+		kbm::init(None, None, None, None);
 	}
 
 	#[test]

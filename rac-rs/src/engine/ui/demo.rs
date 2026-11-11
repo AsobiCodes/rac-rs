@@ -78,6 +78,8 @@ static PRESETS: [UiPresetDef; 3] = [
 static NEEDS: [NeedsRule; 1] = [NeedsRule {
 	row: "lighting",
 	set_to: 1,
+	for_row: "",
+	fix: None,
 	banner: ["Most effects need Enhanced lighting", "La plupart des effets demandent l'\u{e9}clairage am\u{e9}lior\u{e9}", "Die meisten Effekte brauchen verbesserte Beleuchtung", "La mayor\u{ed}a de los efectos necesitan iluminaci\u{f3}n mejorada", "Quasi tutti gli effetti richiedono l'illuminazione migliorata"],
 	detail: ["This only shows with Lighting set to Enhanced. Lighting is {} now.", "Visible seulement avec l'\u{e9}clairage am\u{e9}lior\u{e9}. L'\u{e9}clairage est {} pour l'instant.", "Das ist nur mit verbesserter Beleuchtung zu sehen. Die Beleuchtung steht auf {}.", "Solo se ve con la iluminaci\u{f3}n mejorada. Ahora est\u{e1} en {}.", "Si vede solo con l'illuminazione migliorata. Ora \u{e8} {}."],
 	button: ["Switch Lighting to Enhanced", "Passer \u{e0} l'\u{e9}clairage am\u{e9}lior\u{e9}", "Auf verbesserte Beleuchtung umstellen", "Cambiar a iluminaci\u{f3}n mejorada", "Passa all'illuminazione migliorata"],
@@ -162,6 +164,7 @@ pub fn new_ui(spec: DemoSpec, measure: Box<dyn TextMeasure + Send>) -> Ui {
 	m.set_tab(spec.tab.min(m.menu.tabs.len() - 1));
 	let rows = m.cur_rows();
 	m.focus = (rows.start + spec.focus).min(rows.end.saturating_sub(1));
+	m.settle_focus();
 	m.peek = spec.peek;
 	m.device = if spec.pad { Device::Pad } else { Device::Keyboard };
 	m.glyphs = GlyphSet::from_index(spec.glyphs);

@@ -134,7 +134,7 @@ pub struct FurPart {
 	pub len: [f32; 2],
 	/// Comb: how far the tips lean down along the surface at the top shell (m).
 	pub comb: [f32; 2],
-	/// Fur noise tiles per uv unit of the part's texture (one tile holds ~1700 strands, viewer/furfx/noise.rs).
+	/// Fur noise tiles per uv unit of the part's texture (one tile holds ~6800 strands, viewer/furfx/noise.rs).
 	pub density: f32,
 	/// Opacity of the fur layer (1 = the strand coverage as is), independent of the shell count.
 	pub thick: [f32; 2],
@@ -145,6 +145,17 @@ pub struct FurPart {
 	pub root: f32,
 	/// Warm sheen at grazing angles.
 	pub sheen: [f32; 2],
+	/// Self-shadow at the root (0 = none, 1 = black), fading to none at the tip: the depth of the coat.
+	pub occ: f32,
+	/// Strand highlight (Kajiya-Kay along the strand) strength and its exponent.
+	pub spec: f32,
+	pub spec_exp: f32,
+	/// Tip lift towards the colour's own lighter shade (dark stripes get lighter tips).
+	pub lift: f32,
+	/// Strand coverage at which a strand is fully opaque (0 = off): crisp strands.
+	pub sharp: f32,
+	/// Strand edge shade (0 = none): a strand's core is bright, its edges darker.
+	pub strand: f32,
 }
 
 /// The game's fur table for its hero model.
@@ -156,7 +167,7 @@ pub struct FurSpec {
 
 /// Shells per quality level (Graphics `fur_q` 1, 2, 3): Soft, Fluffy. Same look at every level (the shader spreads the opacity over
 /// the shells); more shells = a smoother, denser outline. High costs most.
-pub const SHELLS: [[u32; 2]; 3] = [[8, 10], [12, 16], [16, 24]];
+pub const SHELLS: [[u32; 2]; 3] = [[8, 10], [12, 16], [20, 32]];
 
 /// The shell count of a quality level (`q` 1..=3; 0 = no fur) and style (`long` = Fluffy).
 pub fn shells(q: u8, long: bool) -> u32 {

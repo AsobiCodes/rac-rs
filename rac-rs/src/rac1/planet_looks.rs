@@ -119,9 +119,13 @@ fn twinkle(level: usize) -> f32 {
 /// fog at all, maybe a slight fog near the water"). Novalis and Kalebo III (identical sky-blue retail fog: a daylight horizon
 /// haze the retail fade already paints) keep no air haze; the levels set in space (Nebula G34, Gemlik Base, Drek's fleet: user
 /// 2026-10-24 "gemlik base ... literally set in space") none either; the others keep the amount their retail fog sets.
+/// Batalia keeps a tenth (user 2026-11-07, "on batalia theres fog everywhere near water which shouldnt happen": its short
+/// retail fog hit MAX_SIGMA and laid grey haze over the sea and the island bases that PCSX2 fullgame1 0340 shows clear; at a
+/// quarter the grey still stood over the water). Not 0: that would drop its fog floor and add the Novalis water mist.
 fn air(level: usize) -> f32 {
 	match level {
 		1 | 6 | 13 | 16 | 17 => 0.0,
+		8 => 0.1,
 		_ => 1.0,
 	}
 }

@@ -28,27 +28,30 @@ fn rows_validate_fit_and_defaults() {
 	assert!(bad.is_empty(), "{bad:#?}");
 }
 
-/// Waves and Underwater look dim at Water Classic (their box offers Water High, no banner) and with Lighting Classic (the Lighting
-/// rule, the root of the chain); the Water row itself only with Lighting. UI only: the model's values, nothing else.
+/// 2026-11-08 (user: "too many options"): no MSAA, DLSS preset, Waves or Underwater look row; Supporter drawings in the Game tab's
+/// Extras; a row whose dependency is unmet is hidden (engine `Model::cur_shown`), and the Lighting banner still says why.
 #[test]
-fn water_rows_dim_with_water_classic_and_with_lighting_classic() {
+fn trimmed_rows_and_hidden_dependents() {
 	use rac_engine::ui::model::Model;
 	let mut m = Model::new(menu(), 0);
-	let [light, water, waves, under] = ["lighting", "water", "waves", "underwater"].map(|id| m.row_index(id).unwrap());
+	for id in ["scene_msaa", "dlss_preset", "waves", "underwater"] {
+		assert!(m.row_index(id).is_none(), "{id} has no row");
+	}
+	let sup = m.row_index("supporters").unwrap();
+	assert_eq!(m.menu.tabs[m.rows[sup].tab].id, "game");
+	let [light, water, up, q, fg] = ["lighting", "water", "upscaler", "upscale_q", "framegen"].map(|id| m.row_index(id).unwrap());
 	m.set_tab(m.menu.tabs.iter().position(|t| t.id == "graphics").unwrap());
 	m.set_value(light, 1);
-	m.set_value(water, 3);
-	assert!(![water, waves, under].iter().any(|&i| m.blocked(i)));
-	m.set_value(water, 0);
-	assert!(m.blocked(waves) && m.blocked(under) && !m.blocked(water));
-	assert_eq!(m.rule(under).map(|r| r.row), Some("water"));
-	assert!(m.tab_rule().is_none(), "Water Classic dims its rows without a banner");
+	m.set_value(up, 0);
+	let shown = m.cur_shown();
+	assert!(shown.contains(&up) && !shown.contains(&q) && !shown.contains(&fg), "Upscaler Off hides its rows");
+	m.set_value(up, rac_engine::viewer::upscale_choice::FFX_VALUE);
+	assert!(m.cur_shown().contains(&q));
 	m.set_value(light, 0);
-	assert!(m.blocked(waves) && m.blocked(under) && m.blocked(water));
-	assert_eq!(m.rule(waves).map(|r| r.row), Some("lighting"), "the root of the chain first");
-	m.set_value(light, 1);
-	let rule = m.rule(under).unwrap();
-	m.enhance(rule);
-	assert_eq!(m.value(water), 3);
-	assert!(!m.blocked(under) && !m.blocked(waves));
+	assert!(!m.cur_shown().contains(&water) && m.cur_shown().contains(&light), "Lighting Classic hides the effect rows");
+	assert_eq!(m.tab_rule().map(|r| r.row), Some("lighting"), "the banner names Lighting");
+	m.focus = water;
+	m.settle_focus();
+	assert!(m.cur_shown().contains(&m.focus) && m.focus < water, "a hidden focus moves to the shown row above it");
 }
+

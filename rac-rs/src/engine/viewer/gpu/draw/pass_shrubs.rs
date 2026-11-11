@@ -80,11 +80,9 @@ impl Gpu {
 						_ => runs.push((q.class_id, q.pass1, base, 6)),
 					}
 				}
-				let idx: Vec<u32> = (0..verts.len() as u32 / 4).flat_map(|q| [q * 4, q * 4 + 1, q * 4 + 2, q * 4, q * 4 + 2, q * 4 + 3]).collect();
-				let vb = buffer(&self.device, "shrub billboard vertices", bytemuck::cast_slice(&verts), wgpu::BufferUsages::VERTEX);
-				self.queue.write_buffer(&vb, 0, bytemuck::cast_slice(&verts));
-				let ib = buffer(&self.device, "shrub billboard indices", bytemuck::cast_slice(&idx), wgpu::BufferUsages::INDEX);
-				self.queue.write_buffer(&ib, 0, bytemuck::cast_slice(&idx));
+				let nq = verts.len() as u32 / 4; // [PC] lane rcpu: the shared quad index list (framebuf.rs)
+				let vb = crate::viewer::framebuf::upload(&self.device, &self.queue, "shrub billboard vertices", bytemuck::cast_slice(&verts), wgpu::BufferUsages::VERTEX);
+				let ib = crate::viewer::framebuf::quad_indices(&self.device, &self.queue, "shrub billboard indices", nq);
 				pass.set_vertex_buffer(0, vb.slice(..));
 				pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
 				for (pipes, want) in [(&self.shrub_pipelines[2..4], true), (&self.shrub_pipelines[4..5], false)] {

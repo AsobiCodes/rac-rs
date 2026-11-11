@@ -4,19 +4,7 @@
 //! the other pages, so rebinding (a capture of the next key or button), conflicts (a key two functions share), Reset, mod switches and
 //! mod settings are the classic code's and write the same `pc_options.txt`, `mods/active.txt` and `mods/settings.json`.
 use super::pause::{list, Facts, Parts};
-use super::title::word;
-use crate::retail::menu_model::pages::Page;
 use rac_engine::ui::kit::page::{PageRow, Panel};
-use rac_engine::ui::T5;
-
-// Not retail text: the line under the Controls rows (modern-only; native-speaker review wanted).
-const HOW: T5 = [
-	"Choose a function, then press the new key or button. Esc cancels.",
-	"Choisissez une fonction, puis appuyez sur la nouvelle touche ou le nouveau bouton. \u{c9}chap annule.",
-	"W\u{e4}hle eine Funktion und dr\u{fc}cke dann die neue Taste oder den neuen Knopf. Esc bricht ab.",
-	"Elige una funci\u{f3}n y pulsa la nueva tecla o bot\u{f3}n. Esc cancela.",
-	"Scegli una funzione, poi premi il nuovo tasto o pulsante. Esc annulla.",
-];
 
 /// The stepper row's value between its two arrows.
 fn stepped(v: &str) -> String {
@@ -50,10 +38,7 @@ pub(super) fn pc_parts(f: &Facts) -> Option<Parts> {
 	Some(Parts { panel: Panel::Rows { caption: pc.title.clone(), rows }, targets, dialog: None, sel: l.cursor, focus: true, grid: None })
 }
 
-/// The note line of the page (empty = none).
-pub(super) fn footer(f: &Facts) -> String {
-	match f.view.page {
-		Page::PcControls => word(&HOW, f.lang).to_string(),
-		_ => String::new(),
-	}
+/// The note line of the page (none now: the Controls table is `pause_keys.rs`, its hints are chips in its own draw list).
+pub(super) fn footer(_f: &Facts) -> String {
+	String::new()
 }

@@ -27,7 +27,8 @@ impl Worker {
 		// the recording keeps the raw sticks + counts, so a replay re-derives the same bytes.
 		let ship = !front && !booting && !disc::extras_off() && shipmouse::in_ship_fight(&m);
 		// Turret sections (Batalia, Gaspar, Hoven): the same counts steer the turret through its stick (shipmouse.rs).
-		let turret = if front || booting || disc::extras_off() { None } else { shipmouse::turret(&m, shipmouse::y_inverted(&m)) };
+		let turret = if front || booting || disc::extras_off() { None } else { shipmouse::turret(&m, shipmouse::game_y_inverted(&m)) };
+		shipmouse_state.set_turret_flip(shipmouse::y_inverted(&m) != shipmouse::game_y_inverted(&m));
 		let pad_sticks = shipmouse_state.step(ship, ship && shipmouse::y_inverted(&m), fin.mc.look, fin.sticks);
 		let mut pad_sticks = shipmouse_state.step_turret(turret, fin.mc.look, pad_sticks);
 		// Modern camera: the controller's right stick gets the mouse's sign for every camera, modcam's or retail's (modcam/sticks.rs);
@@ -58,6 +59,8 @@ impl Worker {
 		if !front && !booting && !disc::extras_off() {
 			// Quick Select pauses the game (qs_pause.rs, row On): the world steps are off for this field while the ring is up.
 			let frozen = qs_pause::pre_field(&mut m, field);
+			// Fast travel (fast_travel.rs, row On): the arrival warp stays black and ends once the level's reads are done.
+			crate::retail::fast_travel::pre_field(&mut m, field, play.is_some());
 			let mut fin2 = pcext::pre_field(&mut m, &fin);
 			if cam_stick {
 				// modcam turns on the same right stick bytes the game reads.
@@ -76,6 +79,10 @@ impl Worker {
 			// The title's Options -> Graphics rows (pcext.rs `front_field`).
 			pcext::front_field(&mut m);
 			crate::retail::pcmods::front_field(&mut m.cpu.mem);
+			// Fast travel after the title's Load Game (fast_load.rs, row On): the load's warp stays black and ends once the reads are done.
+			if !booting && !disc::extras_off() {
+				crate::retail::fast_load::front_field(&mut m, field, play.is_some());
+			}
 		}
 		// Dev debug keys (retail/debugkeys.rs): inert unless RAC_DEBUG_KEYS=1; their writes happen here, between two fields.
 		debugkeys::pre_field(&mut m, field, !front && !booting);

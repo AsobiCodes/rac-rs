@@ -168,6 +168,7 @@ fn load_fonts(l: &Level, disc: &mut iso::Disc, tex: &mut Vec<Texture>, a: &mut H
 	match crate::toc::font_glyph_tables(disc).and_then(|g| art::level_fonts(l, &g)) {
 		Ok(mut fonts) if !fonts.is_empty() => {
 			let f = fonts.remove(0);
+			crate::retail::help_ctl_font::set_table(f.glyphs.iter().map(|g| (g.u as u8, g.v as u8, g.dy as i8, g.adv as u8)).collect());
 			a.font = Some((1 + tex.len(), f.glyphs));
 			tex.push(glyphtex::dress(1 + tex.len(), f.tex));
 			// NOV-14.2b: font 3 (the last of the three level fonts).

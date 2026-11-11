@@ -66,13 +66,18 @@ pub struct Gains {
 	pub stick_k: f32,
 	pub lr: f32,
 	pub ud: f32,
+	/// The mouse's own signs (`pcmouseinv::signs`); equal to `lr` / `ud` = Like camera (today's numbers, bit for bit).
+	pub mouse_lr: f32,
+	pub mouse_ud: f32,
 }
 
 /// The field's turn (yaw, pitch) in radians from the mouse counts `look` and the stick `s` (`stick_axes`, after the deadzone and the
 /// Smooth ramp). With the same factor for both and keys only, the numbers are those of the one-factor formula before the change.
 pub fn turn(look: [i16; 2], s: [f32; 2], g: &Gains) -> (f32, f32) {
-	let dyaw = (-(look[0] as f32) * g.mouse * g.sens * g.mouse_k + s[0] * g.rot * g.stick_k) * g.lr;
-	let dpitch = (look[1] as f32 * g.mouse * g.sens * g.mouse_k - s[1] * g.tilt * g.stick_k) * g.ud;
+	// The mouse's share is flipped by `mouse * retail` (both +-1): exactly 1.0 for Like camera, so the numbers do not move.
+	let (flip_x, flip_y) = (g.mouse_lr * g.lr, g.mouse_ud * g.ud);
+	let dyaw = (-(look[0] as f32) * g.mouse * g.sens * g.mouse_k * flip_x + s[0] * g.rot * g.stick_k) * g.lr;
+	let dpitch = (look[1] as f32 * g.mouse * g.sens * g.mouse_k * flip_y - s[1] * g.tilt * g.stick_k) * g.ud;
 	(dyaw, dpitch)
 }
 
@@ -81,7 +86,7 @@ mod tests {
 	use super::*;
 
 	fn gains(mouse_k: f32, stick_k: f32, lr: f32, ud: f32) -> Gains {
-		Gains { mouse: 0.003, sens: 1.0, mouse_k, rot: 0.03, tilt: 0.02, stick_k, lr, ud }
+		Gains { mouse: 0.003, sens: 1.0, mouse_k, rot: 0.03, tilt: 0.02, stick_k, lr, ud, mouse_lr: lr, mouse_ud: ud }
 	}
 
 	/// The formula before the change (one factor `k` for mouse and stick), for the keys' exact numbers.

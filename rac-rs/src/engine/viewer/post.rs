@@ -24,7 +24,7 @@
 
 use super::*;
 
-const POST_SHADER: &str = r#"
+pub(in crate::viewer) const POST_SHADER: &str = r#"
 struct P { size: vec4<f32>, half: vec4<f32>, proj: vec4<f32>, params: vec4<f32>, grade: vec4<f32>, extra: vec4<f32>, sun: vec4<f32>, cam: array<vec4<f32>, 4>, fxl: array<vec4<f32>, 16>, q: vec4<f32>, gi: vec4<f32>, gi2: vec4<f32>, gi3: vec4<f32> };
 @group(0) @binding(0) var<uniform> p: P;
 @group(0) @binding(1) var scene: texture_2d<f32>;
@@ -40,6 +40,9 @@ struct P { size: vec4<f32>, half: vec4<f32>, proj: vec4<f32>, params: vec4<f32>,
 @group(0) @binding(9) var gi_in: texture_2d<f32>;
 @group(0) @binding(10) var wpos_in: texture_2d<f32>;
 @group(0) @binding(11) var prew_in: texture_2d<f32>;
+// [PC] tb17: the scene as the water pass left it (water shade + falls, or the underwater look when it drew: waterfx `mark_water`),
+// before the smoke, fog and heat haze change it; `gi_skip` compares it with `prew_in`.
+@group(0) @binding(13) var postw_in: texture_2d<f32>;
 // [PC] How much of each pixel the volumetric fog hides (1 - its transmittance; 0 without the fog: volfog.rs `fs_apply`).
 @group(0) @binding(12) var fogc_in: texture_2d<f32>;
 
@@ -289,11 +292,13 @@ fn gi_at(c0: vec2<i32>, z: f32) -> vec3<f32> {
 }
 
 // Whether the water pass drew pixel `c0` this frame (a water surface in its position target, or any pixel it changed: the
-// water, its waterfalls, the underwater look): no bounce light there.
+// water, its waterfalls, the underwater look): no bounce light there. [PC] tb17: compared with the scene the water pass left
+// (`postw_in`), not the composite's input: the volumetric smoke and the heat haze change pixels after it, and a pixel they
+// touched counted as water, took the old screen fire light on top of the surface one (`fx_light`) and saturated yellow.
 fn gi_skip(c0: vec2<i32>) -> bool {
 	if (p.gi.w < 0.5) { return false; }
 	if (textureLoad(wpos_in, c0, 0).a > 0.5) { return true; }
-	return any(textureLoad(prew_in, c0, 0).rgb != textureLoad(scene, c0, 0).rgb);
+	return any(textureLoad(prew_in, c0, 0).rgb != textureLoad(postw_in, c0, 0).rgb);
 }
 
 fn luma(c: vec3<f32>) -> f32 {
@@ -461,7 +466,9 @@ fn fx_light(c0: vec2<i32>, shot: ptr<function, vec3<f32>>) -> vec3<f32> {
 		let face = clamp(dot(n, d / max(dist, 1e-4)) * 0.6 + 0.4, 0.0, 1.0);
 		let c = p.fxl[2u * k + 1u];
 		if (c.w > 0.0) {
-			*shot += c.rgb * (c.w * f * f * face);
+			// The level pass lights its surfaces with these as point lights (flit.wgsl `flit_light`, p.q.w = 1: on): nothing more here
+			// (no screen haze). Pixels the water pass drew (`gi_skip`: water, falls, underwater look) took none: they keep the old term.
+			if (p.q.w <= 0.0 || gi_skip(c0)) { *shot += c.rgb * (c.w * f * f * face); }
 		} else {
 			acc += c.rgb * f * f * face;
 		}
@@ -540,8 +547,8 @@ fn scene_at(c: vec2<i32>, dim: vec2<i32>, off: vec2<f32>) -> vec3<f32> {
 	if (p.extra.y > 0.0) {
 		// The effect lights add to what the surface already shows (a faint floor so black walls still catch some),
 		// not on the particles' own pixels.
-		// The weapon lights (shotlight.rs) light the surface's estimated own colour (towards its hue, as the GI does), so a bolt or a
-		// flame lights up a dark corner too.
+		// The fire and weapon lights (colour .w > 0: firefx_light.rs, shotlight.rs) are lit on the surfaces by the level pass (flit.wgsl,
+		// lane dlit: real point lights on the texture colour); here only on the water pass's pixels, on the estimated own colour (`fx_light`).
 		var shot = vec3<f32>(0.0);
 		let mx = max(l.r, max(l.g, l.b));
 		let alb = max(l + vec3<f32>(0.02), l * (0.5 / max(mx, 0.1)));
@@ -572,6 +579,20 @@ fn scene_at(c: vec2<i32>, dim: vec2<i32>, off: vec2<f32>) -> vec3<f32> {
 }
 "#;
 
+/// [PC] Brightness / Contrast (picture_adjust.rs): the composite's last line, and the same line with the curve (`fs_comp_grade`).
+const COMP_RETURN: &str = "\treturn vec4<f32>(pow(min(l, vec3<f32>(1.0)), vec3<f32>(1.0 / 2.2)), 1.0);\n}\n";
+const COMP_RETURN_GRADED: &str = "\treturn vec4<f32>(grade_curve(pow(min(l, vec3<f32>(1.0)), vec3<f32>(1.0 / 2.2)), p.pgrade), 1.0);\n}\n";
+
+/// [PC] Brightness / Contrast: the post shader with `fs_comp_grade` (a copy of `fs_comp` whose result goes through the shared curve,
+/// `P` gains `pgrade`). The plain shader's text is untouched, so the 50 / 50 composite is the composite of before.
+pub(in crate::viewer) fn graded_post_shader() -> String {
+	let start = POST_SHADER.find("@fragment fn fs_comp(v: VO)").expect("fs_comp");
+	let end = start + POST_SHADER[start..].find(COMP_RETURN).expect("fs_comp's return") + COMP_RETURN.len();
+	let comp = POST_SHADER[start..end].replacen("fn fs_comp(", "fn fs_comp_grade(", 1).replacen(COMP_RETURN, COMP_RETURN_GRADED, 1);
+	let base = POST_SHADER.replacen("gi3: vec4<f32> };", "gi3: vec4<f32>, pgrade: vec4<f32> };", 1);
+	format!("{base}\n{}\n{comp}", super::picture_adjust::CURVE_WGSL)
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct PostU {
@@ -592,6 +613,8 @@ struct PostU {
 	gi: [f32; 4],
 	gi2: [f32; 4],
 	gi3: [f32; 4],
+	/// [PC] Brightness / Contrast: the curve's uniform, read only by `fs_comp_grade` (written by `composite` when it grades).
+	pgrade: [f32; 4],
 }
 
 /// Global illumination by Graphics level (1 Low, 2 Medium, otherwise High): (taps per cell, world radius, largest radius in grid
@@ -760,6 +783,7 @@ struct Views<'a> {
 	wpos: Option<&'a wgpu::TextureView>,
 	prew: Option<&'a wgpu::TextureView>,
 	fogc: Option<&'a wgpu::TextureView>,
+	postw: Option<&'a wgpu::TextureView>,
 }
 
 pub(super) struct Post {
@@ -775,6 +799,8 @@ pub(super) struct Post {
 	p_down: wgpu::RenderPipeline,
 	p_up: wgpu::RenderPipeline,
 	p_comp: wgpu::RenderPipeline,
+	/// [PC] Brightness / Contrast: `fs_comp_grade`, built the first time a slider is off 50 (None inside = the guard refused it).
+	p_comp_grade: std::sync::OnceLock<Option<wgpu::RenderPipeline>>,
 	p_rmask: wgpu::RenderPipeline,
 	p_rays: wgpu::RenderPipeline,
 	/// [PC] Global illumination: cells, gather, blur.
@@ -816,7 +842,7 @@ impl Post {
 			entries: &[
 				wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
 				tex(1, float, false),
-				tex(2, wgpu::TextureSampleType::Depth, true),
+				tex(2, wgpu::TextureSampleType::Depth, crate::viewer::scene_msaa::msaa() > 1),
 				tex(3, wgpu::TextureSampleType::Float { filterable: false }, false),
 				tex(4, wgpu::TextureSampleType::Float { filterable: false }, false),
 				tex(5, float, false),
@@ -827,6 +853,7 @@ impl Post {
 				tex(10, wgpu::TextureSampleType::Float { filterable: false }, false),
 				tex(11, wgpu::TextureSampleType::Float { filterable: false }, false),
 				tex(12, float, false),
+				tex(13, wgpu::TextureSampleType::Float { filterable: false }, false),
 			],
 		});
 		let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("post"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
@@ -839,7 +866,7 @@ impl Post {
 				primitive: Default::default(),
 				depth_stencil: None,
 				// The composite writes every sample of the MSAA target the HUD pass then loads.
-				multisample: wgpu::MultisampleState { count: if ms { MSAA } else { 1 }, ..Default::default() },
+				multisample: wgpu::MultisampleState { count: if ms { msaa() } else { 1 }, ..Default::default() },
 				multiview_mask: None,
 				cache: None,
 			})
@@ -876,6 +903,7 @@ impl Post {
 			p_down: make("fs_down", BLOOM_FORMAT, None, false),
 			p_up: make("fs_up", BLOOM_FORMAT, Some(add), false),
 			p_comp: make("fs_comp", format, None, true),
+			p_comp_grade: std::sync::OnceLock::new(),
 			p_rmask: make("fs_rmask", BLOOM_FORMAT, None, false),
 			p_rays: make("fs_rays", BLOOM_FORMAT, None, false),
 			p_gsrc,
@@ -913,14 +941,16 @@ impl Post {
 		}
 	}
 
-	/// Global illumination, after the water pass's positions: `mask` = its position target and its copy of the scene before
-	/// it shaded (waterfx.rs `gi_mask`) when it runs this frame, so the composite leaves its pixels alone.
-	pub(super) fn bind_water(&mut self, device: &wgpu::Device, mask: Option<(&wgpu::TextureView, &wgpu::Texture)>) {
+	/// Global illumination, after the water pass's positions: `mask` = its position target, its copy of the scene before it
+	/// shaded and the copy after it (waterfx.rs `gi_mask`, `mark_water`) when it runs this frame, so the composite leaves its
+	/// pixels alone.
+	pub(super) fn bind_water(&mut self, device: &wgpu::Device, mask: Option<(&wgpu::TextureView, &wgpu::Texture, &wgpu::Texture)>) {
 		self.gi_water = false;
-		let (Some(t), Some(g), Some((wpos, copy))) = (&self.t, &self.gi, mask) else { return };
+		let (Some(t), Some(g), Some((wpos, copy, after))) = (&self.t, &self.gi, mask) else { return };
 		if g.g_comp_w.as_ref().is_none_or(|(v, c, _)| v != wpos || c != copy) {
 			let prew = copy.create_view(&Default::default());
-			let group = self.bind(device, &self.ubuf, t, &t.scene, Views { lin: Some(&t.lin), ao: Some(&t.ao[0]), bloom: Some(&t.bloom[0]), glow: Some(&t.glow), rays: Some(&t.rays[1]), gi: Some(&g.gi[0]), wpos: Some(wpos), prew: Some(&prew), fogc: Some(&t.fogc) });
+			let postw = after.create_view(&Default::default());
+			let group = self.bind(device, &self.ubuf, t, &t.scene, Views { lin: Some(&t.lin), ao: Some(&t.ao[0]), bloom: Some(&t.bloom[0]), glow: Some(&t.glow), rays: Some(&t.rays[1]), gi: Some(&g.gi[0]), wpos: Some(wpos), prew: Some(&prew), fogc: Some(&t.fogc), postw: Some(&postw) });
 			if let Some(g) = &mut self.gi {
 				g.g_comp_w = Some((wpos.clone(), copy.clone(), group));
 			}
@@ -955,6 +985,7 @@ impl Post {
 				tv(10, v.wpos.unwrap_or(d32)),
 				tv(11, v.prew.unwrap_or(d)),
 				tv(12, v.fogc.unwrap_or(d)),
+				tv(13, v.postw.unwrap_or(d)),
 			],
 		})
 	}
@@ -1009,6 +1040,11 @@ impl Post {
 		self.t.as_ref().map(|t| &t.fogc)
 	}
 
+	/// [PC] tb17: the composite reads the water pass's targets this frame (`bind_water` bound them): `mark_water` must run.
+	pub(super) fn water_bound(&self) -> bool {
+		self.gi_water
+	}
+
 	pub(super) fn water_inputs(&self) -> Option<(&wgpu::TextureView, &wgpu::TextureView, &wgpu::TextureView, u64)> {
 		self.t.as_ref().map(|t| (&t.scene, &t.lin, &t.glow, t.generation))
 	}
@@ -1041,7 +1077,7 @@ impl Post {
 				dimension: wgpu::TextureDimension::D2,
 				format: self.format,
 				// COPY_SRC: the water pass reads a copy of it (waterfx.rs).
-				usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+				usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC | crate::viewer::scene_msaa::copy_usage(),
 				view_formats: &[],
 			})
 			.create_view(&Default::default());
@@ -1113,10 +1149,11 @@ impl Post {
 				[[cam.pos[0], cam.pos[1], cam.pos[2], 0.0], [f[0], f[1], f[2], 0.0], [r[0] * tx, r[1] * tx, r[2] * tx, 0.0], [u[0] * ty, u[1] * ty, u[2] * ty, 0.0]]
 			},
 			fxl: fx.rows(),
-			q: [ao_taps, ao_reach, sun_taps(sun_level), 0.0],
+			q: [ao_taps, ao_reach, sun_taps(sun_level), super::flit::near_share()],
 			gi: [0.0; 4],
 			gi2: [0.0; 4],
 			gi3: [0.0; 4],
+			pgrade: [0.0; 4],
 		};
 		if gi.is_some() {
 			let (taps, reach, cells, div) = gi_quality(gi_level);
@@ -1185,8 +1222,18 @@ impl Post {
 	}
 
 	/// The graded picture into every sample of the MSAA target (`msaa`), stored for the HUD pass to load (`gi_level` as for `encode`).
-	pub(super) fn composite(&self, enc: &mut wgpu::CommandEncoder, msaa: &wgpu::TextureView, gi_level: u8) {
+	/// `grade` = [PC] the Brightness / Contrast curve folded in (gpu/grade_pass.rs `grade_k`; None = the plain composite).
+	pub(super) fn composite(&self, device: &wgpu::Device, queue: &GatedQueue, enc: &mut wgpu::CommandEncoder, msaa: &wgpu::TextureView, gi_level: u8, grade: Option<[f32; 4]>) {
 		let Some(t) = &self.t else { return };
+		let pipe = match grade.and_then(|k| self.comp_grade(device, msaa.texture().format()).map(|p| (k, p))) {
+			Some((k, p)) => {
+				let at = std::mem::offset_of!(PostU, pgrade) as u64;
+				queue.write_buffer(&self.ubuf, at, bytemuck::cast_slice(&k));
+				queue.write_buffer(&self.ubuf_v, at, bytemuck::cast_slice(&k));
+				p
+			}
+			None => &self.p_comp,
+		};
 		let group = match self.gi_on(t, gi_level) {
 			Some(g) => match (&g.g_comp_w, self.gi_water) {
 				(Some((_, _, w)), true) => w,
@@ -1202,9 +1249,32 @@ impl Post {
 			occlusion_query_set: None,
 			multiview_mask: None,
 		});
-		pass.set_pipeline(&self.p_comp);
+		pass.set_pipeline(pipe);
 		pass.set_bind_group(0, group, &[]);
 		pass.draw(0..3, 0..1);
+	}
+
+	/// [PC] Brightness / Contrast: the graded composite's pipeline for `format`, built on first use (pipe-guarded).
+	fn comp_grade(&self, device: &wgpu::Device, format: wgpu::TextureFormat) -> Option<&wgpu::RenderPipeline> {
+		self.p_comp_grade
+			.get_or_init(|| {
+				crate::viewer::pipe_guard::guard(device, crate::viewer::pipe_guard::Effect::Grade, || {
+					let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("post grade"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("post_grade", graded_post_shader().into())) });
+					let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("post grade"), bind_group_layouts: &[Some(&self.layout)], immediate_size: 0 });
+					device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+						label: Some("fs_comp_grade"),
+						layout: Some(&pl),
+						vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs_full"), compilation_options: Default::default(), buffers: &[] },
+						fragment: Some(wgpu::FragmentState { module: &shader, entry_point: Some("fs_comp_grade"), compilation_options: Default::default(), targets: &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })] }),
+						primitive: Default::default(),
+						depth_stencil: None,
+						multisample: wgpu::MultisampleState { count: msaa(), ..Default::default() },
+						multiview_mask: None,
+						cache: None,
+					})
+				})
+			})
+			.as_ref()
 	}
 
 	/// The grid targets when global illumination runs this frame (level `gi_level`, made by `prepare` for these targets).
@@ -1220,5 +1290,30 @@ mod shader_tests {
 	fn the_post_shader_validates() {
 		let m = naga::front::wgsl::parse_str(super::POST_SHADER).expect("wgsl parse");
 		naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).expect("wgsl validate");
+	}
+
+	/// [PC] tb17 (yellow patches under the smoke near big fires): the water-pixel test compares the pre-water copy with the scene
+	/// the water pass left (`postw_in`, waterfx `mark_water`), never with the composite's input, which the smoke, fog and heat
+	/// haze changed after the water pass.
+	#[test]
+	fn the_water_pixel_test_ignores_later_passes() {
+		let s = super::POST_SHADER;
+		let start = s.find("fn gi_skip(").expect("gi_skip");
+		let body = &s[start..start + s[start..].find("\n}").expect("gi_skip's end")];
+		assert!(body.contains("textureLoad(prew_in, c0, 0).rgb != textureLoad(postw_in, c0, 0).rgb"), "{body}");
+		assert!(!body.contains("scene"), "gi_skip reads the composite's input: {body}");
+		assert!(s.contains("@group(0) @binding(13) var postw_in: texture_2d<f32>;"));
+	}
+
+	/// [PC] Brightness / Contrast: the graded composite validates, is `fs_comp` but its last line, and the plain shader is untouched.
+	#[test]
+	fn the_graded_composite_validates_and_matches() {
+		let g = super::graded_post_shader();
+		let m = naga::front::wgsl::parse_str(&g).expect("wgsl parse");
+		naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&m).expect("wgsl validate");
+		assert!(g.contains("fn fs_comp_grade(") && g.contains("pgrade: vec4<f32> };") && g.contains(super::COMP_RETURN_GRADED));
+		assert_eq!(super::POST_SHADER.matches(super::COMP_RETURN).count(), 1, "fs_comp's return is unique");
+		assert!(!super::POST_SHADER.contains("grade_curve"));
+		assert_eq!(std::mem::offset_of!(super::PostU, pgrade), std::mem::size_of::<super::PostU>() - 16, "pgrade is P's last row");
 	}
 }

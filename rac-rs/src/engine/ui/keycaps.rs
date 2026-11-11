@@ -33,6 +33,41 @@ thread_local! {
 /// The caps of the two tab keys in the player's keyboard layout (None = not read yet: Q / E).
 static TABS: RwLock<Option<(String, String)>> = RwLock::new(None);
 
+/// The caps the player's layout prints on the bindable letter and digit keys (empty until the host first `refresh`es, so tests and
+/// the first frames use the QWERTY names). ASCII only: the game's own font draws these (classic Controls page, button prompts).
+static LAYOUT: RwLock<Vec<(winit::keyboard::KeyCode, char)>> = RwLock::new(Vec::new());
+
+/// The cap the player's layout prints on key `k` (A..Z, 0..9 only); None = use the QWERTY name.
+pub fn layout_cap(k: winit::keyboard::KeyCode) -> Option<char> {
+	LAYOUT.read().unwrap_or_else(|e| e.into_inner()).iter().find(|e| e.0 == k).map(|e| e.1)
+}
+
+/// Test hook: the layout's caps (`refresh` sets them from the OS).
+#[cfg(test)]
+pub fn set_layout(v: Vec<(winit::keyboard::KeyCode, char)>) {
+	*LAYOUT.write().unwrap_or_else(|e| e.into_inner()) = v;
+}
+
+/// The caps of every single-letter or digit key in the calling thread's layout, found by scan code.
+#[cfg(windows)]
+fn read_layout() -> Vec<(winit::keyboard::KeyCode, char)> {
+	use winit::keyboard::PhysicalKey;
+	use winit::platform::scancode::PhysicalKeyExtScancode;
+	crate::input::binds::KEYS
+		.iter()
+		.filter(|e| e.2.len() == 1 && e.2.as_bytes()[0].is_ascii_alphanumeric())
+		.filter_map(|e| {
+			let c = os_char(PhysicalKey::Code(e.0).to_scancode()?)?;
+			c.is_ascii_alphanumeric().then(|| (e.0, c.to_ascii_uppercase()))
+		})
+		.collect()
+}
+
+#[cfg(not(windows))]
+fn read_layout() -> Vec<(winit::keyboard::KeyCode, char)> {
+	Vec::new()
+}
+
 /// The language (0..LANGS) the keycaps of the screens built on this thread speak.
 pub fn set_lang(lang: usize) {
 	LANG.with(|l| l.set(lang));
@@ -66,6 +101,12 @@ pub fn refresh() {
 	let mut g = TABS.write().unwrap_or_else(|e| e.into_inner());
 	if g.as_ref() != Some(&t) {
 		*g = Some(t);
+	}
+	drop(g);
+	let l = read_layout();
+	let mut g = LAYOUT.write().unwrap_or_else(|e| e.into_inner());
+	if *g != l {
+		*g = l;
 	}
 }
 

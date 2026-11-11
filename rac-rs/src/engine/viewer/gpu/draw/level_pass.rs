@@ -9,15 +9,11 @@ impl Gpu {
 		let (post_on, part_on, water_on, rs) = flags;
 		enc.begin_render_pass(&wgpu::RenderPassDescriptor {
 			label: Some("level"),
-			color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-				view: &self.msaa,
-				resolve_target: Some(self.post.scene().filter(|_| post_on).unwrap_or(&view)),
-				depth_slice: None,
-				ops: wgpu::Operations {
+			// [PC] lane noaa: at 1 sample the resolve is a copy after the pass (scene_msaa.rs `att`, flushed in passes.rs / draw.rs).
+			color_attachments: &[Some(crate::viewer::scene_msaa::att(&self.msaa, Some(self.post.scene().filter(|_| post_on).unwrap_or(&view)), wgpu::Operations {
 					load: wgpu::LoadOp::Clear(self.warp_fx.as_ref().filter(|_| scene.warp_shown).map_or(scene.clear, |w| w.clear)),
 					store: if part_on || water_on || rs { wgpu::StoreOp::Store } else { wgpu::StoreOp::Discard },
-				},
-			})],
+				}))],
 			depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
 				view: &self.depth,
 				depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),

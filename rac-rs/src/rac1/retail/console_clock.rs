@@ -59,6 +59,14 @@ pub fn init() {
 	eprintln!("retail: console clock {}", if real { "real (host date and time, JST clock with the host time zone)" } else { "fixed (test, replay, scripted run or RAC_REAL_CLOCK=0)" });
 }
 
+/// True when one of `DETERMINISTIC_RUNS` is set (read once): a scripted, replayed, recorded or held run. Fast travel
+/// (fast_travel.rs) keeps retail's space flight in such a run unless its options file names the row, so the gate, fullcheck and
+/// picture hashes stay retail.
+pub fn deterministic() -> bool {
+	static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+	*ON.get_or_init(|| std::env::vars_os().any(|(k, _)| DETERMINISTIC_RUNS.contains(&&*k.to_string_lossy())))
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;

@@ -18,8 +18,16 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
-/// What a feature is made for: (render, window) sizes and the NGX quality mode.
-pub type Key = (Sizes, u32);
+/// What a feature is made for: (render, window) sizes, the NGX quality mode and the NGX preset (a DLSS preset row change = a new
+/// key: the feature is made again).
+pub type Key = (Sizes, u32, u32);
+
+/// The key of a frame at these sizes and window / render ratio, with DLSS preset row value `row` (dlss_preset.rs; the caller
+/// passes the value latched once per frame, slot.rs `dlss_key`).
+pub(super) fn key_of(sizes: Sizes, ratio: f32, row: u8) -> Key {
+	let q = dlss::ngx_quality(ratio);
+	(sizes, q, super::dlss_preset::preset_of(row, q))
+}
 
 /// The render-size inputs and the window-size output of one frame, as views (Vulkan wants the image views too).
 pub(super) struct Views<'a> {
@@ -121,7 +129,7 @@ impl DlssGpu {
 	}
 
 	/// The feature for `key` (made when missing or for other values; the old one must be idle). False = refused (logged, DLSS off).
-	fn prepare(&mut self, device: &wgpu::Device, key: Key) -> bool {
+	fn prepare(&mut self, device: &wgpu::Device, key: Key, row: u8) -> bool {
 		if !self.usable() {
 			self.feat = None; // the caller made the GPU idle (`needs_idle` is true for a refused feature)
 			return false;
@@ -130,7 +138,7 @@ impl DlssGpu {
 			return true;
 		}
 		self.feat = None;
-		let cr = dlss::create_desc(key.0, key.1);
+		let cr = dlss::create_desc(key.0, key.1, key.2);
 		let t0 = Instant::now();
 		let made = match self.rt.backend {
 			Backend::Vulkan => self.create_vk(device, &cr),
@@ -141,7 +149,8 @@ impl DlssGpu {
 				let q = abi::QUALITY_NAMES.iter().find(|n| n.0 == key.1).map_or("?", |n| n.1);
 				let name = dlss::label_of(f.preset);
 				let preset = char::from_u32(f.preset).filter(|_| f.preset != 0).unwrap_or('?');
-				eprintln!("upscale: {name} (preset {preset}, NGX, {:?}), {q}, render {}x{} -> {}x{}, create {} ms", self.rt.backend, key.0 .0 .0, key.0 .0 .1, key.0 .1 .0, key.0 .1 .1, t0.elapsed().as_millis());
+				let row = super::dlss_preset::log_name(row);
+				eprintln!("upscale: {name} (preset {preset}, NGX, {:?}), {q}, render {}x{} -> {}x{}, create {} ms, DLSS preset {row} (asked {})", self.rt.backend, key.0 .0 .0, key.0 .0 .1, key.0 .1 .0, key.0 .1 .1, t0.elapsed().as_millis(), abi::preset_letter(key.2));
 				label(Some(name));
 				self.feat = Some((key, Arc::new(Mutex::new(f))));
 				self.fresh = true;
@@ -349,7 +358,8 @@ fn record_vk(_: &wgpu::Device, _: &mut wgpu::CommandEncoder, _: &mut crate::view
 }
 
 /// The DLSS side for `key`: made on first use (stays None without a runtime: DLSS withdrawn, `label(None)`), its feature ready.
-pub(super) fn ready(dlss: &mut Option<DlssGpu>, device: &wgpu::Device, queue: &crate::viewer::presenter::GatedQueue, key: Key) -> bool {
+/// `row` = the frame's latched DLSS preset row value (`key` was made from it), named in the create log line.
+pub(super) fn ready(dlss: &mut Option<DlssGpu>, device: &wgpu::Device, queue: &crate::viewer::presenter::GatedQueue, key: Key, row: u8) -> bool {
 	if dlss.is_none() {
 		let Some(rt) = dlss::runtime(device) else {
 			label(None);
@@ -357,5 +367,5 @@ pub(super) fn ready(dlss: &mut Option<DlssGpu>, device: &wgpu::Device, queue: &c
 		};
 		*dlss = Some(DlssGpu::new(rt, device, &queue.raw()));
 	}
-	dlss.as_mut().is_some_and(|d| d.prepare(device, key))
+	dlss.as_mut().is_some_and(|d| d.prepare(device, key, row))
 }

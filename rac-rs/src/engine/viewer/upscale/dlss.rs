@@ -7,8 +7,9 @@
 //! - `runtime`: NGX init on the window's device once (the first frame DLSS is chosen), caps, the optimal render sizes (`optimal`,
 //!   the rows' render size: rscale.rs plans with it). `Feature`: one DLSS feature (render size, window size, quality, preset).
 //! - Inputs as FSR 3 (ffx.rs): gamma-space LDR colour, R32 depth (0 near), UV motion vectors current -> previous (scale = render
-//!   size), the Halton jitter in render pixels (same sign as FSR's), auto exposure, reset on cuts. Preset M (L for Ultra
-//!   performance) = DLSS 4.5, asked for in every mode (`abi::preset_dlss45`); NGX's report of the preset names the row's value.
+//!   size), the Halton jitter in render pixels (same sign as FSR's), auto exposure, reset on cuts. Preset K (DLSS 4; L =
+//!   DLSS 4.5 for Ultra performance; dlss_preset.rs `auto_preset`, M before 2026-11-08), asked for in every mode unless the options
+//!   file's DLSS preset (dlss_preset.rs) picks one letter for every mode; NGX's report of the preset names the row's value.
 
 use rac_ngx_abi as abi;
 use std::ffi::{c_char, c_void, CStr};
@@ -287,9 +288,10 @@ pub fn label_of(preset: u32) -> String {
 	}
 }
 
-/// The create desc of a feature: (render, window) sizes, quality mode, preset M (L for Ultra performance).
-pub fn create_desc(sizes: ((u32, u32), (u32, u32)), quality: u32) -> abi::RacNgxCreate {
-	abi::RacNgxCreate { render_w: sizes.0 .0, render_h: sizes.0 .1, out_w: sizes.1 .0, out_h: sizes.1 .1, quality, preset: abi::preset_dlss45(quality), flags: FLAGS, _pad: 0 }
+/// The create desc of a feature: (render, window) sizes, quality mode, NGX preset (dlss_preset.rs `preset_of`: Auto = K, L for
+/// Ultra performance).
+pub fn create_desc(sizes: ((u32, u32), (u32, u32)), quality: u32, preset: u32) -> abi::RacNgxCreate {
+	abi::RacNgxCreate { render_w: sizes.0 .0, render_h: sizes.0 .1, out_w: sizes.1 .0, out_h: sizes.1 .1, quality, preset, flags: FLAGS, _pad: 0 }
 }
 
 /// The VkFormat of the formats the slot hands over (0 = VK_FORMAT_UNDEFINED for anything else).

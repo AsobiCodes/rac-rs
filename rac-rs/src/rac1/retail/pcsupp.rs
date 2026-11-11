@@ -1,4 +1,4 @@
-//! Graphics -> More effects -> Supporter drawings (user 2026-11-04): shows or hides the Ko-fi supporters' drawings on the Veldin garage
+//! Classic Graphics -> More effects / modern Game -> Extras (moved 2026-11-08) -> Supporter drawings (user 2026-11-04): shows or hides the Ko-fi supporters' drawings on the Veldin garage
 //! walls (`kofi.rs`). Off by default, independent of the Lighting row. Same shape as the Metal row (`pcmetal.rs`): a two-value row
 //! (Off / On, retail's own texts) whose byte `SUPP_B` the host reads, remembered in pc_options.txt as `supporters=on|off` (an extra
 //! key: older files without it, and older builds reading a file with it, are unaffected). The label is text id 0x7fbf (a free slot

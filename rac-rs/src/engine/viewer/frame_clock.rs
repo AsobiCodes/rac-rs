@@ -21,6 +21,11 @@ pub fn frame_started() {
 	STARTED.store(e.elapsed().as_nanos() as u64 + 1, Relaxed);
 }
 
+/// [PC] lane tpre (tiez.rs `tiez_ab`): the stamp of the frame being drawn (changes once per frame; 0 before the first).
+pub(crate) fn stamp() -> u64 {
+	STARTED.load(Relaxed)
+}
+
 /// Seconds since this frame began; 0 before the first frame or when the frame is a long one (over `MAX_LAG`: a stall or a pass
 /// drawn outside any frame keeps the plain wall clock).
 pub(crate) fn lag() -> f32 {

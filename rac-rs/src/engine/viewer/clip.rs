@@ -5,7 +5,28 @@
 use super::{Camera, Vertex};
 use crate::mesh::Mesh;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
 use crate::mobies::{clip_strip, guard_clip_weights, GuardBand};
+
+/// [PC] lane kst: draw a guard-clipped face as its whole convex polygon (a fan) instead of retail's list-order strip. Retail's
+/// strip `(k, k+1, k+2)` over the loop-ordered clip output leaves a wedge of the polygon undrawn [C: `clip_strip`, the NOV-5.9c
+/// notes]; retail's camera never sits close enough for that wedge to reach the screen, the Modern camera does (Kerwan stairs, a
+/// big tread crossing the near plane: a straight diagonal cut). Set by the pack with the camera style (off = retail's strip).
+static COMPLETE_POLYS: AtomicBool = AtomicBool::new(false);
+
+pub fn set_complete_polys(on: bool) {
+	COMPLETE_POLYS.store(on, Ordering::Relaxed);
+}
+
+/// The triangles `(index into the polygon)` that draw a clipped polygon of `n` vertices: retail's strip, or (complete mode) the
+/// fan `(0, k, k+1)`, which covers the whole convex polygon (the successive plane clips of a triangle keep it convex).
+pub(super) fn poly_tris(n: usize, complete: bool) -> Vec<[usize; 3]> {
+	if complete {
+		(1..n.saturating_sub(1)).map(|k| [0, k, k + 1]).collect()
+	} else {
+		clip_strip(n)
+	}
+}
 
 /// One clippable face of a props / marker slot: the position of its first index in the batch's index buffer, the
 /// stored indices, the strip phase and what its draw run needs (texture slot, cull mode).
@@ -201,7 +222,7 @@ pub(super) fn clip_face(view: &ClipView, tri: [Vertex; 3], phase: u8, tex: usize
 		})
 		.collect();
 	let c0 = cross(sub(vs[1], vs[0]), sub(vs[2], vs[0]));
-	let tris = clip_strip(poly.len())
+	let tris = poly_tris(poly.len(), COMPLETE_POLYS.load(Ordering::Relaxed))
 		.into_iter()
 		.map(|t| {
 			let c = cross(sub(poly[t[1]].1, poly[t[0]].1), sub(poly[t[2]].1, poly[t[0]].1));
@@ -244,6 +265,28 @@ mod tests {
 		assert!(!v.moby_side_near_out([0.0, 0.0, 0.0], 1536.0));
 		// Near term exactly +0.0 rejects: 32 - (r + vz) with r = 32, vz = 0.
 		assert!(v.moby_side_near_out([0.0, 0.0, 0.0], 32.0));
+	}
+
+	/// Area of the projected polygon `p` (xy) and of the triangles `t` over it.
+	fn area(p: &[[f32; 3]], t: &[[usize; 3]]) -> f32 {
+		t.iter().map(|t| ((p[t[1]][0] - p[t[0]][0]) * (p[t[2]][1] - p[t[0]][1]) - (p[t[2]][0] - p[t[0]][0]) * (p[t[1]][1] - p[t[0]][1])).abs() / 2.0).sum()
+	}
+
+	/// The retail strip over a loop-ordered pentagon leaves a gap; the fan covers all of it.
+	#[test]
+	fn fan_covers_the_whole_clipped_polygon() {
+		// A convex pentagon in loop order (a triangle clipped by the near plane: 5 vertices).
+		let p = [[0.0, 0.0, 1.0], [4.0, 0.0, 1.0], [6.0, 3.0, 1.0], [3.0, 6.0, 1.0], [-1.0, 3.0, 1.0]];
+		let (strip, fan) = (poly_tris(5, false), poly_tris(5, true));
+		assert_eq!(strip, vec![[0, 1, 2], [1, 2, 3], [2, 3, 4]]);
+		assert_eq!(fan, vec![[0, 1, 2], [0, 2, 3], [0, 3, 4]]);
+		// Shoelace area of the pentagon = the fan's area; the strip's is smaller (it overlaps and leaves the wedge).
+		let full = 0.5 * (0..5).map(|i| p[i][0] * p[(i + 1) % 5][1] - p[(i + 1) % 5][0] * p[i][1]).sum::<f32>().abs();
+		assert!((area(&p, &fan) - full).abs() < 1e-4);
+		assert!(area(&p, &strip) < full - 0.5 || poly_tris(3, true) == poly_tris(3, false));
+		// A triangle and a quad are the same either way up to the strip's own order: a triangle is one face.
+		assert_eq!(poly_tris(3, true), vec![[0, 1, 2]]);
+		assert_eq!(poly_tris(2, true), Vec::<[usize; 3]>::new());
 	}
 
 	#[test]

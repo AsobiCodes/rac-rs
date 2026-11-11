@@ -2,7 +2,7 @@
 //! PlayStation controller (`pspad`, read over HID) both arrive as an XInput report (`XRaw`) and become a PS2 DualShock 2 report
 //! (`PadState`: button bits, sticks): A = Cross, B = Circle, X = Square, Y = Triangle, LB = L1, RB = R1, LT = L2, RT = R2, Back =
 //! Select, Start = Start, d-pad, both sticks analog with radial deadzones and a DualShock 2's square range (`stick`), L3 / R3;
-//! which physical button drives which PS2 button is `binds::pad_map`. The pads are merged with the keyboard (OR of buttons, the
+//! the physical buttons are the STANDARD layout here (`binds::DEFAULT_PAD`); a game's gameplay applies the player's remap itself (`kbm::eval_pad`). The pads are merged with the keyboard (OR of buttons, the
 //! larger deflection of each stick axis). Which device a game's prompts show, and a game's own buttons (R&C1's aim), stay with
 //! the game (rac1 retail/prompts.rs `poll_pad`).
 use super::xinput;
@@ -97,9 +97,9 @@ pub fn map_xinput(r: &XRaw) -> PadState {
 	// XInput: dpad up 1 down 2 left 4 right 8, Start 0x10, Back 0x20, L3 0x40, R3 0x80, LB 0x100, RB 0x200, A 0x1000, B 0x2000,
 	// X 0x4000, Y 0x8000, the triggers as bits 16 / 17 here (past TRIGGER). PS2 bits as pad_from_keys: L2 1, R2 2, L1 4, R1 8,
 	// Triangle 0x10, Circle 0x20, Cross 0x40, Square 0x80, Select 0x100, L3 0x200, R3 0x400, Start 0x800, up 0x1000, right 0x2000,
-	// down 0x4000, left 0x8000. Which physical button drives which PS2 button is `binds::pad_map` (today's list unless the player
-	// remapped it on Pause -> Options -> Controls).
-	let b = super::binds::pad_buttons(phys_mask(r), &super::binds::pad_map());
+	// down 0x4000, left 0x8000. This is the STANDARD layout (`binds::DEFAULT_PAD`): menus, movie / scene skips and the UI read it
+	// whatever the player remapped. A game's gameplay follows the remap through the actions (`kbm::eval_pad` on `phys_mask`).
+	let b = super::binds::pad_buttons(phys_mask(r), &super::binds::DEFAULT_PAD);
 	let (rx, ry) = stick(r.rx, r.ry, DZ_RIGHT);
 	let ((x, y), dz) = LEFT_STICK.get().map_or(((r.lx, r.ly), DZ_LEFT), |f| f(r.lx, r.ly, DZ_LEFT)); // game's Stick dead zone row (R&C1 High = retail, unchanged)
 	let (lx, ly) = stick(x, y, dz);
@@ -315,18 +315,15 @@ mod tests {
 		assert!(!pad_activity(&pushed, &idle), "stick back to centre");
 	}
 
-	/// The controller map reaches `map_xinput`; a remapped pad drives the new PS2 buttons.
+	/// `map_xinput` is the STANDARD layout whatever the player remapped (menus, skips and UI read it); the remap applies to the actions
+	/// (`kbm::eval_pad` on `phys_mask`, tests in kbm/pad_tests.rs).
 	#[test]
-	fn remapped_controller_buttons() {
+	fn the_remap_does_not_touch_the_standard_layout() {
 		use super::super::binds;
 		binds::init(None, Some("cross:b,circle:a,l2:lb"));
-		assert_eq!(map_xinput(&x(0x1000)).buttons, 0x20, "A is Circle now");
-		assert_eq!(map_xinput(&x(0x2000)).buttons, 0x40, "B is Cross now");
-		assert_eq!(map_xinput(&x(0x100)).buttons, 1 | 4, "LB is L2 now and still L1 (a button may drive several functions)");
-		assert_eq!(map_xinput(&x(0x1000 | 0x2000)).buttons, 0x60);
-		// The file of a player who moved L1 off LB as well (the Controls page lists every function that differs from the default).
-		binds::init(None, Some("cross:b,circle:a,l2:lb,l1:lt"));
-		assert_eq!(map_xinput(&x(0x100)).buttons, 1, "LB is L2 only");
+		assert_eq!(map_xinput(&x(0x1000)).buttons, 0x40, "A is still Cross");
+		assert_eq!(map_xinput(&x(0x2000)).buttons, 0x20, "B is still Circle");
+		assert_eq!(map_xinput(&x(0x100)).buttons, 4, "LB is still L1");
 		binds::init(None, None);
 		assert_eq!(map_xinput(&x(0x1000)).buttons, 0x40);
 		assert_eq!(phys_mask(&XRaw { buttons: 0x1000, lt: 200, rt: 10, ..Default::default() }), 0x1000 | 1 << 16);

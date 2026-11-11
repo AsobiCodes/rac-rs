@@ -539,11 +539,13 @@ pub fn snap(m: &ee_oracle::Machine) -> Snap {
 }
 
 /// [PC] What the effects passes take from this field's mobys: Water Enhanced's wakes (viewer/waterfx.rs `Wakes`: where the drawn
-/// mobys stand) and Fire's ground fire after a thrown bomb went off (bomb_blast.rs).
+/// mobys stand) and Fire's ground fire after a thrown bomb went off (bomb_blast.rs) or near the player's explosive shots (blast_gate.rs).
 fn moby_fx(fx: &mut RetailFx, mobys: &[Moby], m: &ee_oracle::Machine) {
 	// The bounding sphere is moby +0x00..0x0c, x1024 (decomp/notes MOBY-FADE): its radius at +0x0c.
 	fx.movers = mobys.iter().filter(|mb| mb.shown).map(|mb| (mb.addr, mb.pos, m.rdf(mb.addr + 0xc) / 1024.0)).collect();
 	fx.blasts = super::bomb_blast::of(mobys.iter().map(|mb| (mb.class, mb.addr, mb.pos)), |a| m.rd8(a));
+	fx.blast_gate = super::blast_gate::of(mobys.iter().map(|mb| (mb.class, mb.addr, mb.pos)), m);
+	super::strafe::pack_flame_lights(m, &mut fx.flame_lights);
 }
 
 /// The page menu of this field: the one on screen, the one flying in, the closing flag and the facts the modern pages need.

@@ -42,13 +42,17 @@ fn row(out: &mut Vec<Prim>, s: &Screen, r: &RowData, focused: bool, rect: &Rect,
 	text(out, label.0.x, label.0.y, FontRole::Medium, layout::LABEL_PX, colour, Align::Left, label.1, 0.0, &label.0.text);
 	let value_colour = if focused { s.accent } else { TEXT };
 	match (&r.control, ctrl) {
-		(Control::Choice { value, index, .. }, CtrlBox::Choice { prev, next, value: vb, pips }) => {
+		(Control::Choice { value, index, count }, CtrlBox::Choice { prev, next, value: vb, pips }) => {
 			arrow_button(out, *prev, false);
 			arrow_button(out, *next, true);
 			text(out, vb.cx(), rect.y + 21.0, FontRole::SemiBold, layout::VALUE_PX, value_colour, Align::Center, vb.w, 0.0, value);
-			for (i, p) in pips.iter().enumerate() {
-				let fill = if i == *index { s.accent } else if i < *index { s.accent.tint(0.4) } else { PIP_OFF };
-				rrect(out, *p, 1.5, fill);
+			if *count > layout::MAX_PIPS {
+				position_bar(out, s, pips.first().copied(), *index, *count);
+			} else {
+				for (i, p) in pips.iter().enumerate() {
+					let fill = if i == *index { s.accent } else if i < *index { s.accent.tint(0.4) } else { PIP_OFF };
+					rrect(out, *p, 1.5, fill);
+				}
 			}
 		}
 		(Control::Toggle { value, on }, CtrlBox::Toggle { switch, value: vb }) => {
@@ -96,6 +100,19 @@ fn chip(out: &mut Vec<Prim>, accent: Rgba, c: &Chip, rc: Rect) {
 		TEXT_LABEL
 	};
 	text(out, rc.cx(), rc.cy(), FontRole::SemiBold, layout::CHIP_PX, ink, Align::Center, 0.0, 0.0, &c.text);
+}
+
+/// [PC] A Choice row with more values than `layout::MAX_PIPS` (a list of screen sizes): the bar's `track`, the part before the
+/// thumb lit dimly (as the pips before the value), and a thumb at `index` of `count` in the accent colour.
+fn position_bar(out: &mut Vec<Prim>, s: &Screen, track: Option<Rect>, index: usize, count: usize) {
+	let Some(track) = track else { return };
+	let w = (track.w / count as f32).max(12.0).min(track.w);
+	let x = track.x + (track.w - w) * (index.min(count - 1) as f32 / (count - 1) as f32);
+	rrect(out, track, 1.5, PIP_OFF);
+	if x > track.x {
+		rrect(out, Rect::new(track.x, track.y, x - track.x, track.h), 1.5, s.accent.tint(0.4));
+	}
+	rrect(out, Rect::new(x, track.y, w, track.h), 1.5, s.accent);
 }
 
 /// A thin scrollbar at the right edge of the viewport while the content overflows.

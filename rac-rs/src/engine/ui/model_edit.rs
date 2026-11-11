@@ -121,16 +121,31 @@ impl Model {
 	}
 
 	/// Is row `i` inert right now (its dependency is below the needed value, or the row it depends on is inert itself: a chain such
-	/// as Waves -> Water -> Lighting)?
+	/// as Metal reflections -> Metal -> Lighting)? An inert row is hidden (`shown`).
 	pub fn blocked(&self, i: usize) -> bool {
 		self.cause(i, 0).is_some()
 	}
 
+	/// Does the screen show row `i` (user 2026-11-08: rows that do nothing right now are hidden, not dimmed)?
+	pub fn shown(&self, i: usize) -> bool {
+		!self.blocked(i)
+	}
+
 	/// The rule of row `i`'s dependency; while the row is blocked, the rule of the link that holds it (the root of a chain first), so
-	/// the box and its button fix what really dims the row.
+	/// the box and its button fix what really hides the row. Several rules may name one row: the one whose `set_to` meets the
+	/// dependency wins (an "any upscaler" row and a "DLSS only" row under one Upscaler row), else the first for that row.
 	pub fn rule(&self, i: usize) -> Option<&'static NeedsRule> {
-		let n = self.cause(i, 0).or_else(|| self.rows.get(i)?.row.needs)?;
-		self.menu.needs.iter().find(|r| r.row == n.row)
+		let id = self.rows.get(i)?.row.id;
+		self.rule_for(self.cause(i, 0).or_else(|| self.rows.get(i)?.row.needs)?, id)
+	}
+
+	/// The rule of dependency `n` of row `id` (see `rule`): a rule for this very row first (`for_row`: the Frame Generation row's own
+	/// fix), else among the shared ones the one whose `set_to` meets `n`, else the first shared one for that row.
+	fn rule_for(&self, n: Needs, id: &str) -> Option<&'static NeedsRule> {
+		let of = |r: &&NeedsRule| r.row == n.row;
+		let own = || self.menu.needs.iter().filter(of).find(|r| r.for_row == id);
+		let shared = || self.menu.needs.iter().filter(of).filter(|r| r.for_row.is_empty());
+		own().or_else(|| shared().find(|r| (n.min..=n.max).contains(&r.set_to))).or_else(|| shared().next())
 	}
 
 	/// The unmet dependency that makes row `i` inert (None = live): the cause of the row it needs first, then its own test. `depth`
@@ -146,12 +161,12 @@ impl Model {
 	}
 
 	/// The rule of the first blocked row of the current tab that has a banner (the banner on top of the list; a rule with an empty
-	/// `banner` only dims its rows and fills their detail box).
+	/// `banner` only hides its rows).
 	pub fn tab_rule(&self) -> Option<&'static NeedsRule> {
 		self.cur_rows().filter(|&i| self.blocked(i)).filter_map(|i| self.rule(i)).find(|r| !r.banner[0].is_empty())
 	}
 
-	/// The fix button of a rule: sets the row it names. The focus stays where it was.
+	/// The fix button of a rule (the tab's banner): sets the row it names. The focus stays where it was.
 	pub fn enhance(&mut self, rule: &NeedsRule) {
 		if let (Some(i), Some(v)) = (self.row_index(rule.row), self.fix_value(rule)) {
 			self.set_value(i, v);
@@ -159,15 +174,26 @@ impl Model {
 	}
 
 	/// The value the fix button of `rule` sets: `set_to`, or while the engine withdrew it (ui/live.rs `offer`: FSR on a PC without
-	/// FidelityFX) the next offered value after it that is not the current one (DLSS); None = nothing to switch to (no button).
+	/// FidelityFX) the next offered value after it that is not the current one (DLSS) and that still meets the dependency the rule is
+	/// for (a "DLSS only" rule on a PC without DLSS: no button); None = nothing to switch to (no button).
 	pub fn fix_value(&self, rule: &NeedsRule) -> Option<i32> {
 		let i = self.row_index(rule.row)?;
-		if self.valid(i, rule.set_to) {
-			return Some(rule.set_to);
+		let want = rule.fix.map_or(rule.set_to, |f| f());
+		if self.valid(i, want) {
+			return Some(want);
 		}
 		let r = self.rows[i].row;
 		let n = if r.kind == RowKind::Choice { r.values.len() as i32 } else { 0 };
-		(1..n).map(|k| (rule.set_to + k).rem_euclid(n)).find(|&v| v != self.value(i) && self.valid(i, v))
+		let dep = self.rows.iter().filter_map(|x| Some((x.row.needs?, x.row.id))).map(|(d, id)| (d, self.rule_for(d, id))).find(|(_, r)| r.is_some_and(|r| std::ptr::eq(r, rule))).map(|(d, _)| d);
+		let meets = |v: i32| dep.map_or(true, |d| (d.min..=d.max).contains(&v));
+		(1..n).map(|k| (want + k).rem_euclid(n)).find(|&v| v != self.value(i) && self.valid(i, v) && meets(v))
+	}
+
+	/// The fix button's text of `rule` (empty = no button: nothing to switch to); a `{}` in it names the value it sets.
+	pub fn fix_text(&self, rule: &NeedsRule) -> String {
+		let Some(v) = self.fix_value(rule) else { return String::new() };
+		let name = self.row_index(rule.row).map(|i| self.text_of(i, v)).unwrap_or_default();
+		pick(&rule.button, self.lang).replace("{}", &name)
 	}
 
 	/// The text of value `v` of row `i`.

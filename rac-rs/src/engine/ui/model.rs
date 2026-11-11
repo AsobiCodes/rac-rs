@@ -62,7 +62,7 @@ impl Model {
 		let vals = rows.iter().map(|r| if r.row.kind == super::rows::RowKind::Preset { 0 } else { r.row.def }).collect();
 		let touched = vec![None; rows.len()];
 		let focus = tab_rows.first().map_or(0, |r| r.start);
-		Model {
+		let mut m = Model {
 			menu,
 			lang,
 			front: false,
@@ -80,7 +80,9 @@ impl Model {
 			touched,
 			changes: Vec::new(),
 			sounds: Vec::new(),
-		}
+		};
+		m.focus = m.first_shown();
+		m
 	}
 
 	pub fn row_index(&self, id: &str) -> Option<usize> {
@@ -112,18 +114,39 @@ impl Model {
 		std::mem::take(&mut self.sounds)
 	}
 
-	/// The rows of the current tab.
+	/// The rows of the current tab (shown and hidden).
 	pub fn cur_rows(&self) -> Range<usize> {
 		self.tab_rows.get(self.tab).cloned().unwrap_or(0..0)
 	}
 
+	/// The rows of the current tab the screen shows, in order: a row whose dependency is unmet (`blocked`: Upscale quality while the
+	/// Upscaler is Off) is hidden, not dimmed (user 2026-11-08: "too many options").
+	pub fn cur_shown(&self) -> Vec<usize> {
+		self.cur_rows().filter(|&i| self.shown(i)).collect()
+	}
+
+	/// The first shown row of the current tab (the tab's first row when it shows none).
+	pub fn first_shown(&self) -> usize {
+		self.cur_shown().first().copied().unwrap_or(self.cur_rows().start)
+	}
+
 	pub fn is_first(&self) -> bool {
-		self.focus == self.cur_rows().start
+		self.cur_shown().first().is_none_or(|&f| self.focus == f)
 	}
 
 	pub fn is_last(&self) -> bool {
-		let r = self.cur_rows();
-		r.is_empty() || self.focus + 1 == r.end
+		self.cur_shown().last().is_none_or(|&l| self.focus == l)
+	}
+
+	/// A focus on a row that is hidden now (a value the game changed meanwhile, a focus written directly) moves to the nearest shown
+	/// row of the tab above it, else below it; no sound.
+	pub fn settle_focus(&mut self) {
+		let shown = self.cur_shown();
+		if shown.is_empty() || shown.contains(&self.focus) {
+			return;
+		}
+		let up = shown.iter().rev().find(|&&i| i < self.focus);
+		self.focus = up.or_else(|| shown.iter().find(|&&i| i > self.focus)).copied().unwrap_or(shown[0]);
 	}
 
 	/// Opens the tab with this id (focus on its first row); false if there is none.
@@ -139,7 +162,7 @@ impl Model {
 
 	fn go_tab(&mut self, t: usize, sound: bool) {
 		self.tab = t;
-		self.focus = self.cur_rows().start;
+		self.focus = self.first_shown();
 		self.scroll = 0.0;
 		if sound {
 			self.sound(UiSound::Move);
@@ -159,13 +182,13 @@ impl Model {
 		}
 	}
 
-	/// Moves the focus up / down one row, wrapping at the ends of the tab (no row is skipped, blocked rows included).
+	/// Moves the focus up / down one shown row, wrapping at the ends of the tab (hidden rows are skipped).
 	pub fn focus_step(&mut self, dir: i32) {
-		let r = self.cur_rows();
-		if r.len() > 1 {
-			// A focus outside the tab (`focus` is pub and written directly) counts as its first row: never an underflow.
-			let k = (self.focus.saturating_sub(r.start).min(r.len() - 1)) as i32;
-			self.focus = r.start + (k + dir).rem_euclid(r.len() as i32) as usize;
+		let s = self.cur_shown();
+		if s.len() > 1 {
+			// A focus that is not a shown row of the tab (`focus` is pub and written directly) counts as its first one.
+			let k = s.iter().position(|&i| i == self.focus).unwrap_or(0) as i32;
+			self.focus = s[(k + dir).rem_euclid(s.len() as i32) as usize];
 			self.sound(UiSound::Move);
 		}
 	}
@@ -182,9 +205,9 @@ impl Model {
 	}
 
 	pub fn focus_edge(&mut self, last: bool) {
-		let r = self.cur_rows();
-		if !r.is_empty() {
-			let to = if last { r.end - 1 } else { r.start };
+		let s = self.cur_shown();
+		if let (Some(&first), Some(&end)) = (s.first(), s.last()) {
+			let to = if last { end } else { first };
 			if to != self.focus {
 				self.focus = to;
 				self.sound(UiSound::Move);
@@ -192,11 +215,12 @@ impl Model {
 		}
 	}
 
-	/// Page up / down: `n` rows, clamped to the tab.
+	/// Page up / down: `n` shown rows, clamped to the tab.
 	pub fn focus_page(&mut self, dir: i32, n: usize) {
-		let r = self.cur_rows();
-		if !r.is_empty() {
-			let to = (self.focus as i64 + dir as i64 * n as i64).clamp(r.start as i64, r.end as i64 - 1) as usize;
+		let s = self.cur_shown();
+		if !s.is_empty() {
+			let k = s.iter().position(|&i| i == self.focus).unwrap_or(0) as i64;
+			let to = s[(k + dir as i64 * n as i64).clamp(0, s.len() as i64 - 1) as usize];
 			if to != self.focus {
 				self.focus = to;
 				self.sound(UiSound::Move);
@@ -220,5 +244,6 @@ impl Model {
 				}
 			}
 		}
+		self.settle_focus(); // a value the game changed may hide the focused row
 	}
 }

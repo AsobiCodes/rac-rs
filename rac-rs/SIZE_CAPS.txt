@@ -6,12 +6,12 @@
 # Paths are relative to the project folder (rac-rs's parent).
 file oracle/src/snd989/handler.rs 1679
 file rac-rs/src/engine/gscap/draw/gpu.rs 1550
-file rac-rs/src/engine/viewer/vegfx.rs 2090
+file rac-rs/src/engine/viewer/vegfx.rs 2068
 file rac-rs/src/engine/viewer/waterfx/shader.rs 1542
 file rac-rs/src/formats/anim.rs 2029
 file rac-rs/src/rac1/frontend.rs 2139
 file rac-rs/src/rac1/host/app.rs 1703
-file rac-rs/src/rac1/retail/modcam.rs 1792
+file rac-rs/src/rac1/retail/modcam.rs 1774
 file rac-rs/src/rac1/retail/pcext.rs 1515
 fn oracle/src/cpu.rs exec_body 156
 fn oracle/src/gate.rs run 205
@@ -28,7 +28,7 @@ fn rac-rs/src/engine/gsfull/vu1.rs lower 220
 fn rac-rs/src/engine/viewer/gpu/culling.rs cull_ties 155
 fn rac-rs/src/engine/viewer/gpu/props_layout.rs append_props 158
 fn rac-rs/src/engine/viewer/gpu/scene_build.rs build_scene 228
-fn rac-rs/src/engine/viewer/gpu/setup.rs new 304
+fn rac-rs/src/engine/viewer/gpu/setup.rs new 284
 fn rac-rs/src/engine/viewer/vegfx.rs plan_cpu 311
 fn rac-rs/src/engine/viewer/waterfx/passes.rs positions 186
 fn rac-rs/src/engine/viewer/waterfx/setup.rs new 181
@@ -51,7 +51,7 @@ fn rac-rs/src/rac1/host/hudart.rs hud_art 155
 fn rac-rs/src/rac1/host/startup.rs new_app 213
 fn rac-rs/src/rac1/particles.rs sprites_keyed 171
 fn rac-rs/src/rac1/retail/efx_draw.rs build_in 242
-fn rac-rs/src/rac1/retail/modcam.rs step 233
+fn rac-rs/src/rac1/retail/modcam.rs step 211
 fn rac-rs/src/rac1/retail/pcext.rs eudora_graphics_page 226
 fn rac-rs/src/rac1/retail/snapshot.rs snap 192
 fn rac-rs/src/rac1/retail/test_suite.rs retail_mouse_menus 163

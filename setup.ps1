@@ -644,7 +644,7 @@ function Test-VendorRel([string]$rel) {
     # The upscaler DLLs and licence texts in bundled\ (v0.5.0) are not in git, so a tag archive never holds them: an update must not delete them
     # (not even when a release_files.txt stops listing them); they are replaced only by Install-VendorDlls against its pinned table.
     $r = $rel.Replace('\', '/').TrimStart('/').ToLowerInvariant()
-    return ($r -match '^bundled/(amd_fidelityfx_(loader|upscaler)_(vk|dx12)\.dll|nvngx_dlss\.dll|rac_ngx\.dll|licenses/.*)$')
+    return ($r -match '^bundled/(amd_fidelityfx_(loader|upscaler|framegeneration)_(vk|dx12)\.dll|nvngx_dlssg?\.dll|rac_ngx\.dll|sl\.(common|dlss_g|interposer|pcl|reflex)\.dll|licenses/.*)$')
 }
 
 function Get-Sha256Hex([string]$path) {
@@ -2319,6 +2319,8 @@ if ($ApplyUpdate) {
     $a2 = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $root 'setup.ps1'), '-Console', '-Iso', $Iso, '-SkipHash', '-SkipUnblock')
     if ($NoShortcut) { $a2 += '-NoShortcut' }
     if ($ShortcutDir) { $a2 += @('-ShortcutDir', $ShortcutDir) }
+    # v0.5.1: a test update hands its base on, so the new setup.ps1 takes the upscaler zip from there too (release_check check 2).
+    if ($TestUpdateBase) { $a2 += @('-TestUpdateBase', $TestUpdateBase.TrimEnd('\')) }
     & (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') @a2
     exit $LASTEXITCODE
 }
@@ -2693,10 +2695,12 @@ function Install-BundledLoader([string]$exeDir) {
 # install), or the asset zip rac-rs-upscalers-1.zip of the GitHub release v0.5.0 (pinned URL and SHA-256, every DLL checked against the table
 # below), downloaded once into bundled\ (with the licence texts in bundled\licenses\) when a DLL is missing there and not already next to the exe.
 # Built by release_build\mk_upscaler_zip.py. Licence texts: NVIDIA_DLSS_SDK_LICENSE.txt, AMD_FidelityFX_LICENSE.md. Any failure is only a
-# warning (the upscaler options stay off): never a failed setup. -TestUpdateBase serves <base>/rac-rs-upscalers-1.zip instead of GitHub.
-$VendorZipName = 'rac-rs-upscalers-1.zip'
-$VendorZipUrl = 'https://github.com/AsobiCodes/rac-rs/releases/download/v0.5.0/rac-rs-upscalers-1.zip'
-$VendorZipSha256 = '323D9D91136EFC4E616153C1905D7FA4382DA87BD0A2B8DFEB66E1D9AB9AC403'
+# warning (the upscaler options stay off): never a failed setup. -TestUpdateBase serves <base>/rac-rs-upscalers-2.zip instead of GitHub.
+# v0.5.1: asset revision 2 (GitHub release v0.5.1) = the six + the 8 frame generation DLLs (viewer/fgen: amd_fidelityfx_framegeneration_*.dll,
+# NVIDIA Streamline sl.*.dll + nvngx_dlssg.dll) + licenses/NVIDIA_Streamline_LICENSE.txt. A v0.5.0 install (6 DLLs) downloads it once.
+$VendorZipName = 'rac-rs-upscalers-2.zip'
+$VendorZipUrl = 'https://github.com/AsobiCodes/rac-rs/releases/download/v0.5.1/rac-rs-upscalers-2.zip'
+$VendorZipSha256 = '6B4FB975E44D05BA6240805618B27D0211C445FD541ADAD517D8430B32BD0D4A'
 $VendorDllSha256 = [ordered]@{
     'amd_fidelityfx_loader_dx12.dll'   = 'E2191D3C0828BE45EB8AFFD4E3EC0378F2293ADC345B772A7170EDCF3B021ECB'
     'amd_fidelityfx_loader_vk.dll'     = '38A56A01FB3565C0757D9F5C1E4E69DE4B65E5F2E5769B323B200DC1F142BAB9'
@@ -2704,9 +2708,17 @@ $VendorDllSha256 = [ordered]@{
     'amd_fidelityfx_upscaler_vk.dll'   = '4A7E895AF6E0B615D40A84D59EB8C2B1054AD91CDD0C739567940270D51BDAB7'
     'nvngx_dlss.dll'                   = 'D00B5B0AB29C3CA101B70C3A5ECB3A01B7EF33766A3383A28A18623083E6123E'
     'rac_ngx.dll'                      = '91ADA0E533A67407C7B5C4E29B1AF850621E78E37E3B63AE314970810A144F44'
+    'amd_fidelityfx_framegeneration_dx12.dll'  = 'E6843252F58B0341A0D80F6A20BC0D840643EE95BC48C22CAC08745344577BB6'
+    'amd_fidelityfx_framegeneration_vk.dll'    = 'D002DABFF8C5E71EAA715FC99438CD4DC81230262A7897B16BC402EFEC3498B4'
+    'nvngx_dlssg.dll'                          = '8D59D49B36410DD6B62FEF2503A5871D347415BD85D943FA0848563A95DD50C7'
+    'sl.common.dll'                            = '38EEA3B4209AFC455636EA372B5933D65FCC13BECEC6C84D101DCFC4D8648F75'
+    'sl.dlss_g.dll'                            = '3ED9538DF724993BEA8A050195A6A78B9C8C8A566D5B05ADE477AAB3C390E90F'
+    'sl.interposer.dll'                        = 'B1D7395AEBD7B9722841D64DCF7433680020B6A8E421F851C16D5BA0C2182EDF'
+    'sl.pcl.dll'                               = '5698C38E722318681F215C9FE68E45B9BEDD51378ACC699D8EEE26E961E57770'
+    'sl.reflex.dll'                            = '443577E869352436FF7EC8F4D9C90418D3E95368436CE219261E0F4F07A38122'
 }
 $VendorDlls = @($VendorDllSha256.Keys)
-$VendorLicenses = @('licenses/NVIDIA_DLSS_SDK_LICENSE.txt', 'licenses/AMD_FidelityFX_LICENSE.md')
+$VendorLicenses = @('licenses/NVIDIA_DLSS_SDK_LICENSE.txt', 'licenses/AMD_FidelityFX_LICENSE.md', 'licenses/NVIDIA_Streamline_LICENSE.txt')
 
 function Test-VendorFile([string]$path, [string]$name) {
     return ((Test-Path -LiteralPath $path -PathType Leaf) -and ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -eq $VendorDllSha256[$name]))
@@ -2762,7 +2774,7 @@ function Install-VendorDlls([string]$exeDir) {
         if (-not (Test-VendorFile (Join-Path $b $f) $f) -and -not (Test-VendorFile (Join-Path $exeDir $f) $f)) { $need = $true }
     }
     if ($need) {
-        Write-Host '  upscalers (FSR, DLSS): downloading the DLLs (rac-rs-upscalers-1.zip, about 95 MB) into bundled\'
+        Write-Host '  upscalers (FSR, DLSS): downloading the DLLs (rac-rs-upscalers-2.zip, about 135 MB) into bundled\'
         try { Get-VendorZipIntoBundled $b }
         catch { Write-Host "  upscalers (FSR, DLSS): could not get the DLLs ($($_.Exception.Message)); the upscaler options stay off" -ForegroundColor Yellow }
     }

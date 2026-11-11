@@ -21,6 +21,7 @@ pub fn secs() -> f64 {
 }
 
 pub fn say(text: impl FnOnce() -> String) {
+	crate::diag::cause(crate::diag::LOAD); // [PC] RAC_DIAG spikes.txt
 	if on() || crate::runlog::active() {
 		let line = format!("load: +{:.3} {}", secs(), text());
 		crate::runlog::note_step(&line);

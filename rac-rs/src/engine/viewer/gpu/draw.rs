@@ -49,7 +49,7 @@ struct DrawFx {
 /// The acquired surface image, its view, the command encoder with its cut points, and the GI level of the frame.
 struct DrawTarget {
 	/// None in the Classic pass of a split frame (split.rs): it draws into the offscreen target and presents nothing.
-	frame: Option<wgpu::SurfaceTexture>,
+	frame: Option<crate::viewer::fgen::present::FrameImage>,
 	view: wgpu::TextureView,
 	enc: wgpu::CommandEncoder,
 	cuts: super::presenter::Cuts,
@@ -75,16 +75,21 @@ impl Gpu {
 		crate::viewer::gpu_errors::frame_check(); // [PC] lasting wgpu errors: size options reset, then a main-thread panic (gpu_errors.rs)
 		self.presenter.settle_listed(false); // [PC] ntex: a list past qdefer::LISTED_CAP (frames skipped since the last hand-over) is applied now
 		super::passtime::frame_begin(&self.device); // [PC] RAC_GPU_PASSES (passtime.rs)
+		crate::viewer::scene_msaa::frame_begin(); // [PC] lane noaa: no resolve copy of an earlier frame that stopped early
 		{ let _s = super::profile::span("d_swap"); self.swap_repl(); } // [PC] texture packs
 		let classic_ready = split::take_ready(); // [PC] split view (split.rs): the Classic half was drawn offscreen first (handler/frame_split.rs)
 		self.upscale_begin(cam); // [PC] RAC_UPSCALE_PREP (upscale.rs): cut test, jitter, motion targets
+		crate::viewer::framebuf::frame_begin(&self.device); // [PC] lane rcpu: last frame's per-frame buffers back to the pool (framebuf.rs)
 		let dc = self.frame_uniforms(cam)?;
 		let mut dfx = self.frame_effects(cam, &dc)?;
 		let (mut dt, mut warp_hud) = self.frame_target(cam, &dc)?;
 		self.split_extras(&mut warp_hud, classic_ready);
 		let db = self.frame_buffers(warp_hud)?;
 		self.draw_passes(cam, &dc, &mut dfx, &mut dt, &db)?;
-		self.frame_finish(dt, db.sw, db.sh, capture)
+		crate::viewer::scene_msaa::flush(&mut dt.enc); // lane noaa: the HUD / level pass's resolve copy at 1 sample
+		let out = self.frame_finish(dt, db.sw, db.sh, capture);
+		debug_assert!(crate::viewer::scene_msaa::none_pending(), "scene MSAA: a resolve copy queued after the frame's last flush");
+		out
 	}
 }
 
@@ -135,10 +140,8 @@ fn draw_strips(device: &wgpu::Device, queue: &GatedQueue, pass: &mut wgpu::Rende
 		let fogged = s.tex & crate::prims::FOG_ON != 0;
 		let verts: Vec<Vertex> = (0..s.pos.len()).map(|j| Vertex { pos: s.pos[j], uv: s.uv[j], normal: [0.0; 3], colour: if fogged { [s.colour[j][0], s.colour[j][1], s.colour[j][2], 1.0] } else { s.colour[j] }, light: crate::prims::fog_light(s.tex, 0, if fogged { s.colour[j][3] } else { -1.0 }) }).collect();
 		let idx: Vec<u32> = (0..s.pos.len() as u32 - 2).flat_map(|t| [t, t + 1, t + 2]).collect();
-		let vb = buffer(device, "fx strip vertices", bytemuck::cast_slice(&verts), wgpu::BufferUsages::VERTEX);
-		queue.write_buffer(&vb, 0, bytemuck::cast_slice(&verts));
-		let ib = buffer(device, "fx strip indices", bytemuck::cast_slice(&idx), wgpu::BufferUsages::INDEX);
-		queue.write_buffer(&ib, 0, bytemuck::cast_slice(&idx));
+		let vb = crate::viewer::framebuf::upload(device, queue, "fx strip vertices", bytemuck::cast_slice(&verts), wgpu::BufferUsages::VERTEX);
+		let ib = crate::viewer::framebuf::upload(device, queue, "fx strip indices", bytemuck::cast_slice(&idx), wgpu::BufferUsages::INDEX);
 		pass.set_pipeline(if s.add { add_pipeline } else { pipeline });
 		let k = s.fix as f64 / 128.0;
 		pass.set_blend_constant(wgpu::Color { r: k, g: k, b: k, a: 1.0 });
@@ -198,30 +201,37 @@ fn mirror_count(water_q: u8) -> usize {
 
 /// [PC] The planes to mirror this frame, at most `n` heights (`mirror::pick` for one, `mirror::pick_many` for more, given last
 /// frame's planes of this level). A plane the estimate misses for a frame (the culled patch set shows no flat height that frame)
-/// stays for `MIRROR_HOLD` frames while a slot is free, instead of dropping to the screen-space reflection.
+/// stays for 12 frames while a slot is free, instead of dropping to the screen-space reflection; one a still water mesh of this
+/// frame still holds stays a candidate as long as it does, for a few seconds at most (`mirror::hold`, lane pwat2: the Novalis
+/// pipe's flicker). `n` 0 (or `mirror_forget`, no water this frame) clears what was held.
 fn mirror_pick(level: usize, draws: &[super::waterfx::WaterDraw], eye: [f32; 3], vp: &[[f32; 4]; 4], n: usize) -> Vec<f32> {
-	const MIRROR_HOLD: u32 = 12;
-	thread_local! {
-		static LAST: std::cell::RefCell<(usize, Vec<(f32, u32)>)> = const { std::cell::RefCell::new((usize::MAX, Vec::new())) };
-	}
 	if n == 0 {
+		mirror_forget();
 		return Vec::new();
 	}
-	LAST.with(|l| {
-		let mut l = l.borrow_mut();
-		if l.0 != level {
-			*l = (level, Vec::new());
-		}
-		let prev: Vec<f32> = l.1.iter().map(|p| p.0).collect();
+	MIRROR_MEMORY.with(|m| {
+		let mut m = m.borrow_mut();
+		m.start(level, n, eye);
+		let prev = m.heights();
+		let boxes = super::mirror::hold::planes(draws, &m.held);
 		let ivp = super::mirror::inverse(vp);
-		let fresh: Vec<f32> = if n == 1 { super::mirror::pick(draws, eye, ivp.as_ref(), prev.first().copied()).into_iter().collect() } else { super::mirror::pick_many(draws, eye, ivp.as_ref(), &prev, n) };
-		let mut now: Vec<(f32, u32)> = fresh.into_iter().map(|h| (h, 0)).collect();
-		for &(h, age) in &l.1 {
-			if now.len() < n && age < MIRROR_HOLD && now.iter().all(|p| (p.0 - h).abs() >= 0.5) {
-				now.push((h, age + 1));
-			}
-		}
-		l.1 = now;
-		l.1.iter().map(|p| p.0).collect()
+		let fresh: Vec<f32> = if n == 1 { super::mirror::pick(&boxes, eye, ivp.as_ref(), prev.first().copied()).into_iter().collect() } else { super::mirror::pick_many(&boxes, eye, ivp.as_ref(), &prev, n) };
+		m.update(&super::mirror::hold::found(draws), &boxes, &fresh, n);
+		m.heights()
 	})
+}
+
+thread_local! {
+	/// The planes `mirror_pick` mirrored last frame (render thread).
+	static MIRROR_MEMORY: std::cell::RefCell<super::mirror::hold::Memory> = const { std::cell::RefCell::new(super::mirror::hold::Memory::new()) };
+}
+
+/// A frame without a mirror pick (no water drawn): nothing held carries over to the next pick.
+fn mirror_forget() {
+	MIRROR_MEMORY.with(|m| m.borrow_mut().forget());
+}
+
+/// RAC_WATER_LOG: the held planes (height, frames since the estimate last found it).
+fn mirror_held() -> Vec<(f32, u32)> {
+	MIRROR_MEMORY.with(|m| m.borrow().held.iter().map(|p| (p.height, p.unfound())).collect())
 }

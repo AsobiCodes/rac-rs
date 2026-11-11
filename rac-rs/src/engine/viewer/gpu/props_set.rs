@@ -90,6 +90,7 @@ impl Gpu {
 		};
 		// Draw-distance fade (MOBY-FADE): None = past the limit (culled), else the moby draw alpha.
 		let view = scene.clip_view.as_ref().map(|v| (v.e, v.f));
+		let sp_loop = super::profile::span("sp_loop");
 		let (alphas, past) = open_alphas(prop_alphas(view, props, centres, radii, far), props, cull);
 		scene.props_alpha = props.iter().zip(&alphas).any(|(p, a)| p.draw_shown() && a.is_some_and(|a| moby_alpha_encoding(0.0, a).1));
 		let n_slots = scene.props_ranges.len();
@@ -113,7 +114,7 @@ impl Gpu {
 			};
 			let (ps, ns) = slot_pose(fx_posed, posed, &mut pose_memo, pi, p, r.len());
 			if !(p.draw_shown() && (!occluded || !cull)) || past.get(pi) == Some(&true) {
-				srcs.push(culled_src(pi, p, ps, ns, alpha, cull, self.class_uv.get(&(p.class_id as u32)).copied().unwrap_or([0.0; 2])));
+				srcs.push(culled_src(pi, p, ps, ns, alpha, cull, cls_uv(&self.class_uv, p.class_id as u32)));
 				continue;
 			}
 			// REN-MOBY-DRAWN: the verdict also needs the near / side planes (the GPU clips, so the prop is still drawn).
@@ -144,12 +145,15 @@ impl Gpu {
 			}
 			// WPN-6.3e: the aux 179 texture scroll (FUN_00263928 adds the delta to every vertex V, as the Pyrocitor nozzle);
 			// a scrolled slot is rebuilt every frame.
-			let cuv = self.class_uv.get(&(p.class_id as u32)).copied().unwrap_or([0.0; 2]);
+			let cuv = cls_uv(&self.class_uv, p.class_id as u32);
 			let (du, dv) = (cuv[0], cuv[1] + prop_v.filter(|&(i, _)| i == pi).map_or(0.0, |(_, d)| d));
 			log_uv(p, pi, &m, scale, cuv);
 			srcs.push(SlotSrc::Prop(SlotJob { ps, ns, m, scale, light, alpha_code, prop_tint: p.tint, tint, alpha, dv, du }));
 		}
+		drop(sp_loop);
+		let sp_deb = super::profile::span("sp_debris");
 		debris::build(scene, &self.queue, &self.table, &mut self.moby_dyn, cull, view, debris, insts);
+		drop(sp_deb);
 		for (i, r) in scene.props_ranges.iter().enumerate().skip(props.len()) {
 			match actors.get(i - props.len()).and_then(|a| a.as_ref()).filter(|((ps, _), _)| ps.len() == r.len()) {
 				Some(((ps, ns), at)) => {
@@ -163,10 +167,12 @@ impl Gpu {
 			}
 		}
 		scene.props_vis = shown.clone();
+		let sp_tail = super::profile::span("sp_tail");
 		// [PC] Fire (review R7-9): the flame pipelines are built on the first frame a level shows a flame moby; refused = none marked.
 		let fire = Some(super::moby_fire::classes(self.level)).filter(|c| !c.is_empty() && self.props_gpu.fire_ready(&self.device)).unwrap_or(&[]);
 		scene.update_tail_order(props, &shown, fire); // [PC] #29 (gpu/tail_order.rs)
 		crate::viewer::shotlight::props(props, &alphas, &past); // [PC] weapon lights: the shot mobys the game draws, occluded or not (shotlight.rs)
+		drop(sp_tail);
 		{
 			let pg = &mut self.props_gpu;
 			// [PC] perf round 3: one record per slot and each distinct pose once; `vs_props` poses the static model.
@@ -312,6 +318,11 @@ fn slot_pose<'a>(fx_posed: &'a HashMap<usize, std::sync::Arc<Posed>>, posed: &'a
 		})
 		.filter(|(ps, _)| ps.len() >= len);
 	pose.map_or((&[], &[]), |(ps, ns)| (&ps[..ps.len().min(ns.len())], &ns[..ps.len().min(ns.len())]))
+}
+
+/// [PC] lane rcpu: a class's texture scroll (`class_uv`), no hashing while no class scrolls (most levels).
+fn cls_uv<S: std::hash::BuildHasher>(m: &HashMap<u32, [f32; 2], S>, class: u32) -> [f32; 2] {
+	if m.is_empty() { [0.0; 2] } else { m.get(&class).copied().unwrap_or([0.0; 2]) }
 }
 
 /// RAC_WATER_LOG: a prop slot drawn with a class texture scroll.

@@ -260,7 +260,7 @@ impl Shared {
 			fragment: Some(wgpu::FragmentState { module: &module, entry_point: Some("fs_star"), compilation_options: Default::default(), targets: &[Some(wgpu::ColorTargetState { format: gpu.config.format, blend: Some(premult), write_mask: wgpu::ColorWrites::ALL })] }),
 			primitive: Default::default(),
 			depth_stencil: Some(wgpu::DepthStencilState { format: gpu.depth_format, depth_write_enabled: Some(false), depth_compare: Some(wgpu::CompareFunction::LessEqual), stencil: Default::default(), bias: Default::default() }),
-			multisample: wgpu::MultisampleState { count: super::targets::MSAA, ..Default::default() },
+			multisample: wgpu::MultisampleState { count: super::targets::msaa(), ..Default::default() },
 			multiview_mask: None,
 			cache: None,
 		});

@@ -369,7 +369,7 @@ impl SimRes {
 		let parts = buf("fire sim particles", POOL_MAX as u64 * PART_BYTES, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
 		let emits = buf("fire sim emitters", (MAX_EMIT * std::mem::size_of::<SimEmit>()) as u64, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
 		let (cs, vs, fs, vf) = (wgpu::ShaderStages::COMPUTE, wgpu::ShaderStages::VERTEX, wgpu::ShaderStages::FRAGMENT, wgpu::ShaderStages::VERTEX_FRAGMENT);
-		let depth_ms = wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Depth, view_dimension: wgpu::TextureViewDimension::D2, multisampled: true };
+		let depth_ms = wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Depth, view_dimension: wgpu::TextureViewDimension::D2, multisampled: crate::viewer::scene_msaa::msaa() > 1 };
 		let step_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("fire sim step"), entries: &[layout_entry(0, cs, UNIFORM), layout_entry(1, cs, storage(false)), layout_entry(2, cs, storage(true)), layout_entry(3, cs, NOISE_TEX), layout_entry(4, cs, SAMPLER), layout_entry(5, cs, depth_ms)] });
 		let draw_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("fire sim draw"), entries: &[layout_entry(0, vf, UNIFORM), layout_entry(1, vs, storage(true)), layout_entry(2, fs, NOISE_TEX), layout_entry(3, fs, SAMPLER)] });
 		let draw_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -397,7 +397,7 @@ impl SimRes {
 			}),
 			primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
 			depth_stencil: Some(wgpu::DepthStencilState { format: env.depth_format, depth_write_enabled: Some(false), depth_compare: Some(wgpu::CompareFunction::Less), stencil: Default::default(), bias: Default::default() }),
-			multisample: wgpu::MultisampleState { count: MSAA, ..Default::default() },
+			multisample: wgpu::MultisampleState { count: msaa(), ..Default::default() },
 			multiview_mask: None,
 			cache: None,
 		});

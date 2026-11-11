@@ -2,12 +2,16 @@
 //! the skip rule of a playing movie and the keyboard-as-DualShock mapping.
 
 use super::*;
+use rac_engine::input::kbm::{self, Ctx, Input, Mouse, Wheel};
 
 /// The fewest fields a key tap is held for (`Retail::press_key`): 60 ms, a quick tap on a pad [I]. The game's pad update
 /// (Eudora FUN_00259330) sees a press in one field (new presses = held & !previous held), so one would do for menus.
 pub(super) const TAP_FIELDS: u8 = 3;
 
 impl MouseTaps {
+	/// The input of each `press_mouse` index: left, middle (Circle / Triangle as always), then right, the side buttons and the wheel notches.
+	pub(super) const INPUTS: [Input; 7] = [Input::Mouse(Mouse::Left), Input::Mouse(Mouse::Middle), Input::Mouse(Mouse::Right), Input::Mouse(Mouse::Back), Input::Mouse(Mouse::Forward), Input::Wheel(Wheel::Up), Input::Wheel(Wheel::Down)];
+
 	pub(super) fn press(&mut self, b: usize) {
 		if let Some(n) = self.0.get_mut(b) {
 			*n = TAP_FIELDS;
@@ -20,6 +24,24 @@ impl MouseTaps {
 	}
 }
 
+/// The `press_mouse` index of a wheel notch (`MouseTaps::INPUTS`: 5 = up, 6 = down; it lands in `extra_taps[3]` / `[4]`).
+fn wheel_index(up: bool) -> usize {
+	if up { 5 } else { 6 }
+}
+
+/// The keys whose first poll this is and that the Controls page may read as Tab / Delete: none in the field a capture was running
+/// (the answer can be Delete or Tab) and none still held from a capture's answer.
+fn page_notes(taps: &HashMap<winit::keyboard::KeyCode, u8>, was_capturing: bool, hold: &[winit::keyboard::KeyCode]) -> Vec<winit::keyboard::KeyCode> {
+	if was_capturing {
+		return Vec::new();
+	}
+	taps.iter().filter(|(k, n)| **n == TAP_FIELDS && !hold.contains(k)).map(|(k, _)| *k).collect()
+}
+
+#[cfg(test)]
+#[path = "input_tests.rs"]
+mod tests;
+
 impl Retail {
 	/// A key went down (not an auto-repeat). The viewer samples the keyboard once per frame, and a frame can run several
 	/// fields or take ~200 ms (the pause menu's GS capture paces the interpreter at ~35 ms a field), so a tap pressed and
@@ -31,7 +53,27 @@ impl Retail {
 
 	/// The left (0, Circle: fire) or middle (1, Triangle: Quick Select) mouse button went down; see `press_key`.
 	pub fn press_mouse(&mut self, b: usize) {
-		self.mouse_taps.press(b);
+		match b {
+			0 | 1 => self.mouse_taps.press(b),
+			2..=6 => self.extra_taps[b - 2] = TAP_FIELDS,
+			_ => {}
+		}
+	}
+
+	/// A mouse button other than left / middle went down or up (the held state; the tap latch is `press_mouse`).
+	pub fn set_mouse_held(&mut self, m: Mouse, down: bool) {
+		let bit = match m {
+			Mouse::Right => 1,
+			Mouse::Back => 2,
+			Mouse::Forward => 4,
+			_ => return,
+		};
+		self.mouse_held = if down { self.mouse_held | bit } else { self.mouse_held & !bit };
+	}
+
+	/// A wheel notch: a tap of the wheel input (it presses what it is bound to for `TAP_FIELDS` fields).
+	pub fn press_wheel(&mut self, up: bool) {
+		self.press_mouse(wheel_index(up));
 	}
 
 	/// RAC_RETAIL_KEYTAP: the scripted taps due this field become key taps (`taps`), a right click, or a modern screen's keys.
@@ -69,6 +111,46 @@ impl Retail {
 		}
 	}
 
+	/// Play: the held inputs through the live bindings (kbm). A ship fight turns the Ship layer on: there the left button is Cross
+	/// (`kbm_actions` ship_fire) and no longer Circle (shipmouse.rs, v0.5.0). `live`: key down now; `middle`: the middle button.
+	fn play_pad(&self, live: &impl Fn(winit::keyboard::KeyCode) -> bool, circle: bool, middle: bool) -> (u16, [u8; 4]) {
+		let (mt, et, mh) = (self.mouse_taps.0, self.extra_taps, self.mouse_held);
+		let lmb = circle || mt[0] > 0;
+		let down_in = |i: Input| match i {
+			Input::Key(k) => live(k),
+			Input::Mouse(Mouse::Left) => lmb,
+			Input::Mouse(Mouse::Middle) => middle,
+			Input::Mouse(Mouse::Right) => mh & 1 != 0 || et[0] > 0,
+			Input::Mouse(Mouse::Back) => mh & 2 != 0 || et[1] > 0,
+			Input::Mouse(Mouse::Forward) => mh & 4 != 0 || et[2] > 0,
+			Input::Wheel(Wheel::Up) => et[3] > 0,
+			Input::Wheel(Wheel::Down) => et[4] > 0,
+		};
+		let ctx = Ctx { contexts: if self.snap.ship_fight { 1 << crate::kbm_actions::SHIP } else { 0 }, menu: None };
+		let o = kbm_glue::eval(&down_in, &ctx);
+		(o.buttons, o.sticks)
+	}
+
+	/// One poll of the Controls capture: the keys and mouse buttons that went down this field (the tap latch's first poll) and the
+	/// controller's new buttons are the answer (`kbm::capture_poll`); `cap_hold` remembers what is still down.
+	fn capture_step(taps: &HashMap<winit::keyboard::KeyCode, u8>, mouse: &MouseTaps, extra: &[u8; 5], cap_hold: &mut (Vec<winit::keyboard::KeyCode>, u32)) {
+		let fresh: Vec<winit::keyboard::KeyCode> = taps.iter().filter(|(_, n)| **n == TAP_FIELDS).map(|(k, _)| *k).collect();
+		let mut fresh_in: Vec<Input> = fresh.iter().map(|&k| Input::Key(k)).collect();
+		fresh_in.extend(MouseTaps::INPUTS.iter().enumerate().filter(|(i, _)| (if *i < 2 { mouse.0[*i] } else { extra[*i - 2] }) == TAP_FIELDS).map(|(_, m)| *m));
+		kbm::capture_poll(&fresh_in, prompts::phys_fresh());
+		*cap_hold = (fresh, prompts::phys_now());
+	}
+
+	/// The controller reads the STANDARD layout in this context (a menu screen, a dialog, the shop, the front end, a scene, a ship flight's
+	/// takeoff / landing: retail's own skip tests), the player's remap elsewhere. It uses the NEWEST mode too (`snapshot::live_pad`, not
+	/// only the shown snapshot that lags up to 2 fields).
+	fn pad_menu_context(&self, keys_screen: bool) -> bool {
+		let menu_mode = |m: u32| matches!(m, 2..=5) || (m == 6 && matches!(self.snap.ship, 0 | 8));
+		// The newest state decides: the shown snapshot lags up to 2 fields, and a press in the fields right after a menu closed must act in
+		// the player's layout at once (TB2-N5). Mode 6 reads the shown ship substate (the newest snapshot carries none).
+		keys_screen || self.snap.front || menu_mode(snapshot::live_pad().0)
+	}
+
 	/// One field from the keyboard: the keys held now (`held`, `circle` / `triangle` for the left / middle mouse buttons)
 	/// plus the taps still owed fields (`press_key`); then `tick`.
 	pub fn tick_keys(&mut self, held: impl Fn(winit::keyboard::KeyCode) -> bool, circle: bool, triangle: bool) {
@@ -99,23 +181,21 @@ impl Retail {
 				let extra = (if middle { mouse_menu::TRIANGLE } else { 0 }) | (if click { sc.confirm } else { 0 });
 				(b | extra, s)
 			}
-			// A ship fight (shipmouse.rs): the left mouse button fires with Cross, the ship's fire button; elsewhere it is Circle.
-			None => {
-				let (as_circle, extra) = shipmouse::left_button(self.snap.ship_fight, circle || self.mouse_taps.0[0] > 0);
-				let (b, s) = pad_from_keys(live, as_circle, middle);
-				(b | extra, s)
-			}
+			None => self.play_pad(&live, circle, middle),
 		};
 		menu_keys::log(self.fields, menu, keys_screen.filter(|_| menu.is_none()), b);
 		// A gamepad adds its buttons and sticks and, when it moved, becomes the device of the button prompts (prompts.rs).
 		self.kb_rs = [s[0], s[1]].map(|v| (v as i16 - 0x80) as i8);
-		prompts::poll_pad(&mut b, &mut s);
+		// The controller follows the player's remap in gameplay and reads the standard layout in the Menu context (design V051_PAD_DESIGN:
+		// a menu screen, dialog or shop as the keyboard's `keys_screen`, and the front end, so a moved Start cannot lock the title).
+		let kb_b = b;
+		prompts::poll_pad(&mut b, &mut s, self.pad_menu_context(keys_screen.is_some()));
 		// Quick Select wheel (RAC_WHEEL_MOUSE=1): Triangle held while retail's wheel is up = the mouse direction is the left stick (wheel_mouse.rs).
 		wheel_mouse::step(menu.is_none() && keys_screen.is_none() && b & mouse_menu::TRIANGLE != 0, self.snap.wheel_up, &mut s);
 		let (mode, front) = (self.snap.mode, self.snap.front);
 		// Esc / Space skip a scene or ship flight through retail's own skip test (`skip_feed`); so does a plain Start (keyboard or
 		// controller: `b` holds both) while the Start skips cutscenes row is On (pcskip.rs; GitHub #34 / #23).
-		let skip_key = [winit::keyboard::KeyCode::Escape, winit::keyboard::KeyCode::Space].iter().any(|&k| held(k) || taps.contains_key(&k)) || pcskip::start_pressed(b);
+		let skip_key = [winit::keyboard::KeyCode::Escape, winit::keyboard::KeyCode::Space].iter().any(|&k| held(k) || taps.contains_key(&k)) || pcskip::start_pressed(kb_b | prompts::std_buttons());
 		if !front {
 			b |= skip_feed(mode, self.snap.ship, skip_key);
 		}
@@ -142,10 +222,9 @@ impl Retail {
 		// the game sees a neutral pad meanwhile.
 		// The game sees a neutral pad in the three states below; the worker's instant command must not move the menu either then.
 		let mut neutral = false;
-		if binds::capturing() {
-			let fresh: Vec<winit::keyboard::KeyCode> = taps.iter().filter(|(_, n)| **n == TAP_FIELDS).map(|(k, _)| *k).collect();
-			binds::capture_poll(&fresh, prompts::phys_fresh());
-			self.cap_hold = (fresh, prompts::phys_now());
+		let was_capturing = binds::capturing();
+		if was_capturing {
+			Self::capture_step(taps, &self.mouse_taps, &self.extra_taps, &mut self.cap_hold);
 			(b, s) = (0, [0x80; 4]);
 			neutral = true;
 		} else if !self.cap_hold.0.is_empty() || self.cap_hold.1 != 0 {
@@ -206,11 +285,18 @@ impl Retail {
 		if let Some(c) = instant {
 			mouse_instant::send(mouse_instant::when_neutral(c, neutral));
 		}
+		// The Controls page reads Tab / Delete (slot 2, clear) once their first poll is over, so a Tab that opens a capture never binds itself.
+		// Not in the field a capture was answered (Delete / Tab can be the answer) nor for a key still held from the answer; not while a mod
+		// has the keyboard.
+		for k in page_notes(taps, was_capturing, &self.cap_hold.0) {
+			pcctl_kbm::note_key(k);
+		}
 		self.taps.retain(|_, n| {
 			*n -= 1;
 			*n > 0
 		});
 		self.mouse_taps.tick();
+		self.extra_taps = self.extra_taps.map(|n| n.saturating_sub(1));
 		if crate::loadlog::on() && b != self.pad_last {
 			crate::loadlog::say(|| format!("pad field {} {b:#x}", self.fields));
 		}
@@ -425,5 +511,13 @@ pub fn skip_feed(mode: u32, ship: u32, skip_key: bool) -> u16 {
 /// mouse button (`triangle`) = Triangle (Quick Select), Ctrl = R1, C = L1, V = L2, B = R2, Esc/Enter = Start, M = Select, Left
 /// Shift = L3, R = R3, arrows = d-pad; Pause -> Options -> Controls remaps them (`binds::kb`, the defaults with the extension off).
 pub fn pad_from_keys(held: impl Fn(winit::keyboard::KeyCode) -> bool, circle: bool, triangle: bool) -> (u16, [u8; 4]) {
-	binds::kb().pad(held, circle, triangle)
+	use rac_engine::input::kbm::{Ctx, Input, Mouse};
+	let down = |i: Input| match i {
+		Input::Key(k) => held(k),
+		Input::Mouse(Mouse::Left) => circle,
+		Input::Mouse(Mouse::Middle) => triangle,
+		_ => false,
+	};
+	let o = kbm_glue::eval(&down, &Ctx::default());
+	(o.buttons, o.sticks)
 }

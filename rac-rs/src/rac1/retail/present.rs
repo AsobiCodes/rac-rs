@@ -114,6 +114,7 @@ impl Retail {
 	/// held now reach the game only after a release.
 	pub fn end_movie(&mut self) {
 		self.movie_mask = 0xffff;
+		super::pad_stale::hold_now(); // under a controller remap too: the physical buttons, not only the PS2 bits
 		fmv_bridge::finish();
 	}
 

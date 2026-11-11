@@ -265,17 +265,32 @@ fn art_quads(win: (u32, u32)) -> [crate::overlay::Quad; 2] {
 pub fn place_art(g: &mut crate::viewer::Gpu, win: (u32, u32)) {
 	let want = up() && lock().as_ref().and_then(|s| s.built.as_ref()).is_some_and(|b| b.art);
 	if !want {
+		g.set_menu_art_anim(None);
 		if g.has_menu_art() {
 			g.clear_menu_art();
 		}
 		return;
 	}
 	if !g.has_menu_art() {
-		let art = ART.get_or_init(|| crate::texpack::png::load(ship_marks::ART_PNG).ok().map(|i| (i.w, i.h, i.levels[0].clone())));
+		let art = ART.get_or_init(|| {
+			crate::texpack::png::load(ship_marks::ART_PNG).ok().map(|i| {
+				let mut px = i.levels[0].clone();
+				super::ship_anim::mark_stars(&mut px, i.w, i.h); // the star map the twinkle reads (alpha channel)
+				(i.w, i.h, px)
+			})
+		});
 		let Some((w, h, px)) = art else { return };
 		g.set_menu_art(*w, *h, px);
 	}
-	g.hud.splice(0..0, art_quads(win));
+	let mut quads = art_quads(win);
+	super::ship_anim::tick();
+	if super::ship_anim::enabled() {
+		quads[1].tex = crate::viewer::MENU_ART_ANIM_TEX; // the painting through the animation pipeline (ship_anim.rs)
+		g.set_menu_art_anim(Some(super::ship_anim::anim_at(super::ship_anim::clock_s())));
+	} else {
+		g.set_menu_art_anim(None);
+	}
+	g.hud.splice(0..0, quads);
 	g.hud_split = None;
 }
 

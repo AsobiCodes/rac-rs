@@ -1,14 +1,14 @@
 //! The modern screen's rows that belong to a module's own setter (`ui_bridge.rs` hands them over): Renderer, Skip intro, Start skips
-//! cutscenes, Quick Select mouse, Stick dead zone, Button glyphs, Wrench throw, Upscaler and Upscale quality (no RAM
-//! byte: the engine's `upscale_choice`, options file only), Underwater look (no RAM byte: the engine's `under_choice`), Aspect ratio
-//! (no RAM byte: the engine's `aspect_box`), the
-//! texture filter the presets send (no row of its own), and the retail Left / Right and Up / Down bytes. Each setter writes
-//! the classic page's row byte too when that page exists on this RAM (else its `sync` would read the differing byte as a press and
+//! cutscenes, Quick Select mouse, Stick dead zone, Button glyphs, Wrench throw, Upscaler and Upscale quality (no RAM byte: the
+//! engine's `upscale_choice`, options file only), Aspect ratio (no RAM byte: the engine's `aspect_box`),
+//! Resolution, Brightness and Contrast (no RAM byte: the engine's `resolution`, `picture_adjust`), the texture filter the presets
+//! send (no row of its own), and the retail Left / Right and Up / Down bytes. Each setter writes the classic page's row byte too when that page exists on this RAM (else its `sync` would read the differing byte as a press and
 //! undo the change) and returns whether the options file changed. Quick Select pauses the game (qs_pause.rs) and Auto-equip gadgets
-//! (auto_gadget.rs) have no RAM byte and no classic row: options file only.
+//! (auto_gadget.rs) have no RAM byte: options file only (Quick Select pause has a classic row since v0.5.1: `pcmore::follow_ui` keeps its byte in step; Auto-equip gadgets has none).
+//! Fast travel (fast_travel.rs): options file key `fasttravel`; its classic row (Graphics page, Gameplay section) follows through `pcmore::follow_ui` too.
 use super::*;
-use crate::retail::{glyphs, pcinput, pcintro, pcrender, pcskip, wrench_throw};
-use rac_engine::viewer::{aspect_box, under_choice, upscale_choice};
+use crate::retail::{pcmouseinv, glyphs, pcinput, pcintro, pcrender, pcskip, wrench_throw};
+use rac_engine::viewer::{aspect_box, upscale_choice};
 
 /// The first two records of the Camera Options page's row copy at `TAB`, as retail has them: `{label, byte*, Reversed text,
 /// Normal text, 0, 0}` for Left / Right (k = 0) and Up / Down (k = 1). The byte is 0 = Reversed, 1 = Normal; boot default 1.
@@ -49,10 +49,22 @@ pub(super) fn set(mem: &mut Mem, s: &mut St, id: &str, v: i32) -> Option<bool> {
 		"wrenchthrow" => wrench_throw::set_from_ui(&mut s.opts, on),
 		"upscaler" => upscale_choice::set_kind(&mut s.opts, v),
 		"upscale_q" => upscale_choice::set_quality(&mut s.opts, v),
-		"underwater" => under_choice::set_from_ui(&mut s.opts, on),
+		"framegen" => rac_engine::viewer::fgen_choice::set(&mut s.opts, v),
 		"aspect" => aspect_box::set_from_ui(&mut s.opts, v),
-		"qspause" => crate::retail::qs_pause::set_from_ui(&mut s.opts, on),
+		"resolution" => rac_engine::viewer::resolution::set_from_ui(&mut s.opts, v),
+		"brightness" | "contrast" => rac_engine::viewer::picture_adjust::set_from_ui(&mut s.opts, id == "contrast", v),
+		"qspause" => {
+			let changed = crate::retail::qs_pause::set_from_ui(&mut s.opts, on);
+			crate::retail::pcmore::follow_ui(mem);
+			changed
+		}
 		"autogadget" => crate::retail::auto_gadget::set_from_ui(&mut s.opts, on),
+		"fasttravel" => {
+			let changed = crate::retail::fast_travel::set_from_ui(&mut s.opts, on);
+			crate::retail::pcmore::follow_ui(mem);
+			changed
+		}
+		"mouse_ud" | "mouse_lr" => crate::retail::pcmouseinv::set_from_ui(mem, &mut s.opts, (id == "mouse_lr") as usize, b),
 		"leftright" | "updown" => {
 			if let Some(a) = invert_addr(mem, (id == "updown") as u32) {
 				mem.wr8(a, 1 - on as u8);
@@ -78,10 +90,16 @@ pub(super) fn publish(mem: &mut Mem, v: &mut Vec<(&'static str, i32)>) {
 		("wrenchthrow", wrench_throw::moving() as i32),
 		("upscaler", upscale_choice::kind() as i32),
 		("upscale_q", upscale_choice::quality() as i32),
-		("underwater", under_choice::on() as i32),
+		("framegen", rac_engine::viewer::fgen_follow::shown_now() as i32), // lane fglive: what fits the Upscaler (Off while not)
 		("aspect", aspect_box::current() as i32),
+		("resolution", rac_engine::viewer::resolution::index()),
+		("brightness", rac_engine::viewer::picture_adjust::brightness() as i32),
+		("contrast", rac_engine::viewer::picture_adjust::contrast() as i32),
 		("qspause", crate::retail::qs_pause::on() as i32),
 		("autogadget", crate::retail::auto_gadget::on() as i32),
+		("fasttravel", crate::retail::fast_travel::on() as i32),
+		("mouse_ud", pcmouseinv::mode(0) as i32),
+		("mouse_lr", pcmouseinv::mode(1) as i32),
 		("leftright", lr),
 		("updown", ud),
 	]);

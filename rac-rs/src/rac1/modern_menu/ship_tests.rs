@@ -273,3 +273,16 @@ fn a_page_that_flies_in_fills_the_hole_with_the_card_colour_and_places_no_crop()
 	ship_pic::settle(&mut d, ship_pic::FLYING);
 	assert_eq!(d, before, "the details page has no hole to fill");
 }
+
+/// The markers' click targets and the page's layout do not move with the animation clock (only their look pulses).
+#[test]
+fn markers_stay_put_while_they_pulse() {
+	super::ship_anim::set_clock_for_test(Some(3.0));
+	let a = page(&listing(2), Stage::List, 0, Device::Pad);
+	super::ship_anim::set_clock_for_test(Some(11.7));
+	let b = page(&listing(2), Stage::List, 0, Device::Pad);
+	super::ship_anim::set_clock_for_test(None);
+	assert_eq!(a.marks, b.marks);
+	assert_eq!(a.rows, b.rows);
+	assert_ne!(format!("{:?}", a.prims.len()), "0");
+}

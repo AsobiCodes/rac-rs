@@ -159,7 +159,7 @@ impl Gpu {
 			let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("sky capture"), layout: &self.pipeline.get_bind_group_layout(0), entries: &self.sun.entries(&r.ubufs[k], &self.metalenv) });
 			let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
 				label: Some("sky capture"),
-				color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &r.colour, resolve_target: Some(&r.faces[k]), depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(scene.clear), store: wgpu::StoreOp::Discard } })],
+				color_attachments: &[Some(crate::viewer::scene_msaa::att_direct(&r.colour, &r.faces[k], wgpu::Operations { load: wgpu::LoadOp::Clear(scene.clear), store: wgpu::StoreOp::Discard }))],
 				depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
 					view: &r.depth,
 					depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
@@ -187,8 +187,9 @@ impl Gpu {
 			device.create_texture(&wgpu::TextureDescriptor { label: Some(label), size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: layers }, mip_level_count: 1, sample_count: samples, dimension: wgpu::TextureDimension::D2, format, usage, view_formats: &[] })
 		};
 		let ra = wgpu::TextureUsages::RENDER_ATTACHMENT;
-		let colour = tex("sky capture msaa", FACE, FACE, 1, crate::viewer::targets::MSAA, self.config.format, ra).create_view(&Default::default());
-		let depth = tex("sky capture depth", FACE, FACE, 1, crate::viewer::targets::MSAA, self.depth_format, ra).create_view(&Default::default());
+		let (mw, mh) = crate::viewer::scene_msaa::ms_size(FACE, FACE); // lane noaa: 1 x 1 at 1 sample (unused: att_direct)
+		let colour = tex("sky capture msaa", mw, mh, 1, crate::viewer::targets::msaa(), self.config.format, ra).create_view(&Default::default());
+		let depth = tex("sky capture depth", FACE, FACE, 1, crate::viewer::targets::msaa(), self.depth_format, ra).create_view(&Default::default());
 		let ft = tex("sky capture faces", FACE, FACE, 6, 1, self.config.format, ra | wgpu::TextureUsages::TEXTURE_BINDING);
 		let faces = (0..6).map(|k| ft.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2), base_array_layer: k, array_layer_count: Some(1), ..Default::default() })).collect();
 		let array = ft.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() });
@@ -245,7 +246,7 @@ impl Gpu {
 			fragment: Some(wgpu::FragmentState { module: &bmod, entry_point: Some("fs_backdrop"), compilation_options: Default::default(), targets: &[Some(wgpu::ColorTargetState { format: self.config.format, blend: None, write_mask: wgpu::ColorWrites::ALL })] }),
 			primitive: Default::default(),
 			depth_stencil: Some(wgpu::DepthStencilState { format: self.depth_format, depth_write_enabled: Some(false), depth_compare: Some(wgpu::CompareFunction::Always), stencil: Default::default(), bias: Default::default() }),
-			multisample: wgpu::MultisampleState { count: crate::viewer::targets::MSAA, ..Default::default() },
+			multisample: wgpu::MultisampleState { count: crate::viewer::targets::msaa(), ..Default::default() },
 			multiview_mask: None,
 			cache: None,
 		});

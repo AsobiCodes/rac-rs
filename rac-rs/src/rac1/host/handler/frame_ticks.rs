@@ -58,7 +58,7 @@ impl App {
 						// A movie that follows another one at once (Veldin's ending: the flagship movie right after the
 						// short one) ends the held last picture's hold: the old fade no longer tints the presenter (its
 						// first frame resets the tint, `Presenter::upload`), else the new movie played all black.
-						MOVIE_HOLD.store(false, std::sync::atomic::Ordering::Relaxed);
+						MOVIE_HOLD.store(false, std::sync::atomic::Ordering::Relaxed); super::shot_movie::started();
 						self.movie = Some(fmv::player::Player::start(&self.iso_path, &m, lang, self.audio.as_mut()));
 					}
 					if let Some(g) = &self.gpu {
@@ -70,7 +70,7 @@ impl App {
 					// [PC] Frame smoothing (interp.rs): this field's draw lists and its cut verdict (nothing kept while it is Off).
 					let smooth_menu = if crate::retail::pcext::enabled() { super::interp::wanted(crate::retail::pcext::graphics().smoothing) } else { self.settings.smooth };
 					{ let _s = profile::span("t_interp"); super::interp::field(r, smooth_menu); }
-					if (!r.holds() || r.overlay_covers() || r.menu_presents() || r.gs_front_drops_movie()) && MOVIE_HOLD.swap(false, std::sync::atomic::Ordering::Relaxed) {
+					if super::movie_hold::field(r, &MOVIE_HOLD) {
 						if let Some(g) = &mut self.gpu {
 							g.movie.clear();
 						}
@@ -80,7 +80,7 @@ impl App {
 						g.movie.tint = t;
 					}
 					if MOVIE_HOLD.load(std::sync::atomic::Ordering::Relaxed) && std::env::var_os("RAC_SCENE_LOG").is_some() {
-						eprintln!("retail: movie hold field {} holds {} covers {} tint {:?}", r.field_count(), r.holds(), r.overlay_covers(), r.movie_tint());
+						eprintln!("retail: movie hold field {} holds {} covers {} tint {:?} travel_target {:?} (replay travel flag {})", r.field_count(), r.holds(), r.overlay_covers(), r.movie_tint(), r.travel_target(), r.travelling());
 					}
 					// Scene actors play sequences retail appended to their classes (retail.rs `scene_seqs`).
 					{ let _s = profile::span("t_seqs"); r.scene_seqs(&mut self.prop_anims, self.hero_anim.as_mut()); }

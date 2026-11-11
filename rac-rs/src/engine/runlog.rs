@@ -181,6 +181,22 @@ fn waits_now() -> String {
 	if w.is_empty() { "none named".into() } else { w.join("; ") }
 }
 
+/// [PC] RAC_DIAG (diag.rs): the run log's system line (OS, CPU, logical CPUs, RAM; Windows only, else empty).
+pub(crate) fn system_summary() -> String {
+	#[cfg(windows)]
+	return win::system();
+	#[cfg(not(windows))]
+	String::new()
+}
+
+/// [PC] RAC_DIAG: local time "YYYY-MM-DD HH:MM:SS" (UTC where the local-time call is not wired).
+pub(crate) fn local_time_text() -> String {
+	#[cfg(windows)]
+	return win::local_time();
+	#[cfg(not(windows))]
+	crate::diag::utc_now()
+}
+
 #[cfg(windows)]
 mod win {
 	use super::*;

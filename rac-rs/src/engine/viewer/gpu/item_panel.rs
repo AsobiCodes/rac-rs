@@ -83,12 +83,7 @@ impl Gpu {
 	fn draw_panel_target(&self, enc: &mut wgpu::CommandEncoder, cam: &Camera, scene: &Scene, target: &ItemPanel, models: &[(usize, &Batch, [f32; 16], Option<&Batch>)]) {
 		let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
 			label: Some("target panel"),
-			color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-				view: &target.msaa,
-				resolve_target: Some(&target.resolved),
-				depth_slice: None,
-				ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Discard },
-			})],
+			color_attachments: &[Some(crate::viewer::scene_msaa::att_direct(&target.msaa, &target.resolved, wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Discard }))],
 			depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
 				view: &target.depth,
 				depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),

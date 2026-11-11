@@ -112,10 +112,12 @@ pub static AIMING: [UiRow; 3] = [
 	),
 ];
 
-/// Lock-on strength is dimmed while Lock-on is Off (the search does not run). No banner over the tab: only the row's box says why.
+/// Lock-on strength is hidden while Lock-on is Off (the search does not run; user 2026-11-08: hidden, not dimmed). No banner.
 pub const NEEDS_LOCKON: NeedsRule = NeedsRule {
 	row: "lockon",
 	set_to: 0,
+	for_row: "",
+	fix: None,
 	banner: t(""),
 	detail: [
 		"Applies while Lock-on is Auto or On. Lock-on is {} now.",

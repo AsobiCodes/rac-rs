@@ -1,7 +1,9 @@
 //! [PC] Fire, ground fire after explosions (stage 2 of the v0.5 fire extras): where an explosion lands on the ground a scorch mark with a
 //! bed of embers and a few flame tongues stays for a while. The explosion itself keeps its retail look.
 //! CPU half (pure, tested): `BlastFire::watch` finds the explosions (pool sprites of a `FireKind::Blast` row, new since the last frame,
-//! and the pack's `fxpool::BlastPoint`s: explosions without such sprites, R&C1's Bomb Glove bombs, rac1/retail/bomb_blast.rs),
+//! and the pack's `fxpool::BlastPoint`s: explosions without such sprites, R&C1's Bomb Glove bombs, rac1/retail/bomb_blast.rs; with the
+//! pack's `PoolFx::blast_gate` only the sprites born near one of the player's explosive shots, `Gate`, R&C1 rac1/retail/blast_gate.rs:
+//! an enemy dying in its own explosion leaves no fire),
 //! `land` puts each on the ground (a probe into the collision world: nothing for mid-air blasts, water or steep faces) and keeps the
 //! patches (`GroundFirePatch`, at most `MAX_PATCHES`), `flames` builds the tongues and ember emitters of the burning ones.
 //! The GPU half (firefx_blast_gpu.rs, groundfire.wgsl) draws the scorch and the embers into the depth the level wrote.
@@ -13,7 +15,7 @@
 //! Everything is forgotten (and the next call only primes `seen`) on Fire Off / Low / Classic, a level change, a frame-counter jump of the
 //! effects pool (respawn, savestate load), a gap with no pool and the warp (`FireFx::forget`, firefx_gametime.rs).
 //! Dev knobs (`RAC_TUNE`, ENV.md): gfire_radius gfire_h gfire_burn gfire_scorch gfire_max gfire_dark gfire_reach gfire_min_size
-//! gfire_glow gfire_tol gfire_hero_r fire_blast55 gfire_log.
+//! gfire_glow gfire_tol gfire_hero_r fire_blast55 gfire_gate_t gfire_log.
 
 use super::firefx::{dist, tongue, Emit, FireFx};
 use super::vegfx::burn::{BurnU, Times};
@@ -128,7 +130,10 @@ struct Cand {
 }
 
 /// What `BlastFire::note` keeps per blast-type sprite: its identity, where it was at the last call, whether it has started a fire
-/// (a primed-in sprite counts as started) and when (game time, s).
+/// (a primed-in sprite counts as started) and when (game time, s), and whether it may start one at all (`ok`: born near one of the
+/// player's explosive shots, `Gate`; always with no gate and for the pack's blasts). `birth` = `ok` as judged when the sprite was born
+/// (or reborn): the simulated burst follows it alone (`player_blast`), so a sprite never switches from retail to simulated fire in
+/// mid-explosion when the `REJUDGE` window later allows its ground fire.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Entry {
 	slot: u32,
@@ -136,7 +141,56 @@ struct Entry {
 	pos: [f32; 3],
 	triggered: bool,
 	t: f64,
+	ok: bool,
+	birth: bool,
 }
+
+/// The player's explosive shots (`PoolFx::blast_gate`). `live` = the shots of the last field; a shot that VANISHES (its slot no longer
+/// holds it: it deletes itself in the tick it explodes [C omni_weapons.md]) opens a zone at its last place for `gfire_gate_t` s
+/// (default 0.5, game time). A shot that only lives opens nothing: a mine waiting in the glove, a laid mine, a Doom agent or a Visibomb
+/// flying past never make an enemy death near them light a fire. A slot is the same shot only with the same `kind` and a place within
+/// twice its reach of the last one, else the old shot vanished there and the slot holds a new one. `on` = the pack gates (Some); off =
+/// every blast sprite may start a fire.
+#[derive(Default)]
+struct Gate {
+	on: bool,
+	live: Vec<crate::fxpool::ShotZone>,
+	open: Vec<(crate::fxpool::ShotZone, f64)>,
+}
+
+/// At most this many opened zones are remembered (the dynamic moby pool is 256 slots); the oldest go first, none is dropped the frame it opens.
+const GATE_MAX: usize = 256;
+
+impl Gate {
+	fn update(&mut self, zones: Option<&[crate::fxpool::ShotZone]>, now: f64) {
+		let Some(zones) = zones else {
+			*self = Gate::default();
+			return;
+		};
+		self.on = true;
+		for old in &self.live {
+			let same = zones.iter().any(|z| z.id == old.id && z.kind == old.kind && dist(z.pos, old.pos) <= 2.0 * old.reach);
+			if !same {
+				self.open.push((*old, now));
+			}
+		}
+		self.live.clear();
+		self.live.extend_from_slice(zones);
+		let keep = tune("gfire_gate_t", 0.5) as f64;
+		self.open.retain(|s| now - s.1 <= keep && now >= s.1);
+		if self.open.len() > GATE_MAX {
+			self.open.drain(..self.open.len() - GATE_MAX);
+		}
+	}
+
+	/// May an explosion sprite born at `pos` start a fire?
+	fn allows(&self, pos: [f32; 3]) -> bool {
+		!self.on || self.open.iter().any(|(z, _)| dist(z.pos, pos) <= z.reach)
+	}
+}
+
+/// A sprite judged "not a player's" is judged again for this long (s) after its birth: the shot may vanish a tick after its sprite shows.
+const REJUDGE: f64 = 0.1;
 
 /// A pool slot taken over by a NEW explosion of the same type shows as a jump of the sprite: farther than this plus half its size.
 const REBIRTH_HOP: f32 = 1.0;
@@ -169,6 +223,10 @@ pub(in crate::viewer) struct BlastFire {
 	/// patches (grass stays burnt ~60 s). Fed only while Vegetation is on (`burn_feed`), cleared with the patches.
 	burnt: BurnMap,
 	burn_feed: bool,
+	/// The player's explosive shots (only explosions born near one start a fire).
+	gate: Gate,
+	/// `seen` holds this frame's judged blast sprites (`watch` ran with a pool): `player_blast` answers from it.
+	judged: bool,
 	/// The GPU half (firefx_blast_gpu.rs), made at the first draw.
 	pub(super) res: std::cell::OnceCell<super::firefx_blast_gpu::GroundRes>,
 }
@@ -207,6 +265,17 @@ impl BlastFire {
 		self.water.clear();
 		self.burnt.clear();
 		self.burn_feed = false;
+		self.gate = Gate::default();
+		self.judged = false;
+	}
+
+	/// Was the explosion sprite in pool slot `slot` born near one of the player's explosive shots (`Gate`, judged by `watch` this
+	/// frame)? Only those become fire (the simulated burst, firefx.rs `add_sprite`; the ground fire, `note`): an enemy's own death
+	/// explosion keeps the retail look (user 2026-11-07, test build 9 on Kerwan: "fire is only reserved for weapons explosions").
+	/// True while nothing was judged (no pool, the dev knob fire_ground_blast 0) or the pack hands no gate (another game). Decided at
+	/// birth (`Entry::birth`): a sprite first judged retail stays retail for its whole life, no pop into a burst that starts mid-explosion.
+	pub(super) fn player_blast(&self, slot: u16) -> bool {
+		!self.judged || self.seen.iter().find(|e| e.ty != PACK_TY && e.slot == u32::from(slot)).map_or(true, |e| e.birth)
 	}
 
 	/// Stage 3: this frame's burnt-area uniform for the vegetation shaders (count 0 with no area).
@@ -245,16 +314,18 @@ impl BlastFire {
 			self.seen.clear();
 			self.primed = false;
 		}
+		self.judged = false;
 		self.burn_feed = super::vegfx::want() > 0;
 		if !self.burn_feed {
 			self.burnt.clear();
 		}
 	}
 
-	/// Every frame, in `FireFx::begin_sprites`: `on` = Fire at Medium or High, drawn this frame; `now` = the fire's game time
+	/// Every frame, in `FireFx::begin_sprites`: `on` = Fire drawn this frame (any level: the gate also decides which explosions the
+	/// simulation takes, `player_blast`), `ground` = Fire at Medium or High (only then patches); `now` = the fire's game time
 	/// (firefx_gametime.rs). Off (or another level) forgets every patch; the first call after that only notes what is on screen (a
 	/// savestate loaded in an explosion starts no fire).
-	pub(in crate::viewer) fn watch(&mut self, on: bool, level: usize, sprites: &[crate::prims::Sprite], fx: Option<&crate::fxpool::PoolFx<'_>>, eye: [f32; 3], now: f64) {
+	pub(in crate::viewer) fn watch(&mut self, on: bool, ground: bool, level: usize, sprites: &[crate::prims::Sprite], fx: Option<&crate::fxpool::PoolFx<'_>>, eye: [f32; 3], now: f64) {
 		if !on {
 			if self.level.is_some() || !self.patches.is_empty() || self.primed {
 				self.reset();
@@ -266,7 +337,7 @@ impl BlastFire {
 			self.level = Some(level);
 		}
 		self.eye = eye;
-		self.burn_feed = super::vegfx::want() > 0;
+		self.burn_feed = ground && super::vegfx::want() > 0;
 		if !self.burn_feed {
 			self.burnt.clear();
 		}
@@ -274,6 +345,7 @@ impl BlastFire {
 			self.seen.clear();
 			self.pending.clear();
 			self.primed = false;
+			self.judged = false;
 			return;
 		};
 		self.hero = fx.hero;
@@ -281,25 +353,57 @@ impl BlastFire {
 		if !fx.blasts.is_empty() && log_on() {
 			eprintln!("gfire: t {now:.2} pack blasts {:?}", fx.blasts);
 		}
+		self.gate.update(fx.blast_gate, now);
 		let cands = candidates(rows, sprites, fx.sprite_types, fx.sprite_slots, fx.blasts, &tuned());
 		self.note(&cands, now);
+		self.judged = true;
+		if !ground {
+			// Fire Low: only the judging (`player_blast`); no ground fire, as before.
+			self.patches.clear();
+			self.pending.clear();
+		}
 	}
 
 	/// Every blast-type sprite is followed by (slot, type); each starts ONE fire, the first time it is `big` (a flipbook that dips under the
 	/// gate and comes back does not light again; one that starts small lights when it passes the gate). A slot taken over by a new
 	/// explosion of the same type shows as a jump of the sprite (more than `REBIRTH_HOP` + half its size, `REBIRTH_AFTER` s after it last
 	/// started a fire): that one is new again. After a reset the first call only primes (everything on screen counts as started).
+	/// A sprite born (or reborn) away from the player's explosive shots (`Gate`) never starts one: an enemy's own death explosion.
 	fn note(&mut self, cands: &[Cand], now: f64) {
 		let old = std::mem::take(&mut self.seen);
+		let log = log_on();
 		for c in cands {
+			let born = |pos: [f32; 3]| {
+				let ok = c.ty == PACK_TY || self.gate.allows(pos);
+				if !ok && log && self.primed {
+					eprintln!("gfire: t {now:.2} no player shot near the blast sprite {pos:?} (type {}): no fire", c.ty);
+				}
+				ok
+			};
 			let mut e = match old.iter().find(|e| e.slot == c.slot && e.ty == c.ty) {
 				Some(&prev) => {
-					let hopped = dist(prev.pos, c.pos) > REBIRTH_HOP + 0.5 * c.size;
-					Entry { pos: c.pos, triggered: prev.triggered && !(hopped && now - prev.t >= REBIRTH_AFTER), ..prev }
+					let mut e = Entry { pos: c.pos, ..prev };
+					// A new explosion in the slot (the sprite jumped): judged again where it was born, whatever the old one was.
+					if dist(prev.pos, c.pos) > REBIRTH_HOP + 0.5 * c.size {
+						e.ok = born(c.pos);
+						e.birth = e.ok;
+						if prev.triggered && now - prev.t >= REBIRTH_AFTER {
+							e.triggered = false;
+						}
+						if !prev.ok || e.ok != prev.ok {
+							e.t = now;
+						}
+					} else if !prev.ok && !prev.triggered && now - prev.t < REJUDGE {
+						e.ok = self.gate.allows(c.pos);
+					}
+					e
 				}
-				None => Entry { slot: c.slot, ty: c.ty, pos: c.pos, triggered: !self.primed, t: now },
+				None => {
+					let ok = born(c.pos);
+					Entry { slot: c.slot, ty: c.ty, pos: c.pos, triggered: !self.primed, t: now, ok, birth: ok }
+				}
 			};
-			if !e.triggered && c.big {
+			if !e.triggered && e.ok && c.big {
 				if self.pending.len() < 8 {
 					self.pending.push(Blast { pos: c.pos, size: c.size });
 				}
@@ -548,7 +652,7 @@ mod tests {
 		b.note0(&[cand(1, 3.0, 2.0), cand(2, 30.0, 2.0)]);
 		b.land(&mut flat, 10.0);
 		assert!(!b.burnt.is_empty());
-		b.watch(false, 1, &[], None, [0.0; 3], 0.0);
+		b.watch(false, false, 1, &[], None, [0.0; 3], 0.0);
 		assert!(b.burnt.is_empty() && b.patches().is_empty() && !b.burn_feed);
 		assert_eq!(b.burn_u(11.0).head, [0.0; 4]);
 	}
@@ -707,16 +811,16 @@ mod tests {
 		b.note0(&[cand(1, 0.0, 3.0)]);
 		b.land(&mut flat, 1.0);
 		assert_eq!(b.patches().len(), 1);
-		b.watch(false, 3, &[], None, [0.0; 3], 0.0);
+		b.watch(false, false, 3, &[], None, [0.0; 3], 0.0);
 		assert!(b.patches().is_empty() && b.pending.is_empty() && !b.primed && b.level.is_none(), "off clears");
-		b.watch(true, 3, &[], None, [0.0; 3], 0.0);
+		b.watch(true, true, 3, &[], None, [0.0; 3], 0.0);
 		assert_eq!(b.level, Some(3));
 		assert!(!b.primed, "without a pool nothing is primed");
 		b.note0(&[]);
 		b.note0(&[cand(1, 0.0, 3.0)]);
 		b.land(&mut flat, 2.0);
 		assert_eq!(b.patches().len(), 1);
-		b.watch(true, 4, &[], None, [0.0; 3], 0.0);
+		b.watch(true, true, 4, &[], None, [0.0; 3], 0.0);
 		assert!(b.patches().is_empty(), "another level starts empty");
 	}
 
@@ -724,7 +828,7 @@ mod tests {
 	/// and the big, visible ones are marked `big` (they alone start a fire); a Burst row only with the knob.
 	#[test]
 	fn candidates_are_the_pool_sprites_of_blast_rows_and_the_big_visible_ones_are_marked() {
-		let rows = [FireRow { key: 5, kind: FireKind::Blast }, FireRow { key: 55, kind: FireKind::Burst }, FireRow { key: 12, kind: FireKind::Jet }];
+		let rows = [FireRow { key: 5, kind: FireKind::Blast, dark: false }, FireRow { key: 55, kind: FireKind::Burst, dark: false }, FireRow { key: 12, kind: FireKind::Jet, dark: false }];
 		let t = Tune { radius: 1.4, h: 0.9, max: 8, reach: 1.5, min_size: 0.6, bursts: false };
 		// Pool sprites: [0] type 5 big, [1] type 5 tiny, [2] type 12, [3] type 5 invisible, [4] type 55; the 3rd entry is no pool sprite.
 		let sprites = [sprite(2.0, 0.5, true), sprite(0.3, 0.5, true), sprite(2.0, 0.5, false), sprite(2.0, 0.5, true), sprite(2.0, 0.0, true), sprite(2.0, 0.5, true)];
@@ -755,6 +859,144 @@ mod tests {
 		assert_eq!(b.pending.len(), 2, "a second bomb is a second blast");
 		b.land(&mut flat, 0.0);
 		assert_eq!(b.patches().len(), 2);
+	}
+
+	fn zone(id: u32, x: f32) -> crate::fxpool::ShotZone {
+		crate::fxpool::ShotZone { id, kind: 457, pos: [x, 0.0, 0.5], reach: 3.0 }
+	}
+
+	fn xs(b: &BlastFire) -> Vec<f32> {
+		b.pending.iter().map(|p| p.pos[0]).collect()
+	}
+
+	#[test]
+	fn a_zone_opens_when_the_shot_vanishes_not_while_it_lives() {
+		let mut b = primed();
+		b.gate.update(Some(&[zone(1, 0.0)]), 0.0);
+		b.note(&[cand(1, 1.0, 3.0)], 0.0);
+		assert!(b.pending.is_empty(), "a shot that only lives (a laid mine, a Doom agent) makes no zone: a death beside it lights nothing");
+		b.gate.update(Some(&[]), 0.3);
+		b.note(&[cand(1, 1.0, 3.0), cand(2, 20.0, 3.0), cand(3, 2.0, 3.0)], 0.3);
+		assert_eq!(xs(&b), [2.0], "the shot vanished (it exploded): a new blast at its last place lights, the far one does not");
+		b.gate.update(Some(&[]), 1.0);
+		b.note(&[cand(4, 1.5, 3.0)], 1.0);
+		assert_eq!(b.pending.len(), 1, "an enemy dying there later lights nothing");
+	}
+
+	#[test]
+	fn a_slot_that_changes_kind_or_jumps_is_another_shot() {
+		let mut g = Gate::default();
+		g.update(Some(&[zone(1, 0.0)]), 0.0);
+		let other = crate::fxpool::ShotZone { kind: 74, ..zone(1, 0.5) };
+		g.update(Some(&[other]), 0.1);
+		assert!(g.allows([1.0, 0.0, 0.5]), "the rocket in the slot vanished, a mine took it over");
+		let mut g = Gate::default();
+		g.update(Some(&[zone(1, 0.0)]), 0.0);
+		g.update(Some(&[zone(1, 30.0)]), 0.1);
+		assert!(g.allows([1.0, 0.0, 0.5]) && !g.allows([31.0, 0.0, 0.5]), "a far jump = a new rocket in the reused slot; the old one's last place stays");
+		let mut g = Gate::default();
+		g.update(Some(&[zone(1, 0.0)]), 0.0);
+		g.update(Some(&[zone(1, 0.8)]), 0.1);
+		assert!(!g.allows([1.0, 0.0, 0.5]), "the same shot moving on is no vanish");
+	}
+
+	#[test]
+	fn no_zone_opened_this_frame_is_dropped() {
+		let mut g = Gate::default();
+		let many: Vec<_> = (0..250).map(|i| zone(i + 1, i as f32 * 10.0)).collect();
+		g.update(Some(&many), 0.0);
+		g.update(Some(&[]), 0.1);
+		assert_eq!(g.open.len(), 250);
+		assert!((0..250).all(|i| g.allows([i as f32 * 10.0, 0.0, 0.5])), "250 shots vanishing at once all open");
+	}
+
+	#[test]
+	fn a_slot_jump_is_judged_again_both_ways() {
+		// a: a player's small sprite never lit; its slot is taken over by an enemy death far away in the same field: no fire.
+		let mut b = primed();
+		b.gate.update(Some(&[zone(1, 0.0)]), 0.0);
+		b.gate.update(Some(&[]), 0.05);
+		b.note(&[Cand { big: false, ..cand(1, 1.0, 0.3) }], 0.05);
+		assert!(b.seen[0].ok && b.pending.is_empty());
+		b.note(&[cand(1, 40.0, 3.0)], 0.1);
+		assert!(!b.seen[0].ok && b.pending.is_empty(), "the enemy's explosion takes the slot: no patch");
+		// b: an enemy-death sprite (not ok) whose slot is taken over by the player's blast within 0.4 s: it lights.
+		b.gate.update(Some(&[zone(7, 60.0)]), 0.2);
+		b.gate.update(Some(&[]), 0.25);
+		b.note(&[cand(1, 61.0, 3.0)], 0.25);
+		assert_eq!(xs(&b), [61.0], "a rocket's explosion in a slot just left by an enemy's lights");
+	}
+
+	#[test]
+	fn a_blast_sprite_one_tick_before_its_shot_vanishes_is_judged_again() {
+		let mut b = primed();
+		b.gate.update(Some(&[zone(1, 0.0)]), 0.0);
+		b.note(&[cand(1, 1.0, 3.0)], 0.0);
+		assert!(b.pending.is_empty());
+		b.gate.update(Some(&[]), 0.03);
+		b.note(&[cand(1, 1.0, 3.0)], 0.03);
+		assert_eq!(b.pending.len(), 1, "the shot vanished a tick after its sprite showed");
+		b.judged = true;
+		assert!(!b.player_blast(1), "its burst was decided at birth: it stays the retail sprite (no pop into a burst mid-explosion)");
+		b.note(&[cand(1, 1.0, 3.0)], 0.3);
+		assert!(!b.player_blast(1), "for its whole life");
+		b.gate.update(Some(&[zone(2, 9.0)]), 0.6);
+		b.gate.update(Some(&[]), 0.62);
+		b.note(&[cand(1, 9.0, 3.0)], 0.62);
+		assert!(b.player_blast(1), "a new explosion in the slot, born where another shot vanished: judged again at its birth");
+	}
+
+	/// Lane rfire worker 10 (user 2026-11-07, Kerwan: enemies dying in their own explosion left fire on the ground): the fire
+	/// simulation takes an explosion sprite as a burst only when it is the player's (`player_blast`), the same judgement as the ground fire.
+	#[test]
+	fn only_the_players_explosions_become_simulated_fire() {
+		let mut b = primed();
+		assert!(b.player_blast(1) && b.player_blast(2), "nothing judged yet (no pool): every blast as before");
+		b.gate.update(Some(&[zone(9, 0.0)]), 0.0);
+		b.gate.update(Some(&[]), 0.1);
+		b.note(&[cand(1, 1.0, 3.0), cand(2, 30.0, 3.0)], 0.1);
+		b.judged = true;
+		assert!(b.player_blast(1), "born where the rocket vanished: the player's explosion is fire");
+		assert!(!b.player_blast(2), "an enemy's death explosion far from any shot stays retail");
+		b.note(&[cand(2, 30.0, 3.0)], 0.5);
+		assert!(!b.player_blast(2), "and stays retail for its whole life");
+		b.gate.update(None, 0.6);
+		b.note(&[cand(3, 50.0, 3.0)], 0.6);
+		assert!(b.player_blast(3), "no gate from the pack (another game): every blast is fire");
+		b.burn_only(3);
+		assert!(b.player_blast(2), "the dev knob fire_ground_blast 0 judges nothing: as before");
+	}
+
+	#[test]
+	fn fire_low_judges_but_puts_no_fire_on_the_ground() {
+		let mut b = BlastFire::default();
+		b.watch(true, false, 3, &[], None, [0.0; 3], 0.0);
+		assert!(b.patches().is_empty() && b.pending.is_empty() && !b.judged, "no pool: nothing judged");
+		b.note(&[cand(1, 1.0, 3.0)], 0.0);
+		b.watch(true, false, 3, &[], None, [0.0; 3], 0.1);
+		assert!(b.pending.is_empty() && b.patches().is_empty());
+	}
+
+	#[test]
+	fn with_a_gate_pack_blasts_always_light() {
+		let mut b = primed();
+		b.gate.update(Some(&[]), 0.0);
+		let bomb = crate::fxpool::BlastPoint { id: 0x1a2b00, pos: [50.0, 2.0, 0.5], size: 3.0 };
+		b.note(&candidates(&[], &[], &[], &[], &[bomb], &tuned()), 0.1);
+		assert_eq!(b.pending.len(), 1);
+	}
+
+	#[test]
+	fn without_a_gate_every_blast_sprite_lights() {
+		let mut b = primed();
+		b.gate.update(None, 0.0);
+		b.note(&[cand(1, 1.0, 3.0), cand(2, 20.0, 3.0)], 0.0);
+		assert_eq!(b.pending.len(), 2);
+		let mut g = Gate::default();
+		g.update(Some(&[zone(1, 0.0)]), 0.0);
+		g.update(Some(&[]), 0.05);
+		g.update(None, 0.1);
+		assert!(g.allows([99.0, 0.0, 0.0]) && g.open.is_empty(), "a pack that stops gating gates nothing");
 	}
 
 	#[test]
@@ -861,7 +1103,7 @@ mod tests {
 	#[test]
 	fn watch_off_changes_nothing_and_builds_nothing() {
 		let mut b = BlastFire::default();
-		b.watch(false, 1, &[sprite(3.0, 1.0, true)], None, [1.0, 2.0, 3.0], 0.0);
+		b.watch(false, false, 1, &[sprite(3.0, 1.0, true)], None, [1.0, 2.0, 3.0], 0.0);
 		assert!(b.patches().is_empty() && b.pending.is_empty() && !b.primed && b.level.is_none());
 		assert_eq!(b.eye, [0.0; 3], "nothing was stored");
 		assert_eq!(vertex_count(3, 5.0, &b), (0, 0));

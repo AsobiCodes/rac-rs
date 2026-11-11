@@ -308,6 +308,20 @@ pub(super) fn cam_rows(cam: &Camera, aspect: f32) -> [[f32; 4]; 4] {
 }
 
 impl VolFog {
+	/// Warm-up (v0.5.1): the fog pipelines and timer on the first frame Fog could draw (quality 1..3), not at the first march mid-play.
+	pub(super) fn warm(&mut self, device: &wgpu::Device, queue: &GatedQueue, quality_level: u8, level: usize, fog: [f32; 4]) {
+		if self.pipes.is_some() || quality(quality_level).is_none() {
+			return;
+		}
+		// A level that never gets a volume (`density::level_params` None: no air haze and no water mist, or a retail fog that ends at nothing) pays nothing.
+		if !(density::air(level) > 0.0 && density::fog_weight(fog) >= 0.04 || !self.ocean_heights.is_empty()) {
+			return;
+		}
+		let Some(p) = super::pipe_guard::guard(device, super::pipe_guard::Effect::VolFog, || self.build(device, queue)) else { return };
+		self.pipes = Some(p);
+		self.timer = gputime::GpuTimer::new(device, queue);
+	}
+
 	/// A frame on which the pass does not draw (`Plan::new` is None: Classic, under water, a level without a volume): the bind-group
 	/// cache lets go of the full-size views it holds (MSAA depth, `lin`, the soft buffer), so a resize or a render scale change
 	/// while the fog is off does not keep the old ones alive. One `is_some` check per frame while nothing is cached.
@@ -347,7 +361,7 @@ impl VolFog {
 				entry(9, tex2(false)),
 				entry(10, tex2(false)),
 				entry(11, wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }),
-				entry(12, wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Depth, view_dimension: wgpu::TextureViewDimension::D2, multisampled: true }),
+				entry(12, wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Depth, view_dimension: wgpu::TextureViewDimension::D2, multisampled: crate::viewer::scene_msaa::msaa() > 1 }),
 			],
 		});
 		let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("volfog"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });

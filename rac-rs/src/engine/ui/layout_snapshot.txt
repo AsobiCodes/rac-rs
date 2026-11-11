@@ -35,26 +35,12 @@ chevron 761 304 14 14 right #DCE3ECFF
 text 655 306 SemiBold 18 #EEF2F7FF Center max 176 track 0 "Classic"
 rrect 635 323 18 3 r 1.5 fill #FFB347FF
 rrect 657 323 18 3 r 1.5 fill #FFFFFF29
-text 77 365 Medium 18 #97A3B6FF Left max 436 track 0 "shadows"
-rrect 525 348 34 34 r 8 fill #FFFFFF0F
-chevron 535 358 14 14 left #DCE3ECFF
-rrect 751 348 34 34 r 8 fill #FFFFFF0F
-chevron 761 358 14 14 right #DCE3ECFF
-text 655 360 SemiBold 18 #EEF2F7FF Center max 176 track 0 "High"
-rrect 613 377 18 3 r 1.5 fill #FFB34766
-rrect 635 377 18 3 r 1.5 fill #FFB34766
-rrect 657 377 18 3 r 1.5 fill #FFB34766
-rrect 679 377 18 3 r 1.5 fill #FFB347FF
-text 77 419 Medium 18 #97A3B6FF Left max 592 track 0 "bloom"
-text 721 419 SemiBold 18 #EEF2F7FF Right max 0 track 0 "On"
-rrect 729 404 56 30 r 15 fill #FFB347FF
-rrect 758 407 24 24 r 12 fill #FFFFFFFF
-text 77 474 Condensed 15 #8FA0B8FF Left max 0 track 0.16 "VIEW"
-text 77 517 Medium 18 #DCE3ECFF Left max 438 track 0 "fov"
-rrect 527 515 190 4 r 2 fill #FFFFFF2E
-rrect 527 515 112.2 4 r 2 fill #FFB347FF
-rrect 630.2 508 18 18 r 9 fill #FFFFFFFF border 2 #FFB347FF
-text 785 517 SemiBold 18 #EEF2F7FF Right max 0 track 0 "90 deg"
+text 77 366 Condensed 15 #8FA0B8FF Left max 0 track 0.16 "VIEW"
+text 77 409 Medium 18 #DCE3ECFF Left max 438 track 0 "fov"
+rrect 527 407 190 4 r 2 fill #FFFFFF2E
+rrect 527 407 112.2 4 r 2 fill #FFB347FF
+rrect 630.2 400 18 18 r 9 fill #FFFFFFFF border 2 #FFB347FF
+text 785 409 SemiBold 18 #EEF2F7FF Right max 0 track 0 "90 deg"
 clip-end
 rrect 832 116 400 540 r 16 fill #0A0F1BD6 border 1 #FFFFFF14
 text 861 153 SemiBold 13 #8FA0B8FF Left max 342 track 0.16 "GRAPHICS · LOOK"

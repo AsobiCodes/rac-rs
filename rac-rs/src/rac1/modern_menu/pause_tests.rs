@@ -209,7 +209,7 @@ fn the_player_focus_wins_over_the_cursor_for_a_moment() {
 #[test]
 fn help_and_options_list_the_games_rows_under_their_tab() {
 	let ids: Vec<u16> = (0x4f00..0x4f0a).collect();
-	for (page, tab) in [(Page::Help, 4), (Page::Options, 5)] {
+	for (page, tab) in [(Page::Options, 5)] {
 		let b = built(&view_of(page, &rows_of(&ids), 2), &Extra::default()).unwrap();
 		let Panel::Rows { rows, .. } = &b.screen.panel else { panic!("rows") };
 		assert_eq!(rows.len(), 10, "all ten Options rows");

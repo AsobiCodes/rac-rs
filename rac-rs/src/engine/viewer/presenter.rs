@@ -21,6 +21,7 @@
 //! Ordering stays exact because every use of the queue from the render thread goes through `GatedQueue` (the `Gpu::queue` field):
 //! its `Deref` waits until the pending submit has returned, so a `write_buffer` / `submit` of frame N+1 can never land before
 //! the command buffers of frame N (wgpu applies `write_buffer`s at the next submit). RAC_SUBMIT_DEFER=0 submits inline (old).
+use super::fgen::present::FrameImage;
 use super::qdefer::{DeferredView, Pending, TexMeta, WriteList};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
@@ -51,7 +52,7 @@ struct Job {
 	last: Option<wgpu::CommandBuffer>,
 	/// true: submit the parts (and `last`); false: present only (`Presenter::present`).
 	submit: bool,
-	frame: wgpu::SurfaceTexture,
+	frame: FrameImage,
 	/// [PC] ReShade add-on: where the frame's submit is split and the hook that runs there (`Cuts::split`).
 	mid: Option<(usize, Hook)>,
 	/// [PC] Overlay writes (gpu/ovwrite.rs) issued up to this frame's hand-over: `submit_parts` waits for exactly these.
@@ -64,9 +65,9 @@ struct Job {
 pub(super) type Hook = Box<dyn FnOnce() + Send>;
 
 /// `queue.present` on the calling thread, with its start and length in the RAC_FRAME_CSV file.
-fn present_timed(q: &wgpu::Queue, frame: wgpu::SurfaceTexture) {
+fn present_timed(q: &wgpu::Queue, frame: FrameImage) {
 	let t = Instant::now();
-	q.present(frame);
+	frame.present(q);
 	super::framecsv::present(t, t.elapsed().as_secs_f32() * 1000.0);
 }
 
@@ -84,17 +85,24 @@ fn cuts_mode() -> u8 {
 }
 
 /// Submits `cmds`; with `mid` = (n, hook): the first n, then the hook, then the rest (the hook's work lands between them on the queue).
-fn submit_parts(q: &wgpu::Queue, mut cmds: Vec<wgpu::CommandBuffer>, mid: Option<(usize, Hook)>, ov: u64) {
+/// [PC] fgen: the frame's LAST submit goes through `frame` (our own Vulkan swapchain arms its semaphores there, fgen/present.rs).
+fn submit_parts(q: &wgpu::Queue, mut cmds: Vec<wgpu::CommandBuffer>, mid: Option<(usize, Hook)>, ov: u64, frame: Option<&FrameImage>) {
 	// The frame's overlay texture write (a helper thread's, see gpu/ovwrite.rs) must be staged before this submit executes it.
 	super::gpu::ovwrite::join_to(ov);
+	let last = |q: &wgpu::Queue, cmds: Vec<wgpu::CommandBuffer>| match frame {
+		Some(f) => f.submit_last(q, cmds),
+		None => {
+			q.submit(cmds);
+		}
+	};
 	let Some((n, hook)) = mid else {
-		q.submit(cmds);
+		last(q, cmds);
 		return;
 	};
 	let rest = cmds.split_off(n.min(cmds.len()));
 	q.submit(cmds);
 	run_hook(hook);
-	q.submit(rest);
+	last(q, rest);
 }
 
 /// Runs the ReShade hook under the GS capture's submit lock. The add-on's `flush_immediate` is a raw vkQueueSubmit on the window's queue
@@ -467,6 +475,7 @@ impl Presenter {
 					let mut sub = (0u64, 0u64);
 					while let Ok(job) = rx.recv() {
 						let Job { parts, last, submit, frame, mid, ov, writes } = job;
+						let hold = frame.holds_gate(); // [PC] fgen: our own Vulkan present is a raw queue call: the gate stays shut until it returned
 						if submit {
 							// The frame's queue writes first, in call order (qdefer.rs): the enc-finish jobs run meanwhile.
 							if let Some(w) = writes {
@@ -478,13 +487,18 @@ impl Presenter {
 							let t1 = t0.elapsed().as_nanos() as u64;
 							super::framecsv::present_step('U', t0, t1 as f32 / 1e6);
 							let ts = Instant::now();
-							submit_parts(&q, cmds, mid, ov);
+							submit_parts(&q, cmds, mid, ov, Some(&frame));
 							super::framecsv::present_step('V', ts, ts.elapsed().as_secs_f32() * 1000.0);
 							sub = (sub.0 + t1, sub.1 + t0.elapsed().as_nanos() as u64 - t1);
-							g.clear();
+							if !hold {
+								g.clear();
+							}
 						}
 						let t = Instant::now();
-						q.present(frame);
+						frame.present(&q);
+						if hold {
+							g.clear();
+						}
 						let d = t.elapsed().as_nanos() as u64;
 						super::framecsv::present(t, d as f32 / 1e6);
 						(n, ns) = (n + 1, ns + d);
@@ -538,7 +552,7 @@ impl Presenter {
 	}
 
 	/// Presents `frame` (inline, or on the worker once the previous present has returned).
-	pub(super) fn present(&self, frame: wgpu::SurfaceTexture) {
+	pub(super) fn present(&self, frame: FrameImage) {
 		let Some((tx, _)) = &self.worker else {
 			present_timed(&self.queue, frame);
 			return;
@@ -548,19 +562,23 @@ impl Presenter {
 			self.flush();
 		}
 		*self.busy.0.lock().unwrap() = true;
+		if frame.holds_gate() {
+			self.gate.set(); // [PC] fgen: no render-thread submit during our own Vulkan present (the worker clears it after the present)
+		}
 		if let Err(mpsc::SendError(job)) = tx.send(Job { parts: Vec::new(), last: None, submit: false, frame, mid: None, ov: 0, writes: None }) {
 			*self.busy.0.lock().unwrap() = false;
 			present_timed(&self.queue, job.frame);
+			self.gate.clear();
 		}
 	}
 
 	/// Submits the frame's command buffers (`cuts` parts in order, then `last`) and presents `frame`. With the worker and
 	/// RAC_SUBMIT_DEFER on this returns at once: the present thread collects the parts, submits and presents; any use of the
 	/// viewer's `GatedQueue` meanwhile waits for the submit. Otherwise submit here and present as `present`.
-	pub(super) fn present_frame(&self, cuts: Cuts, last: wgpu::CommandBuffer, frame: wgpu::SurfaceTexture) {
+	pub(super) fn present_frame(&self, cuts: Cuts, last: wgpu::CommandBuffer, frame: FrameImage) {
 		let Some((tx, _)) = self.worker.as_ref().filter(|_| self.defer && cuts.mode == 2) else {
 			self.pending.flush(&self.queue);
-			cuts.submit(&self.queue, last);
+			cuts.submit_frame(&self.queue, last, Some(&frame));
 			self.present(frame);
 			return;
 		};
@@ -577,7 +595,7 @@ impl Presenter {
 			}
 			let mut cmds: Vec<wgpu::CommandBuffer> = parts.into_iter().filter_map(|rx| rx.recv().ok()).collect();
 			cmds.extend(last);
-			submit_parts(&self.queue, cmds, mid, ov);
+			submit_parts(&self.queue, cmds, mid, ov, Some(&frame));
 			self.gate.clear();
 			*self.busy.0.lock().unwrap() = false;
 			present_timed(&self.queue, frame);
@@ -594,7 +612,7 @@ impl Presenter {
 	/// Like `present_frame`, but the frame's final encoder is finished on an enc-finish thread too (it was the one `finish` left on
 	/// the render thread, ~1.1 ms a frame): same command buffers in the same order, so the GPU work and the picture are unchanged.
 	/// Only when `defers_finish`; the caller finishes `enc` itself otherwise.
-	pub(super) fn present_frame_enc(&self, mut cuts: Cuts, enc: wgpu::CommandEncoder, frame: wgpu::SurfaceTexture) {
+	pub(super) fn present_frame_enc(&self, mut cuts: Cuts, enc: wgpu::CommandEncoder, frame: FrameImage) {
 		let Some((tx, _)) = self.worker.as_ref() else { unreachable!("checked by defers_finish") };
 		let (ctx, crx) = mpsc::channel();
 		finish_pool().spawn(move || {
@@ -613,7 +631,7 @@ impl Presenter {
 				apply_writes(&self.pending, &self.queue, w);
 			}
 			let cmds: Vec<wgpu::CommandBuffer> = parts.into_iter().filter_map(|rx| rx.recv().ok()).chain(last).collect();
-			submit_parts(&self.queue, cmds, mid, ov);
+			submit_parts(&self.queue, cmds, mid, ov, Some(&frame));
 			self.gate.clear();
 			*self.busy.0.lock().unwrap() = false;
 			present_timed(&self.queue, frame);
@@ -679,7 +697,10 @@ impl Cuts {
 	/// finished command buffer recorded only through `as_hal_mut` (wgpu 30 forbids mixing that with wgpu commands in one
 	/// encoder), after it; `enc` continues fresh. Same submit, same order.
 	pub(super) fn raw(&mut self, device: &wgpu::Device, enc: &mut wgpu::CommandEncoder, raw: wgpu::CommandBuffer) {
+		// [PC] lane gspeed: RAC_GPU_PASSES row `upscaler raw` (DLSS / FSR evaluate): start stamp before, end stamp after the raw buffer.
+		let pt = super::passtime::open(enc, "upscaler raw");
 		let old = std::mem::replace(enc, device.create_command_encoder(&Default::default()));
+		super::passtime::close(enc, pt);
 		let (tx, rx) = mpsc::channel();
 		if self.mode == 2 {
 			finish_pool().spawn(move || {
@@ -695,9 +716,14 @@ impl Cuts {
 	}
 
 	/// Submits the frame's command buffers (`take`), in two halves with the hook between them when `split` was used.
-	pub(super) fn submit(mut self, q: &wgpu::Queue, last: wgpu::CommandBuffer) {
+	pub(super) fn submit(self, q: &wgpu::Queue, last: wgpu::CommandBuffer) {
+		self.submit_frame(q, last, None);
+	}
+
+	/// `submit`, the last submit through the frame's window image (fgen/present.rs `submit_last`).
+	pub(super) fn submit_frame(mut self, q: &wgpu::Queue, last: wgpu::CommandBuffer, frame: Option<&FrameImage>) {
 		let mid = self.mid.take();
-		submit_parts(q, self.take(last), mid, super::gpu::ovwrite::issued());
+		submit_parts(q, self.take(last), mid, super::gpu::ovwrite::issued(), frame);
 	}
 
 	/// Ends the current encoder (no open pass allowed) and continues with a fresh one in `enc`.

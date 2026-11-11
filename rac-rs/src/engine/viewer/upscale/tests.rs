@@ -167,7 +167,7 @@ fn a_reset_frame_has_no_motion() {
 
 #[test]
 fn cuts() {
-	let v = View { level: 3, render: (1280, 720), display: (1920, 1080), eye: [0.0; 3], fwd: [1.0, 0.0, 0.0] };
+	let v = View { level: 3, render: (1280, 720), display: (1920, 1080), eye: [0.0; 3], fwd: [1.0, 0.0, 0.0], up: [0.0, 0.0, 1.0] };
 	assert!(is_cut(None, &v), "first frame");
 	assert!(!is_cut(Some(&v), &v));
 	assert!(!is_cut(Some(&v), &View { eye: [1.0, 1.0, 0.5], ..v }), "a normal move");

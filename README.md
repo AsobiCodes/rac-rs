@@ -46,7 +46,7 @@ That's all. Setup downloads anything else it needs into its own folder.
 
 ## Setup
 
-1. Download **rac-rs-0.5.0.zip** from the [latest release](https://github.com/AsobiCodes/rac-rs/releases/latest) (or click the green **Code** button above and choose **Download ZIP**), and unzip it anywhere. Drives formatted as exFAT, USB sticks and SD cards work too.
+1. Download **rac-rs-0.5.1.zip** from the [latest release](https://github.com/AsobiCodes/rac-rs/releases/latest) (or click the green **Code** button above and choose **Download ZIP**), and unzip it anywhere. Drives formatted as exFAT, USB sticks and SD cards work too.
 2. Double-click **Setup.cmd**. A window opens (no black console window).
 3. Click **Browse** and pick your `.iso` file. The window checks it and shows a green **Disc OK**. Two boxes below choose whether to also install the **RAC-RS Launcher** and whether to **add the game to Steam** (close Steam first). Then click **Install**.
 4. Wait. The window shows the steps and a progress bar (about 15 minutes; you can keep using your PC). When it says **Ready to play**, click **Play**.
@@ -126,6 +126,8 @@ The game works the same without the launcher; everything it changes can also be 
 
 On Windows, Graphics > Resolution > Upscaler offers AMD FidelityFX Super Resolution (FSR) and NVIDIA DLSS (DLSS 4.5, NVIDIA RTX graphics cards only). The game is drawn at a lower resolution and scaled up to the window; menus and the HUD stay sharp. Both come as DLL files with the release: `amd_fidelityfx_loader_vk.dll`, `amd_fidelityfx_loader_dx12.dll`, `amd_fidelityfx_upscaler_vk.dll` and `amd_fidelityfx_upscaler_dx12.dll` (AMD, MIT licence), `nvngx_dlss.dll` (the NVIDIA DLSS runtime) and `rac_ngx.dll` (this project's small bridge to it, which contains NVIDIA's NGX SDK library). Without them the Upscaler row stays Off and the game plays as before. Licences and credits are in [NOTICE.md](NOTICE.md).
 
+Frame Generation (since v0.5.1, Graphics > Frame Generation) follows the Upscaler: FSR 2x with AMD FidelityFX frame generation (`amd_fidelityfx_framegeneration_vk.dll`, `amd_fidelityfx_framegeneration_dx12.dll`; AMD, MIT licence), or DLSS 2x, 3x and 4x on NVIDIA RTX 40 and 50 graphics cards with NVIDIA DLSS frame generation (`nvngx_dlssg.dll`, the NVIDIA runtime) through NVIDIA Streamline 2.14.16 (`sl.interposer.dll`, `sl.common.dll`, `sl.dlss_g.dll`, `sl.reflex.dll`, `sl.pcl.dll`; MIT licence). Without them the Frame Generation row stays Off.
+
 ## Making mods
 
 - **Script mods** (Luau, run by OmniLoader): [docs/MODDING.md](docs/MODDING.md) is a step-by-step guide with a 5-minute first mod, hooks, fields, drawing and per-save data. The preinstalled [Arsenal Mastery](bundled/mods/arsenal-mastery) is a full worked example.
@@ -149,9 +151,6 @@ The game's own button prompts show the keyboard and mouse keys. You can change t
 - The faint afterimage trail behind Ratchet during Thruster-Pack flight is not drawn yet.
 - Some glass surfaces can flicker.
 - On AMD and Intel graphics, HUD Sharp only sharpens the title screen and main menu for now. In game, the on-screen text, icons, menus and shop keep the Original look.
-- With the Classic camera, any strafe aim makes the camera jump for one frame when you press it.
-- The modern pause menu's Help tab is empty; Space opens the classic Helpdesk.
-- The Upscaler, Quick Select pause and Aspect ratio rows are only in the modern menu style.
 
 ## Reporting a problem
 
@@ -173,4 +172,4 @@ The repository contains only original source code and tools. It contains no copy
 
 ## License
 
-GPL-3.0-or-later, see [LICENSE](LICENSE). Credits for third-party work (including OmniLoader's Luau script engine, AMD FidelityFX FSR, NVIDIA DLSS and Microsoft's DirectX Shader Compiler) are in [NOTICE.md](NOTICE.md). The NVIDIA DLSS files (`nvngx_dlss.dll`, `rac_ngx.dll`) are not under the GPL: they come under NVIDIA's own licence, and an additional permission under section 7 of the GPL allows rac-rs to be shipped and run with them (see [NOTICE.md](NOTICE.md)).
+GPL-3.0-or-later, see [LICENSE](LICENSE). Credits for third-party work (including OmniLoader's Luau script engine, AMD FidelityFX FSR, NVIDIA DLSS, NVIDIA Streamline and Microsoft's DirectX Shader Compiler) are in [NOTICE.md](NOTICE.md). The NVIDIA DLSS files (`nvngx_dlss.dll`, `rac_ngx.dll`, `nvngx_dlssg.dll`) are not under the GPL: they come under NVIDIA's own licence, and an additional permission under section 7 of the GPL allows rac-rs to be shipped and run with them (see [NOTICE.md](NOTICE.md)).

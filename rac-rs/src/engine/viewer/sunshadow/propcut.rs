@@ -16,13 +16,13 @@ use super::{Draw, Vertex, SUN_SHADER};
 pub(super) const MOBY_OPAQUE: u8 = 255;
 
 /// The props shader of the alpha-tested moby casts: `SUN_SHADER` (its placement `sh_place`, the kind rule and the faded-moby rule
-/// stay the one copy) plus the texture array in group 2 and the cut.
+/// stay the one copy) plus the texture array in group 0 (sunshadow.rs `G_ARR`) and the cut.
 pub(super) fn shader() -> String {
 	format!(
 		r#"enable wgpu_binding_array;
 {SUN_SHADER}
-@group(2) @binding(0) var texs: binding_array<texture_2d<f32>, {cap}>;
-@group(2) @binding(1) var samp: sampler;
+@group(0) @binding(0) var texs: binding_array<texture_2d<f32>, {cap}>;
+@group(0) @binding(1) var samp: sampler;
 struct POut {{ @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, @location(1) @interpolate(flat) ti: u32, @location(2) @interpolate(flat) ma: f32 }};
 
 // `vs_sh_props` with the texel's uv (a placed prop's class scroll added as `vs_props` adds it), the texture slot (the low 16 bits
@@ -47,10 +47,11 @@ struct POut {{ @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, @l
 	)
 }
 
-/// The alpha-tested props pipeline: groups (cascade uniform, posed props, texture array), the batch's position, uv and normal (`sh_grow`), the slot attribute.
+/// The alpha-tested props pipeline: groups (texture array, cascade uniform, posed props: sunshadow.rs `G_ARR` / `G_SU` / `G_SKIN`, the
+/// layout of every shadow pipeline with the props), the batch's position, uv and normal (`sh_grow`), the slot attribute.
 pub(super) fn pipeline(device: &wgpu::Device, ulayout: &wgpu::BindGroupLayout, skin: &wgpu::BindGroupLayout, array: &wgpu::BindGroupLayout) -> wgpu::RenderPipeline {
 	let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("sun shadow moby cut"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("sun shadow moby cut", shader().into())) });
-	let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("sun shadow moby cut"), bind_group_layouts: &[Some(ulayout), Some(skin), Some(array)], immediate_size: 0 });
+	let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("sun shadow moby cut"), bind_group_layouts: &[Some(array), Some(ulayout), Some(skin)], immediate_size: 0 });
 	let vu = wgpu::VertexBufferLayout { array_stride: std::mem::size_of::<Vertex>() as u64, step_mode: wgpu::VertexStepMode::Vertex, attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2, 2 => Float32x3] };
 	let sj = wgpu::VertexBufferLayout { array_stride: 8, step_mode: wgpu::VertexStepMode::Vertex, attributes: &wgpu::vertex_attr_array![5 => Uint32x2] };
 	device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -133,7 +134,7 @@ mod tests {
 		assert_eq!(src.matches("kind == ").count(), 3, "the keep rule only once (in SUN_SHADER's `sh_place`)");
 		assert!(src.contains("o.pos = sh_place(p, n, sj);") && src.contains("o.ma = sh_alpha(s);"));
 		assert!(src.contains("if (floor(ta * i.ma / 128.0) < 96.0) { discard; }"), "the cut of `fs_moby_a`: moby_a x 128 < 96");
-		assert!(src.contains("@group(2) @binding(0) var texs: binding_array<texture_2d<f32>, 4096>;"));
+		assert!(src.contains("@group(0) @binding(0) var texs: binding_array<texture_2d<f32>, 4096>;"));
 	}
 
 	/// Both props shaders (the depth-only `SUN_SHADER` with its placement moved into `sh_place`, and the cut) parse and validate.

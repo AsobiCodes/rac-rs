@@ -83,12 +83,26 @@ pub mod pcext;
 pub mod console_clock;
 pub use rac_engine::input::binds;
 pub mod pcctl;
+pub(crate) mod pcctl_kbm;
+pub(crate) mod pcctl_pad;
+pub(crate) mod prompt_pad;
+pub(crate) mod pad_stale;
+pub(crate) mod help_ctl;
+mod help_ctl_data;
+mod help_ctl_extras;
+pub(crate) mod help_ctl_font;
+mod help_ctl_text;
+#[cfg(test)]
+mod help_ctl_tests;
 pub mod pcmods;
 pub mod prompts;
+mod prompt_names;
 pub mod prompts_box;
 pub mod wrench_throw;
 pub mod wheel_mouse;
 pub mod qs_pause;
+pub mod fast_travel;
+pub mod fast_load;
 pub mod auto_gadget;
 pub use rac_engine::input::pspad;
 #[cfg(any(test, target_os = "linux"))]
@@ -105,7 +119,7 @@ pub mod wide_fov;
 pub mod pcdisp;
 pub mod glyphs;
 pub mod pcinput;
-pub mod pcintro; pub mod pcmetal; pub mod pcmrefl; pub mod pcsupp;
+pub mod pcintro; pub mod pcmetal; pub mod pcmrefl; pub mod pcsupp; pub mod pcmore; pub mod pcfgen; pub mod pcmouseinv;
 pub mod pcrender;
 pub mod pcskip;
 pub mod strafe;
@@ -125,6 +139,7 @@ mod mouse_script;
 pub mod menu_keys;
 pub mod menu_model;
 pub mod map_open;
+pub mod help_seen;
 pub mod map_seen;
 pub mod title_boot;
 pub mod title_quit;
@@ -148,14 +163,20 @@ mod capture;
 mod front_end;
 mod fx_queue;
 mod bomb_blast;
+mod blast_gate;
 mod lights_water;
 mod shadow_snap;
 mod shop_snap;
 pub mod shop_view;
-mod wide_side;
+pub(crate) mod wide_side;
 mod worker;
 pub(crate) mod tick;
 mod input;
+mod kbm_glue;
+#[cfg(test)]
+mod kbm_tests;
+#[cfg(test)]
+mod pad_remap_tests;
 mod present;
 mod accessors;
 mod props_sync;
@@ -287,6 +308,10 @@ pub struct Retail {
 	/// are released, else the bound key would act as the button it now is (Confirm) and the page would start a capture again.
 	cap_hold: (Vec<winit::keyboard::KeyCode>, u32),
 	mouse_taps: MouseTaps,
+	/// Mouse buttons held beyond left / middle (bit 1 right, 2 back, 4 forward; `set_mouse_held`).
+	mouse_held: u8,
+	/// Tap latches of right, back, forward, wheel up, wheel down (`press_mouse` 2..6), `TAP_FIELDS` fields each.
+	extra_taps: [u8; 5],
 	/// Buttons the game's pad update read since `take_pad_seen`.
 	pad_seen: u32,
 	/// Interpreter time of the last field (ms), for the frame budget.

@@ -5,7 +5,7 @@ use rac_engine::ui::{Cost, Needs, NeedsRule, UiRow, T5};
 
 const FUR_STYLES: &[T5] = &[["Soft", "Doux", "Weich", "Suave", "Morbido"], ["Fluffy", "Duveteux", "Flauschig", "Esponjoso", "Soffice"]];
 
-pub static EFFECTS: [UiRow; 8] = [
+pub static EFFECTS: [UiRow; 7] = [
 	row(
 		"particles",
 		CH,
@@ -22,18 +22,22 @@ pub static EFFECTS: [UiRow; 8] = [
 		costs::PARTICLES,
 		LIGHT,
 	),
+	// [PC] v0.5.1 test build 17 (user 2026-11-09: "it should be one with metal reflection detail. 3 options and off option"): ONE row,
+	// Off = Metal off; Low / Medium / High = Metal on with that floor reflection detail (lane mres: the planar target at 1/8, 1/6, 1/4
+	// of the render size per axis, engine viewer/metal_detail.rs). It reads and writes both options-file keys (`metal`, `metal_detail`;
+	// rac1 retail/pcmetal.rs `ui_value` / `set_ui`), so old files and the launcher keep their meaning. Not in the Graphics presets.
 	row(
 		"metal",
-		TOG,
+		CH,
 		["Metal", "M\u{e9}tal", "Metall", "Metal", "Metallo"],
 		[
-			"Shiny metal: reflections of the sky and the scene, and sharp highlights.",
-			"M\u{e9}tal brillant : reflets du ciel et de la sc\u{e8}ne, et brillances nettes.",
-			"Gl\u{e4}nzendes Metall: Spiegelungen von Himmel und Szene und scharfe Glanzlichter.",
-			"Metal brillante: reflejos del cielo y de la escena, y brillos n\u{ed}tidos.",
-			"Metallo lucido: riflessi del cielo e della scena, e luci nitide.",
+			"Shiny metal: reflections of the sky and the scene, and sharp highlights. Low to High = sharper floor reflections, slower.",
+			"M\u{e9}tal brillant : reflets du ciel et de la sc\u{e8}ne, et brillances nettes. De Faible \u{e0} \u{c9}lev\u{e9} = reflets du sol plus nets, plus lent.",
+			"Gl\u{e4}nzendes Metall: Spiegelungen von Himmel und Szene und scharfe Glanzlichter. Niedrig bis Hoch = sch\u{e4}rfere Bodenspiegelungen, langsamer.",
+			"Metal brillante: reflejos del cielo y de la escena, y brillos n\u{ed}tidos. De Baja a Alta = reflejos del suelo m\u{e1}s n\u{ed}tidos, m\u{e1}s lento.",
+			"Metallo lucido: riflessi del cielo e della scena, e luci nitide. Da Bassa ad Alta = riflessi del pavimento pi\u{f9} nitidi, pi\u{f9} lento.",
 		],
-		NO,
+		Q4,
 		0,
 		costs::METAL,
 		LIGHT,
@@ -52,7 +56,7 @@ pub static EFFECTS: [UiRow; 8] = [
 		NO,
 		75,
 		Cost::None,
-		Some(Needs { row: "metal", min: 1, max: 1 }),
+		Some(Needs { row: "metal", min: 1, max: i32::MAX }),
 	),
 	row(
 		"fire",
@@ -118,35 +122,22 @@ pub static EFFECTS: [UiRow; 8] = [
 		Cost::None,
 		LIGHT,
 	),
-	row(
-		"supporters",
-		TOG,
-		["Supporter drawings", "Dessins des soutiens", "Fan-Zeichnungen", "Dibujos de mecenas", "Disegni sostenitori"],
-		[
-			"Shows the children's drawings made for the Ko-fi supporters on the walls of Ratchet's garage on Veldin. Works with any Lighting.",
-			"Affiche sur les murs du garage de Ratchet, sur Veldin, les dessins d'enfant faits pour les soutiens Ko-fi. Fonctionne avec tous les \u{e9}clairages.",
-			"Zeigt die Kinderzeichnungen f\u{fc}r die Ko-fi-Unterst\u{fc}tzer an den W\u{e4}nden von Ratchets Garage auf Veldin. Funktioniert mit jeder Beleuchtung.",
-			"Muestra en las paredes del garaje de Ratchet, en Veldin, los dibujos infantiles hechos para los mecenas de Ko-fi. Funciona con cualquier iluminaci\u{f3}n.",
-			"Mostra sulle pareti del garage di Ratchet, su Veldin, i disegni dei bambini fatti per i sostenitori di Ko-fi. Funziona con qualsiasi illuminazione.",
-		],
-		NO,
-		0,
-		Cost::None,
-		None,
-	),
 ];
 
-/// Metal reflections is dimmed while Metal is Off. No banner over the tab: only the row's box says why.
+/// Metal reflections are hidden while Metal is Off (user 2026-11-08: hidden, not dimmed). No banner. Its fix sets High (the reflection
+/// detail default, rac1 retail/pcmetal.rs `DETAIL_DEFAULT`).
 pub const NEEDS_METAL: NeedsRule = NeedsRule {
 	row: "metal",
-	set_to: 1,
+	set_to: 3,
+	for_row: "",
+	fix: Some(crate::retail::pcmetal::saved_ui_value), // tb17 review: restore the saved Low / Medium / High, not always High
 	banner: t(""),
 	detail: [
-		"Applies while Metal is On. Metal is {} now.",
-		"S'applique quand le m\u{e9}tal est sur Oui. Il est sur {} pour l'instant.",
-		"Gilt, solange Metall an ist. Metall steht auf {}.",
-		"Se aplica con el metal en S\u{ed}. Ahora est\u{e1} en {}.",
-		"Vale con il metallo su S\u{ec}. Ora \u{e8} su {}.",
+		"Applies while Metal is not Off. Metal is {} now.",
+		"S'applique tant que le m\u{e9}tal n'est pas sur Non. Il est sur {} pour l'instant.",
+		"Gilt, solange Metall nicht auf Aus steht. Metall steht auf {}.",
+		"Se aplica mientras el metal no est\u{e9} en No. Ahora est\u{e1} en {}.",
+		"Vale finch\u{e9} il metallo non \u{e8} su No. Ora \u{e8} su {}.",
 	],
 	button: ["Switch Metal On", "Activer le m\u{e9}tal", "Metall einschalten", "Activar el metal", "Attiva il metallo"],
 };

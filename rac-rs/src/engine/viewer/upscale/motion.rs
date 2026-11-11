@@ -53,7 +53,7 @@ impl MotionGpu {
 	pub(super) fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> MotionGpu {
 		let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("upscale motion"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("upscale motion", SHADER.into())) });
 		let uniform = wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None };
-		let l_frame = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("upscale motion"), entries: &[uniform, tex_entry(1, wgpu::TextureSampleType::Depth, true)] });
+		let l_frame = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("upscale motion"), entries: &[uniform, tex_entry(1, wgpu::TextureSampleType::Depth, crate::viewer::scene_msaa::msaa() > 1)] });
 		let l_show = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("upscale show"), entries: &[tex_entry(0, wgpu::TextureSampleType::Float { filterable: false }, false)] });
 		let pipe = |entry: &'static str, layouts: &[Option<&wgpu::BindGroupLayout>], targets: &[Option<wgpu::ColorTargetState>], count: u32| {
 			let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some(entry), bind_group_layouts: layouts, immediate_size: 0 });
@@ -71,7 +71,7 @@ impl MotionGpu {
 		};
 		let plain = |format| Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL });
 		let motion_pipe = pipe("fs_motion", &[Some(&l_frame)], &[plain(MOTION_FORMAT), plain(DEPTH_FORMAT)], 1);
-		let show_pipe = pipe("fs_show", &[Some(&l_frame), Some(&l_show)], &[plain(format)], crate::viewer::targets::MSAA);
+		let show_pipe = pipe("fs_show", &[Some(&l_frame), Some(&l_show)], &[plain(format)], crate::viewer::targets::msaa());
 		let ubuf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("upscale motion"), size: std::mem::size_of::<MotionUniforms>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
 		MotionGpu { ubuf, motion_pipe, show_pipe, l_frame, l_show, targets: None, frame: None }
 	}
@@ -109,7 +109,7 @@ impl MotionGpu {
 		objects(enc, self);
 		if show {
 			let load = Some(wgpu::RenderPassColorAttachment { view: msaa, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } });
-			let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor { label: Some("upscale show"), color_attachments: &[load], depth_stencil_attachment: None, timestamp_writes: None, occlusion_query_set: None, multiview_mask: None });
+			let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor { label: Some("upscale show"), color_attachments: &[load], depth_stencil_attachment: None, timestamp_writes: crate::viewer::passtime::rw("upscale show"), occlusion_query_set: None, multiview_mask: None });
 			pass.set_pipeline(&self.show_pipe);
 			pass.set_bind_group(0, frame, &[]);
 			pass.set_bind_group(1, &t.show, &[]);

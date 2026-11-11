@@ -45,8 +45,8 @@ pub enum RowKind {
 }
 
 /// A row is inert while the value of row `row` is below `min` (decision 1: "Needs Enhanced lighting"), or while row `row` is inert
-/// itself (a chain: Waves needs Water, which needs Lighting): its label is dimmed, the tab shows the banner of the matching
-/// `NeedsRule`, the detail panel the rule's box (the rule of the link that holds it, the root of the chain first).
+/// itself (a chain: Metal reflections needs Metal, which needs Lighting): the row is hidden (user 2026-11-08, was dimmed) and
+/// the tab shows the banner of the matching `NeedsRule` (the rule of the link that holds it, the root of the chain first).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Needs {
 	pub row: &'static str,
@@ -89,11 +89,16 @@ pub struct UiPresetDef {
 }
 
 /// The texts and the fix of a dependency: `banner` over the tab's list, `detail` in the focused row's box (`{}` = the current
-/// value name of row `row`), `button` on both; the button sets row `row` to `set_to`. An empty `banner` (all languages) = no
-/// banner: the rows are only dimmed, with the box (a quality row under an Off switch, not worth a banner over the whole tab).
+/// value name of row `row`; drawn only if a hidden row has the focus, which `Model::settle_focus` prevents), `button` on both; the
+/// button sets row `row` to `set_to`. An empty `banner` (all languages) = no banner: the rows are only hidden (a quality row under
+/// an Off switch, not worth a banner over the whole tab).
+/// `for_row` = the one dependent row this rule serves ("" = every row that needs `row` and has no rule of its own); `fix` = the
+/// value the button sets, asked when the box is drawn (None = `set_to`; a `{}` in `button` names the value it sets).
 pub struct NeedsRule {
 	pub row: &'static str,
 	pub set_to: i32,
+	pub for_row: &'static str,
+	pub fix: Option<fn() -> i32>,
 	pub banner: T5,
 	pub detail: T5,
 	pub button: T5,
@@ -207,6 +212,11 @@ impl UiMenu {
 				}
 			}
 		}
+		for u in self.needs.iter().filter(|u| !u.for_row.is_empty()) {
+			if !self.find(u.for_row).is_some_and(|r| r.needs.is_some_and(|n| n.row == u.row)) {
+				bad.push(format!("the rule on {} is for row {}, which does not need it", u.row, u.for_row));
+			}
+		}
 		for (id, _) in self.preset_also {
 			if self.find(id).is_some() {
 				bad.push(format!("preset_also names row {id} (put it in the presets)"));
@@ -217,10 +227,10 @@ impl UiMenu {
 				if self.find(n.row).is_none() {
 					bad.push(format!("{} needs unknown row {}", r.id, n.row));
 				}
-				if !self.needs.iter().any(|u| u.row == n.row) {
+				if !self.needs.iter().any(|u| u.row == n.row && (u.for_row.is_empty() || u.for_row == r.id)) {
 					bad.push(format!("{} needs {} but no NeedsRule has texts for it", r.id, n.row));
 				}
-				// A chain (Waves -> Water -> Lighting) must end: a loop would dim its rows for good.
+				// A chain (Metal reflections -> Metal -> Lighting) must end: a loop would hide its rows for good.
 				let mut chain = vec![r.id];
 				let mut next = Some(n);
 				while let Some(n) = next {

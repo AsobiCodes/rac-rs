@@ -25,9 +25,6 @@ pub const TOG: RowKind = RowKind::Toggle;
 
 /// Rows that show nothing until Lighting is Enhanced (DECISIONS 1, PLAN section 8).
 pub const LIGHT: Option<Needs> = Some(Needs { row: "lighting", min: 1, max: i32::MAX });
-/// Rows of the improved water (Waves, Underwater look): nothing at Water Classic; Water itself needs Lighting, so they dim with
-/// either (a chain, `Model::blocked`).
-pub const WATER: Option<Needs> = Some(Needs { row: "water", min: 1, max: i32::MAX });
 
 #[allow(clippy::too_many_arguments)]
 pub const fn row(id: &'static str, kind: RowKind, label: T5, desc: T5, values: &'static [T5], def: i32, cost: Cost, needs: Option<Needs>) -> UiRow {

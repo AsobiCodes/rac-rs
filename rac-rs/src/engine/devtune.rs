@@ -13,6 +13,7 @@ use std::sync::OnceLock;
 
 /// The WGSL source of shader module `label`: `src`, unless RAC_WGSL_DIR holds an override file for it.
 pub fn wgsl<'a>(label: &str, src: Cow<'a, str>) -> Cow<'a, str> {
+	let src = crate::viewer::scene_msaa::wgsl(src); // [PC] lane noaa: the 1-sample variant in the upscaler cut (same text at 4x)
 	dump(label, &src);
 	let Some(dir) = std::env::var_os("RAC_WGSL_DIR") else {
 		return src;

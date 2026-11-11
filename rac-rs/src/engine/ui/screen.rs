@@ -30,19 +30,19 @@ pub fn build(m: &Model) -> (Screen, ScreenMap) {
 	let mut map = ScreenMap::default();
 	if let Some(rule) = m.tab_rule() {
 		// [PC] No button text (no button) when there is nothing to switch to (model_edit.rs `fix_value`).
-		let button = m.fix_value(rule).map(|_| t(&rule.button)).unwrap_or_default();
+		let button = m.fix_text(rule);
 		items.push(Item::Banner(BannerData { text: t(&rule.banner), button }));
 		map.item_row.push(None);
 	}
 	let mut sec = usize::MAX;
-	for i in m.cur_rows() {
+	for i in m.cur_shown() {
 		let r = m.rows[i];
 		if r.sec != sec {
 			sec = r.sec;
 			items.push(Item::Section(t(&m.menu.tabs[r.tab].sections[r.sec].title)));
 			map.item_row.push(None);
 		}
-		items.push(Item::Row(RowData { label: t(&r.row.label), dim: m.blocked(i), control: control(m, i) }));
+		items.push(Item::Row(RowData { label: t(&r.row.label), dim: false, control: control(m, i) })); // hidden rows are not here
 		map.item_row.push(Some(i));
 	}
 	let s = Screen {
@@ -94,7 +94,7 @@ fn detail(m: &Model) -> Option<Detail> {
 	let tab = &m.menu.tabs[r.tab];
 	let boxed = m.rule(i).filter(|_| m.blocked(i)).map(|rule| {
 		let cur = m.value_of(rule.row).map(|v| m.text_of(m.row_index(rule.row).unwrap_or(0), v)).unwrap_or_default();
-		BoxData { text: t(&rule.detail).replace("{}", &cur), button: m.fix_value(rule).map(|_| t(&rule.button)).unwrap_or_default() }
+		BoxData { text: t(&rule.detail).replace("{}", &cur), button: m.fix_text(rule) }
 	});
 	let meter = (r.row.cost.level() > 0).then(|| {
 		let level = r.row.cost.level();
@@ -106,7 +106,7 @@ fn detail(m: &Model) -> Option<Detail> {
 		now: Some((t(&c.now), m.value_text(i))),
 		default: Some((t(&c.default), m.default_text(i))),
 		body: t(&r.row.desc),
-		note: r.row.note.as_ref().map(t),
+		note: super::live::note(r.row.id).or(r.row.note.as_ref()).map(t),
 		boxed,
 		meter,
 		footer: Some(Footer { note: t(&c.peek_note), button: t(&c.view_game), lead: HintKind::Peek }),

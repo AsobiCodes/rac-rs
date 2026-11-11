@@ -667,10 +667,7 @@ impl Inner {
                         if !self.streams.payload.contains_key(&lba) {
                             if let Some((i, data)) = read_vag_payload(iso, lba, ring) {
                                 self.vags.insert(lba, i);
-                                if self.streams.payload.len() >= 6 {
-                                    self.streams.payload.clear();
-                                }
-                                self.streams.payload.insert(lba, std::sync::Arc::new(data));
+                                self.streams.keep_payload(lba, std::sync::Arc::new(data), [a.lba, a.lba_r]);
                             }
                         } else if let Some(i) = read_vag(iso, lba, ring) {
                             self.vags.insert(lba, i);

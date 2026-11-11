@@ -5,28 +5,41 @@ use super::*;
 impl Gpu {
 	pub(super) fn frame_finish(&mut self, dt: DrawTarget, sw: f32, sh: f32, capture: bool) -> Option<crate::render::Image> {
 		let DrawTarget { frame, view, mut enc, cuts, .. } = dt;
-		let frame = frame?;
+		#[allow(unused_mut)]
+		let mut frame = frame?;
+		#[cfg(windows)]
+		frame.attach_fg(self.screen.take_pending()); // [S2] fgen/frame.rs: this frame's generation inputs go with its present
+		#[cfg(windows)]
+		frame.attach_sl(self.screen.take_sl()); // [S3] fgen/sl_frame.rs: this frame's Streamline frame goes with its present
+		let sp_fin = super::profile::span("e_fin");
+		// [PC] Brightness / Contrast (picture_adjust.rs) also on movies; the modern menu below stays ungraded.
+		self.movie.set_grade(&self.device, crate::viewer::picture_adjust::frame_k());
 		self.movie.draw(&self.queue, &mut enc, &view, sw, sh);
 		// [PC] Render scale (rscale.rs): the offscreen picture is copied onto the window image; readbacks are the window image.
 		// [PC] Aspect ratio (aspect_pass.rs): with a box, the copy and the modern menu go onto the box picture, which then goes into its
 		// rectangle of the window image between black bars; the readback is the whole window image.
 		let boxed = self.abox_tex();
-		let out = boxed.as_ref().unwrap_or(&frame.texture);
+		let out = boxed.as_ref().unwrap_or(frame.texture());
 		self.rscale_blit(&mut enc, &out.create_view(&Default::default()));
 		self.ui_pass(&mut enc, out); // [PC] modern menu (ui/gpu.rs): nothing unless a scene is set
-		self.abox_blit(&mut enc, &frame.texture);
+		self.abox_blit(&mut enc, frame.texture());
+		let pt = super::passtime::open(&mut enc, "present copy"); // [PC] lane gspeed: RAC_GPU_PASSES row of the copies below
+		frame.encode_out(&mut enc); // [PC] fgen/present.rs: our own swapchain: the backbuffer onto the window image (nothing on wgpu's surface)
 		let (w, h) = self.real_size();
 		let row = (w * 4).next_multiple_of(256);
 		let readback = capture.then(|| {
 			let buf = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("shot"), size: (row * h) as u64, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
 			enc.copy_texture_to_buffer(
-				frame.texture.as_image_copy(),
+				frame.shot().as_image_copy(),
 				wgpu::TexelCopyBufferInfo { buffer: &buf, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(h) } },
 				wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
 			);
 			buf
 		});
+		drop(sp_fin);
 		super::profile::lap(super::profile::Phase::Encode);
+		frame.encode_present(&mut enc); // [PC] fgen/present.rs: our own swapchain image to the present state
+		super::passtime::close(&mut enc, pt);
 		super::passtime::frame_end(&mut enc); // [PC] RAC_GPU_PASSES (passtime.rs)
 		// [PC] perf (P9d): on the deferred path the final encoder is finished on an enc-finish thread as well. A screenshot frame
 		// takes the old path unless RAC_FINISH_DEFER_SHOT=1 (proof aid: --shot then exercises the deferred path too).
@@ -48,7 +61,7 @@ impl Gpu {
 			// frame needs its readback at once and submits here.
 			let _t = super::profile::span("submit");
 			if capture {
-				cuts.submit(self.queue.sync(), cmd);
+				cuts.submit_frame(self.queue.sync(), cmd, Some(&frame));
 				self.presenter.present(frame);
 			} else {
 				self.presenter.present_frame(cuts, cmd, frame);

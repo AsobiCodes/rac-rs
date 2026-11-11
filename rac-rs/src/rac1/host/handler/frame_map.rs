@@ -108,7 +108,7 @@ fn map_scene(r: &crate::retail::Retail, text: &crate::frontend::Text, lang: usiz
 	map_host::begin(prompts::pad_peek().map(|p| mhost::pad_sample(p.buttons, p.sticks)));
 	let strings = Strings(text);
 	let (device, glyphs) = (map_host::device(), look::glyph_set());
-	let style = btn_text::Style { device, glyphs };
+	let style = btn_text::Style { device, glyphs, menu: true };
 	let t = |id: u32| btn_text::text(&strings, id, style);
 	let sc = menu_keys::screen_of_id(if stage == Stage::Missions { menu_keys::MISSIONS } else { menu_keys::MAP });
 	let key = |b: Btn| prompts::menu_key(btn_text::glyph_code(b), &sc);

@@ -11,6 +11,7 @@
 use super::*;
 
 mod copy_cull; // [PC] speed (lane water2): the ties a bed / mirror pass cannot show are not drawn in it
+pub(super) mod hold; // [PC] lane pwat2: a mirrored plane stays while its water is in view but its flat-plane estimate drops out
 
 /// A water draw's flat plane (`plane_of`), as [height, x0, y0, x1, y1].
 pub(super) type Plane = Option<[f32; 5]>;
@@ -68,7 +69,7 @@ pub(super) const MAX_MIRRORS: usize = 3;
 /// The flat water planes below the eye as (rays on it, distance, height): of `grid` x `grid` rays through the screen (NDC -`span`
 /// .. `span`, `ivp` = the inverse view-projection), those meeting the plane inside its box; the distance is the horizontal one to
 /// its box plus a quarter of the height above it.
-fn view_planes(draws: &[super::waterfx::WaterDraw], eye: [f32; 3], ivp: Option<&[[f32; 4]; 4]>, grid: usize, span: f32) -> Vec<(u32, f32, f32)> {
+fn view_planes(boxes: &[[f32; 5]], eye: [f32; 3], ivp: Option<&[[f32; 4]; 4]>, grid: usize, span: f32) -> Vec<(u32, f32, f32)> {
 	// Column-major: ray directions through the grid, from the eye to the unprojected point (NDC depth 0.5 lies in front).
 	let rays: Vec<[f32; 3]> = ivp
 		.map(|m| {
@@ -82,9 +83,9 @@ fn view_planes(draws: &[super::waterfx::WaterDraw], eye: [f32; 3], ivp: Option<&
 				.collect()
 		})
 		.unwrap_or_default();
-	draws
+	boxes
 		.iter()
-		.filter_map(|d| d.plane)
+		.copied()
 		.filter(|b| eye[2] > b[0] + 0.3)
 		.map(|b| {
 			let on = rays
@@ -110,10 +111,10 @@ fn view_planes(draws: &[super::waterfx::WaterDraw], eye: [f32; 3], ivp: Option<&
 /// [C: RAC_WATER_LOG, fogged quads at 61.2, box 328..344 x 102..118], 1.6 units above the sea, took the mirror whenever the
 /// camera came near it, and the sea in view fell back to the screen-space reflection: no mirror image, no ripples bending it,
 /// flipping as the camera moved; user 2026-10-20.)
-pub(super) fn pick(draws: &[super::waterfx::WaterDraw], eye: [f32; 3], ivp: Option<&[[f32; 4]; 4]>, prev: Option<f32>) -> Option<f32> {
+pub(super) fn pick(boxes: &[[f32; 5]], eye: [f32; 3], ivp: Option<&[[f32; 4]; 4]>, prev: Option<f32>) -> Option<f32> {
 	const VIEW_GRID: usize = 5;
 	const VIEW_KEEP: u32 = 3;
-	let planes = view_planes(draws, eye, ivp, VIEW_GRID, 0.8);
+	let planes = view_planes(boxes, eye, ivp, VIEW_GRID, 0.8);
 	let best = planes.iter().max_by(|a, b| a.0.cmp(&b.0).then(b.1.total_cmp(&a.1)))?;
 	let kept = prev.and_then(|h| planes.iter().filter(|p| (p.2 - h).abs() < 0.5).min_by(|a, b| (a.2 - h).abs().total_cmp(&(b.2 - h).abs())));
 	Some(match kept {
@@ -127,10 +128,10 @@ pub(super) fn pick(draws: &[super::waterfx::WaterDraw], eye: [f32; 3], ivp: Opti
 /// of its plane). Last frame's planes (`prev`) stay while they hold a ray; a free slot takes the best plane with a ray; with all
 /// slots taken a plane replaces the weakest only when it has `keep` rays more, so the set does not flip while planes take about
 /// as much of the view. With no ray on any water (looking up) the nearest plane alone, as `pick`.
-pub(super) fn pick_many(draws: &[super::waterfx::WaterDraw], eye: [f32; 3], ivp: Option<&[[f32; 4]; 4]>, prev: &[f32], n: usize) -> Vec<f32> {
+pub(super) fn pick_many(boxes: &[[f32; 5]], eye: [f32; 3], ivp: Option<&[[f32; 4]; 4]>, prev: &[f32], n: usize) -> Vec<f32> {
 	const GRID: usize = 9;
 	let keep = (3 * (GRID * GRID) as u32 / 25).max(1);
-	let planes = view_planes(draws, eye, ivp, GRID, 0.95);
+	let planes = view_planes(boxes, eye, ivp, GRID, 0.95);
 	let mut order: Vec<&(u32, f32, f32)> = planes.iter().collect();
 	order.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.total_cmp(&b.1)));
 	let apart = |c: &[(u32, f32, f32)], h: f32| c.iter().all(|p| (p.2 - h).abs() >= 0.8);
@@ -159,8 +160,8 @@ pub(super) fn pick_many(draws: &[super::waterfx::WaterDraw], eye: [f32; 3], ivp:
 }
 
 /// RAC_WATER_LOG: (rays of a 9 x 9 grid, height) of every flat plane below the eye.
-pub(super) fn view_stats(draws: &[super::waterfx::WaterDraw], eye: [f32; 3], ivp: Option<&[[f32; 4]; 4]>) -> Vec<(u32, f32)> {
-	view_planes(draws, eye, ivp, 9, 0.95).into_iter().map(|p| (p.0, p.2)).collect()
+pub(super) fn view_stats(boxes: &[[f32; 5]], eye: [f32; 3], ivp: Option<&[[f32; 4]; 4]>) -> Vec<(u32, f32)> {
+	view_planes(boxes, eye, ivp, 9, 0.95).into_iter().map(|p| (p.0, p.2)).collect()
 }
 
 /// The mirror's own uniforms (the level's, with the mirrored camera) and their bind group (the level's layout).
@@ -317,7 +318,7 @@ impl Gpu {
 		let kept = (first && !probe("ties")).then(|| self.kept_ties(scene, with, &mu.view_proj, multi, mirror)).flatten();
 		let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
 			label: Some(label),
-			color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: colour, resolve_target: last.then_some(resolve), depth_slice: None, ops: wgpu::Operations { load: if first { wgpu::LoadOp::Clear(scene.clear) } else { wgpu::LoadOp::Load }, store: if last { wgpu::StoreOp::Discard } else { wgpu::StoreOp::Store } } })],
+			color_attachments: &[Some(crate::viewer::scene_msaa::att_into(colour, resolve, last, wgpu::Operations { load: if first { wgpu::LoadOp::Clear(scene.clear) } else { wgpu::LoadOp::Load }, store: if last { wgpu::StoreOp::Discard } else { wgpu::StoreOp::Store } }))],
 			depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
 				view: depth,
 				depth_ops: Some(wgpu::Operations { load: if first { wgpu::LoadOp::Clear(1.0) } else { wgpu::LoadOp::Load }, store: if mirror && label != METAL_PLANAR { wgpu::StoreOp::Discard } else { wgpu::StoreOp::Store } }),
@@ -391,7 +392,9 @@ impl Gpu {
 			};
 			pass.set_vertex_buffer(0, batch.vbuf.slice(..));
 			pass.set_index_buffer(batch.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-			for d in draws {
+			// [PC] lane pwat (gpu/mirror_cull.rs): a mirror also draws the tfrags off the main view that only it shows.
+			let extra: &[Draw] = if mirror && std::ptr::eq(batch, &scene.tfrags) { &self.waterfx.mirror_cull.draws } else { &[] };
+			for d in draws.iter().chain(extra) {
 				pass.set_pipeline(if d.cull != 0 { &cull[flip(d.cull)] } else { pipeline });
 				pass.set_bind_group(1, &scene.bind_groups[d.texture], &[]);
 				pass.draw_indexed(d.start..d.start + d.count, 0, d.inst..d.inst + 1);

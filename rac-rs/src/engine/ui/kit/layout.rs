@@ -322,6 +322,9 @@ fn row_box(r: &RowData, rect: Rect, m: &dyn TextMeasure) -> ItemBox {
 	}
 }
 
+/// The most values a Choice row shows as pips; a row with more shows one position bar (CtrlBox::Choice pips = the bar's track).
+pub const MAX_PIPS: usize = 8;
+
 /// The control's boxes and the x where its column starts.
 fn ctrl_box(c: &Control, row: Rect, right: f32, m: &dyn TextMeasure) -> (CtrlBox, f32) {
 	match c {
@@ -336,7 +339,12 @@ fn ctrl_box(c: &Control, row: Rect, right: f32, m: &dyn TextMeasure) -> (CtrlBox
 			let prev = Rect::new(value.x - 8.0 - 34.0, row.y + 9.0, b, b);
 			let n = *count as f32;
 			let x0 = value.cx() - (n * 18.0 + (n - 1.0).max(0.0) * 4.0) * 0.5;
-			let pips = (0..*count).filter(|_| live).map(|i| Rect::new(x0 + i as f32 * 22.0, row.y + 38.0, 18.0, 3.0)).collect();
+			// [PC] More values than fit as pips (the Resolution row's sizes): one thin position bar under the value (draw_list.rs).
+			let pips = if *count > MAX_PIPS {
+				vec![Rect::new(value.x + 8.0, row.y + 38.0, value.w - 16.0, 3.0)]
+			} else {
+				(0..*count).filter(|_| live).map(|i| Rect::new(x0 + i as f32 * 22.0, row.y + 38.0, 18.0, 3.0)).collect()
+			};
 			(CtrlBox::Choice { prev, next, value, pips }, prev.x)
 		}
 		Control::Toggle { value, .. } => {
@@ -425,5 +433,20 @@ mod choice_tests {
 		assert_eq!((p1.w, p1.h, n1.w, n1.h, pips1.len()), (0.0, 0.0, 0.0, 0.0, 0), "no arrows, no pips");
 		assert_eq!((v1, left1), (value, left), "value box and column unchanged");
 		assert!(!p1.contains(p1.x, p1.y) && !n1.contains(n1.x, n1.y), "a zero rect is never hit");
+	}
+
+	/// Review finding 11: a Choice row with more than MAX_PIPS values has one bar under the value box instead of a pip per value;
+	/// a row with MAX_PIPS or fewer keeps its pips.
+	#[test]
+	fn a_long_choice_has_one_position_bar() {
+		let row = Rect::new(CONTENT_X, 200.0, CONTENT_W, ROW_H);
+		let right = row.right() - 10.0;
+		let pips = |count| match ctrl_box(&Control::Choice { value: "1920x1080".into(), index: 0, count }, row, right, &FixedAdvance(0.5)) {
+			(CtrlBox::Choice { value, pips, .. }, _) => (value, pips),
+			_ => panic!("choice"),
+		};
+		assert_eq!(pips(MAX_PIPS).1.len(), MAX_PIPS);
+		let (value, bar) = pips(24);
+		assert_eq!(bar, vec![Rect::new(value.x + 8.0, row.y + 38.0, value.w - 16.0, 3.0)], "one bar inside the value box");
 	}
 }

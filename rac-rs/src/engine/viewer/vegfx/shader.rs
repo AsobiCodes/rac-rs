@@ -203,9 +203,9 @@ fn veg_fog(i: VegOut) -> f32 {
 	let k = sun_baked(vec3<f32>(i.gl), i.w).x / max(i.gl, 1e-3);
 	let fog = veg_fog(i);
 	if (veg.burn.head.x > 0.0) {
-		return vec4<f32>(mix(u.fog_colour.rgb, veg_char(i.c, i.bn) * k, fog) + veg_glow(i.bn) * (1.0 - fog), 1.0);
+		return vec4<f32>(mix(u.fog_colour.rgb, flit_add(veg_char(i.c, i.bn) * k, veg_char(i.c, i.bn), i.w, vec3<f32>(0.0)), fog) + veg_glow(i.bn) * (1.0 - fog), 1.0);
 	}
-	return vec4<f32>(mix(u.fog_colour.rgb, i.c * k, fog), 1.0);
+	return vec4<f32>(mix(u.fog_colour.rgb, flit_add(i.c * k, i.c, i.w, vec3<f32>(0.0)), fog), 1.0); // [PC] fire light (flit.wgsl)
 }
 
 @vertex fn vs_veg_mesh(@location(0) p: vec3<f32>, @location(1) root: vec2<f32>, @location(2) uv: vec2<f32>, @location(3) c: vec4<f32>, @location(4) side: vec2<f32>, @location(5) ia: vec4<f32>, @location(6) ib: vec4<f32>, @location(7) ic: vec4<f32>, @location(8) id: vec4<f32>) -> VegOut {
@@ -267,8 +267,8 @@ fn veg_fog(i: VegOut) -> f32 {
 	let shade = sun_baked(min(i.c, vec3<f32>(255.0 / 128.0)), i.w);
 	let fog = veg_fog(i);
 	if (veg.burn.head.x > 0.0) {
-		return vec4<f32>(mix(u.fog_colour.rgb, veg_char(t.rgb, i.bn) * shade, fog) + veg_glow(i.bn) * (1.0 - fog), a);
+		return vec4<f32>(mix(u.fog_colour.rgb, flit_add(veg_char(t.rgb, i.bn) * shade, veg_char(t.rgb, i.bn), i.w, vec3<f32>(0.0)), fog) + veg_glow(i.bn) * (1.0 - fog), a);
 	}
-	return vec4<f32>(mix(u.fog_colour.rgb, t.rgb * shade, fog), a);
+	return vec4<f32>(mix(u.fog_colour.rgb, flit_add(t.rgb * shade, t.rgb, i.w, vec3<f32>(0.0)), fog), a); // [PC] fire light (flit.wgsl)
 }
 "#;

@@ -475,7 +475,7 @@ mod tests {
 			let rel = base[i] * (1.0 + (rl * hue - 1.0) * wr);
 			let own = (1.0 + ((base[i] / lb).clamp(0.0, 2.0) - 1.0) * tint).min(1.0);
 			let metal = rel + (env[i] * own - rel) * wg;
-			let plain = base[i] + (env[i] - base[i]) * f;
+			let plain = base[i] + (lum(base) * rl * env[i] / le.max(1e-4) - base[i]) * f;
 			plain + (metal - plain) * metalness.clamp(0.0, 1.0)
 		})
 	}
@@ -505,6 +505,22 @@ mod tests {
 		assert!(dark < 0.85 && dark > 0.4, "a dark object reflected darkens it, glossy: not a mirror's full drop ({dark})");
 		assert!((lum(shade(base, sky, sky, 1.0, 0.38, 0.3, K, G)) - lum(base)).abs() < 0.03, "painted: the retail colour and a thin coat");
 		assert!(lum(shade(base, sky, sky, 0.05, 0.05, 1.0, K, G)) > lum(base) * 2.0, "grazing on mirror chrome: the surroundings");
+	}
+	/// User 2026-11-08 on Novalis' copper floor (painted kind) in a shaded street under a lavender sky: "still kinda too glossy". The
+	/// painted coat shows the sky at the floor's own brightness (relative to the surroundings), not the bright sky itself.
+	#[test]
+	fn a_dark_painted_floor_takes_no_sky_wash() {
+		let (copper, sky) = ([0.050, 0.034, 0.020], [0.60, 0.55, 0.80]);
+		let painted = |ndv: f32, metalness: f32| lum(shade(copper, sky, sky, ndv, 0.45, metalness, K, G)) / lum(copper);
+		for ndv in [0.1, 0.2, 0.4, 0.7, 1.0] {
+			assert!((painted(ndv, 0.0) - 1.0).abs() < 1e-3, "the coat alone keeps shaded copper's brightness at ndv {ndv}: {}", painted(ndv, 0.0));
+		}
+		// The painted kind (metalness 0.3): its metal share still glosses toward grazing angles, looking at the floor it stays near.
+		for ndv in [0.4, 0.7, 1.0] {
+			assert!((painted(ndv, 0.3) - 1.0).abs() < 0.1, "shaded copper keeps its brightness at ndv {ndv}: {}", painted(ndv, 0.3));
+		}
+		let window = lum(shade(copper, [1.0; 3], [0.1; 3], 0.4, 0.45, 0.3, K, G)) / lum(copper);
+		assert!(window > 1.05, "a bright thing against dark surroundings still shows in the coat: {window}");
 	}
 	/// User 2026-11-03 on v3: "metal is reflective ofc but it isnt a mirror so we need to somehow tone down the reflections".
 	/// Looking down, a reflection moves the metal less far than v3 did; at grazing angles it stays strong; a coloured metal tints
@@ -803,7 +819,7 @@ mod tests {
 			"if (wp < 0.5) { hit = metal_ssr(i.w, r, rough); hit.a *= 1.0 - 2.0 * wp; }",
 			"return vec4<f32>(c * c, fade * smoothstep(0.5, 1.0, cov));",
 			"let lift = mix(max(1.0, MK_INDOOR_LIFT * metal_lum(miss) / max(metal_lum(oa), 1e-4)), 1.0, ha);",
-			"let around = mix(oa * lift, metal_world(n, 1.0, 0.0), vis);",
+			"if (!MK_CUT || vis > 0.0) { around = mix(oa * lift, metal_world(n, 1.0, 0.0), vis); }",
 			"pop = hit.rgb * (ha * (1.0 - vis) * popw);",
 			"const MK_HIT_MAX: f32 = 0.7;",
 			"let pw = min(MK_POP * metalness * clamp(k.x * (1.0 - rough) * fw, 0.0, 1.0), max(MK_HIT_MAX - metal_env_w(ndv, rough, metalness, k, u.metal[10]), 0.0) / max(ha * (1.0 - vis), 1e-4));",
@@ -815,7 +831,7 @@ mod tests {
 			"let rel = base * mix(vec3<f32>(1.0), rl * hue, clamp(k.x * s * fw, 0.0, 1.0));",
 			"let own = min(mix(vec3<f32>(1.0), clamp(base / max(metal_lum(base), 1e-3), vec3<f32>(0.0), vec3<f32>(2.0)), tint), vec3<f32>(1.0));",
 			"let metal = mix(rel, env * own, ew.x);",
-			"let plain = mix(base, env, ew.y);",
+			"let plain = mix(base, metal_lum(base) * rl * env / max(le, 1e-4), ew.y);",
 			"return vec2<f32>(clamp(graze * s * s * k.x * g.y, 0.0, 1.0), k.y + (max(s, k.y) - k.y) * graze);",
 			"return mix(w.y, w.x, clamp(metalness, 0.0, 1.0));",
 			"var lin = metal_shade(base, env, around, ndv, rough, metalness, k, u.metal[10]);",

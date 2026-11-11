@@ -195,8 +195,9 @@ mod tests {
 		let bad = unguarded_burn_lines(w);
 		assert!(bad.is_empty(), "burn terms outside `if (burning)` / `if (veg.burn.head.x > 0.0)`: {bad:?}");
 		// The count-0 paths are the pre-burn expressions, and the branches exist in all four entry points.
-		assert!(w.contains("return vec4<f32>(mix(u.fog_colour.rgb, i.c * k, fog), 1.0);"), "blade fragment, no burn");
-		assert!(w.contains("return vec4<f32>(mix(u.fog_colour.rgb, t.rgb * shade, fog), a);"), "mesh fragment, no burn");
+		// (The fire light of flit.wgsl wraps the lit colour: `flit_add(lit, albedo, world, normal)`, no burn term in it.)
+		assert!(w.contains("return vec4<f32>(mix(u.fog_colour.rgb, flit_add(i.c * k, i.c, i.w, vec3<f32>(0.0)), fog), 1.0);"), "blade fragment, no burn");
+		assert!(w.contains("return vec4<f32>(mix(u.fog_colour.rgb, flit_add(t.rgb * shade, t.rgb, i.w, vec3<f32>(0.0)), fog), a);"), "mesh fragment, no burn");
 		assert!(w.contains("var height = ib.y * f * touch.z * smoothstep(0.8, 2.4, d);"), "blade height, no burn");
 		assert!(w.contains("var s = ib.y * mix(0.15, 1.0, f) * select(0.0, 1.0, f > 0.0) * touch.z * smoothstep(1.0, 3.0, d);"), "mesh scale, no burn");
 		assert!(w.contains("let wind = lean * c.a * c.a * max(p.z, 0.0) * s;"), "mesh wind, no burn");

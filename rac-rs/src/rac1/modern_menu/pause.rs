@@ -164,6 +164,8 @@ pub struct Built {
 	pub ach: Option<super::pause_ach::AchBuilt>,
 	/// The Map tab's index in the tab bar (the last tab; `menu` has no target for it: the host opens the map itself).
 	pub map_tab: usize,
+	/// The modern Controls table (`pause_keys`, the PcControls page): it replaces the panel; `items` is then all inert.
+	pub keys: Option<super::pause_keys::KeysBuilt>,
 }
 
 impl Built {
@@ -183,7 +185,7 @@ pub(super) struct List<'a> {
 	pub(super) addr: u32,
 	pub(super) n: usize,
 	pub(super) cursor: usize,
-	rows: &'a [RowView],
+	pub(super) rows: &'a [RowView],
 }
 
 fn list_of(it: &ItemView) -> Option<List<'_>> {
@@ -290,11 +292,17 @@ fn grid_parts(f: &Facts) -> Option<Parts> {
 	Some(Parts { panel: Panel::None, targets: g.targets.clone(), dialog: None, sel: g.flat_sel, focus: true, grid: Some(g) })
 }
 
+/// Help: the list and its detail panel with retail's picture (`pause_help.rs`).
+fn help_parts(f: &Facts) -> Option<Parts> {
+	let g = super::pause_help::build(f, &FontMeasure)?;
+	Some(Parts { panel: Panel::None, targets: g.targets.clone(), dialog: None, sel: g.flat_sel, focus: true, grid: Some(g) })
+}
+
 fn parts(f: &Facts) -> Option<Parts> {
 	match f.view.page {
 		Page::Root => Some(Parts { panel: Panel::None, targets: Vec::new(), dialog: None, sel: 0, focus: true, grid: None }),
 		Page::Weapons | Page::Gadgets | Page::QuickSelect | Page::Items => grid_parts(f),
-		Page::Help => list_parts(f, TAB_HELP),
+		Page::Help => help_parts(f).or_else(|| list_parts(f, TAB_HELP)),
 		Page::Options => list_parts(f, TAB_OPTIONS),
 		Page::Goodies => list_parts(f, TAB_GOODIES_AT),
 		Page::HelpDesk => toggle_parts(f, T_HELPDESK),
@@ -420,6 +428,10 @@ pub fn build(f: &Facts) -> Option<Built> {
 	}
 	let (tabs, root_sel, goodies) = tabs(f)?;
 	let mut parts = parts(f)?;
+	let keys = (page == Page::PcControls).then(|| super::pause_keys::build(f));
+	if keys.is_some() {
+		(parts.panel, parts.targets) = (Panel::None, Vec::new());
+	}
 	let root = page == Page::Root;
 	let retail = if root { root_sel } else { parts.sel };
 	let sel = shown(f.local, retail, f.now);
@@ -442,5 +454,6 @@ pub fn build(f: &Facts) -> Option<Built> {
 		grid: parts.grid,
 		ach: None,
 		map_tab: tabs.len() - 1,
+		keys,
 	})
 }

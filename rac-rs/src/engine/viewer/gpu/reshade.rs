@@ -301,7 +301,7 @@ impl Gpu {
 		let (msaa, depth) = self.upscale.hud_targets().unwrap_or((&self.msaa, &self.depth));
 		let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
 			label: Some("hud"),
-			color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: msaa, resolve_target: Some(view), depth_slice: None, ops: wgpu::Operations { load, store: wgpu::StoreOp::Discard } })],
+			color_attachments: &[Some(crate::viewer::scene_msaa::att(msaa, Some(view), wgpu::Operations { load, store: wgpu::StoreOp::Discard }))], // lane noaa: 1 sample = copy (flushed in draw.rs)
 			depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
 				view: depth,
 				depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
@@ -405,7 +405,7 @@ mod tests {
 		{
 			let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
 				label: Some("hud"),
-				color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &msaa, resolve_target: Some(&out_view), depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Discard } })],
+				color_attachments: &[Some(crate::viewer::scene_msaa::att_direct(&msaa, &out_view, wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Discard }))],
 				depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
 					view: &depth,
 					depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),

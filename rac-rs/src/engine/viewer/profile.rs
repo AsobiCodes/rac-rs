@@ -192,9 +192,10 @@ thread_local! {
 /// Reads RAC_FRAME_PROFILE once at start-up.
 pub fn init_from_env() {
 	let csv = super::framecsv::init_from_env();
+	crate::diag::init(); // [PC] RAC_DIAG (diag.rs): the session folder; the profiler runs without printing to feed it
 	if std::env::var("RAC_FRAME_PROFILE").is_ok_and(|v| v == "1") {
 		enable(true);
-	} else if csv {
+	} else if csv || crate::diag::on() {
 		enable(false);
 	}
 }
@@ -341,8 +342,17 @@ thread_local! {
 }
 
 fn meter_on() -> bool {
-	static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-	*ON.get_or_init(|| std::env::var("RAC_FPS_METER").is_ok_and(|v| v == "1"))
+	meter_mode() != 0
+}
+
+/// RAC_FPS_METER: 0 = off, 1 = on screen, 2 = `log`: on screen plus one stderr line per window (A/B fps runs on hidden windows).
+fn meter_mode() -> u8 {
+	static ON: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+	*ON.get_or_init(|| match std::env::var("RAC_FPS_METER").as_deref() {
+		Ok("1") => 1,
+		Ok("log") => 2,
+		_ => 0,
+	})
 }
 
 fn meter_frame(ticks: u32) {
@@ -365,6 +375,9 @@ fn meter_frame(ticks: u32) {
 			let colour = if pct >= 98.0 { [0.55, 1.0, 0.55, 1.0] } else if pct >= 80.0 { [1.0, 0.9, 0.4, 1.0] } else { [1.0, 0.45, 0.4, 1.0] };
 			let a = format!("{:.0} FPS  {:.1} MS  MAX {:.1}", m.frames as f32 / secs, ms(m.sum) / (m.frames - 1).max(1) as f32, ms(m.worst));
 			let b = format!("GAME SPEED {pct:.0}%  {steps:.0} STEPS/S");
+			if meter_mode() == 2 {
+				eprintln!("fpsmeter: {secs:.3} s {} frames {a}  {b}", m.frames);
+			}
 			*m = Meter { since: now, last: Some(now), frames: 0, ticks: 0, sum: Duration::ZERO, worst: Duration::ZERO, lines: Some((a, b, colour)) };
 		}
 	});
@@ -404,6 +417,9 @@ pub fn frame_end(ticks: u32) {
 		let mut cur = std::mem::take(&mut s.cur);
 		cur.ms = d.as_secs_f32() * 1000.0;
 		cur.ticks = ticks;
+		if crate::diag::on() {
+			crate::diag::frame(&PHASES.map(name), &std::array::from_fn(|k| cur.phase[k].as_secs_f32() * 1000.0), cur.ms, ticks, &cur.spans);
+		}
 		super::framecsv::frame(s.start, cur.ms, ticks, cur.phase[9].as_secs_f32() * 1000.0, cur.phase[10].as_secs_f32() * 1000.0, cur.phase[11].as_secs_f32() * 1000.0, super::smooth_lead::last_ms());
 		if super::framecsv::on() {
 			let ph: Vec<f32> = cur.phase.iter().map(|d| d.as_secs_f32() * 1000.0).collect();
@@ -443,7 +459,10 @@ pub fn frame_end(ticks: u32) {
 				eprintln!("{}", s.window.report(secs));
 			}
 			let w = std::mem::take(&mut s.window);
-			s.all.merge(&w);
+			// The session total keeps every frame time: only for RAC_FRAME_PROFILE=1, never when only RAC_DIAG drives the profiler.
+			if s.print {
+				s.all.merge(&w);
+			}
 			s.window_start = now;
 		}
 	});

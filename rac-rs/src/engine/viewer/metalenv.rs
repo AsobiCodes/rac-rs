@@ -20,7 +20,7 @@ use std::cell::{Cell, OnceCell, RefCell};
 mod planar; // [PC] planar reflection of flat metal floors
 pub(crate) use planar::{Floors, Keys};
 #[path = "metalcontact.rs"]
-mod contact; // [PC] contact reflections: the planar mirror fades with the reflection distance
+pub(in crate::viewer) mod contact; // [PC] contact reflections: the planar mirror fades with the reflection distance
 
 /// Captured face size and mip levels (metalfx.wgsl `MK_MIPS` = the last level).
 const FACE: u32 = 64;
@@ -139,6 +139,8 @@ struct Real {
 	hiz_layout: wgpu::BindGroupLayout,
 	/// The reflection-source bind group and the post targets' generation it reads.
 	ssr_group: RefCell<Option<(u64, wgpu::BindGroup)>>,
+	/// The planar contact pass's pipeline (metalcontact.rs), shared by every planar target set.
+	contact: contact::ContactPipe,
 }
 
 /// The reflection source at one size (`ssr_size`), remade when the render size changes (`MetalEnv::alloc`).
@@ -171,7 +173,8 @@ pub(in crate::viewer) struct MetalEnv {
 	captured: Cell<Option<(usize, u32)>>,
 	/// (level, view-projection) of the reflection source kept last frame.
 	prev: Cell<Option<(usize, [[f32; 4]; 4])>>,
-	/// The planar floor reflection's targets (made with `ssr`, same size), this frame's floor height and its mirror pass's uniforms.
+	/// The planar floor reflection's targets (made with `ssr`, at its size over the Metal reflection detail's divisor / 2:
+	/// metal_detail.rs `planar_size`), this frame's floor height and its mirror pass's uniforms.
 	planar: Option<planar::Planar>,
 	plane: Cell<Option<f32>>,
 	/// The planar weight's fade-in (metalplanar.rs `fade`): last frame's weight and time.
@@ -196,22 +199,25 @@ impl MetalEnv {
 	}
 
 	/// The first frame with Metal `on` makes the real set, and a frame with a new render size `w` x `h` (the post chain's) a new
-	/// reflection source (`ssr_rebuild`; the kept one is forgotten). True = made: every group 0 that holds `entries()` must be rebound.
+	/// reflection source (`ssr_rebuild`; the kept one is forgotten); then the planar targets follow the source and the Metal
+	/// reflection detail row (metalplanar.rs `alloc_planar`). True = made: every group 0 that holds `entries()` must be rebound.
 	pub(super) fn alloc(&mut self, on: bool, w: u32, h: u32) -> bool {
 		let first = build_on_first_on(&self.real, on, || Real::new(&self.device, self.format, self.depth_format, &self.samp));
 		// The planar pass's group holds `entries()`: remade on its next pass.
 		if first {
 			self.planar_mirror.get_mut().take();
 		}
-		let Some(size) = ssr_rebuild(self.ssr.as_ref().map(|s| s.0), on, w, h) else { return first };
-		let Some(real) = self.real.get_mut() else { return first };
-		// The face passes' groups hold `entries()`: remade on the next capture.
-		real.cap_groups.take();
-		self.ssr = Some((size, Ssr::new(&self.device, real, self.format, &self.samp, size)));
-		self.planar = Some(planar::Planar::new(&self.device, &real.mip_layout, &self.samp, (self.format, self.depth_format), size));
-		self.planar_mirror.get_mut().take();
-		self.prev.set(None);
-		true
+		let mut made = first;
+		if let (Some(size), Some(real)) = (ssr_rebuild(self.ssr.as_ref().map(|s| s.0), on, w, h), self.real.get_mut()) {
+			// The face passes' groups hold `entries()`: remade on the next capture.
+			real.cap_groups.take();
+			self.ssr = Some((size, Ssr::new(&self.device, real, self.format, &self.samp, size)));
+			self.planar_mirror.get_mut().take();
+			self.prev.set(None);
+			made = true;
+		}
+		// Metal Off keeps what it has (as the source): nothing is remade while Off.
+		(on && self.alloc_planar()) || made
 	}
 
 	/// Whether the real set exists (never before the first frame with Metal On).
@@ -227,8 +233,9 @@ impl Real {
 		let (ra, tb) = (wgpu::TextureUsages::RENDER_ATTACHMENT, wgpu::TextureUsages::TEXTURE_BINDING);
 		let env = tex("metal env", FACE, FACE, 6, MIPS, 1, format, ra | tb | wgpu::TextureUsages::COPY_DST);
 		let env_view = env.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() });
-		let msaa = tex("metal env msaa", FACE, FACE, 1, 1, crate::viewer::targets::MSAA, format, ra).create_view(&Default::default());
-		let depth = tex("metal env depth", FACE, FACE, 1, 1, crate::viewer::targets::MSAA, depth_format, ra).create_view(&Default::default());
+		let (mw, mh) = crate::viewer::scene_msaa::ms_size(FACE, FACE); // lane noaa: 1 x 1 at 1 sample (unused: att_direct)
+		let msaa = tex("metal env msaa", mw, mh, 1, 1, crate::viewer::targets::msaa(), format, ra).create_view(&Default::default());
+		let depth = tex("metal env depth", FACE, FACE, 1, 1, crate::viewer::targets::msaa(), depth_format, ra).create_view(&Default::default());
 		let stage = tex("metal env stage", FACE, FACE, 6, 1, 1, format, ra | wgpu::TextureUsages::COPY_SRC);
 		let stage_faces = (0..6).map(|k| layer(&stage, k, 0)).collect();
 		let ubufs = (0..6).map(|_| device.create_buffer(&wgpu::BufferDescriptor { label: Some("metal env uniforms"), size: std::mem::size_of::<Uniforms>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false })).collect();
@@ -259,7 +266,8 @@ impl Real {
 		let mips = (1..MIPS).flat_map(|m| (0..6).map(move |k| (k, m))).map(|(k, m)| mip_step(device, &mip_layout, samp, &env, k, m)).collect();
 		let hiz_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("metal hiz"), entries: &[lin] });
 		let hiz = pipe(&hiz_layout, "fs_hiz", &[target(SSR_DEPTH)]);
-		Real { env, env_view, msaa, depth, stage, stage_faces, ubufs, cap_groups: OnceCell::new(), mip, mip_layout, mips, ssr, ssr_layout, hiz, hiz_layout, ssr_group: RefCell::new(None) }
+		let contact = contact::ContactPipe::new(device, format);
+		Real { env, env_view, msaa, depth, stage, stage_faces, ubufs, cap_groups: OnceCell::new(), mip, mip_layout, mips, ssr, ssr_layout, hiz, hiz_layout, ssr_group: RefCell::new(None), contact }
 	}
 }
 
@@ -412,7 +420,7 @@ impl Gpu {
 			self.queue.write_buffer(&re.ubufs[k], 0, bytemuck::bytes_of(&mu));
 			let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
 				label: Some("metal env capture"),
-				color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &re.msaa, resolve_target: Some(&re.stage_faces[k]), depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(scene.clear), store: wgpu::StoreOp::Discard } })],
+				color_attachments: &[Some(crate::viewer::scene_msaa::att_direct(&re.msaa, &re.stage_faces[k], wgpu::Operations { load: wgpu::LoadOp::Clear(scene.clear), store: wgpu::StoreOp::Discard }))],
 				depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
 					view: &re.depth,
 					depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
@@ -437,7 +445,7 @@ impl Gpu {
 				label: Some("metal env mip"),
 				color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: target, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store } })],
 				depth_stencil_attachment: None,
-				timestamp_writes: None,
+				timestamp_writes: crate::viewer::passtime::rw("metal env mip"),
 				occlusion_query_set: None,
 				multiview_mask: None,
 			});
@@ -495,7 +503,7 @@ impl Gpu {
 				label: Some(label),
 				color_attachments: &[attach(target)],
 				depth_stencil_attachment: None,
-				timestamp_writes: None,
+				timestamp_writes: crate::viewer::passtime::rw(label),
 				occlusion_query_set: None,
 				multiview_mask: None,
 			});
@@ -600,11 +608,27 @@ mod tests {
 		let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
 		let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).expect("adapter");
 		let (device, _queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).expect("device");
+		use crate::viewer::metal_detail::{self as md, Detail};
+		let _guard = crate::pcopts::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+		let mut opts = crate::pcopts::PcOptions::new();
+		md::init(&opts, md::ENGINE_DEFAULT);
 		let mut me = MetalEnv::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb, wgpu::TextureFormat::Depth24PlusStencil8);
 		assert!(!me.allocated() && !me.alloc(false, 1280, 800) && !me.allocated(), "Off allocates nothing");
 		assert!(me.alloc(true, 1280, 800) && me.allocated(), "the first On frame allocates");
 		assert!(!me.alloc(true, 1280, 800), "once per size");
 		assert!(me.alloc(true, 1920, 1080), "a new render size remakes the reflection source");
+		// A live Metal reflection detail switch (metal_detail.rs): the planar targets are remade on the next frame, once.
+		for d in [Detail::High, Detail::Medium, Detail::Low, Detail::Full, Detail::High] {
+			assert!(md::set_from_ui(&mut opts, d));
+			assert!(me.alloc(true, 1920, 1080), "{d:?}: remade");
+			assert_eq!(me.planar.as_ref().map(|p| p.lod_bias()), Some(d.lod_bias()), "{d:?}");
+			assert!(!me.alloc(true, 1920, 1080), "{d:?}: once");
+		}
+		assert!(!me.alloc(false, 1920, 1080), "Off remakes nothing");
+		md::set_from_ui(&mut opts, Detail::Low);
+		assert!(!me.alloc(false, 1920, 1080), "a change while Off waits");
+		assert!(me.alloc(true, 1920, 1080), "and applies on the On frame");
+		md::init(&crate::pcopts::PcOptions::new(), md::ENGINE_DEFAULT);
 	}
 	/// v4 (orchestrator review of v3): the source follows the render size; the Deck keeps 640 x 400; every `HIZ` level halves exactly.
 	#[test]

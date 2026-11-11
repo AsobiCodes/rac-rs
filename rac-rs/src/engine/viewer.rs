@@ -36,15 +36,15 @@ pub(crate) mod gpuhero;
 pub(crate) mod furfx;
 pub(crate) mod bindless;
 pub(crate) mod warpfx;
-pub(crate) mod clip;
+pub(crate) mod clip; pub use clip::set_complete_polys; // [PC] lane kst: whole clipped polygons with the Modern camera
 pub(crate) mod shadowvol;
-pub(crate) mod post; pub(crate) mod volclouds; pub mod volfog; pub(crate) mod volsmoke; pub(crate) mod star; pub(crate) mod starfield; pub mod pipe_guard;
+pub(crate) mod post; pub(crate) mod volclouds; pub mod volfog; pub(crate) mod volsmoke; pub(crate) mod heathaze; pub(crate) mod star; pub(crate) mod starfield; pub mod pipe_guard;
 pub mod sunshadow;
 pub(crate) mod waterfx;
-pub mod aspect_box; pub mod under_choice; pub mod under_detect; pub mod underwater;
-pub(crate) mod icefx; pub(crate) mod texfilter; pub(crate) mod metalfx; pub(crate) mod metalenv; pub(crate) mod metalpipe; pub(crate) mod metaldraw; pub(crate) use metaldraw::MetalDraw;
+pub mod aspect_box; pub mod resolution; pub mod picture_adjust; pub mod under_choice; pub mod metal_detail; pub mod under_detect; pub mod underwater;
+pub(crate) mod icefx; pub(crate) mod texfilter; pub(crate) mod metalfx; pub(crate) mod metalenv; pub(crate) mod metalpipe; pub(crate) mod pipewarm; pub(crate) mod metaldraw; pub(crate) use metaldraw::MetalDraw;
 pub(crate) mod mirror;
-pub(crate) mod partfx; pub(crate) mod firefx; pub(crate) mod firefx_light; pub(crate) mod firefx_vol; pub(crate) mod firefx_ground; pub(crate) mod firefx_ground_track; pub(crate) mod firefx_burn; pub(crate) mod firefx_burn_trail; pub(crate) mod firefx_grid; pub(crate) mod firefx_clock; pub(crate) mod firefx_gametime; pub(crate) mod firefx_jet; pub(crate) mod firefx_jet_quads; pub(crate) mod firefx_jet_lerp; pub(crate) mod firefx_jet_grass; pub(crate) mod firefx_jet_vol; pub(crate) mod firefx_blast; pub(crate) mod firefx_blast_gpu; pub(crate) mod firesim; pub(crate) mod firesim_heat; pub(crate) mod firesim_tongues; pub(crate) mod firebook; pub(crate) mod firebook_dump;
+pub(crate) mod partfx; pub(crate) mod firefx; pub(crate) mod firefx_light; pub(crate) mod firefx_carried; pub(crate) mod flit; pub(crate) mod flitquad; pub(crate) mod flitlist; pub(crate) mod flitcolour; pub(crate) mod flitref; pub(crate) mod flitsplit; pub(crate) mod firefx_vol; pub(crate) mod firefx_ground; pub(crate) mod firefx_ground_track; pub(crate) mod firefx_burn; pub(crate) mod firefx_burn_trail; pub(crate) mod firefx_grid; pub(crate) mod firefx_clock; pub(crate) mod firefx_gametime; pub(crate) mod firefx_jet; pub(crate) mod firefx_jet_quads; pub(crate) mod firefx_jet_lerp; pub(crate) mod firefx_jet_grass; pub(crate) mod firefx_jet_vol; pub(crate) mod firefx_blast; pub(crate) mod firefx_blast_gpu; pub(crate) mod firesim; pub(crate) mod firesim_heat; pub(crate) mod firesim_tongues; pub(crate) mod firebook; pub(crate) mod firebook_dump;
 pub(crate) mod shotlight; // [PC] weapon lights (lane nwlit)
 pub mod vegfx;
 pub mod hudsharp;
@@ -52,15 +52,16 @@ pub mod smooth;
 pub mod smooth_lead;
 pub(crate) mod gpucache;
 pub(crate) mod tiegpu;
-pub mod profile; pub(crate) mod passtime; pub(crate) mod gfxq; pub mod framecsv;
+pub mod profile; pub(crate) mod passtime; pub(crate) mod levelstats; pub(crate) mod tiez; pub(crate) mod gfxq; pub mod framecsv;
 pub mod pace;
 pub mod test_clock;
-pub(crate) mod presenter; pub(crate) mod qdefer; use presenter::GatedQueue; pub(crate) mod gpu_errors;
+pub(crate) mod presenter; pub(crate) mod fgen; pub use fgen::choice as fgen_choice; pub use fgen::follow as fgen_follow; pub(crate) mod qdefer; use presenter::GatedQueue; pub(crate) mod gpu_errors;
 pub mod fardraw;
 
 pub(crate) mod projection;
-pub mod targets;
-pub(crate) mod upscale; pub use upscale::choice as upscale_choice; // [PC] upscaler: inputs (RAC_UPSCALE_PREP), slot (RAC_UPSCALE), the menu choice (choice.rs)
+pub mod targets; pub mod scene_msaa; // [PC] lane noaa: the scene's sample count (1 with an upscaler and the MSAA row Off)
+pub(crate) mod framebuf; // [PC] lane rcpu: per-frame buffer pool + shared quad indices (RAC_FRAMEBUF_OLD)
+pub(crate) mod upscale; pub use upscale::{choice as upscale_choice, dlss_preset}; // [PC] upscaler: inputs (RAC_UPSCALE_PREP), slot (RAC_UPSCALE), the menu choice (choice.rs)
 pub mod maths;
 pub(crate) mod moby_fade;
 pub mod hero_pose; pub mod loose_range;
@@ -79,7 +80,8 @@ pub use self::hero_pose::*;
 pub use self::pause_hero::*;
 pub use self::lights::*;
 pub use self::projection::{PROJ_Y_RATIO};
-pub use self::targets::{ITEM_PANEL_TEX, MENU_ART_TEX, POPUP_PANEL_TEX, PORTRAIT_PANEL_TEX, RETAIL_OV_TEX, RETAIL_HD_TEX, RETAIL_FILTER_TEX};
+pub use self::gpu::menu_art_anim::{turn_angle, ArtAnim, TWINKLE_WRAP_S};
+pub use self::targets::{ITEM_PANEL_TEX, MENU_ART_ANIM_TEX, MENU_ART_TEX, POPUP_PANEL_TEX, PORTRAIT_PANEL_TEX, RETAIL_OV_TEX, RETAIL_HD_TEX, RETAIL_FILTER_TEX};
 
 /// The change tokens of this frame's prop poses (`Gpu::set_props` / gpu/pose_reuse.rs): `of(in_fx, pi, key)` is the "born" stamp of the pose
 /// prop `pi` takes (`fx_posed`'s when `in_fx`, else the one of `key()`'s pose); equal tokens = bit-equal poses, 0 = no token (always
@@ -163,20 +165,23 @@ pub(crate) struct Uniforms {
 	sun_q: [f32; 4], keep_tail: [f32; 4], // [PC] #29: keep_tail.x = 1 in the water bed / mirror passes (mirror.rs; no blend pass there): a moby's tail texels draw opaque as before
 	/// [PC] Metal On (metalfx.wgsl `u.metal`, filled by `metalenv::MetalEnv::write_uniforms`; zero = off).
 	metal: [[f32; 4]; 14],
+	/// [PC] Fire + weapon lights on the world surfaces (lane flit, `flit_add`; lane dlit2: the light list, flit.rs `FlitU`): written
+	/// by draw/passes.rs before the level pass; zero = off.
+	flit: flit::FlitU,
 }
 
 /// Mobies lit by a dynamic light in one frame (the rest take none).
 pub(crate) const MAX_DYN: usize = 128;
 
 pub(crate) const SHADER: &str = concat!(r#"
-struct U { view_proj: mat4x4<f32>, sky_view_proj: mat4x4<f32>, lights: array<array<vec4<f32>, 4>, 16>, ambient: array<vec4<f32>, 4>, fog_colour: vec4<f32>, fog: vec4<f32>, eye: vec4<f32>, points: array<vec4<f32>, 16>, dynl: array<vec4<f32>, 256>, sun_vp: array<mat4x4<f32>, 3>, sun: vec4<f32>, sun_bias: vec4<f32>, sun_texel: vec4<f32>, sun_q: vec4<f32>, keep_tail: vec4<f32>, metal: array<vec4<f32>, 14> };
+struct U { view_proj: mat4x4<f32>, sky_view_proj: mat4x4<f32>, lights: array<array<vec4<f32>, 4>, 16>, ambient: array<vec4<f32>, 4>, fog_colour: vec4<f32>, fog: vec4<f32>, eye: vec4<f32>, points: array<vec4<f32>, 16>, dynl: array<vec4<f32>, 256>, sun_vp: array<mat4x4<f32>, 3>, sun: vec4<f32>, sun_bias: vec4<f32>, sun_texel: vec4<f32>, sun_q: vec4<f32>, keep_tail: vec4<f32>, metal: array<vec4<f32>, 14>, flit: array<vec4<f32>, 76>, flit_grid: array<vec4<u32>, 64> };
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var sun_map: texture_depth_2d_array;
 @group(0) @binding(2) var sun_cmp: sampler_comparison;
 @group(1) @binding(0) var tex: texture_2d<f32>;
 @group(1) @binding(1) var samp: sampler;
 
-struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, @location(1) n: vec3<f32>, @location(2) c: vec4<f32>, @location(3) w: vec3<f32>, @location(4) @interpolate(flat) l: vec4<f32>, @location(5) @interpolate(linear) fogf: f32, @location(6) lit: vec3<f32>, @location(9) amb: vec3<f32>, @location(10) @interpolate(flat) metal: u32, @location(7) @interpolate(flat) kmx: vec2<f32> };
+struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, @location(1) n: vec3<f32>, @location(2) c: vec4<f32>, @location(3) w: vec3<f32>, @location(4) @interpolate(flat) l: vec4<f32>, @location(5) @interpolate(linear) fogf: f32, @location(6) lit: vec3<f32>, @location(9) amb: vec3<f32>, @location(10) @interpolate(flat) metal: u32, @location(11) sn: vec3<f32>, @location(7) @interpolate(flat) kmx: vec2<f32> };
 
 // GS fog coefficient per world class (gameplay::fog_coefficient; lighting_fog.md "Fog per class"). The vertex light
 // w tags the class: -1 tfrag (per vertex, view depth), -2 shrub (per instance, l.xyz = instance origin) / -3 tie
@@ -235,7 +240,7 @@ fn tie_kmx(l: vec4<f32>, inst: u32, kmx: vec2<f32>) -> vec2<f32> {
 
 // Terrain fragments: the draw's first-instance word carries K (raw signed 12 bits, 1/16 mip) and the top mip level.
 @vertex fn vs_tfrag(@location(0) p: vec3<f32>, @location(1) uv: vec2<f32>, @location(2) n: vec3<f32>, @location(3) c: vec4<f32>, @location(4) l: vec4<f32>, @builtin(instance_index) inst: u32) -> VOut {
-	var o = vs_main(p, uv, n, c, l);
+	var o = vs_main(p, uv, n, c, l); o.sn = l.xyz; // [PC] fire light: the retail per-position terrain normal (scene_ctx.rs `push_mesh_vertices`, `tfrag_rgb`; zero for every other vertex)
 	o.metal = (inst >> 16u) & 15u;
 	var k = i32(inst & 0xfffu);
 	if (k >= 2048) { k = k - 4096; }
@@ -362,7 +367,7 @@ fn vs_main(p: vec3<f32>, uv: vec2<f32>, n: vec3<f32>, c: vec4<f32>, l: vec4<f32>
 	return o;
 }
 
-"#, include_str!("viewer/sunrecv.wgsl"), include_str!("viewer/skyvis.wgsl"), include_str!("viewer/metalfx.wgsl"), r#"
+"#, include_str!("viewer/sunrecv.wgsl"), include_str!("viewer/skyvis.wgsl"), include_str!("viewer/metalfx.wgsl"), include_str!("viewer/flit.wgsl"), include_str!("viewer/flitshadow.wgsl"), r#"
 // One light slot: colour * max(q, q * wrap) for both of its directions (prog11).
 fn slot(k: u32, n: vec3<f32>) -> vec3<f32> {
 	let l = u.lights[k];
@@ -488,10 +493,10 @@ fn ice_look(i: VOut, rgb: vec3<f32>) -> vec3<f32> {
 		var f = clamp(u.fog.z + (d - u.fog.x) * (u.fog.w - u.fog.z) / max(u.fog.y - u.fog.x, 0.001), min(u.fog.z, u.fog.w), 255.0) / 255.0;
 		if (i.fogf >= 0.0) { f = i.fogf / 255.0; }
 		let shade = sun_baked(min(i.c.rgb, vec3<f32>(255.0 / 128.0)), i.w);
-		if (u.keep_tail.y <= 0.0 || i.metal == 0u) { return vec4<f32>(mix(u.fog_colour.rgb, ice_look(i, c.rgb * shade), f), 1.0); }
-		return vec4<f32>(mix(u.fog_colour.rgb, ice_look(i, metal_look(i, c.rgb * shade)), f), 1.0);
+		if (u.keep_tail.y <= 0.0 || i.metal == 0u) { return vec4<f32>(mix(u.fog_colour.rgb, ice_look(i, flit_add(c.rgb * shade, c.rgb, i.w, i.n)), f), 1.0); }
+		return vec4<f32>(mix(u.fog_colour.rgb, ice_look(i, metal_look(i, flit_add(c.rgb * shade, c.rgb, i.w, i.n))), f), 1.0);
 	}
-	var rgb = c.rgb * i.c.rgb * sun_lit(i);
+	var rgb = flit_add_obj(c.rgb * i.c.rgb * sun_lit(i), c.rgb * i.c.rgb, i.w, i.n);
 	if (u.keep_tail.y > 0.0 && i.metal != 0u) { rgb = metal_look(i, rgb); }
 	// GS fog: coefficient linear in distance, 255 = unfogged (FUN_001f7900).
 	let d = distance(i.w, u.eye.xyz);
@@ -516,8 +521,8 @@ fn shrub_rgb(i: VOut, c: vec4<f32>) -> vec3<f32> {
 	var f = clamp(u.fog.z + (d - u.fog.x) * (u.fog.w - u.fog.z) / max(u.fog.y - u.fog.x, 0.001), min(u.fog.z, u.fog.w), 255.0) / 255.0;
 	if (i.fogf >= 0.0) { f = i.fogf / 255.0; }
 	let shade = sun_baked(min(i.c.rgb, vec3<f32>(255.0 / 128.0)), i.w);
-	if (u.keep_tail.y <= 0.0 || i.metal == 0u) { return mix(u.fog_colour.rgb, ice_look(i, c.rgb * shade), f); }
-	return mix(u.fog_colour.rgb, ice_look(i, metal_look(i, c.rgb * shade)), f);
+	if (u.keep_tail.y <= 0.0 || i.metal == 0u) { return mix(u.fog_colour.rgb, ice_look(i, flit_add(c.rgb * shade, c.rgb, i.w, i.n)), f); }
+	return mix(u.fog_colour.rgb, ice_look(i, metal_look(i, flit_add(c.rgb * shade, c.rgb, i.w, i.n))), f);
 }
 
 // Billboard texel: the GS picks the mip from LOD = log2(32 vz) + K (Q = 1 / (32 vz)); K and the top level ride in the vertex normal.
@@ -540,8 +545,8 @@ fn tfrag_rgb(i: VOut, c: vec4<f32>) -> vec3<f32> {
 	var f = clamp(u.fog.z + (d - u.fog.x) * (u.fog.w - u.fog.z) / max(u.fog.y - u.fog.x, 0.001), min(u.fog.z, u.fog.w), 255.0) / 255.0;
 	if (i.fogf >= 0.0) { f = i.fogf / 255.0; }
 	let shade = sun_baked(min(i.c.rgb, vec3<f32>(255.0 / 128.0)), i.w);
-	if (u.keep_tail.y <= 0.0 || i.metal == 0u) { return mix(u.fog_colour.rgb, c.rgb * shade, f); }
-	return mix(u.fog_colour.rgb, metal_look(i, c.rgb * shade), f);
+	if (u.keep_tail.y <= 0.0 || i.metal == 0u) { return mix(u.fog_colour.rgb, flit_add(c.rgb * shade, c.rgb, i.w, select(i.n, i.sn, dot(i.sn, i.sn) > 0.25)), f); }
+	return mix(u.fog_colour.rgb, metal_look(i, flit_add(c.rgb * shade, c.rgb, i.w, select(i.n, i.sn, dot(i.sn, i.sn) > 0.25))), f);
 }
 
 @fragment fn fs_tfrag(i: VOut) -> @location(0) vec4<f32> {
@@ -571,8 +576,8 @@ fn tie_rgb(i: VOut, c: vec4<f32>) -> vec3<f32> {
 	if (i.fogf >= 0.0) { f = i.fogf / 255.0; }
 	// [PC] Lighting Enhanced: the sun shadow / AO term of the other baked paths (`sun_baked`; identity in Classic).
 	let shade = sun_baked(min(i.c.rgb, vec3<f32>(255.0 / 128.0)), i.w);
-	if (u.keep_tail.y <= 0.0 || i.metal == 0u) { return mix(u.fog_colour.rgb, ice_look(i, c.rgb * shade), f); }
-	return mix(u.fog_colour.rgb, ice_look(i, metal_look(i, c.rgb * shade)), f);
+	if (u.keep_tail.y <= 0.0 || i.metal == 0u) { return mix(u.fog_colour.rgb, ice_look(i, flit_add(c.rgb * shade, c.rgb, i.w, i.n)), f); }
+	return mix(u.fog_colour.rgb, ice_look(i, metal_look(i, flit_add(c.rgb * shade, c.rgb, i.w, i.n))), f);
 }
 
 @fragment fn fs_tie(i: VOut) -> @location(0) vec4<f32> {
@@ -657,17 +662,25 @@ fn moby_a(i: VOut, c: vec4<f32>) -> f32 {
 	return floor(floor(c.a * 128.0 + 0.5) * moby_alpha(i) / 128.0) / 128.0;
 }
 
-fn moby_rgb(i: VOut, c: vec4<f32>) -> vec3<f32> {
+// The moby colour with (`lit_by_fire` true: fs_moby_a/_b) or without the fire / weapon light of flit.wgsl. The additive moby pass
+// (gpu/moby_add.rs) and the mesh-flame heat (gpu/moby_fire.rs) take the plain one: retail adds no light there.
+fn moby_shade(i: VOut, c: vec4<f32>, lit_by_fire: bool) -> vec3<f32> {
 	var rgb = c.rgb * i.c.rgb * sun_lit(i);
+	if (lit_by_fire) { rgb = flit_add_obj(rgb, c.rgb * i.c.rgb, i.w, i.n); }
 	if (i.c.a < -1.5) {
 		// Tinted tail packet: constant unlit colour, same alpha as the lit packets.
 		rgb = c.rgb * sun_baked(min(i.c.rgb, vec3<f32>(255.0 / 128.0)), i.w); // [PC] Enhanced sun shadow, as the opaque tail texels of `fs`
+		if (lit_by_fire) { rgb = flit_add_obj(rgb, c.rgb, i.w, i.n); }
 	}
 	if (u.keep_tail.y > 0.0 && i.metal != 0u) { rgb = metal_look(i, rgb); }
 	let d = distance(i.w, u.eye.xyz);
 	let f = clamp(u.fog.z + (d - u.fog.x) * (u.fog.w - u.fog.z) / max(u.fog.y - u.fog.x, 0.001), min(u.fog.z, u.fog.w), 255.0) / 255.0;
 	return mix(u.fog_colour.rgb, rgb, f);
 }
+
+fn moby_rgb(i: VOut, c: vec4<f32>) -> vec3<f32> { return moby_shade(i, c, true); }
+
+fn moby_lit_rgb(i: VOut, c: vec4<f32>) -> vec3<f32> { return moby_shade(i, c, false); }
 
 @fragment fn fs_moby_a(i: VOut) -> @location(0) vec4<f32> {
 	let ta = floor(moby_texel(i).a * 128.0 + 0.5);
@@ -810,7 +823,7 @@ fn fx_smoke(p: vec3<f32>) -> vec3<f32> {
 	let c = textureSample(tex, samp, i.uv) * i.c;
 	let d = distance(i.w, u.eye.xyz);
 	let f = clamp(255.0 + d * (0.0 - 255.0) / 253.98438, 0.0, 255.0) / 255.0;
-	return vec4<f32>(mix(vec3<f32>(15.0, 15.0, 25.0) / 255.0, c.rgb, f), 1.0);
+	return vec4<f32>(mix(vec3<f32>(15.0, 15.0, 25.0) / 255.0, flit_add(c.rgb, c.rgb, i.w, vec3<f32>(0.0)), f), 1.0);
 }
 
 // KER-30: the Kerwan ocean (0x290b48, decomp/notes/kerwan_environment.md): as fs_ocean with its fog words near 10000,
@@ -819,7 +832,7 @@ fn fx_smoke(p: vec3<f32>) -> vec3<f32> {
 	let c = textureSample(tex, samp, i.uv) * i.c;
 	let d = distance(i.w, u.eye.xyz);
 	let f = clamp(255.0 + (d - 9.765625) * (0.0 - 255.0) / 244.21875, 0.0, 255.0) / 255.0;
-	return vec4<f32>(mix(vec3<f32>(96.0, 96.0, 96.0) / 255.0, c.rgb, f), 1.0);
+	return vec4<f32>(mix(vec3<f32>(96.0, 96.0, 96.0) / 255.0, flit_add(c.rgb, c.rgb, i.w, vec3<f32>(0.0)), f), 1.0);
 }
 
 // Retail-mode oceans of Rilgar, Umbris and Gaspar (retail/oldsim.rs `RamOcean`): as fs_ocean with the fog the
@@ -842,7 +855,7 @@ fn fx_smoke(p: vec3<f32>) -> vec3<f32> {
 		col = u.fog_colour.rgb;
 	}
 	let f = clamp(f0 + (d - near) * (f1 - f0) / max(far - near, 0.001), min(f0, f1), 255.0) / 255.0;
-	return vec4<f32>(mix(col, c.rgb, f), 1.0);
+	return vec4<f32>(mix(col, flit_add(c.rgb, c.rgb, i.w, vec3<f32>(0.0)), f), 1.0);
 }
 
 // Retail-mode oceans built from RAM (Batalia, Oltanis): the fs_ocean_k fog words (identical in every ocean descriptor,
@@ -851,7 +864,7 @@ fn fx_smoke(p: vec3<f32>) -> vec3<f32> {
 	let c = textureSample(tex, samp, i.uv) * i.c;
 	let d = distance(i.w, u.eye.xyz);
 	let f = clamp(255.0 + (d - 9.765625) * (0.0 - 255.0) / 244.21875, 0.0, 255.0) / 255.0;
-	return vec4<f32>(mix(i.l.rgb, c.rgb, f), 1.0);
+	return vec4<f32>(mix(i.l.rgb, flit_add(c.rgb, c.rgb, i.w, vec3<f32>(0.0)), f), 1.0);
 }
 
 // Water: the particle colour with the scene fog (GS fog before the alpha blend, same coefficient as the world).
@@ -1163,10 +1176,10 @@ thread_local! {
 
 
 pub struct Gpu {
-	/// [PC] Presents on a worker thread (presenter.rs); flush() before the surface is reconfigured. Before `surface`: fields drop in order, so the thread is joined before the surface goes (else a window close destroyed it under the thread's SurfaceTexture: wgpu panic, exit 101).
+	/// [PC] Presents on a worker thread (presenter.rs); flush() before the surface is reconfigured. Before `screen`: fields drop in order, so the thread is joined before the surface goes (else a window close destroyed it under the thread's SurfaceTexture: wgpu panic, exit 101).
 	presenter: presenter::Presenter,
 	pub window: Arc<Window>,
-	surface: wgpu::Surface<'static>,
+	screen: fgen::present::Screen, // [PC] the window's present: wgpu's surface or our own swapchain (fgen/present.rs)
 	pub device: wgpu::Device,
 	/// [PC] Gated on the deferred submit of the previous frame (presenter.rs `GatedQueue`): every use waits for it.
 	pub queue: presenter::GatedQueue,
@@ -1252,6 +1265,8 @@ pub struct Gpu {
 	pub retail_hd: Option<(wgpu::Texture, wgpu::BindGroup, u32, u32)>,
 	/// The menu art picture (width, rows; `MENU_ART_TEX`, `set_menu_art`); None: no modern page lays one over the world.
 	pub menu_art: Option<(wgpu::Texture, wgpu::BindGroup, u32, u32)>,
+	/// The animation of the menu art (gpu/menu_art_anim.rs; `MENU_ART_ANIM_TEX`), off by default.
+	menu_art_anim: gpu::menu_art_anim::MenuArtAnim,
 	/// The overlay's effect depth (gpu/ov_depth.rs; R&C2), made at its first use.
 	ov_depth: Option<gpu::ov_depth::OvDepth>,
 	ubuf: wgpu::Buffer,

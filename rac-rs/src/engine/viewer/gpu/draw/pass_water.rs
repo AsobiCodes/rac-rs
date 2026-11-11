@@ -19,10 +19,8 @@ impl Gpu {
 					idx.extend((0..s.pos.len() as u32 - 2).flat_map(|t| [base + t, base + t + 1, base + t + 2]));
 				}
 				if !idx.is_empty() {
-					let vb = buffer(&self.device, "ocean vertices", bytemuck::cast_slice(&verts), wgpu::BufferUsages::VERTEX);
-					let ib = buffer(&self.device, "ocean indices", bytemuck::cast_slice(&idx), wgpu::BufferUsages::INDEX);
-					self.queue.write_buffer(&vb, 0, bytemuck::cast_slice(&verts));
-					self.queue.write_buffer(&ib, 0, bytemuck::cast_slice(&idx));
+					let vb = crate::viewer::framebuf::upload(&self.device, &self.queue, "ocean vertices", bytemuck::cast_slice(&verts), wgpu::BufferUsages::VERTEX);
+					let ib = crate::viewer::framebuf::upload(&self.device, &self.queue, "ocean indices", bytemuck::cast_slice(&idx), wgpu::BufferUsages::INDEX);
 					// KER-30: every strip carries the ocean's FIX; below 0x80 the blended pair with constant FIX / 128.
 					let fix = self.ocean_draws[0].fix;
 					let blended = fix < 0x80;
@@ -62,10 +60,8 @@ impl Gpu {
 					}
 					pass.set_bind_group(1, &b.bind, &[]);
 					if !b.idx.is_empty() {
-						let vb = buffer(&self.device, "ocean ram vertices", bytemuck::cast_slice(&b.verts), wgpu::BufferUsages::VERTEX);
-						let ib = buffer(&self.device, "ocean ram indices", bytemuck::cast_slice(&b.idx), wgpu::BufferUsages::INDEX);
-						self.queue.write_buffer(&vb, 0, bytemuck::cast_slice(&b.verts));
-						self.queue.write_buffer(&ib, 0, bytemuck::cast_slice(&b.idx));
+						let vb = crate::viewer::framebuf::upload(&self.device, &self.queue, "ocean ram vertices", bytemuck::cast_slice(&b.verts), wgpu::BufferUsages::VERTEX);
+						let ib = crate::viewer::framebuf::upload(&self.device, &self.queue, "ocean ram indices", bytemuck::cast_slice(&b.idx), wgpu::BufferUsages::INDEX);
 						pass.set_pipeline(&self.ocean_g_pipeline[blended as usize]);
 						pass.set_vertex_buffer(0, vb.slice(..));
 						pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
@@ -75,10 +71,8 @@ impl Gpu {
 						}
 					}
 					if !b.pidx.is_empty() {
-						let pvb = buffer(&self.device, "ocean ram patch vertices", bytemuck::cast_slice(&b.pverts), wgpu::BufferUsages::VERTEX);
-						let pib = buffer(&self.device, "ocean ram patch indices", bytemuck::cast_slice(&b.pidx), wgpu::BufferUsages::INDEX);
-						self.queue.write_buffer(&pvb, 0, bytemuck::cast_slice(&b.pverts));
-						self.queue.write_buffer(&pib, 0, bytemuck::cast_slice(&b.pidx));
+						let pvb = crate::viewer::framebuf::upload(&self.device, &self.queue, "ocean ram patch vertices", bytemuck::cast_slice(&b.pverts), wgpu::BufferUsages::VERTEX);
+						let pib = crate::viewer::framebuf::upload(&self.device, &self.queue, "ocean ram patch indices", bytemuck::cast_slice(&b.pidx), wgpu::BufferUsages::INDEX);
 						pass.set_pipeline(&self.ocean_g_pipeline[2 + blended as usize]);
 						pass.set_vertex_buffer(0, pvb.slice(..));
 						pass.set_index_buffer(pib.slice(..), wgpu::IndexFormat::Uint32);
@@ -135,11 +129,9 @@ impl Gpu {
 					}
 				}
 				if !verts.is_empty() {
-					let idx: Vec<u32> = (0..verts.len() as u32 / 4).flat_map(|q| [q * 4, q * 4 + 1, q * 4 + 2, q * 4, q * 4 + 2, q * 4 + 3]).collect();
-					let vb = buffer(&self.device, "fx quad vertices", bytemuck::cast_slice(&verts), wgpu::BufferUsages::VERTEX);
-					self.queue.write_buffer(&vb, 0, bytemuck::cast_slice(&verts));
-					let ib = buffer(&self.device, "fx quad indices", bytemuck::cast_slice(&idx), wgpu::BufferUsages::INDEX);
-					self.queue.write_buffer(&ib, 0, bytemuck::cast_slice(&idx));
+					let nq = verts.len() as u32 / 4; // [PC] lane rcpu: the shared quad index list (framebuf.rs)
+					let vb = crate::viewer::framebuf::upload(&self.device, &self.queue, "fx quad vertices", bytemuck::cast_slice(&verts), wgpu::BufferUsages::VERTEX);
+					let ib = crate::viewer::framebuf::quad_indices(&self.device, &self.queue, "fx quad indices", nq);
 					pass.set_vertex_buffer(0, vb.slice(..));
 					pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
 					for (tex, additive, start, count) in runs {
@@ -149,37 +141,31 @@ impl Gpu {
 					}
 					// The fogged run is the water quads (Novalis class 751, Drek fleet water).
 					if fogged && water_on {
-						wrec.push(super::waterfx::WaterDraw::new(vb, ib, idx.len() as u32, verts.iter().map(|v| v.pos)).kind("fogged quads"));
+						wrec.push(super::waterfx::WaterDraw::new(vb, ib, nq * 6, verts.iter().map(|v| v.pos)).kind("fogged quads"));
 					}
 				}
 				if !sea.is_empty() {
 					sea_shading_mesh(&mut sea, &sea_t, sea_tex[0], cam.pos);
-					let idx: Vec<u32> = (0..sea.len() as u32 / 4).flat_map(|q| [q * 4, q * 4 + 1, q * 4 + 2, q * 4, q * 4 + 2, q * 4 + 3]).collect();
-					let vb = buffer(&self.device, "sea quad vertices", bytemuck::cast_slice(&sea), wgpu::BufferUsages::VERTEX);
-					self.queue.write_buffer(&vb, 0, bytemuck::cast_slice(&sea));
-					let ib = buffer(&self.device, "sea quad indices", bytemuck::cast_slice(&idx), wgpu::BufferUsages::INDEX);
-					self.queue.write_buffer(&ib, 0, bytemuck::cast_slice(&idx));
-					wrec.push(super::waterfx::WaterDraw::new(vb, ib, idx.len() as u32, sea.iter().map(|v| v.pos)).kind("sea fx quads"));
+					let nq = sea.len() as u32 / 4;
+					let vb = crate::viewer::framebuf::upload(&self.device, &self.queue, "sea quad vertices", bytemuck::cast_slice(&sea), wgpu::BufferUsages::VERTEX);
+					let ib = crate::viewer::framebuf::quad_indices(&self.device, &self.queue, "sea quad indices", nq);
+					wrec.push(super::waterfx::WaterDraw::new(vb, ib, nq * 6, sea.iter().map(|v| v.pos)).kind("sea fx quads"));
 				}
 				if !pond.is_empty() {
-					let idx: Vec<u32> = (0..pond.len() as u32 / 4).flat_map(|q| [q * 4, q * 4 + 1, q * 4 + 2, q * 4, q * 4 + 2, q * 4 + 3]).collect();
-					let vb = buffer(&self.device, "pond quad vertices", bytemuck::cast_slice(&pond), wgpu::BufferUsages::VERTEX);
-					self.queue.write_buffer(&vb, 0, bytemuck::cast_slice(&pond));
-					let ib = buffer(&self.device, "pond quad indices", bytemuck::cast_slice(&idx), wgpu::BufferUsages::INDEX);
-					self.queue.write_buffer(&ib, 0, bytemuck::cast_slice(&idx));
-					let d = super::waterfx::WaterDraw::new(vb, ib, idx.len() as u32, pond.iter().map(|v| v.pos)).kind("pond fx quads");
+					let nq = pond.len() as u32 / 4;
+					let vb = crate::viewer::framebuf::upload(&self.device, &self.queue, "pond quad vertices", bytemuck::cast_slice(&pond), wgpu::BufferUsages::VERTEX);
+					let ib = crate::viewer::framebuf::quad_indices(&self.device, &self.queue, "pond quad indices", nq);
+					let d = super::waterfx::WaterDraw::new(vb, ib, nq * 6, pond.iter().map(|v| v.pos)).kind("pond fx quads");
 					wrec.push(d.opaque());
 				}
 				for (slot, group) in river_groups.iter().filter(|_| !fogged && !warp) {
 					{
 						let q = |i: usize| &self.fx_quads[river[i]];
 						let v: Vec<Vertex> = group.iter().flat_map(|&i| (0..4).map(move |k| (i, k))).map(|(i, k)| Vertex { pos: q(i).pos[k], uv: q(i).uv[k], normal: [0.0; 3], colour: q(i).colour[k], light: [0.0; 4] }).collect();
-						let idx: Vec<u32> = (0..v.len() as u32 / 4).flat_map(|q| [q * 4, q * 4 + 1, q * 4 + 2, q * 4, q * 4 + 2, q * 4 + 3]).collect();
-						let vb = buffer(&self.device, "river quad vertices", bytemuck::cast_slice(&v), wgpu::BufferUsages::VERTEX);
-						self.queue.write_buffer(&vb, 0, bytemuck::cast_slice(&v));
-						let ib = buffer(&self.device, "river quad indices", bytemuck::cast_slice(&idx), wgpu::BufferUsages::INDEX);
-						self.queue.write_buffer(&ib, 0, bytemuck::cast_slice(&idx));
-						wrec.push(super::waterfx::WaterDraw::new(vb, ib, idx.len() as u32, v.iter().map(|v| v.pos)).kind("river fx quads").flowing(*slot));
+						let nq = v.len() as u32 / 4;
+						let vb = crate::viewer::framebuf::upload(&self.device, &self.queue, "river quad vertices", bytemuck::cast_slice(&v), wgpu::BufferUsages::VERTEX);
+						let ib = crate::viewer::framebuf::quad_indices(&self.device, &self.queue, "river quad indices", nq);
+						wrec.push(super::waterfx::WaterDraw::new(vb, ib, nq * 6, v.iter().map(|v| v.pos)).kind("river fx quads").flowing(*slot));
 					}
 				}
 			}

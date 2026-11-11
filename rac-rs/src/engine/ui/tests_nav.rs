@@ -106,7 +106,7 @@ const P_DOWN_SAMPLE: PadSample = PadSample { buttons: P_DOWN, ..PadSample::IDLE 
 #[test]
 fn mouse_hit_test_rows_tabs_chevrons_switch_slider_chips() {
 	let mut ui = new_ui();
-	// items with Lighting Classic: 0 banner, 1 section, 2 preset, 3 lighting, 4 shadows, 5 bloom, 6 section, 7 fov
+	// items with Lighting Classic: 0 banner, 1 section, 2 preset, 3 lighting, 4 section, 5 fov (shadows and bloom are hidden)
 	let tab1 = ui.frame().0.head.tabs[1].rect;
 	click_rect(&mut ui, tab1);
 	assert_eq!((ui.model.tab, ui.model.focus), (1, 5), "a tab click opens the tab");
@@ -121,9 +121,9 @@ fn mouse_hit_test_rows_tabs_chevrons_switch_slider_chips() {
 	let ItemBox::Row { label_hit, .. } = item(&ui, 5) else { panic!("row") };
 	ui.mouse(MouseEvent::Move { x: label_hit.cx(), y: label_hit.cy() }, 0);
 	ui.tick(0); // the hover is applied once per display frame
-	assert_eq!(ui.model.focus, 3, "bloom");
+	assert_eq!(ui.model.focus, 4, "fov");
 	click_rect(&mut ui, label_hit);
-	assert_eq!(ui.model.value(3), 1, "a click on the label does not change the value");
+	assert_eq!(ui.model.value(4), 90, "a click on the label does not change the value");
 	// chevrons of the Lighting choice
 	let ItemBox::Row { ctrl: CtrlBox::Choice { next, .. }, .. } = item(&ui, 3) else { panic!("choice") };
 	click_rect(&mut ui, next);
@@ -132,12 +132,13 @@ fn mouse_hit_test_rows_tabs_chevrons_switch_slider_chips() {
 	let ItemBox::Row { ctrl: CtrlBox::Choice { prev, .. }, .. } = item(&ui, 2) else { panic!("choice") };
 	click_rect(&mut ui, prev);
 	assert_eq!(ui.model.value(1), 0);
-	// the switch of Bloom (item 5 again)
-	let ItemBox::Row { ctrl: CtrlBox::Toggle { switch, .. }, .. } = item(&ui, 5) else { panic!("toggle") };
+	// the switch of Bloom: shown again with Lighting Enhanced (no banner: item 4)
+	ui.model.set_value(1, 1);
+	let ItemBox::Row { ctrl: CtrlBox::Toggle { switch, .. }, .. } = item(&ui, 4) else { panic!("toggle") };
 	click_rect(&mut ui, switch);
 	assert_eq!((ui.model.value(3), ui.model.focus), (0, 3));
-	// chips of the Preset row: High applies, the disabled Custom chip does nothing
-	let ItemBox::Row { ctrl: CtrlBox::Chips(chips), .. } = item(&ui, 2) else { panic!("chips") };
+	// chips of the Preset row (item 1, no banner): High applies, the disabled Custom chip does nothing
+	let ItemBox::Row { ctrl: CtrlBox::Chips(chips), .. } = item(&ui, 1) else { panic!("chips") };
 	assert_eq!(chips.len(), 4);
 	click_rect(&mut ui, chips[3]);
 	assert_eq!(ui.model.preset_index(), None);
@@ -148,7 +149,7 @@ fn mouse_hit_test_rows_tabs_chevrons_switch_slider_chips() {
 	let ItemBox::Banner { button, .. } = item(&ui, 0) else { panic!("banner") };
 	click_rect(&mut ui, button);
 	assert_eq!(ui.model.value(1), 1);
-	// the box button of the detail panel
+	// the box button of the detail panel (a focus written straight onto a hidden row: the fallback box)
 	ui.model.set_value(1, 0);
 	ui.model.focus_to(2);
 	let b = ui.frame().0.detail.unwrap().boxed.unwrap().button;

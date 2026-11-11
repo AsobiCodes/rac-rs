@@ -86,7 +86,8 @@ pub fn pre_field(m: &mut ee_oracle::Machine, fin: &crate::retail::FieldIn) {
 		return;
 	}
 	let (lr, ud) = (if m.rd8(OPT_LR) == 0 { -1.0 } else { 1.0 }, if m.rd8(OPT_UD) == 0 { -1.0 } else { 1.0 });
-	let g = crate::retail::modcam_turn::Gains { mouse: MOUSE, sens: sens(), mouse_k: crate::retail::pcext::mousespeed_scale(), rot: 0.0, tilt: 0.0, stick_k: 0.0, lr, ud };
+	let (mouse_lr, mouse_ud) = crate::retail::pcmouseinv::signs(lr, ud);
+	let g = crate::retail::modcam_turn::Gains { mouse: MOUSE, sens: sens(), mouse_k: crate::retail::pcext::mousespeed_scale(), rot: 0.0, tilt: 0.0, stick_k: 0.0, lr, ud, mouse_lr, mouse_ud };
 	let (dyaw, dpitch) = crate::retail::modcam_turn::turn(look, [0.0; 2], &g);
 	// Retail's own gate of the stick pitch (FUN_002e8590): a camera switch blend running and the previous hero state 2.
 	let dpitch = if m.rd32(lv.blend()) != 0 && m.rd32(HERO_PREV_STATE) == 2 { 0.0 } else { dpitch };

@@ -146,5 +146,6 @@ pub fn build(f: &Facts, a: &AchFacts) -> Built {
 		grid: None,
 		ach: Some(AchBuilt { n, first, focus, page: shown, banner, cards }),
 		map_tab: tab_list.len().saturating_sub(1),
+		keys: None,
 	}
 }

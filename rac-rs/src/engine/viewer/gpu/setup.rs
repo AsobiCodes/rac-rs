@@ -5,7 +5,7 @@ use super::*;
 impl Gpu {
 	pub fn new(window: Arc<Window>) -> Gpu {
 		// [PC] The graphics API: the Renderer row's `renderer=` in the options file, WGPU_BACKEND overrides (renderer.rs).
-		let (_instance, surface, adapter) = super::renderer::open(&window);
+		let (instance, surface, adapter) = super::renderer::open(&window);
 		super::tiegpu::note_adapter(&adapter);
 		// [PC] perf round 3 (bindless.rs): texture binding arrays for the tie / shrub draws when the adapter has them.
 		let bindless = super::bindless::wanted(&adapter);
@@ -14,41 +14,36 @@ impl Gpu {
 		// adapter has it, else the core Depth24PlusStencil8).
 		let stencil32 = adapter.features().contains(wgpu::Features::DEPTH32FLOAT_STENCIL8);
 		let depth_format = if stencil32 { wgpu::TextureFormat::Depth32FloatStencil8 } else { wgpu::TextureFormat::Depth24PlusStencil8 };
-		let stencil_feature = if stencil32 { wgpu::Features::DEPTH32FLOAT_STENCIL8 } else { wgpu::Features::empty() } | crate::texpack::gpu_features(&adapter) | (crate::pack::get().capture_features)(&adapter) | crate::viewer::volfog::gpu_features(&adapter) | super::passtime::features(&adapter); // [PC] texture packs: BC formats when the adapter has them; GS capture (shares this device on Vulkan): pipeline cache
+		let stencil_feature = if stencil32 { wgpu::Features::DEPTH32FLOAT_STENCIL8 } else { wgpu::Features::empty() } | crate::texpack::gpu_features(&adapter) | (crate::pack::get().capture_features)(&adapter) | crate::viewer::volfog::gpu_features(&adapter) | super::passtime::features(&adapter) | super::flitquad::features(&adapter); // [PC] texture packs: BC formats when the adapter has them; GS capture (shares this device on Vulkan): pipeline cache
 		// [PC] perf (lane D5b, tiegpu.rs): the tie vertex buffer (64 B x ~3M vertices) is bound as one storage buffer, which needs more than
 		// the 128 MiB default binding size where the adapter offers it (else the path stays off).
 		let storage_bind = adapter.limits().max_storage_buffer_binding_size.min(512 << 20).max(wgpu::Limits::default().max_storage_buffer_binding_size);
-		let desc = match bindless {
-			true => wgpu::DeviceDescriptor {
-				required_features: super::bindless::features() | stencil_feature | if multi { wgpu::Features::INDIRECT_FIRST_INSTANCE } else { wgpu::Features::empty() },
-				required_limits: wgpu::Limits { max_binding_array_elements_per_shader_stage: super::bindless::TEX_CAP, max_storage_buffer_binding_size: storage_bind, ..Default::default() },
-				..Default::default()
-			},
-			false => wgpu::DeviceDescriptor { required_features: stencil_feature, required_limits: wgpu::Limits { max_storage_buffer_binding_size: storage_bind, ..Default::default() }, ..Default::default() },
-		};
+		let desc = device_desc(bindless, multi, stencil_feature, storage_bind);
 		let (device, queue) = super::dlss_vk::request_device(&adapter, &desc).expect("device"); // [PC] DLSS: NGX's Vulkan extensions where it runs (dlss_vk.rs)
-		crate::viewer::gpu_errors::install(&device); // [PC] uncaptured wgpu errors: a log line for players (no crash), the panic in test runs; lost device
+		crate::viewer::scene_msaa::device_made(surface.get_capabilities(&adapter).usages, adapter.get_info().backend); // [PC] lane noaa: before the first target / pipeline (the scene sample count's latch)
+		crate::viewer::gpu_errors::install(&device); super::flitquad::device_created(&device); crate::viewer::pipewarm::init(&device, &adapter.get_info()); // [PC] flitquad first: its probe decides the fire modules, part of pipewarm's key // [PC] level pipelines disk cache, after the uncaptured wgpu errors handler (its pool may build at once). The handler: a log line for players (no crash), the panic in test runs; lost device
 		super::gpuhero::device_created(&adapter, &device);  super::passtime::init(&device, &queue); // [PC] RAC_GPU_PASSES (passtime.rs)
 		let size = window.inner_size();
 		let mut config = surface.get_default_config(&adapter, size.width.max(1), size.height.max(1)).expect("surface config");
 		config.usage |= wgpu::TextureUsages::COPY_SRC; // for --shot
+		config.usage |= crate::viewer::scene_msaa::copy_usage() & surface.get_capabilities(&adapter).usages & wgpu::TextureUsages::COPY_DST; // lane noaa: the HUD pass's resolve copy at 1 sample
 		// The GS blends and modulates raw 8-bit values: render in gamma space like it does.
 		config.format = config.format.remove_srgb_suffix();
 		config.present_mode = present_mode(&surface.get_capabilities(&adapter).present_modes, std::env::var("RAC_VSYNC").is_ok_and(|v| v == "1"), std::env::var("RAC_PRESENT").ok().as_deref());
 		// [PC] Swapchain frames in flight: wgpu's 2, 3 on DirectX 12 (renderer.rs); RAC_FRAME_LATENCY (1..3) is the A/B knob.
 		config.desired_maximum_frame_latency = super::renderer::frame_latency(adapter.get_info().backend, std::env::var("RAC_FRAME_LATENCY").ok().and_then(|v| v.parse::<u32>().ok()), config.desired_maximum_frame_latency);
 		configure_surface(&surface, &device, &config);  let win = super::rscale::start_size(&device, &mut config); // [PC] Render scale (rscale.rs): `config` holds the RENDER size from here on, the swapchain above got the window size
-		eprintln!("gpu: {:?} {}, present mode {:?}, frame latency {}", adapter.get_info().backend, adapter.get_info().name, config.present_mode, config.desired_maximum_frame_latency);
+		eprintln!("gpu: {:?} {}, present mode {:?}, frame latency {}", adapter.get_info().backend, adapter.get_info().name, config.present_mode, config.desired_maximum_frame_latency); if crate::diag::on() { crate::diag::note_gpu(&adapter.get_info(), &format!("{:?}", config.present_mode), config.desired_maximum_frame_latency, (size.width, size.height), (config.width, config.height), window.current_monitor()); } // [PC] RAC_DIAG system.txt (args built only while on)
 		// The driver (bug reports: a fault on one driver version only).
 		let ai = adapter.get_info();
 		eprintln!("gpu: driver {} {}, vendor {:#06x} device {:#06x}, {:?}", ai.driver, ai.driver_info, ai.vendor, ai.device, ai.device_type);
 		// The GS capture shares this device when it is Vulkan, else it is on by default on NVIDIA only (gscap draw/gpu_shared.rs).
 		(crate::pack::get().capture_window)(&device, &queue, &ai, &adapter);
 
-		let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-			label: Some("level"),
-			source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("level", super::metalfx::with_override(super::volfog::soft::level_source(SHADER, super::volfog::soft::early(&device))).into())),
-		});
+		// [PC] Lane fshade (flitquad.rs): the plain level module (as before the lane) and the fire module of the fire-shadow sets. DX12 LOD fix (texfilter.rs) once on the source, so both modules get it.
+		let level_src = super::texfilter::frag_w_fix(super::metalfx::with_override(super::volfog::soft::level_source(SHADER, super::volfog::soft::early(&device))));
+		let level_mods = super::flitquad::Modules::new(&device, "level", level_src.clone());
+		let shader = level_mods.plain.clone(); // review W7 item 8: single-set pipelines (oceans, partfx, props extras) stay on the plain module by design
 		// [PC] Bindings 1 and 2: the dynamic-shadow cascades and their compare sampler (sunshadow.rs; read only while shadows run); 3 volfog/soft.rs.
 		let ulayout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
 			label: Some("uniforms"),
@@ -65,7 +60,7 @@ impl Gpu {
 					ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Depth, view_dimension: wgpu::TextureViewDimension::D2Array, multisampled: false },
 					count: None,
 				},
-				wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison), count: None }, super::volfog::soft::LAYOUT_ENTRY, super::metalenv::LAYOUT_ENTRIES[0], super::metalenv::LAYOUT_ENTRIES[1], super::metalenv::LAYOUT_ENTRIES[2], super::metalenv::LAYOUT_ENTRIES[3], super::metalenv::LAYOUT_ENTRIES[4], super::metalenv::LAYOUT_ENTRIES[5],
+				wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison), count: None }, super::volfog::soft::LAYOUT_ENTRY, super::metalenv::LAYOUT_ENTRIES[0], super::metalenv::LAYOUT_ENTRIES[1], super::metalenv::LAYOUT_ENTRIES[2], super::metalenv::LAYOUT_ENTRIES[3], super::metalenv::LAYOUT_ENTRIES[4], super::metalenv::LAYOUT_ENTRIES[5], super::sunshadow::omni_mom::LAYOUT_ENTRY,
 			],
 		});
 		let tex_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -95,8 +90,8 @@ impl Gpu {
 			immediate_size: 0,
 		});
 		// [PC] Metal On / Off sets (metalpipe.rs): the level pipelines that can reach the metal look are built per set on first use.
-		let lm = super::metalpipe::LevelMaker { device: device.clone(), layout: layout.clone(), shader: shader.clone(), format: config.format, depth_format };
-		let make_prim = |vs: &str, fs: &str, blend: Option<wgpu::BlendState>, depth_write: bool, compare: wgpu::CompareFunction, primitive: wgpu::PrimitiveState| lm.prim(true, vs, fs, blend, depth_write, compare, primitive);
+		let lm = super::metalpipe::LevelMaker { device: device.clone(), layout: layout.clone(), mods: level_mods.clone(), format: config.format, depth_format };
+		let make_prim = |vs: &str, fs: &str, blend: Option<wgpu::BlendState>, depth_write: bool, compare: wgpu::CompareFunction, primitive: wgpu::PrimitiveState| lm.prim(super::metalpipe::set(true, true) /* no FIRE bit: the plain module (flitquad.rs) */, vs, fs, blend, depth_write, compare, primitive);
 		let make_cull = |vs: &str, fs: &str, blend: Option<wgpu::BlendState>, depth_write: bool, compare: wgpu::CompareFunction, cull: Option<wgpu::Face>| make_prim(vs, fs, blend, depth_write, compare, wgpu::PrimitiveState { cull_mode: cull, ..Default::default() });
 		let make = |vs: &str, fs: &str, blend: Option<wgpu::BlendState>, depth_write: bool, compare: wgpu::CompareFunction| make_cull(vs, fs, blend, depth_write, compare, None);
 		// KER-92: pool draw mode 2, GS PRIM line + IIP, ALPHA_1 0x44 (alpha-over), depth-tested as the particles, no writes.
@@ -175,22 +170,7 @@ impl Gpu {
 			make("vs", "fs_ocean_g", None, true, wgpu::CompareFunction::LessEqual),
 			make("vs", "fs_ocean_g", Some(fix_blend), false, wgpu::CompareFunction::LessEqual),
 		];
-		let bindless = bindless.then(|| {
-			let bl_layout = super::bindless::Bindless::layout(&device);
-			let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("level bindless"), source: wgpu::ShaderSource::Wgsl(crate::devtune::wgsl("level bindless", super::bindless::shader_source(&super::metalfx::with_override(super::volfog::soft::level_source(SHADER, super::volfog::soft::early(&device)))).into())) });
-			let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("level bindless"), bind_group_layouts: &[Some(&ulayout), Some(&bl_layout)], immediate_size: 0 });
-			// The same states as `pipeline`, `pipeline_cull`, `shrub_pipelines[0..2]` and `tie_pipelines`, per Metal set (metalpipe.rs).
-			let bl = super::metalpipe::LevelMaker { device: device.clone(), layout: pl, shader: module, format: config.format, depth_format };
-			let z = crate::gs_state::ztest();
-			super::bindless::Bindless {
-				tie: bl.pipes(super::metalpipe::ties, z),
-				pipeline: bl.pipes(super::metalpipe::opaque, z),
-				pipeline_cull: bl.pipes(super::metalpipe::opaque_cull, z),
-				shrub_faded: bl.pipes(super::metalpipe::shrub_faded, z),
-				layout: bl_layout,
-				indirect: multi.then(|| (device.create_buffer(&wgpu::BufferDescriptor { label: Some("indirect draws"), size: 20 * 1024, usage: wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }), 1024)),
-			}
-		});
+		let bindless = bindless.then(|| super::bindless::Bindless::new(&device, &ulayout, &level_src, (multi, &ai), (config.format, depth_format))); // [PC] lane tpre: moved to bindless.rs (+ the tie pre-pass, tiez.rs)
 		// [PC] perf round 3 (gpuskin.rs): the props batch's pipelines, posed in `vs_props` from the static model, the (slot, vertex)
 		// attribute and the storage records; same fragment states as `pipeline`, `pipeline_cull` and `moby_pipelines`.
 		let props_gpu = (|| {
@@ -202,7 +182,7 @@ impl Gpu {
 			});
 			// [PC] Fire (review R7-9): `PropsGpu` keeps the maker and builds the mesh-flame pipelines (gpu/moby_fire.rs) only when a level
 			// first shows a flame moby with Fire on.
-			let maker = super::moby_fire::PropsMaker { layout: props_layout, shader: shader.clone(), format: config.format, depth_format };
+			let maker = super::moby_fire::PropsMaker { layout: props_layout, mods: level_mods.clone(), format: config.format, depth_format };
 			let make_props = |fs: &str, blend: Option<wgpu::BlendState>, depth_write: bool, compare: wgpu::CompareFunction, cull: Option<wgpu::Face>| {
 				maker.make(&device, fs, blend, depth_write, compare, cull)
 			};
@@ -277,8 +257,8 @@ impl Gpu {
 				],
 			});
 			ItemPanel {
-				msaa: tex("item panel msaa", config.format, MSAA, wgpu::TextureUsages::RENDER_ATTACHMENT).create_view(&Default::default()),
-				depth: tex("item panel depth", depth_format, MSAA, wgpu::TextureUsages::RENDER_ATTACHMENT).create_view(&Default::default()),
+				msaa: tex("item panel msaa", config.format, crate::viewer::scene_msaa::msaa(), wgpu::TextureUsages::RENDER_ATTACHMENT).create_view(&Default::default()),
+				depth: tex("item panel depth", depth_format, crate::viewer::scene_msaa::msaa(), wgpu::TextureUsages::RENDER_ATTACHMENT).create_view(&Default::default()),
 				resolved,
 				bind,
 			}
@@ -291,7 +271,7 @@ impl Gpu {
 		let veg = super::pipe_guard::build(&device, super::pipe_guard::Effect::Veg, || super::vegfx::VegFx::new(&device, &ulayout, &tex_layout, config.format, depth_format));
 		let presenter = super::presenter::Presenter::new(queue.clone(), ai.vendor);
 		let queue = presenter.gated();
-		let mut gpu = Gpu { window, surface, device, queue, presenter, config, pipeline, pipeline_cull, moby_pipelines, moby_cull, shrub_pipelines, clamp_sampler, wrap_samplers, tfrag_pipeline, tfrag_pipeline_lt, tie_pipelines, sky_pipeline, sky_add_pipeline, hud_pipeline, clear_pipeline, pbuf, pbind, preview: None, preview_gold: false, preview_pair: None, preview_worn: None, preview2: None, shop_models: Vec::new(), shop_panel_models: Vec::new(), item_panel, popup_panel, portrait_panel, portrait_shown: false, popup_bolt: None, icon_bolt: None, icon_bolt_sphere: None, popup_bolt_sphere: None, panel_posed: None, metal: MetalDraw::default(), metalenv, props_gpu, bindless, hud_split: None, mods_hidden: false, hud_textures: Vec::new(), nearest, hud: Vec::new(), retail_ov: None, retail_hd: None, menu_art: None, ov_depth: None, ubuf, ubind, tex_layout, sampler, depth, msaa, scene: None, lighting: None, reserved_lights: None, fog_live: None, shrub_cap: shrubs::SHRUB_CAP, part_far: crate::prims::PART_FAR, under_flag: false, under_surf: None, under, points: [[0.0; 4]; 16], table: [None; 8], moby_dyn: Vec::new(), hero_placed: (gameplay::SPAWN_AMBIENT, 0), hero_env: gameplay::placed_env(gameplay::SPAWN_AMBIENT, 0), scene_actor_light: None, marker_v: None, prop_v: None, class_uv: HashMap::new(), marker_ghosts: [None; 5], marker_loose: [None; 3], hero_gens: (0, 0), marker_bomb: None, marker_light: None, part_pipelines, strip_pipeline, pool_pipeline, pool_add_pipeline, part_tex: None, part_verts: BTreeMap::new(), line_pipeline, line_verts: Vec::new(), part_defs: Vec::new(), fx_meshes: HashMap::new(), fx_tex: HashMap::new(), orig_gpu: Default::default(), fx_quads: Vec::new(), water_quads: Vec::new(), strip_draws: Vec::new(), pool_draws: Vec::new(), ocean_pipeline, ocean_tex: None, ocean_draws: Vec::new(), ocean_rgba: Vec::new(), ocean_frame: None, ocean_level_fog: false, ocean_fog: None, ocean_g_pipeline, ocean_ram: Vec::new(), warp_fx: None, movie, hero_tint_out: None, depth_format, shadow, volume_buf: None, volume_counts: (0, 0), marker_tilt: [0.0; 2], marker_fur_off: false, post, volfog, volsmoke, volclouds, waterfx, fur: Default::default(), ach_icons: Default::default(), mirror, bed, partfx, firefx: Default::default(), veg, level: usize::MAX, modern_ok: false, sun, ship_fight: false, hud_place: None, retail_ov_guard: Default::default(), reshade: Default::default(), rscale: Default::default(), upscale: Default::default(), ui_gpu: Default::default() }; gpu.upscale_probe(); /* [PC] upscale.rs: which upscalers run here, before any menu opens */ gpu.rscale_plan(win); gpu.ui_gpu.warm(&gpu.device, gpu.config.format); /* [PC] modern menu pipelines (ui/gpu.rs): built and validated now, so a driver refusal is known before any menu opens */
+		let screen = crate::viewer::fgen::present::Screen::open(instance, window.clone(), surface, &adapter, &device, &queue.raw(), &super::rscale::window_config(&config, (win.0, win.1))); /* [PC] fgen/present.rs: wgpu's surface, or our own swapchain (RAC_FG=null, FSR frame generation) */ let mut gpu = Gpu { window, screen, device, queue, presenter, config, pipeline, pipeline_cull, moby_pipelines, moby_cull, shrub_pipelines, clamp_sampler, wrap_samplers, tfrag_pipeline, tfrag_pipeline_lt, tie_pipelines, sky_pipeline, sky_add_pipeline, hud_pipeline, clear_pipeline, pbuf, pbind, preview: None, preview_gold: false, preview_pair: None, preview_worn: None, preview2: None, shop_models: Vec::new(), shop_panel_models: Vec::new(), item_panel, popup_panel, portrait_panel, portrait_shown: false, popup_bolt: None, icon_bolt: None, icon_bolt_sphere: None, popup_bolt_sphere: None, panel_posed: None, metal: MetalDraw::default(), metalenv, props_gpu, bindless, hud_split: None, mods_hidden: false, hud_textures: Vec::new(), nearest, hud: Vec::new(), retail_ov: None, retail_hd: None, menu_art: None, menu_art_anim: Default::default(), ov_depth: None, ubuf, ubind, tex_layout, sampler, depth, msaa, scene: None, lighting: None, reserved_lights: None, fog_live: None, shrub_cap: shrubs::SHRUB_CAP, part_far: crate::prims::PART_FAR, under_flag: false, under_surf: None, under, points: [[0.0; 4]; 16], table: [None; 8], moby_dyn: Vec::new(), hero_placed: (gameplay::SPAWN_AMBIENT, 0), hero_env: gameplay::placed_env(gameplay::SPAWN_AMBIENT, 0), scene_actor_light: None, marker_v: None, prop_v: None, class_uv: HashMap::new(), marker_ghosts: [None; 5], marker_loose: [None; 3], hero_gens: (0, 0), marker_bomb: None, marker_light: None, part_pipelines, strip_pipeline, pool_pipeline, pool_add_pipeline, part_tex: None, part_verts: BTreeMap::new(), line_pipeline, line_verts: Vec::new(), part_defs: Vec::new(), fx_meshes: HashMap::new(), fx_tex: HashMap::new(), orig_gpu: Default::default(), fx_quads: Vec::new(), water_quads: Vec::new(), strip_draws: Vec::new(), pool_draws: Vec::new(), ocean_pipeline, ocean_tex: None, ocean_draws: Vec::new(), ocean_rgba: Vec::new(), ocean_frame: None, ocean_level_fog: false, ocean_fog: None, ocean_g_pipeline, ocean_ram: Vec::new(), warp_fx: None, movie, hero_tint_out: None, depth_format, shadow, volume_buf: None, volume_counts: (0, 0), marker_tilt: [0.0; 2], marker_fur_off: false, post, volfog, volsmoke, volclouds, waterfx, fur: Default::default(), ach_icons: Default::default(), mirror, bed, partfx, firefx: Default::default(), veg, level: usize::MAX, modern_ok: false, sun, ship_fight: false, hud_place: None, retail_ov_guard: Default::default(), reshade: Default::default(), rscale: Default::default(), upscale: Default::default(), ui_gpu: Default::default() }; gpu.upscale_probe(); /* [PC] upscale.rs: which upscalers run here, before any menu opens */ gpu.rscale_plan(win); gpu.ui_gpu.warm(&gpu.device, gpu.config.format); gpu.warm_menu_art_anim(); /* [PC] menu_art_anim.rs: the animated painting's pipeline, guarded; refused = plain painting */ /* [PC] modern menu pipelines (ui/gpu.rs): built and validated now, so a driver refusal is known before any menu opens */
 		let font = gpu.upload(Some(&overlay::font_texture()), &gpu.nearest);
 		gpu.hud_textures.push(font);
 		// prog2 maps each sprite's full texture (decomp/notes/particles.md "Draw size"); this soft disc is only
@@ -317,6 +297,7 @@ impl Gpu {
 		let (rw, rh) = self.rscale_plan((w, h));
 		self.config.width = rw;
 		self.config.height = rh;
+		crate::diag::note_sizes((w, h), (rw, rh)); // [PC] RAC_DIAG
 		self.reconfigure_surface();
 		self.depth = depth_view(&self.device, rw, rh, self.depth_format);
 		self.msaa = msaa_view(&self.device, self.config.format, rw, rh);
@@ -331,12 +312,26 @@ impl Gpu {
 /// [PC] (Re)creates the swapchain. An uncapped mode is configured over a Fifo swapchain: on Vulkan / NVIDIA (RTX 5070 Ti)
 /// an Immediate swapchain created that way costs ~0.35 ms less CPU in submit + present per frame and has fewer present
 /// stalls (bench medians: present 1.75 -> 1.42 ms, p99 18.8 -> 15.0 ms) than one created directly; harmless elsewhere.
-pub(super) fn configure_surface(surface: &wgpu::Surface, device: &wgpu::Device, config: &wgpu::SurfaceConfiguration) {
+pub(crate) fn configure_surface(surface: &wgpu::Surface, device: &wgpu::Device, config: &wgpu::SurfaceConfiguration) {
+	crate::diag::cause(crate::diag::SWAPCHAIN); // [PC] RAC_DIAG spikes.txt
 	let _no_capture_submit = (crate::pack::get().capture_submit_lock)(); // wgpu fails the configure's wait for idle when another thread submits meanwhile
 	if config.present_mode != wgpu::PresentMode::Fifo {
 		surface.configure(device, &wgpu::SurfaceConfiguration { present_mode: wgpu::PresentMode::Fifo, ..config.clone() });
 	}
 	surface.configure(device, config);
+}
+
+/// The window device's descriptor: bindless texture arrays (+ indirect first instance for `multi`) when wanted, the stencil
+/// and capture features, the storage binding size.
+fn device_desc(bindless: bool, multi: bool, features: wgpu::Features, storage_bind: u64) -> wgpu::DeviceDescriptor<'static> {
+	match bindless {
+		true => wgpu::DeviceDescriptor {
+			required_features: super::bindless::features() | features | if multi { wgpu::Features::INDIRECT_FIRST_INSTANCE } else { wgpu::Features::empty() },
+			required_limits: wgpu::Limits { max_binding_array_elements_per_shader_stage: super::bindless::TEX_CAP, max_storage_buffer_binding_size: storage_bind, ..Default::default() },
+			..Default::default()
+		},
+		false => wgpu::DeviceDescriptor { required_features: features, required_limits: wgpu::Limits { max_storage_buffer_binding_size: storage_bind, ..Default::default() }, ..Default::default() },
+	}
 }
 
 pub(super) fn present_mode(supported: &[wgpu::PresentMode], vsync: bool, named: Option<&str>) -> wgpu::PresentMode {

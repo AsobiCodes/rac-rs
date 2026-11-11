@@ -29,6 +29,7 @@ use super::*;
 mod box_mouse;
 mod cursor_vis;
 mod display;
+mod display_res;
 mod edge_fill;
 mod frame_audio;
 pub(in crate::host) mod fx_skin;
@@ -55,7 +56,9 @@ pub(in crate::host) mod hud_hold;
 pub(in crate::host) mod hud_place;
 mod play_input;
 mod pose_service;
+mod movie_hold;
 mod ship_shadows;
+mod shot_movie;
 mod sun_gate;
 mod sound_loops;
 mod ui_events;
@@ -90,6 +93,10 @@ impl ApplicationHandler for App {
 			return;
 		}
 		let mut attrs = Window::default_attributes().with_title(crate::app_name()).with_inner_size(winit::dpi::LogicalSize::new(1280, 720)).with_visible(!self.headless);
+		// [PC] Resolution (display_res.rs): a saved windowed size is the new window's size (no second resize at the first frame).
+		if let (false, Some(s)) = (test_window(), display_res::start_size(el)) {
+			attrs = attrs.with_inner_size(s);
+		}
 		// Window and taskbar icon: the logo, 64x64 raw RGBA embedded in the exe (assets/icon/rac-rs-64.rgba).
 		if let Ok(icon) = winit::window::Icon::from_rgba(include_bytes!("../../../assets/icon/rac-rs-64.rgba").to_vec(), 64, 64) {
 			attrs = attrs.with_window_icon(Some(icon));
@@ -160,11 +167,12 @@ impl ApplicationHandler for App {
 		}
 	}
 
-	fn window_event(&mut self, el: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+	fn window_event(&mut self, el: &ActiveEventLoop, _: WindowId, mut event: WindowEvent) {
 		if rac_engine::quit::take() { return quit_app(el); } // a menu asked to quit (engine/quit.rs): polled with every event
 		// Button prompts follow the device: a key or mouse button press, the wheel or clear mouse movement make the keyboard the device (retail/prompts.rs).
 		crate::retail::prompts::note_window_event(&event);
 		cursor_vis::window_event(&event, self.grabbed); // The OS cursor shows only while the mouse is the device in use (cursor_vis.rs).
+		if matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. }) { display_res::dirty(); display_res::scale_changed(&mut event); } // [PC] Resolution: maybe another monitor (a DPI change keeps a chosen size)
 		// [PC] Aspect ratio (box_mouse.rs): a box that changed under a still cursor (the row, a resize) first moves the cursor to its
 		// place in the new box (hover, `App::cursor`, the retail aim follow); then the event with its cursor in box pixels.
 		if let Some(moved) = self.box_follow() {
@@ -204,6 +212,16 @@ impl App {
 			}
 			// The pointer, and the retail page menus' aim (retail/mouse_menu.rs) as fractions of the box (box_mouse.rs).
 			WindowEvent::CursorMoved { position, .. } => self.cursor_moved(position.x, position.y),
+			// The Controls page waits for an input: a click or a notch is the answer, not a menu step (play_input.rs).
+			WindowEvent::MouseWheel { delta, .. } if self.kbm_capturing() => {
+				use winit::event::MouseScrollDelta;
+				let y = match delta {
+					MouseScrollDelta::LineDelta(_, y) => y,
+					MouseScrollDelta::PixelDelta(p) => p.y as f32,
+				};
+				self.kbm_capture_wheel(y);
+			}
+			WindowEvent::MouseInput { state: ElementState::Pressed, button: b @ (MouseButton::Left | MouseButton::Right | MouseButton::Middle), .. } if self.kbm_capturing() => self.kbm_capture_click(b),
 			// Retail page menus: the wheel steps the list (retail/mouse_menu.rs).
 			WindowEvent::MouseWheel { delta, .. } if self.retail.as_ref().is_some_and(|r| r.mouse_menu_active()) => {
 				use winit::event::MouseScrollDelta;
@@ -226,8 +244,8 @@ impl App {
 					return;
 				}
 				self.zoom_acc -= lines * 0.75;
-				if self.retail.is_some() && self.grabbed {
-					crate::retail::modcam::ui_zoom(lines);
+				if self.retail.is_some() {
+					self.kbm_wheel(lines); // play_input.rs: the notch is a tap of Wheel up / down and, where bound to a zoom action, the zoom
 				}
 			}
 			// Retail page menus: right click = the screen's back button, left click = select + Cross (the fire button is off).
@@ -243,10 +261,13 @@ impl App {
 				}
 			}
 			// Retail + modern camera, or Camera Classic with Strafe aiming On (retail/modcam.rs): RMB held aims.
-			WindowEvent::MouseInput { state, button: MouseButton::Right, .. } if self.retail.is_some() && crate::retail::modcam::classic::aim_button() && !crate::retail::devtools::free_on() => crate::retail::modcam::ui_aim(state == ElementState::Pressed),
-			WindowEvent::MouseInput { state, button: MouseButton::Right, .. } => self.looking = state == ElementState::Pressed,
+			WindowEvent::MouseInput { state, button: MouseButton::Right, .. } => self.kbm_right(state == ElementState::Pressed), // play_input.rs: aim where bound (modcam::ui_aim), else the orbit look
+			WindowEvent::MouseInput { state, button: b @ (MouseButton::Back | MouseButton::Forward), .. } => self.kbm_side(b == MouseButton::Back, state == ElementState::Pressed),
 			// Play: left / middle click (see `App::play_mouse`); in retail a click shorter than a frame still reaches the game.
-			WindowEvent::MouseInput { state, button: b @ (MouseButton::Left | MouseButton::Middle), .. } => self.play_mouse((b == MouseButton::Middle) as usize, state == ElementState::Pressed, true),
+			WindowEvent::MouseInput { state, button: b @ (MouseButton::Left | MouseButton::Middle), .. } => {
+				self.play_mouse((b == MouseButton::Middle) as usize, state == ElementState::Pressed, true);
+				self.kbm_pc_edge(rac_engine::input::kbm::Input::Mouse(if b == MouseButton::Middle { rac_engine::input::kbm::Mouse::Middle } else { rac_engine::input::kbm::Mouse::Left }), state == ElementState::Pressed);
+			}
 			WindowEvent::KeyboardInput { event, .. } => {
 				let PhysicalKey::Code(k) = event.physical_key else { return };
 				// [PC] DEV ONLY (RAC_DEV_TOOLS=1, retail/devtools.rs): F1 planet list (its keys go nowhere else while it is open),
@@ -263,7 +284,7 @@ impl App {
 					return;
 				}
 				// Held keys are tracked everywhere (the Sound page steps volume while Left/Right is held).
-				self.key_change(k, event.state == ElementState::Pressed, event.repeat);
+				rac_engine::diag::key(k, event.state == ElementState::Pressed, event.repeat); self.key_change(k, event.state == ElementState::Pressed, event.repeat); // [PC] RAC_DIAG: F9 marks the moment (engine/diag.rs)
 				// Retail + modern camera: F7 toggles it (retail/modcam.rs).
 				if k == KeyCode::F7 && event.state == ElementState::Pressed && !event.repeat && self.retail.is_some() && crate::retail::modcam::enabled() {
 					crate::retail::modcam::ui_toggle();

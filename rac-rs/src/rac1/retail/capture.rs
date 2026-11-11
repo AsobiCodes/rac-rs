@@ -127,7 +127,11 @@ pub(super) fn capture_gs(m: &mut ee_oracle::Machine, dir: &str) -> Option<Captur
 /// 0x18 (weapon, ammo) and Gadgets help 0x19. Checked against --gsfull; the other pages draw no model (their pictures are
 /// plain textures the capture already shows).
 pub(super) fn rtt_page(s: &Snap) -> bool {
-	s.menu.as_ref().is_some_and(|m| !m.front && matches!(m.id, 3 | 4 | 5 | 6 | 0x18 | 0x19 | 0x22))
+	// Stage 3 (GitHub #79): EVERY in-game menu page, not only the model pages: the olive frame ring of each box is a VU1 (path 1) mesh
+	// drawn into the main buffer (32x32 ring texture, ~86 triangles a box, found with RAC_GSFULL_QDUMP); only P1 mode draws it.
+	// Also while a page flies in / changes (`flying`, `menu` unreadable then) and during the 12 closing fields (`closing`): the ring stays
+	// on the boxes and the model is not rebuilt at each page change.
+	s.menu.as_ref().or(s.flying.as_ref()).is_some_and(|m| !m.front) || s.closing
 }
 
 /// The capture thread on a given 4 MB VRAM (a cold boot has no GS.bin: empty VRAM, attached from the first field).

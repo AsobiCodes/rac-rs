@@ -292,6 +292,10 @@ impl Gpu {
 		let fog = self.lighting.as_ref().map_or([0.0, 524288.0, 255.0, 0.0], |l| l.fog);
 		let far = self.far_draw();
 		let cull = self.culling();
+		// [PC] mirror_cull.rs: last frame's mirror-only draws cleared (buffer kept); the heights a planar mirror may show a fragment by.
+		let mut mirror_draws = std::mem::take(&mut self.waterfx.mirror_cull.draws);
+		mirror_draws.clear();
+		let mirrors = self.waterfx.mirror_cull.heights(crate::splitview::classic());
 		let Some(scene) = &mut self.scene else { return };
 		if scene.tfrag_set.is_empty() {
 			return;
@@ -318,60 +322,22 @@ impl Gpu {
 				continue;
 			}
 			if tfrag_probe_info(i) {
-				if let Some(v) = &scene.clip_view {
-					let p = v.view(c.centre).map(|x| x * 1024.0);
-					let r = c.radius * 1024.0;
-					let flags: Vec<u8> = c.corners.iter().map(|&k| v.viewport().flags(v.view(k))).collect();
-					let bands: Vec<u8> = c.corners.iter().map(|&k| v.band().flags(v.view(k))).collect();
-					eprintln!(
-						"TFINFO i={i} centre={:?} r={r} view_p={p:?} cap={} near={} occ={} inside={} flags={flags:?} band={bands:?} force_far={} lod_code={:#x} side_out_x={} side_out_y={}",
-						c.centre,
-						terrain::beyond_draw_cap(p[2], r),
-						32.0 - (p[2] + r) >= 0.0,
-						scene.occ.passes(c.occ),
-						v.sphere_wholly_inside(p, r),
-						c.force_far,
-						terrain::lod_code(c.force_far, (p[2] - r) as i32, (p[2] + r) as i32, ints),
-						0.63 * p[2] - (p[0].abs() - r * 1.1819053) < 0.0,
-						0.47628 * p[2] - (p[1].abs() - r * 1.1076293) < 0.0
-					);
-				}
+				tfrag_info(scene, i, c, ints);
 			}
-			let code = match &scene.clip_view {
-				None => 0x14,
-				Some(v) => {
-					let p = v.view(c.centre).map(|x| x * 1024.0);
-					let r = c.radius * 1024.0;
-					// [PC] Draw distance Medium / High (fardraw.rs): the cap moves out to the level's cap.
-					// [PC] Culling Off: no cap (the world far plane still clips).
-					if cull && match far { Some(l) => super::fardraw::tfrag_beyond(l, p[2], r), None => terrain::beyond_draw_cap(p[2], r) } { st[0] += 1; continue; }
-					if 32.0 - (p[2] + r) >= 0.0 { st[1] += 1; continue; }
-					if !scene.occ.passes(c.occ) && (cull || !scene.occ.ever_visible(c.occ)) { st[2] += 1; continue; }
-					let mut near_only = false;
-					if !v.sphere_wholly_inside(p, r) {
-						// [PC] perf (ncull): no flag vectors; the same ANDed / ORed corner flags.
-						let (vp, bd) = (v.viewport(), v.band());
-						if cull && c.corners.iter().fold(0x3f, |a, &k| a & vp.flags(v.view(k))) != 0 {
-							st[3] += 1;
-							continue;
-						}
-						near_only = c.corners.iter().any(|&k| bd.flags(v.view(k)) != 0);
-					}
-					// [PC] Draw distance Medium / High: the full-detail near mesh unmorphed (a forced-far fragment keeps its far mesh).
-					if near_only || (far.is_some() && !c.force_far) {
-						0x14
-					} else {
-						terrain::lod_code(c.force_far, (p[2] - r) as i32, (p[2] + r) as i32, ints)
-					}
-				}
+			let (code, mirror_only) = match &scene.clip_view {
+				None => (0x14, false),
+				Some(v) => match tfrag_verdict(v, c, &scene.occ, (cull, far, ints), mirrors, &mut st) {
+					Some(k) => k,
+					None => continue,
+				},
 			};
 			let lod = match code {
 				6 => 0,
 				8 | 0xa => 1,
 				_ => 2,
 			};
-			draws.extend_from_slice(&scene.tfrag_draws[scene.tfrag_ranges[i][lod].start as usize..scene.tfrag_ranges[i][lod].end as usize]);
-			scene.tfrag_lod[i] = lod as u8;
+			let d = &scene.tfrag_draws[scene.tfrag_ranges[i][lod].start as usize..scene.tfrag_ranges[i][lod].end as usize];
+			if mirror_only { mirror_draws.extend_from_slice(d) } else { draws.extend_from_slice(d); scene.tfrag_lod[i] = lod as u8; }
 			let hit = memo_on && super::tfrag_memo::skip(&scene.tfrag_memo, i, lod, code);
 			if !hit || check {
 				jobs.push((i, code, lod, hit));
@@ -429,6 +395,72 @@ impl Gpu {
 		super::profile::span_add("ctf_n_writes", n_w as f32 * 1e-3);
 		super::profile::span_add("ctf_n_verts", n_v as f32 * 1e-3);
 		scene.tfrags.draws = draws;
+		self.waterfx.mirror_cull.draws = mirror_draws;
+	}
+}
+
+/// REN-CULL-TFRAG, one fragment under the clip view `v`: None = dropped (the reason counted in `st`: cap, near, occlusion,
+/// viewport), else (LOD code, mirror only). `cfg` = (Culling On, the far draw level, the LOD distances).
+/// [PC] mirror_cull.rs: with Culling On a fragment the cap, the occlusion mask or the viewport test drops is kept for the planar
+/// mirrors when one about `mirrors` can show it within the cap (read on the mirrored centre), read with Culling Off's occlusion
+/// rule (a cell that is ever visible) and posed
+/// with the camera-free near mesh 0x14 (what the sun shadow assumes of an undrawn fragment; the pose memo skips it). The near
+/// (behind the camera) test drops it as before, as Culling Off does.
+pub(super) fn tfrag_verdict(v: &crate::viewer::clip::ClipView, c: &terrain::TfragCull, occ: &crate::occlusion::Occlusion, (cull, far, ints): (bool, Option<super::fardraw::Level>, [i32; 3]), mirrors: &[f32], st: &mut [u32; 4]) -> Option<(u8, bool)> {
+	let p = v.view(c.centre).map(|x| x * 1024.0);
+	let r = c.radius * 1024.0;
+	let near = 32.0 - (p[2] + r) >= 0.0;
+	// [PC] Draw distance Medium / High (fardraw.rs): the cap moves out to the level's cap. Culling Off: no cap (the world far plane still clips).
+	let beyond = |pz: f32, r: f32| cull && match far { Some(l) => super::fardraw::tfrag_beyond(l, pz, r), None => terrain::beyond_draw_cap(pz, r) };
+	let reason = if beyond(p[2], r) {
+		0
+	} else if near {
+		1
+	} else if !occ.passes(c.occ) && (cull || !occ.ever_visible(c.occ)) {
+		2
+	} else {
+		let mut near_only = false;
+		if !v.sphere_wholly_inside(p, r) {
+			// [PC] perf (ncull): no flag vectors; the same ANDed / ORed corner flags.
+			let (vp, bd) = (v.viewport(), v.band());
+			if cull && c.corners.iter().fold(0x3f, |a, &k| a & vp.flags(v.view(k))) != 0 {
+				if super::mirror_cull::rescue(v, c, occ, near, mirrors, beyond) {
+					return Some((0x14, true));
+				}
+				st[3] += 1;
+				return None;
+			}
+			near_only = c.corners.iter().any(|&k| bd.flags(v.view(k)) != 0);
+		}
+		// [PC] Draw distance Medium / High: the full-detail near mesh unmorphed (a forced-far fragment keeps its far mesh).
+		return Some((if near_only || (far.is_some() && !c.force_far) { 0x14 } else { terrain::lod_code(c.force_far, (p[2] - r) as i32, (p[2] + r) as i32, ints) }, false));
+	};
+	if cull && super::mirror_cull::rescue(v, c, occ, near, mirrors, beyond) {
+		return Some((0x14, true));
+	}
+	st[reason] += 1;
+	None
+}
+
+/// RAC_TFRAG_INFO=i (probe): the cull inputs of fragment i (moved out of `cull_tfrags`, lane pwat).
+fn tfrag_info(scene: &Scene, i: usize, c: &crate::terrain::TfragCull, ints: [i32; 3]) {
+	if let Some(v) = &scene.clip_view {
+		let p = v.view(c.centre).map(|x| x * 1024.0);
+		let r = c.radius * 1024.0;
+		let flags: Vec<u8> = c.corners.iter().map(|&k| v.viewport().flags(v.view(k))).collect();
+		let bands: Vec<u8> = c.corners.iter().map(|&k| v.band().flags(v.view(k))).collect();
+		eprintln!(
+			"TFINFO i={i} centre={:?} r={r} view_p={p:?} cap={} near={} occ={} inside={} flags={flags:?} band={bands:?} force_far={} lod_code={:#x} side_out_x={} side_out_y={}",
+			c.centre,
+			terrain::beyond_draw_cap(p[2], r),
+			32.0 - (p[2] + r) >= 0.0,
+			scene.occ.passes(c.occ),
+			v.sphere_wholly_inside(p, r),
+			c.force_far,
+			terrain::lod_code(c.force_far, (p[2] - r) as i32, (p[2] + r) as i32, ints),
+			0.63 * p[2] - (p[0].abs() - r * 1.1819053) < 0.0,
+			0.47628 * p[2] - (p[1].abs() - r * 1.1076293) < 0.0
+		);
 	}
 }
 

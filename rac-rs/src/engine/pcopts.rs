@@ -16,6 +16,8 @@
 //!                   cone about the crosshair is scaled by it, 100 = the full cone, 0 = no lock; written once the player changes it)
 //! metal_reflect=75  0..100 in steps of 5   (Graphics -> Effects -> Metal reflections, in percent: the metal look's reflection strength,
 //!                   100 = the full look, 0 = no reflections, highlights stay; default 75 when the key is absent)
+//! metal_detail=high high medium low (the Low / Medium / High of Graphics -> Effects -> Metal, with metal=on: the metal floor reflection
+//!                   at 1/4, 1/6, 1/8 of the render size; absent = the game's default (R&C1 high); viewer/metal_detail.rs)
 //! camspeed=50      10..200 in steps of 10   (Pause -> Options -> Camera Options -> Camera speed, in percent: 50 = retail's Fast; the
 //!                   key is only written once the player changes the row, absent = retail's own Slow / Medium / Fast row untouched; stick only)
 //! mousespeed=50    10..200 in steps of 10   (Pause -> Options -> Camera Options -> Mouse speed, in percent: the Modern camera's mouse turn;
@@ -27,6 +29,12 @@
 //! ao=high           off low medium high   (Pause -> Options -> Graphics -> Ambient occlusion: with Lighting Enhanced; older files: on = high)
 //! shadows=high      off low medium high   (Pause -> Options -> Graphics -> Dynamic shadows: with Lighting Enhanced; older files: on = high)
 //! display=fullscreen   windowed fullscreen   (Pause -> Options -> Graphics -> Display mode: borderless on the window's monitor)
+//! resolution=1920x1080   WxH   (Options -> Display -> Screen -> Resolution, modern menu only: absent = Desktop (the window as it is);
+//!                   windowed = the window's client size, fullscreen = the size the whole frame is drawn at, scaled to the screen; a size
+//!                   the monitor cannot show reads as Desktop; no RAM byte; viewer/resolution.rs, rac1/host/handler/display_res.rs)
+//! brightness=50     0..100 in steps of 5   (Options -> Display -> Picture -> Brightness, modern menu only: a gamma lift of the game picture
+//!                   before the HUD; absent = 50 = today's picture, only other values are written; no RAM byte; viewer/picture_adjust.rs)
+//! contrast=50       0..100 in steps of 5   (Options -> Display -> Picture -> Contrast, modern menu only: slope about mid-grey, as above)
 //! water=high        classic low medium high   (Pause -> Options -> Graphics -> Water: with Lighting Enhanced; viewer/waterfx.rs; older files: enhanced = high)
 //! particles=high    classic low medium high   (Pause -> Options -> Graphics -> Particles: with Lighting Enhanced; older files: enhanced = high)
 //! sunrays=high      off low medium high   (Pause -> Options -> Graphics -> Sun rays: with Lighting Enhanced; older files: on = high)
@@ -40,9 +48,10 @@
 //!                   read case-insensitively. `parse` takes the marker out of the unknown keys; `culling_reset` tells `pcext::init` that
 //!                   it reset a v0.4.0 Off, so it writes the file once at start.)
 //! gi=off            off low medium high   (Pause -> Options -> Graphics -> Global illumination: with Lighting Enhanced; viewer/post.rs)
-//! metal=on          on off           (Graphics -> Effects -> Metal; added metal look and the chrome adjustment, with Lighting Enhanced)
-//! waves=on          on off           (Pause -> Options -> Graphics -> Waves: the sea's geometric waves at Water Medium / High; viewer/waterfx.rs)
-//! underwater=on     on off           (Options -> Graphics -> World -> Underwater look, modern menu only: off = retail's underwater picture at any
+//! metal=on          on off           (Graphics -> Effects -> Metal: off = Off, on = Low..High with metal_detail; added metal look and the chrome adjustment, with Lighting Enhanced)
+//! waves=on          on off           (classic Graphics page -> Waves; the modern Water row sets it, on at Medium / High, since 2026-11-08:
+//!                   the sea's geometric waves at Water Medium / High; viewer/waterfx.rs)
+//! underwater=on     on off           (launcher only since 2026-11-08, was the modern Underwater look row: off = retail's underwater picture at any
 //!                   Water quality (its fog at full strength, no volumetric fog), the water surface keeps it; absent = on; no RAM byte;
 //!                   viewer/under_choice.rs)
 //! draw=medium       low medium high   (Pause -> Options -> Graphics -> Draw distance, with either Lighting: low = retail's distances and
@@ -65,6 +74,15 @@
 //! upscaler=fsr     off fsr dlss   (Options -> Graphics -> Resolution -> Upscaler, modern menu only: AMD FSR / NVIDIA DLSS draw the game smaller and scale it up;
 //!                   old fsr1 = fsr; one this PC cannot run = off; absent = off; viewer/upscale/choice.rs; RAC_UPSCALE still wins; Render scale applies only with off)
 //! upscale_q=quality native quality balanced performance   (... -> Upscale quality: 100 / 67 / 59 / 50 % of the window per side; absent = quality)
+//! dlss_preset=l     m l k j   (launcher only since 2026-11-08, was the modern DLSS preset row; with upscaler=dlss: the NVIDIA DLSS model in
+//!                   every mode; absent / unknown = Auto = K (M before 2026-11-08),
+//!                   L at Ultra performance; written only when not Auto; viewer/upscale/dlss_preset.rs; RAC_DLSS_PRESET wins)
+//! scene_msaa=4x     4x upscaler_off   (no screen writes it since 2026-11-08; absent = the pack's mode, R&C1 upscaler_off: the scene at
+//!                   1 sample while DLSS / FSR was chosen at start-up and can run; applies at the next start; viewer/scene_msaa.rs;
+//!                   RAC_SCENE_MSAA wins)
+//! framegen=off      off fsr dlss2 dlss3 dlss4   (... -> Frame Generation; lane fglive: offers only the running Upscaler's maker (DLSS -> dlss2..4,
+//!                   FSR -> fsr; dimmed with the Upscaler off), in force while it fits the Upscaler (else paused, the key unchanged); live within
+//!                   the maker the run started with, another maker after a restart; viewer/fgen/choice.rs + follow.rs; RAC_FG still wins)
 //! hud=sharp         sharp original   (the HUD and menus drawn again at the window's resolution, no new art; original = the 512-wide picture;
 //!                   gscap/draw/gpu.rs, gpu.wgsl k_hd; Pause -> Options -> Graphics -> Picture -> HUD, applied at once; only on windows at least
 //!                   896 px tall (gscap.rs HD_MIN_PX_PER_ROW); RAC_HUD=original forces Original)
@@ -728,8 +746,11 @@ impl PcOptions {
 		let mut tmp = path.as_os_str().to_owned();
 		tmp.push(tmp_suffix);
 		let tmp = PathBuf::from(tmp);
-		std::fs::write(&tmp, self.to_text())?;
-		std::fs::rename(&tmp, path)
+		let text = self.to_text();
+		std::fs::write(&tmp, &text)?;
+		std::fs::rename(&tmp, path)?;
+		crate::diag::options_saved(&text); // [PC] RAC_DIAG: the change goes into the session's system.txt
+		Ok(())
 	}
 }
 

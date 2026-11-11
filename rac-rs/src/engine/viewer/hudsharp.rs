@@ -77,7 +77,7 @@ pub(super) fn pipelines(device: &wgpu::Device, like: &wgpu::RenderPipeline, tex_
 					stencil: Default::default(),
 					bias: Default::default(),
 				}),
-				multisample: wgpu::MultisampleState { count: super::MSAA, ..Default::default() },
+				multisample: wgpu::MultisampleState { count: super::msaa(), ..Default::default() },
 				multiview_mask: None,
 				cache: None,
 			})

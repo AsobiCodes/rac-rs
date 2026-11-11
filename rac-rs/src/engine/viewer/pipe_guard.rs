@@ -56,6 +56,18 @@ pub enum Effect {
 	/// The Aspect ratio box's copy pass (`gpu/aspect_pass.rs`): refused = no box, the picture fills the window (render scale and the
 	/// upscaler are not touched).
 	AspectBox,
+	/// The animated menu art's pipeline (`gpu/menu_art_anim.rs`): refused = the painting is drawn plain (`MENU_ART_TEX` path).
+	MenuArt,
+	/// The heat haze pass (`heathaze.rs`): refused = no haze, the picture as without it.
+	HeatHaze,
+	/// The Brightness / Contrast pipelines (`gpu/grade_pass.rs`, the graded variants in `post.rs`, `upscale/slot_gpu.rs` and the
+	/// movie's): refused = that picture stays ungraded, nothing else changes.
+	Grade,
+	/// The Resolution box's filtered copy (`gpu/aspect_pass.rs` `fs_scale`): refused = a chosen fullscreen Resolution is ignored
+	/// (the frame is drawn at the screen size); the plain Aspect ratio box keeps its own bit.
+	ResScale,
+	/// The tie depth pre-pass (`tiez.rs`, speed only): refused = the tie batch is drawn without it (the same picture).
+	TieZ,
 }
 
 impl Effect {
@@ -88,6 +100,11 @@ impl Effect {
 			Effect::Ui => "modern ui (the classic menus stay)",
 			Effect::Upscale => "upscaler (the picture is drawn at the window size)",
 			Effect::AspectBox => "aspect ratio box (the picture fills the window)",
+			Effect::MenuArt => "animated menu art (the plain painting stays)",
+			Effect::HeatHaze => "heat haze",
+			Effect::Grade => "brightness / contrast (the picture stays ungraded)",
+			Effect::ResScale => "resolution scaling (the frame is drawn at the screen size)",
+			Effect::TieZ => "tie depth pre-pass (the ties are drawn without it, same picture)",
 		}
 	}
 }
@@ -155,6 +172,9 @@ pub(crate) fn refuse(e: Effect, why: &str) {
 	}
 	if mark(&OFF, e) {
 		eprintln!("{line}");
+		if e == Effect::Upscale {
+			crate::viewer::fgen::follow::refresh(); // lane fglive: Frame Generation follows the upscaler that really runs
+		}
 	}
 }
 
@@ -170,7 +190,9 @@ fn run<T>(device: &wgpu::Device, e: Effect, f: impl FnOnce() -> T) -> (T, bool) 
 	let oom = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
 	let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
 	let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+	let t0 = std::time::Instant::now();
 	let value = f();
+	crate::loadlog::say(|| format!("pipe_guard: {e:?} built in {:.0} ms", t0.elapsed().as_secs_f32() * 1000.0)); // [PC] RAC_LOAD_LOG: which lazy build stalls a frame
 	let errors = [pollster::block_on(validation.pop()), pollster::block_on(internal.pop()), pollster::block_on(oom.pop())].map(|r| r.map(|x| x.to_string()));
 	match decide(&errors) {
 		Verdict::Keep => (value, true),
@@ -258,7 +280,7 @@ Caused by:
 
 	#[test]
 	fn bits_are_distinct_and_marking_is_once() {
-		let all = [Effect::VolFog, Effect::VolClouds, Effect::VolSmoke, Effect::Water, Effect::Underwater, Effect::Veg, Effect::SunShadow, Effect::ShadowVol, Effect::Post, Effect::Star, Effect::Starfield, Effect::HudSharp, Effect::RenderScale, Effect::Reshade, Effect::TieGpu, Effect::WaterBedMin, Effect::Fur, Effect::Fire, Effect::GroundFire, Effect::Ui, Effect::Upscale, Effect::AspectBox];
+		let all = [Effect::VolFog, Effect::VolClouds, Effect::VolSmoke, Effect::Water, Effect::Underwater, Effect::Veg, Effect::SunShadow, Effect::ShadowVol, Effect::Post, Effect::Star, Effect::Starfield, Effect::HudSharp, Effect::RenderScale, Effect::Reshade, Effect::TieGpu, Effect::WaterBedMin, Effect::Fur, Effect::Fire, Effect::GroundFire, Effect::Ui, Effect::Upscale, Effect::AspectBox, Effect::MenuArt, Effect::HeatHaze, Effect::Grade, Effect::ResScale, Effect::TieZ];
 		let mut seen = 0u32;
 		for e in all {
 			assert_eq!(seen & e.bit(), 0, "{e:?} shares a bit");

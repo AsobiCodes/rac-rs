@@ -29,6 +29,8 @@ use crate::retail::disc::va;
 mod chain;
 mod pack_fx;
 pub use pack_fx::exhaust_shift;
+mod pack_light;
+pub use pack_light::flame_lights as pack_flame_lights;
 #[cfg(test)]
 mod clock_tests;
 #[cfg(test)]

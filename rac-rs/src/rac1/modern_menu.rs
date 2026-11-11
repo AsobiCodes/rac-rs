@@ -10,16 +10,20 @@ pub mod look;
 pub mod pause;
 pub mod pause_ach;
 pub mod pause_grid;
+mod pause_help;
+pub mod pause_keys;
 pub mod pause_host;
 mod pause_pc;
 pub mod pause_quick;
 mod rows_camera;
 mod rows_display;
+mod rows_picture;
 mod rows_effects;
 mod rows_game;
 mod rows_graphics;
 mod rows_system;
-mod rows_upscale;
+pub(crate) mod rows_fgen;
+pub(crate) mod rows_upscale;
 pub mod style;
 mod tabs;
 mod text;
@@ -34,6 +38,7 @@ pub mod vendor_portrait;
 pub mod map;
 pub mod map_host;
 pub mod ship;
+pub mod ship_anim;
 pub mod ship_host;
 pub mod ship_marks;
 pub mod ship_pic;
@@ -46,7 +51,11 @@ mod pause_ach_tests;
 #[cfg(test)]
 mod pause_grid_tests;
 #[cfg(test)]
+mod pause_keys_tests;
+#[cfg(test)]
 mod pause_pc_tests;
+#[cfg(test)]
+mod pause_help_tests;
 #[cfg(test)]
 mod pause_quick_tests;
 #[cfg(test)]

@@ -128,6 +128,8 @@ pub struct Extra {
 	/// The planet map (0xb) and its mission list (0xc): the planet their titles name (`map_seen`; None = no title looked up lately);
 	/// `ship` then holds the gold bolts found.
 	pub map: Option<crate::retail::map_seen::Seen>,
+	/// The Help page (7): the text id of the description of the row under the cursor (`help_seen`; None = not looked up lately).
+	pub help_desc: Option<u32>,
 }
 
 /// The in-level page menu with everything the modern pause menu reads: the worker's extra facts and the header figures.
@@ -286,6 +288,7 @@ pub fn read_at(menu: Option<&MenuSnap>, level: u32, rd: &dyn Fn(u32) -> u32) -> 
 			}
 		}
 		Page::Sound => x.sound = read_sound(rd),
+		Page::Help => x.help_desc = crate::retail::help_seen::desc(crate::retail::prompts::field_no()),
 		Page::Camera => x.pc = super::pcpage::read(m, rd),
 		Page::GalaxyMap | Page::GalaxyDetails => x.ship = Some(read_ship(rd)),
 		Page::PauseMap | Page::Missions => {

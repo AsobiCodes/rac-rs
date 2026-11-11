@@ -94,8 +94,16 @@ impl Rect {
 /// down, at least 1 x 1); Auto = the whole window. A window within 1 % of the shape (`near`) is the whole window: no bars, no box
 /// pass, ReShade stays on (a 3440 x 1440 monitor at 21:9, a 1366 x 768 laptop at 16:9). No stretch: the camera follows the window.
 pub fn fit(win: (u32, u32), r: Ratio) -> Rect {
+	match r.frac() {
+		Some(f) => fit_shape(win, f),
+		None => Rect::full(win),
+	}
+}
+
+/// `fit` for the shape `a` : `b` in whole numbers.
+pub fn fit_shape(win: (u32, u32), (a, b): (u64, u64)) -> Rect {
 	let (ww, wh) = (win.0.max(1), win.1.max(1));
-	let Some((a, b)) = r.frac() else { return Rect::full(win) };
+	let (a, b) = (a.max(1), b.max(1));
 	if near((ww, wh), (a, b)) {
 		return Rect::full(win);
 	}
@@ -107,6 +115,23 @@ pub fn fit(win: (u32, u32), r: Ratio) -> Rect {
 		// narrower (or the same shape): the full width, bars top and bottom
 		let h = ((ww as u64 * b + a / 2) / a).clamp(1, wh as u64) as u32;
 		Rect { x: 0, y: (wh - h) / 2, w: ww, h }
+	}
+}
+
+/// [PC] Resolution (resolution.rs): the box picture's size and its rectangle in the window `real` for the shape `r` and the frame
+/// size `frame` (Some only while fullscreen at a chosen size): without one the picture is the rectangle `fit` gives (exactly as
+/// before); with one, the picture is the largest box of the shape inside that size and the rectangle the largest one of the
+/// picture's own shape in the window (the copy scales it).
+pub fn picture(real: (u32, u32), r: Ratio, frame: Option<(u32, u32)>) -> ((u32, u32), Rect) {
+	match frame {
+		None => {
+			let rect = fit(real, r);
+			(rect.size(), rect)
+		}
+		Some(f) => {
+			let pic = fit(f, r).size();
+			(pic, fit_shape(real, (pic.0 as u64, pic.1 as u64)))
+		}
 	}
 }
 

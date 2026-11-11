@@ -23,14 +23,20 @@ use rac_engine::fire_option::{FireKind, FireRow};
 
 /// A pool sprite row: the effect type `ty` (`PoolFx::sprite_types`).
 const fn ty(ty: u32, kind: FireKind) -> FireRow {
-	FireRow { key: ty, kind }
+	FireRow { key: ty, kind, dark: false }
+}
+
+/// A flame row that is drawn as fire but never lights (`FireRow::dark`): type 15 = the fire image's flying embers (also the
+/// Blaster's impact embers on Batalia, the R.Y.N.O. blast fire's embers; fire_pick_log 2026-11-07: up to 0.27 big, lane rfire).
+const fn ember(ty: u32) -> FireRow {
+	FireRow { key: ty, kind: FireKind::Flame, dark: true }
 }
 
 macro_rules! table {
 	($($quad:expr),*) => {
 		&[
 			$($quad,)*
-			ty(2, FireKind::JetBurst), ty(4, FireKind::Burn), ty(12, FireKind::Jet), ty(15, FireKind::Flame), ty(19, FireKind::Flame), ty(21, FireKind::Flame),
+			ty(2, FireKind::JetBurst), ty(4, FireKind::Burn), ty(12, FireKind::Jet), ember(15), ty(19, FireKind::Flame), ty(21, FireKind::Flame),
 				ty(25, FireKind::JetSpark), ty(5, FireKind::Blast), ty(8, FireKind::Blast),
 			ty(44, FireKind::Flame), ty(55, FireKind::Burst), ty(72, FireKind::Flame), ty(75, FireKind::Flame),
 		]
@@ -38,9 +44,9 @@ macro_rules! table {
 }
 
 static SPRITES: &[FireRow] = table!();
-static VELDIN: &[FireRow] = table!(FireRow { key: 41, kind: FireKind::Ground });
-static NOVALIS: &[FireRow] = table!(FireRow { key: 46, kind: FireKind::Ground });
-static OLTANIS: &[FireRow] = table!(FireRow { key: 45, kind: FireKind::Ground });
+static VELDIN: &[FireRow] = table!(FireRow { key: 41, kind: FireKind::Ground, dark: false });
+static NOVALIS: &[FireRow] = table!(FireRow { key: 46, kind: FireKind::Ground, dark: false });
+static OLTANIS: &[FireRow] = table!(FireRow { key: 45, kind: FireKind::Ground, dark: false });
 
 /// Moby classes that are fire and draw as meshes (not as pool sprites): 112 the blast fireball (decomp/notes/particles.md "Fireball 112 and
 /// shards 122 draw like every moby") and 179 the Pyrocitor's pilot flame (viewer/smooth.rs `PYRO_PILOT`). The same in every level.
@@ -92,6 +98,19 @@ mod tests {
 			assert!(!blast_type(rows(l), 55, false) && blast_type(rows(l), 55, true));
 			for no in [12u8, 2, 25, 4, 19, 16, 14, 64, 15, 21, 44, 72, 75] {
 				assert!(!blast_type(rows(l), no, true), "type {no} must not start a ground fire");
+			}
+		}
+	}
+
+	/// Lane rfire review: the embers (type 15) are drawn as flames but never light; the real flames do.
+	#[test]
+	fn embers_draw_as_flames_but_never_light() {
+		use rac_engine::fire_option::sprite_dark;
+		for l in 0..19 {
+			assert_eq!(sprite_kind(rows(l), 15), Some(FireKind::Flame));
+			assert!(sprite_dark(rows(l), 15), "level {l}: embers light nothing");
+			for lit in [19u8, 21, 44, 72, 75, 4, 12, 55] {
+				assert!(!sprite_dark(rows(l), lit), "level {l}: type {lit} lights");
 			}
 		}
 	}

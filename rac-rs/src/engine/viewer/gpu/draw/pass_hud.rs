@@ -37,6 +37,14 @@ impl Gpu {
 						let Some((_, bind, _, _)) = &self.menu_art else { continue };
 						pass.set_pipeline(&self.hud_pipeline[2]);
 						pass.set_bind_group(1, bind, &[]);
+					} else if d.texture == MENU_ART_ANIM_TEX {
+						// [PC] The same painting through the animation pipeline (menu_art_anim.rs); plain without an animation.
+						let Some((_, bind, _, _)) = &self.menu_art else { continue };
+						if self.draw_menu_art_anim(pass, bind, d.start..d.start + d.count) {
+							continue;
+						}
+						pass.set_pipeline(&self.hud_pipeline[2]);
+						pass.set_bind_group(1, bind, &[]);
 					} else if d.texture == RETAIL_FILTER_TEX {
 						let Some((_, bind, _, _, _)) = &self.retail_ov else { continue };
 						pass.set_pipeline(&self.hud_pipeline[4]);

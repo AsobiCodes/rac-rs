@@ -112,7 +112,7 @@ impl Gs {
         let test = self.r[0x47 + c];
         let disp = (self.dispfb & 0x1ff) as u32;
         // A path-1 packet of P1 mode: only the render-to-texture targets (the display and main buffers are rac-rs's own).
-        if self.p1_only && (self.full || fbp == disp || Some(fbp) == self.main_fbp) {
+        if self.p1_only && (self.full || fbp == disp) {
             return;
         }
         if self.tracing() {
@@ -235,7 +235,7 @@ impl Gs {
             // not have.
             // Depth-tested prims belong to the 3D scene, except those at the near end of the depth range (the
             // HUD and menus pass GEQUAL with z near the maximum) [I].
-            if zte && ztst >= 2 {
+            if zte && ztst >= 2 && !self.p1_only {
                 let zmax: u64 = match (self.r[0x4e + c] >> 24) & 0xf {
                     0 => 0xffff_ffff,
                     1 => 0xff_ffff,
@@ -248,7 +248,7 @@ impl Gs {
             }
             // The sky comes first (rac-rs draws its own): Eudora's before any VU1 program, Rilgar's cloud layer after
             // two; the scene's thousands follow.
-            if self.mscal < super::SKY_PROGRAMS {
+            if self.mscal < super::SKY_PROGRAMS && !self.p1_only {
                 return;
             }
             if test & 0x4000 != 0 || (tme && tbp >= main && tbp < main_end) {

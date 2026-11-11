@@ -14,6 +14,7 @@ pub(in crate::retail::pcext) fn reset_globals() {
 	texfilter::set(opts.texfilter.unwrap_or(true));
 	crate::retail::pcdisp::init(&opts);
 	rac_engine::viewer::under_choice::init(&opts);
+	crate::retail::pcmetal::init_detail(&opts);
 	rac_engine::viewer::aspect_box::init(&opts);
 	rac_engine::viewer::upscale_choice::init(&opts);
 }
@@ -197,27 +198,32 @@ fn values_published_after_sync_match_graphics() {
 	assert_eq!((g.ao_q, g.water_q, g.draw, g.culling, g.waves), (2, 3, 0, false, false));
 }
 
-/// GitHub #64: the Underwater look row lives in the options file and the engine only (`under_choice`): no Graphics byte, no `glast`
-/// change; it is published back and survives a save and a load.
+/// 2026-11-08 (user: "Water: one row"): the modern Water row sets the Waves byte as the presets did (on at Medium and High, off at
+/// Classic and Low); Underwater look, DLSS preset and MSAA have no row and nothing to publish (options file keys only).
 #[test]
-fn the_underwater_row_is_options_file_only() {
-	use rac_engine::viewer::under_choice;
+fn water_sets_waves_and_the_removed_rows_publish_nothing() {
 	let _g = globals();
 	let (mut mem, mut s) = fresh();
-	let (bytes, glast) = (GROWS.map(|a| mem.rd8(a)), s.glast);
-	assert_eq!(publish_ui("underwater", &mut mem), Some(1), "On by default");
-	set("underwater", 0);
+	for (water, waves) in [(3, true), (1, false), (2, true), (0, false), (3, true)] {
+		set("water", water);
+		drain(&mut mem, &mut s);
+		publish(&mut mem);
+		let g = menu_graphics();
+		assert_eq!((g.water_q as i32, g.waves), (water, waves), "Water {water}");
+		assert_eq!(get("waves"), Some(waves as i32));
+	}
+	// A preset that leaves Water as it is (only the texture filter in its batch): Waves follows Water all the same.
+	set("waves", 0);
 	drain(&mut mem, &mut s);
-	assert!(!under_choice::on());
-	assert_eq!((GROWS.map(|a| mem.rd8(a)), s.glast), (bytes, glast), "no Graphics byte changes");
-	assert_eq!(s.opts.extra_get("underwater"), Some("off"));
-	assert_eq!(publish_ui("underwater", &mut mem), Some(0));
-	under_choice::init(&PcOptions::parse(&s.opts.to_text()));
-	assert!(!under_choice::on(), "the file keeps Off");
-	set("underwater", 1);
+	publish(&mut mem);
+	assert_eq!(get("waves"), Some(0), "the Waves byte itself can still be set (classic page, launcher)");
+	set("texfilter", 1);
 	drain(&mut mem, &mut s);
-	assert!(under_choice::on());
-	assert_eq!(s.opts.extra_get("underwater"), Some("on"));
+	publish(&mut mem);
+	assert_eq!(get("waves"), Some(1), "a preset with Water High (unchanged) turns Waves on");
+	for id in ["underwater", "dlss_preset", "scene_msaa"] {
+		assert_eq!(publish_ui(id, &mut mem), None, "{id} has no row");
+	}
 }
 
 /// GitHub #45: the Aspect ratio row lives in the options file and the engine only (`aspect_box`): no RAM write at all (the whole

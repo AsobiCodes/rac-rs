@@ -165,7 +165,7 @@ impl App {
 				crate::retail::devtools::draw(&mut g.hud, g.config.width as f32, g.config.height as f32, self.level, hero);
 			}
 			// [PC] RAC_FPS_METER=1: fps, frame time and game speed in the top right corner (viewer/profile.rs `meter_draw`).
-			profile::meter_draw(&mut g.hud, g.config.width as f32, g.config.height as f32);
+			profile::meter_draw(&mut g.hud, g.config.width as f32, g.config.height as f32); if rac_engine::diag::on() { crate::diag_facts::publish(self.level, self.game.as_ref().map(|gm| gm.player.pos), self.retail.as_ref().map(|r| (r.paused(), r.front_ram().is_some()))); } // [PC] RAC_DIAG facts (diag_facts.rs)
 			// [PC] Achievements: the unlock pop-up (held while a modern page is up: its header fills the top right), the pause-menu hint and the list (engine/achievements/screen.rs).
 			crate::achievements::hold_toast(crate::modern_menu::hide::HideSet::now().overlay || rac_engine::ui::is_open()); crate::achievements::draw(&mut g.hud, g.config.width as f32, g.config.height as f32, self.retail.as_ref().is_some_and(|r| r.front_ram().is_none() && r.paused())); super::frame_ui::hide_retail(g); // [PC] the modern Options page hides the retail overlay (frame_ui.rs)
 			if let Some(r) = self.retail.as_ref() { crate::retail::splitview::strip_hud(&mut g.hud, &mut g.hud_split, &mut g.mods_hidden, r.front_ram().is_none() && !r.paused() && g.shop_models.is_empty()); } // [PC] Hide HUD (F11): the HUD and the mods' layer
@@ -207,9 +207,9 @@ impl App {
 				g.hud_split = g.hud_split.map(|s| s + 1);
 			}
 			// --shot: let a few frames settle, save one, quit.
-			let capture = self.shot.as_ref().is_some_and(|s| s.1 == 0);
+			let diag_shot = rac_engine::diag::shot_due(); let capture = self.shot.as_ref().is_some_and(|s| s.1 == 0) || diag_shot; // [PC] RAC_DIAG: the mark key's picture
 			// While the switch waits for the prefetch (`switch_hold`) the frame still draws: the world is black then (above), no stale picture stays up.
-			let ly_img = { let c = drawn_cam.as_ref().unwrap_or(&self.cam); super::frame_split::run(g, self.game.as_ref(), &self.smooth, &self.fx_skins.born, &self.debris, f, c); g.draw(c, capture) };
+			let ly_img = { let c = drawn_cam.as_ref().unwrap_or(&self.cam); super::frame_split::run(g, self.game.as_ref(), &self.smooth, &self.fx_skins.born, &self.debris, f, c); g.draw(c, capture) }; let ly_img = if diag_shot && self.shot.as_ref().is_none_or(|s| s.1 != 0) { rac_engine::diag::shot(ly_img); None } else { ly_img };
 			let mut taken = false; // RAC_TEST_SUB (test_clock.rs): this frame was captured
 			if let Some(img) = ly_img.filter(|_| capture) {
 				let path = &self.shot.as_ref().unwrap().0;
@@ -228,7 +228,7 @@ impl App {
 			}
 			// RAC_SHOT_TICK: hold the capture until that many play ticks have run.
 			let wait = std::env::var("RAC_SHOT_TICK").ok().and_then(|v| v.parse::<u32>().ok()).is_some_and(|t| self.play_ticks < t) && !paused // play ticks stop while paused
-				|| self.retail.as_ref().is_some_and(|r| r.travelling() || r.shot_field_wait());
+				|| (if super::shot_movie::enabled() { super::shot_movie::wait() } else { self.retail.as_ref().is_some_and(|r| (r.travelling() && std::env::var_os("RAC_SHOT_FIELD").is_none()) || r.shot_field_wait()) });
 			if let Some(s) = &mut self.shot {
 				s.1 = if wait { s.1.max(6) } else { s.1.saturating_sub(1) };
 			}

@@ -7,7 +7,7 @@ const X: [f32; 3] = [1.0, 0.0, 0.0];
 
 /// The mouse's (yaw, pitch) at the default gains (Mouse speed 1.0, sensitivity 1.0, Normal on both axes).
 fn mouse(dx: i16, dy: i16) -> (f32, f32) {
-	let g = crate::retail::modcam_turn::Gains { mouse: MOUSE, sens: 1.0, mouse_k: 1.0, rot: 0.0, tilt: 0.0, stick_k: 0.0, lr: 1.0, ud: 1.0 };
+	let g = crate::retail::modcam_turn::Gains { mouse: MOUSE, sens: 1.0, mouse_k: 1.0, rot: 0.0, tilt: 0.0, stick_k: 0.0, lr: 1.0, ud: 1.0, mouse_lr: 1.0, mouse_ud: 1.0 };
 	crate::retail::modcam_turn::turn([dx, dy], [0.0; 2], &g)
 }
 

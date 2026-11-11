@@ -29,7 +29,8 @@ enum Enc {
 	Draw,
 }
 
-/// The Graphics rows in `GROWS` order: the screen's row id and the encoding. A test keeps the ids equal to the rows table.
+/// The Graphics rows in `GROWS` order: the row id and the encoding. Waves has no modern row since 2026-11-08 (Water sets it:
+/// `waves_follow`); the classic page and the launcher keep theirs.
 const GFX: [(&str, Enc); 19] = [
 	("lighting", Enc::Plain),
 	("ao", Enc::Level),
@@ -127,6 +128,9 @@ pub(super) fn drain(mem: &mut Mem, s: &mut St) {
 	};
 	let mut g = s.glast.unwrap_or_else(|| GROWS.map(|a| mem.rd8(a)));
 	let mut gfx = false;
+	// Every modern preset sends the texture filter (`UiMenu::preset_also`); a Water row it leaves unchanged is not in the batch
+	// (`Model::put`), so Waves is set from the Water byte after the loop.
+	let preset = cmds.iter().any(|(id, _)| id == "texfilter");
 	for (id, v) in cmds {
 		match GFX.iter().position(|(k, _)| *k == id) {
 			Some(i) => {
@@ -136,14 +140,31 @@ pub(super) fn drain(mem: &mut Mem, s: &mut St) {
 				mem.wr8(GROWS[i], b);
 				g[i] = b;
 				gfx = true;
+				if id == "water" {
+					waves_follow(mem, &mut g, v);
+				}
 			}
 			None => other(mem, s, &id, v),
 		}
+	}
+	if preset {
+		let w = GFX.iter().position(|(k, _)| *k == "water").expect("water row");
+		let water = gfx_ui(GFX[w].1, g[w]);
+		gfx |= waves_follow(mem, &mut g, water);
 	}
 	if gfx {
 		s.glast = Some(g);
 		apply_graphics(s, g, true);
 	}
+}
+
+/// Waves follows Water (no Waves row on the modern screen since 2026-11-08, user: "Water: one row"): on at Medium and High (UI 2,
+/// 3), off at Classic and Low, as the presets set it. The classic page and the launcher keep their own row. True = the byte changed.
+fn waves_follow(mem: &mut Mem, g: &mut [u8], water: i32) -> bool {
+	let w = GFX.iter().position(|(k, _)| *k == "waves").expect("waves row");
+	let wb = gfx_byte(GFX[w].1, (water >= 2) as i32).min(super::rows::row_values(w) - 1);
+	mem.wr8(GROWS[w], wb);
+	std::mem::replace(&mut g[w], wb) != wb
 }
 
 /// The rows that are not Graphics bytes.
@@ -168,9 +189,9 @@ fn other(mem: &mut Mem, s: &mut St, id: &str, v: i32) {
 		"mousespeed" => mousespeed::set_from_ui(s, b),
 		"metal" => {
 			if super::super::pcctl::gfx_built(mem) {
-				mem.wr8(super::super::pcctl::METAL_B, b.min(1));
+				mem.wr8(super::super::pcctl::METAL_B, super::super::pcmetal::ui_value_to_byte(v.clamp(0, 3)));
 			}
-			if super::super::pcmetal::set_from_ui(&mut s.opts, b != 0) {
+			if super::super::pcmetal::set_ui(&mut s.opts, v.clamp(0, 3)) {
 				s.save();
 			}
 		}
@@ -234,7 +255,7 @@ pub(super) fn publish(mem: &mut Mem) {
 		("lockon_strength", lockstr::lockon_strength() as i32),
 		("camspeed", camopts::CAMSHOW.load(Ordering::Relaxed) as i32),
 		("mousespeed", mousespeed::shown() as i32),
-		("metal", super::super::pcmetal::enabled() as i32),
+		("metal", super::super::pcmetal::ui_value()),
 		("metal_reflect", rac_engine::metal_option::reflect_pct() as i32),
 		("supporters", super::super::pcsupp::enabled() as i32),
 		("hud", !sharp as i32),
@@ -278,11 +299,16 @@ pub(crate) fn defaults_for_test() -> Vec<(&'static str, i32)> {
 	r::pcsupp::init(&opts);
 	r::wrench_throw::init(&opts);
 	rac_engine::viewer::upscale_choice::init(&opts);
+	rac_engine::viewer::fgen_choice::init(&opts);
 	rac_engine::viewer::under_choice::init(&opts);
+	crate::retail::pcmetal::init_detail(&opts);
 	rac_engine::viewer::aspect_box::init(&opts);
+	rac_engine::viewer::resolution::init(&opts);
+	rac_engine::viewer::picture_adjust::init(&opts);
 	crate::modern_menu::style::init(&opts);
 	r::qs_pause::init(&opts);
 	r::auto_gadget::init(&opts);
+	r::fast_travel::init(&opts);
 	camopts_init(&opts);
 	let mut mem = Mem::new();
 	let mut s = St { opts, path: None, last: None, glast: None, lang_seen: None, warned: false };

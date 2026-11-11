@@ -85,7 +85,7 @@ impl Gpu {
 			sample_count: 1,
 			dimension: wgpu::TextureDimension::D2,
 			format: key.2,
-			usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+			usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | crate::viewer::scene_msaa::copy_usage(),
 			view_formats: &[],
 		});
 		let view = tex.create_view(&Default::default());
@@ -110,11 +110,14 @@ impl Gpu {
 	}
 
 	fn split_classic_steps(&mut self, cam: &Camera) -> Option<()> {
+		crate::viewer::scene_msaa::frame_begin(); // lane noaa: no resolve copy of an earlier frame that stopped early
 		let dc = self.frame_uniforms(cam)?;
 		let mut dfx = self.frame_effects(cam, &dc)?;
 		let (mut dt, warp_hud) = self.frame_target(cam, &dc)?;
 		let db = self.frame_buffers(warp_hud)?;
 		self.draw_passes(cam, &dc, &mut dfx, &mut dt, &db)?;
+		crate::viewer::scene_msaa::flush(&mut dt.enc); // lane noaa: the level pass's resolve copy at 1 sample
+		debug_assert!(crate::viewer::scene_msaa::none_pending());
 		let DrawTarget { enc, cuts, .. } = dt;
 		cuts.submit(self.queue.sync(), enc.finish());
 		Some(())

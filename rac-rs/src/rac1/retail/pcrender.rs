@@ -43,9 +43,11 @@ pub fn set_from_ui(mem: &mut ee_oracle::mem::Mem, opts: &mut PcOptions, dx12: bo
 	true
 }
 
+/// The suffix of a classic value that applies after a restart (also the Frame Generation row's, pcfgen.rs).
+pub(super) const RESTART: [&str; 5] = [" - restart", " - relancer", " - Neustart", " - reiniciar", " - riavvio"];
+
 /// The value text of the row in language `l` (En Fr De Es It); a value that differs from the running API says restart.
 pub fn value_text(dx12: bool, l: usize) -> Vec<u8> {
-	const RESTART: [&str; 5] = [" - restart", " - relancer", " - Neustart", " - reiniciar", " - riavvio"];
 	let mut t = if dx12 { b"DirectX 12".to_vec() } else { b"Vulkan".to_vec() };
 	if dx12 != RUNNING_DX12.load(Ordering::Relaxed) {
 		t.extend_from_slice(RESTART[l.min(4)].as_bytes());

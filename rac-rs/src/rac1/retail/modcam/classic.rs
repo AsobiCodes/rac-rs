@@ -33,6 +33,66 @@ fn grab_wanted(strafe_on: bool, rmb: bool, ratchet: bool) -> bool {
 	strafe_on && rmb && ratchet
 }
 
+/// Fields the press's view offset takes to fade out (the aim lift's blend, `AIM_BLEND`).
+const LOOK_FADE: u32 = 12;
+
+/// Where retail's classic camera looks at the press versus where the modern aim orbit looks (always at the pivot): the modern pose
+/// is seeded from retail's EYE, so the eye does not jump, but retail's camera looks about 0.1 rad off the pivot (pitch), so writing
+/// the pivot-looking rows at once tilted the whole view in one field (v0.5.0 known issue: the one-frame camera jump when a strafe
+/// aim is pressed). The offset is taken on the first written pose (that pose then equals retail's view) and fades out smoothly.
+#[derive(Clone, Copy, Default)]
+pub(super) struct LookOff {
+	/// Retail's (yaw, pitch) at the press, waiting for the first pose written.
+	ret: Option<(f32, f32)>,
+	/// The offset still to fade (yaw, pitch) and the fields faded so far.
+	off: (f32, f32),
+	n: u32,
+}
+
+impl LookOff {
+	pub(super) const NONE: LookOff = LookOff { ret: None, off: (0.0, 0.0), n: LOOK_FADE };
+
+	/// The press seeded the modern pose from retail's (yaw, pitch).
+	pub(super) fn seed(&mut self, ret: (f32, f32)) {
+		*self = LookOff { ret: Some(ret), off: (0.0, 0.0), n: 0 };
+	}
+
+	/// The seed of a new live pose: with the modern camera on (or a fresh level) there is no offset to keep.
+	pub(super) fn on_seed(&mut self, modern: bool, ret: (f32, f32)) {
+		if modern {
+			self.clear();
+		} else {
+			self.seed(ret);
+		}
+	}
+
+	/// Back to no offset (hand-back, a seed with the modern camera on, a re-seed).
+	pub(super) fn clear(&mut self) {
+		*self = LookOff { ret: None, off: (0.0, 0.0), n: LOOK_FADE };
+	}
+
+	/// The (yaw, pitch) the camera rows get for the pose (`yaw`, `pitch`) of this field: the pose itself once the offset is gone.
+	pub(super) fn apply(&mut self, yaw: f32, pitch: f32) -> (f32, f32) {
+		if let Some((ry, rp)) = self.ret.take() {
+			self.off = (super::wrap(ry - yaw), rp - pitch);
+			self.n = 0;
+		}
+		if self.n >= LOOK_FADE {
+			return (yaw, pitch);
+		}
+		let t = self.n as f32 / LOOK_FADE as f32;
+		let w = 1.0 - t * t * (3.0 - 2.0 * t);
+		self.n += 1;
+		(yaw + self.off.0 * w, pitch + self.off.1 * w)
+	}
+}
+
+/// Whether a seed keeps no look offset: the modern camera drives, or the orbit frame is tilted (retail's world yaw / pitch are
+/// not angles of that frame, so their difference to the orbit's would be meaningless).
+pub(super) fn no_offset(modern: bool, flat: bool) -> bool {
+	modern || !flat
+}
+
 /// The modern camera drives the follow camera: switched on, or borrowed for the strafe aim with Camera Classic.
 pub(super) fn drives(st: &St) -> bool {
 	st.active || BORROW.load(Ordering::Relaxed)
@@ -65,6 +125,45 @@ mod tests {
 			assert!(!aim_mode(true, true, true, form), "form {form} (Clank / Giant Clank / Hologuise): no aim mode, no raised camera");
 		}
 		assert!(!aim_mode(false, true, true, 0) && !aim_mode(true, false, true, 0) && !aim_mode(true, true, false, 0));
+	}
+
+	#[test]
+	fn the_press_view_starts_at_retails_and_fades_to_the_orbit() {
+		let mut l = LookOff::NONE;
+		assert_eq!(l.apply(1.0, 0.2), (1.0, 0.2), "no seed: the pose as it is");
+		l.seed((1.0, 0.13));
+		let (y0, p0) = l.apply(1.0, 0.24);
+		assert!((y0 - 1.0).abs() < 1e-6 && (p0 - 0.13).abs() < 1e-6, "the first pose written is retail's view: no jump");
+		let mut last = p0;
+		for _ in 1..LOOK_FADE {
+			let (_, p) = l.apply(1.0, 0.24);
+			assert!(p >= last - 1e-6 && p <= 0.24 + 1e-6, "monotone towards the orbit's pitch");
+			last = p;
+		}
+		assert_eq!(l.apply(1.0, 0.24), (1.0, 0.24), "faded out");
+		l.seed((2.0, 0.0));
+		l.clear();
+		assert_eq!(l.apply(1.0, 0.24), (1.0, 0.24), "cleared");
+	}
+
+	#[test]
+	fn a_repress_in_the_blend_starts_at_the_view_on_screen() {
+		// What `step` passes on a seed: the blended pose shown (yaw, pitch), not retail's rows. The first pose written equals it.
+		let mut l = LookOff::NONE;
+		l.on_seed(false, (0.5, 0.20));
+		let (y, p) = l.apply(0.5, 0.24);
+		assert!((y - 0.5).abs() < 1e-6 && (p - 0.20).abs() < 1e-6, "first written pose = the shown view");
+		l.on_seed(true, (0.5, 0.20));
+		assert_eq!(l.apply(0.5, 0.24), (0.5, 0.24), "modern camera on: nothing computed, no offset");
+	}
+
+	#[test]
+	fn no_look_offset_off_flat_ground() {
+		assert!(no_offset(false, false) && no_offset(true, false) && no_offset(true, true));
+		assert!(!no_offset(false, true));
+		let mut l = LookOff::NONE;
+		l.on_seed(no_offset(false, false), (2.0, 0.5));
+		assert_eq!(l.apply(0.5, 0.24), (0.5, 0.24), "tilted frame: the pose as it is");
 	}
 
 	#[test]

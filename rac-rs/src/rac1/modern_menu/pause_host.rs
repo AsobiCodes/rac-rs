@@ -8,6 +8,7 @@
 //! Gadgets, Items: local focus in a grid, the game's D-pad at its edge, the preview crop) are the child `pause_host/grid.rs`.
 use super::host::map_key;
 use super::pause::Built;
+use super::pause_keys;
 use super::title::shown;
 use super::watchdog::Watch;
 use crate::retail::menu_model::extra::VOLUME_MAX;
@@ -15,6 +16,7 @@ use crate::retail::menu_model::pages::Page;
 use crate::retail::menu_model::{cmd, resolve, submit, Command, Intent};
 use crate::retail::mouse_menu::{MenuSnap, LEFT, RIGHT, TRIANGLE};
 use crate::retail::mouse_slider::Slide;
+use rac_engine::input::kbm;
 use rac_engine::ui::font::FontMeasure;
 use rac_engine::ui::input::{key_action, pad_mask, Action, Device, MouseButton, MouseEvent, PadSample, Repeater, PAD_ACTIONS};
 use rac_engine::ui::kit::page::{PageHit, PageLayout};
@@ -64,6 +66,11 @@ struct State {
 	pending: Option<child_tabs::Pending>,
 	/// When the page on screen first could not be built (`hold_unbuilt`); None after a built frame.
 	unbuilt: Option<u64>,
+	/// The modern Controls table's focus (`pause_host/keys.rs`) and when a capture last held the input (ms).
+	keys: super::pause_keys::Ui,
+	keys_cap_at: u64,
+	/// A capture was waiting at the last pad poll (`keys::capture_gate`).
+	cap_seen: bool,
 }
 
 /// How long (ms) the last picture stays over a landed page the builder cannot read yet (`hold_unbuilt`).
@@ -108,6 +115,7 @@ pub fn set_up(on: bool) {
 		}
 	}
 	if !on {
+		keys::set_table(false);
 		SOUND.store(false, Ordering::Relaxed);
 	}
 }
@@ -285,6 +293,9 @@ fn act(st: &mut State, a: Action, now: u64) {
 	if b.grid.is_some() {
 		return grid::act_grid(st, a, now);
 	}
+	if b.keys.is_some() {
+		return keys::act(st, a, now);
+	}
 	let root = b.root;
 	let dir = match a {
 		Action::Up => -1,
@@ -307,6 +318,12 @@ pub fn key(code: KeyCode, pressed: bool, repeat: bool) -> bool {
 	}
 	let mut g = lock();
 	let Some(st) = g.as_mut().filter(|s| s.built.is_some()) else { return false }; // never take a key for a page that was not drawn
+	if matches!(code, KeyCode::Tab | KeyCode::Delete) && keys::is_keys(st) {
+		if pressed && !repeat {
+			keys::raw_key(st, code, now());
+		}
+		return pressed;
+	}
 	let Some(k) = map_key(code) else { return false };
 	let Some(a) = key_action(k, super::host::shift()) else { return false };
 	if SOUND.load(Ordering::Relaxed) && matches!(a, Action::Left | Action::Right) {
@@ -419,6 +436,12 @@ pub fn mouse(ev: MouseEvent) -> bool {
 		ach::mouse(st, ev, now); // the achievements page: hover, wheel, tabs, Back (pause_host/ach.rs)
 		return true;
 	}
+	if keys::is_keys(st) && keys::hands_to_capture(&ev) {
+		return false; // the Controls table waits for an input: the window handler takes the click / notch (play_input.rs)
+	}
+	if keys::is_keys(st) && keys::mouse(st, ev, now) {
+		return true;
+	}
 	match ev {
 		MouseEvent::Move { x, y } => match st.drag {
 			Some(i) => slide_to(st, i, x, now),
@@ -457,6 +480,7 @@ fn pad_core(st: &mut State, mask: u16, now: u64) {
 		(st.pad_prev, st.primed) = (mask, true);
 		return;
 	}
+	keys::capture_gate(st, mask, now);
 	let (down, up) = (mask & !st.pad_prev, st.pad_prev & !mask);
 	st.pad_prev = mask;
 	if down != 0 {
@@ -516,7 +540,8 @@ pub fn begin(pad: Option<PadSample>) {
 pub fn end(built: Built, snap: Option<&MenuSnap>, win: (u32, u32)) -> Vec<Prim> {
 	// Left / Right stay the game's on the Sound bars and on the Controls / Mods pages (the section stepper reads them).
 	// The achievements page over one of them keeps them (it pages with Left / Right).
-	SOUND.store(built.ach.is_none() && matches!(built.page, Page::Sound | Page::PcControls | Page::PcMods), Ordering::Relaxed);
+	SOUND.store(built.ach.is_none() && built.keys.is_none() && matches!(built.page, Page::Sound | Page::PcControls | Page::PcMods), Ordering::Relaxed);
+	keys::set_table(built.keys.is_some());
 	WATCH.stamp(now());
 	cmd::stamp(snap); // the pulses queued until the next frame are made for this page
 	let (layout, mut prims) = page_draw::frame(&built.screen, &FontMeasure);
@@ -528,6 +553,10 @@ pub fn end(built: Built, snap: Option<&MenuSnap>, win: (u32, u32)) -> Vec<Prim> 
 	}
 	if built.goodies {
 		GOODIES_SEEN.store(true, Ordering::Relaxed);
+	}
+	if let Some(k) = &built.keys {
+		let ui = lock().as_mut().map(|st| keys::frame(st, &k.rows));
+		prims = pause_keys::draw(k, &ui.unwrap_or_default(), kbm::capture_state(), now(), prims);
 	}
 	if let Some(st) = lock().as_mut() {
 		st.goodies |= built.goodies;
@@ -568,7 +597,9 @@ pub fn repeat() -> Vec<Prim> {
 mod ach;
 mod child_tabs;
 mod grid;
+mod keys;
 pub use grid::place_preview;
+pub use keys::table_up;
 
 #[cfg(test)]
 mod tests;

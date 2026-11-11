@@ -17,8 +17,10 @@ pub const LIGHTING: Cost = Cost::High;
 pub const AO: Cost = Cost::Low;
 /// 0.57 / 0.77 / 0.94 ms (25..29 %).
 pub const SHADOWS: Cost = Cost::High;
-/// 0.09 / 0.10 / 0.10 ms (under 5 %).
-pub const GI: Cost = Cost::Low;
+/// 0.09 / 0.10 / 0.10 ms (under 5 %) in the 2026-11-04 scenes; since v0.5.1 test build 5 GI also drives the fire lights and their
+/// soft fire shadows (lane dlit2): at 1440p next to fires GI High costs +2.4 ms GPU (110 -> 89 fps at the user's settings),
+/// Medium +1.2 ms, Low +0.15 ms, no-fire scenes 0 (user 2026-11-06: "also change to GI cost in menu to high").
+pub const GI: Cost = Cost::High;
 /// 0.00 / 0.00 / 0.07 ms.
 pub const SUNRAYS: Cost = Cost::Low;
 /// High against Low: 0.02 / 0.22 / 0.38 ms (up to 10 %).
@@ -27,19 +29,14 @@ pub const DRAW: Cost = Cost::Medium;
 pub const VEGETATION: Cost = Cost::High;
 /// High against Classic: 0.20 ms on Novalis, 0.92 ms on Pokitaru's sea (25 %).
 pub const WATER: Cost = Cost::High;
-/// 0.00 / 0.12 ms (3 %).
-pub const WAVES: Cost = Cost::Low;
-/// Only while the camera is under water (underwater.rs: one full-screen pass and a copy of the picture). Measured (lane nuw, dev PC,
-/// fg1 1_0038 under water, Water High, 300 frames): the pass 0.102 ms of a 1.017 ms GPU sum, 0.922 ms with the row Off; under half
-/// of the Water passes in the same frames (bed, shade, mirror, positions: 0.235 ms, Medium): Low.
-pub const UNDERWATER: Cost = Cost::Low;
 /// High against Classic: 0.05 / 0.06 / 0.16 ms (up to 4 %).
 pub const FOG: Cost = Cost::Low;
 /// High against Classic: 0.20 / 0.26 / 0.10 ms (up to 10 %).
 pub const CLOUDS: Cost = Cost::Medium;
 /// High against Classic: 0.00 / 0.08 ms (3 %).
 pub const PARTICLES: Cost = Cost::Low;
-/// 0.68 / 0.77 / 1.64 ms (27..44 %): the costliest effect.
+/// 0.68 / 0.77 / 1.64 ms (27..44 %): the costliest effect (the Metal row: Low / Medium / High = the floor reflection at 1/8, 1/6, 1/4
+/// of the render size per axis, lane mres; the earlier half size took 0.38 ms mean at 1440p; one cost per row).
 pub const METAL: Cost = Cost::High;
 /// The burning buildings of Novalis: 0.07 ms (3 %).
 pub const FIRE: Cost = Cost::Low;

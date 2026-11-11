@@ -65,6 +65,8 @@ const PRESETS: [UiPresetDef; 3] = [
 const NEEDS: [NeedsRule; 1] = [NeedsRule {
 	row: "lighting",
 	set_to: 1,
+	for_row: "",
+	fix: None,
 	banner: t("Most effects need Enhanced lighting"),
 	detail: t("This only shows with Lighting set to Enhanced. Lighting is {} now."),
 	button: t("Switch Lighting to Enhanced"),

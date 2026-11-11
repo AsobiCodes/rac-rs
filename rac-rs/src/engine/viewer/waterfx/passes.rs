@@ -264,9 +264,18 @@ impl WaterFx {
 		self.t.as_ref().map(|t| (&t.bed_ms, &t.bed, &t.bed_depth))
 	}
 
-	/// [PC] Global illumination (post.rs `bind_water`): the position target and the scene copy `shade` takes before it draws.
-	pub(in crate::viewer) fn gi_mask(&self) -> Option<(&wgpu::TextureView, &wgpu::Texture)> {
-		self.t.as_ref().map(|t| (&t.wpos, &t.copy))
+	/// [PC] Global illumination (post.rs `bind_water`): the position target, the scene copy `shade` takes before it draws and
+	/// the copy `mark_water` takes after the water's own passes.
+	pub(in crate::viewer) fn gi_mask(&self) -> Option<(&wgpu::TextureView, &wgpu::Texture, &wgpu::Texture)> {
+		self.t.as_ref().map(|t| (&t.wpos, &t.copy, &t.after))
+	}
+
+	/// [PC] tb17: copies `scene` as the water pass left it (after `shade`, or after the underwater look when that drew), before
+	/// the volumetric smoke, fog and heat haze change pixels: post.rs `gi_skip` tells the water's pixels by the difference to the
+	/// pre-water copy, which those later passes must not take part in (their pixels took the fire light twice: yellow patches).
+	pub(in crate::viewer) fn mark_water(&self, enc: &mut wgpu::CommandEncoder, scene: &wgpu::TextureView) {
+		let Some(t) = &self.t else { return };
+		enc.copy_texture_to_texture(scene.texture().as_image_copy(), t.after.as_image_copy(), t.after.size());
 	}
 
 	/// Inside the post chain (after the occlusion, before the bloom): shades the water pixels of the post scene `scene`;

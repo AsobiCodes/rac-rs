@@ -35,9 +35,9 @@ pub(super) struct Pipes {
 
 impl Pipes {
 	pub(super) fn new(device: &wgpu::Device, format: F, depth_format: F) -> Pipes {
-		let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("reshade"), source: wgpu::ShaderSource::Wgsl(SHADER.into()) });
+		let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("reshade"), source: wgpu::ShaderSource::Wgsl(crate::viewer::scene_msaa::wgsl(SHADER.into())) });
 		let float = wgpu::TextureSampleType::Float { filterable: false };
-		let (l_depth, l_touch, l_copy) = (layout(device, 0, wgpu::TextureSampleType::Depth, true), layout(device, 1, float, false), layout(device, 2, float, false));
+		let (l_depth, l_touch, l_copy) = (layout(device, 0, wgpu::TextureSampleType::Depth, crate::viewer::scene_msaa::msaa() > 1), layout(device, 1, float, false), layout(device, 2, float, false));
 		let make = |entry: &'static str, l: &wgpu::BindGroupLayout, target: F, ds: Option<wgpu::DepthStencilState>, count: u32| {
 			let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("reshade"), bind_group_layouts: &[Some(l)], immediate_size: 0 });
 			device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -62,7 +62,7 @@ impl Pipes {
 		Pipes {
 			depth: make("fs_depth", &l_depth, F::R32Float, None, 1),
 			touch: make("fs_touch", &l_touch, F::R8Unorm, None, 1),
-			copy: make("fs_copy", &l_copy, format, Some(hud_ds), crate::viewer::MSAA),
+			copy: make("fs_copy", &l_copy, format, Some(hud_ds), crate::viewer::msaa()),
 			l_depth,
 			l_touch,
 			l_copy,
@@ -129,7 +129,7 @@ impl Targets {
 	/// attachment (the render_target state ReShade asks for), `depth1` left as a shader resource (read by the touch pass).
 	pub(super) fn encode(&self, pipes: &Pipes, enc: &mut wgpu::CommandEncoder, msaa: &wgpu::TextureView) {
 		fn attach<'a>(view: &'a wgpu::TextureView, resolve: Option<&'a wgpu::TextureView>, load: wgpu::LoadOp<wgpu::Color>, store: wgpu::StoreOp) -> [Option<wgpu::RenderPassColorAttachment<'a>>; 1] {
-			[Some(wgpu::RenderPassColorAttachment { view, resolve_target: resolve, depth_slice: None, ops: wgpu::Operations { load, store } })]
+			[Some(crate::viewer::scene_msaa::att(view, resolve, wgpu::Operations { load, store }))] // lane noaa: 1 sample = copy
 		}
 		fn pass<'e>(enc: &'e mut wgpu::CommandEncoder, label: &'static str, colors: &[Option<wgpu::RenderPassColorAttachment>]) -> wgpu::RenderPass<'e> {
 			enc.begin_render_pass(&wgpu::RenderPassDescriptor { label: Some(label), color_attachments: colors, depth_stencil_attachment: None, timestamp_writes: crate::viewer::passtime::rw(label), occlusion_query_set: None, multiview_mask: None })
@@ -141,6 +141,7 @@ impl Targets {
 		p.draw(0..3, 0..1);
 		drop(p);
 		drop(pass(enc, "rs resolve", &attach(msaa, Some(&self.rt_view), wgpu::LoadOp::Load, wgpu::StoreOp::Discard)));
+		crate::viewer::scene_msaa::flush(enc);
 		drop(pass(enc, "rs rt", &attach(&self.rt_view, None, wgpu::LoadOp::Load, wgpu::StoreOp::Store)));
 		let mut p = pass(enc, "rs touch", &attach(&self.touch, None, clear, wgpu::StoreOp::Discard));
 		p.set_pipeline(&pipes.touch);
@@ -168,7 +169,7 @@ mod tests {
 
 	#[test]
 	fn the_depth_pass_reads_every_msaa_sample() {
-		assert!(SHADER.contains(&format!("const SAMPLES: i32 = {};", crate::viewer::MSAA)), "passes.wgsl SAMPLES must equal the renderer's MSAA");
+		assert!(SHADER.contains(&format!("const SAMPLES: i32 = {};", crate::viewer::scene_msaa::FULL)), "passes.wgsl SAMPLES must equal the full MSAA count (scene_msaa.rs rewrites it to 1)");
 	}
 
 	#[test]

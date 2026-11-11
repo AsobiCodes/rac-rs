@@ -12,7 +12,7 @@ const HUD_VALUES: &[rac_engine::ui::T5] = &[["Sharp", "Net", "Scharf", "N\u{ed}t
 const ASPECT_VALUES: &[rac_engine::ui::T5] = &[t("Auto"), t("4:3"), t("16:9"), t("16:10"), t("21:9"), t("32:9")];
 const POS_VALUES: &[rac_engine::ui::T5] = &[t("4:3"), ["Corners", "Coins", "Ecken", "Esquinas", "Angoli"]];
 
-pub static SCREEN: [UiRow; 5] = [
+pub static SCREEN: [UiRow; 6] = [
 	row(
 		"displaymode",
 		CH,
@@ -29,6 +29,7 @@ pub static SCREEN: [UiRow; 5] = [
 		Cost::None,
 		None,
 	),
+	super::rows_picture::RESOLUTION, // [PC] v0.5.1: Desktop or a monitor size (rows_picture.rs)
 	row(
 		"aspect",
 		CH,

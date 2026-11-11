@@ -94,6 +94,8 @@ struct Targets {
 	wpos: wgpu::TextureView,
 	wdepth: wgpu::TextureView,
 	copy: wgpu::Texture,
+	/// [PC] tb17: the scene as the water pass left it (`mark_water`), for the global illumination's water test (post.rs `gi_skip`).
+	after: wgpu::Texture,
 	g_pos: wgpu::BindGroup,
 	g_shade: wgpu::BindGroup,
 	/// The planar mirrors (mirror.rs), half size: MSAA colour and depth (shared by the passes, each clears them), the resolve
@@ -132,6 +134,8 @@ pub(super) struct WaterFx {
 	start: std::time::Instant,
 	/// The geometric sea planes' and the mirrors' heights, steadied (`steady.rs`).
 	heave: steady::Heave,
+	/// [PC] lane pwat (gpu/mirror_cull.rs): the mirror heights for next frame's tfrag cull and the mirror-only tfrag draws.
+	pub(in crate::viewer) mirror_cull: crate::viewer::gpu::mirror_cull::MirrorCull,
 	t: Option<Targets>,
 	drift: std::collections::HashMap<(u32, u32, u32, u32), Drift>,
 	flows: Vec<[f32; 2]>,
@@ -198,6 +202,16 @@ pub(super) struct WaterFrame {
 }
 
 
+/// The water shader as setup.rs builds it (no debug hook): tests (here, and the 1-sample variant in scene_msaa_tests.rs).
+#[cfg(test)]
+pub(in crate::viewer) fn test_source() -> String {
+	format!("{}{}{}{}{}{}{}{}{}{}", SHADER, fall_wgsl::FALL_WGSL, skymap::wgsl(12, 13), edge_calm::EDGE_WGSL, far_look::FAR_WGSL, steep_look::STEEP_WGSL, shore_fade::SHORE_FADE_WGSL, shore_map::SHORE_DIST_WGSL, hero_crest::HERO_CREST_WGSL, rim::RIM_WGSL) + underside::UNDER_WGSL + dry_tiles::DRY_WGSL + grid_waves::GRID_WAVES_WGSL + far_lod::FAR_LOD_WGSL + nwater::NWATER_WGSL + bed_min::BED_MIN_WGSL + &skyvis_water::wgsl()
+}
+
+/// The shore map shader (scene_msaa_tests.rs).
+#[cfg(test)]
+pub(in crate::viewer) const SHORE_TEST_SOURCE: &str = shore_map::SHORE_SHADER;
+
 #[cfg(test)]
 mod tests {
 	/// A strip whose uv is (x / 4, y / 8): the world-from-uv map is diag(4, 8).
@@ -230,7 +244,7 @@ mod tests {
 	/// The shader compiles (naga) with both entry pairs.
 	#[test]
 	fn water_shader_parses() {
-		let src = format!("{}{}{}{}{}{}{}{}{}{}", super::SHADER, super::fall_wgsl::FALL_WGSL, super::skymap::wgsl(12, 13), super::edge_calm::EDGE_WGSL, super::far_look::FAR_WGSL, super::steep_look::STEEP_WGSL, super::shore_fade::SHORE_FADE_WGSL, super::shore_map::SHORE_DIST_WGSL, super::hero_crest::HERO_CREST_WGSL, super::rim::RIM_WGSL) + super::underside::UNDER_WGSL + super::dry_tiles::DRY_WGSL + super::grid_waves::GRID_WAVES_WGSL + super::far_lod::FAR_LOD_WGSL + super::nwater::NWATER_WGSL + super::bed_min::BED_MIN_WGSL + &super::skyvis_water::wgsl();
+		let src = super::test_source();
 		let m = naga::front::wgsl::parse_str(&src).expect("water shader");
 		let names: Vec<_> = m.entry_points.iter().map(|e| e.name.as_str()).collect();
 		for n in ["vs_pos", "fs_pos", "vs_full", "fs_water", "vs_grid", "cs_dry", "cs_wave", "cs_bedmin"] {

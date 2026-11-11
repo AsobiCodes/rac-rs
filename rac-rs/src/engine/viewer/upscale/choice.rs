@@ -45,7 +45,7 @@ fn index(v: Option<&str>, names: &[&str], def: u8) -> u8 {
 }
 
 /// The Upscaler row value of a file value: `KINDS`, then the old names (`ALIASES`); unknown = Off.
-fn kind_index(v: Option<&str>) -> u8 {
+pub(in crate::viewer) fn kind_index(v: Option<&str>) -> u8 {
 	let old = v.and_then(|v| ALIASES.iter().find(|a| a.0.eq_ignore_ascii_case(v.trim())));
 	old.map_or_else(|| index(v, &KINDS, 0), |a| a.1)
 }
@@ -54,8 +54,10 @@ fn kind_index(v: Option<&str>) -> u8 {
 pub fn init(opts: &PcOptions) {
 	KIND.store(kind_index(opts.extra_get(KEY)), Ordering::Relaxed);
 	Q.store(index(opts.extra_get(KEY_Q), &QUALITIES, DEFAULT_Q), Ordering::Relaxed);
+	super::dlss_preset::init(opts); // [PC] the DLSS preset (lane disp worker 8; the launcher's row)
 	crate::ui::live::watch(KEY); // [PC] the menu showing the row = the moment to name the FidelityFX version (upscale.rs)
 	label_quality(kind());
+	crate::viewer::fgen::follow::refresh(); // lane fglive: Frame Generation follows the Upscaler
 	if kind() != 0 {
 		eprintln!("upscale: Upscaler {}, quality {} (options file)", KINDS[kind() as usize], QUALITIES[quality() as usize]);
 	}
@@ -64,6 +66,17 @@ pub fn init(opts: &PcOptions) {
 /// The Upscaler row's value in force: 0 Off, 1 FSR (FidelityFX), 2 DLSS; the chosen one, or Off while it cannot run here.
 pub fn kind() -> u8 {
 	effective(KIND.load(Ordering::Relaxed), NOT_RUNNING.load(Ordering::Relaxed))
+}
+
+/// The Upscaler row value the slot really runs (slot.rs `active`: the env RAC_UPSCALE over the option, Off while the slot was
+/// refused by the driver or its upscaler cannot run here). Lane fglive: Frame Generation follows this (fgen/follow.rs).
+pub fn kind_in_force() -> u8 {
+	value_of_setting(super::slot::active())
+}
+
+/// The Upscaler row value of a slot setting (pure; None = Off).
+pub(in crate::viewer) fn value_of_setting(s: Option<Setting>) -> u8 {
+	s.map_or(0, |s| value_of(s.kind) as u8)
 }
 
 /// `kind` for a chosen row value and the not-running bits.
@@ -77,6 +90,12 @@ fn value_of(kind: Kind) -> i32 {
 		Kind::Fsr => FFX_VALUE,
 		Kind::Dlss => DLSS_VALUE,
 	}
+}
+
+/// Whether row value `v` can be chosen on this PC: Off always, FSR / DLSS unless the engine found they cannot run (the classic
+/// menu's Upscaler row skips the others, rac1 retail/pcmore.rs).
+pub fn offered(v: i32) -> bool {
+	v <= 0 || NOT_RUNNING.load(Ordering::Relaxed) & (1 << v.clamp(0, 7)) == 0
 }
 
 /// Whether `kind` runs on this PC as far as the engine knows (slot.rs `active_of`: no = no upscaler, the plain picture).
@@ -95,6 +114,7 @@ pub(in crate::viewer) fn set_runs(v: i32, runs: bool) {
 	}
 	crate::ui::live::offer(KEY, v, runs);
 	label_quality(kind());
+	crate::viewer::fgen::follow::refresh();
 	let name = KINDS.get(v.max(0) as usize).copied().unwrap_or("?");
 	eprintln!("upscale: {name} {}", if runs { "runs on this PC again: offered" } else { "cannot run on this PC: not offered, Off while chosen" });
 }
@@ -137,6 +157,7 @@ fn put(cell: &AtomicU8, opts: &mut PcOptions, key: &str, names: &[&str], v: i32)
 pub fn set_kind(opts: &mut PcOptions, v: i32) -> bool {
 	let changed = put(&KIND, opts, KEY, &KINDS, v);
 	label_quality(kind());
+	crate::viewer::fgen::follow::refresh(); // lane fglive: Frame Generation pauses / resumes with the Upscaler, no restart
 	changed
 }
 

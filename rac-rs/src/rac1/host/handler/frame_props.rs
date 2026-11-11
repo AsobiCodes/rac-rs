@@ -10,13 +10,17 @@ impl App {
 	/// history, the ones in a box are blended too.
 	fn posing(&self, game: &Game, g: crate::retail::pcext::Graphics) -> (Vec<bool>, Vec<bool>) {
 		let sun = SunGate::of(self, g);
+		// [PC] tb4 N7: and the ones in a point-light shadow map's reach (last frame's maps; sun_gate.rs `light_takes`).
+		let lights = self.gpu.as_ref().map_or(&[][..], |gpu| gpu.sun.light_spheres());
 		game.props.iter().map(|p| {
 			if p.shown || (p.cast && !g.culling) {
 				return (true, true);
 			}
 			let sphere = || self.prop_anims.get(&p.class_id).map(|c| c.0.bsphere);
+			let lit = |m: f32| sun_gate::light_takes(lights, p, sphere(), m);
 			match &sun {
-				Some(s) if p.cast => (s.takes(p, sphere(), HISTORY_MARGIN), s.takes(p, sphere(), 0.0)),
+				Some(s) if p.cast => (s.takes(p, sphere(), HISTORY_MARGIN) || lit(HISTORY_MARGIN), s.takes(p, sphere(), 0.0) || lit(0.0)),
+				_ if p.cast => (lit(HISTORY_MARGIN), lit(0.0)),
 				_ => (false, false),
 			}
 		}).unzip()

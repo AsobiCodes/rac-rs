@@ -10,13 +10,15 @@ fn ratios_map_to_ngx_modes() {
 	assert!(super::super::slot::QUALITY.iter().all(|&(_, r)| ngx_quality(r) != abi::QUALITY_ULTRA_QUALITY));
 }
 
-/// Preset M / L = DLSS 4.5 in every mode (the create desc asks for it), the label follows NGX's report.
+/// Preset K in every mode, L for Ultra performance, with the preset on Auto (the create desc asks for it), the label follows NGX's report.
 #[test]
 fn presets_and_labels() {
+	use super::super::dlss_preset::preset_of;
 	for q in [abi::QUALITY_DLAA, abi::QUALITY_MAX_QUALITY, abi::QUALITY_BALANCED, abi::QUALITY_MAX_PERF] {
-		assert_eq!(create_desc(((1707, 960), (2560, 1440)), q).preset, abi::PRESET_M);
+		assert_eq!(create_desc(((1707, 960), (2560, 1440)), q, preset_of(0, q)).preset, abi::PRESET_K);
+		assert_eq!(create_desc(((1707, 960), (2560, 1440)), q, preset_of(2, q)).preset, abi::PRESET_L, "row L");
 	}
-	let c = create_desc(((853, 480), (2560, 1440)), abi::QUALITY_ULTRA_PERFORMANCE);
+	let c = create_desc(((853, 480), (2560, 1440)), abi::QUALITY_ULTRA_PERFORMANCE, preset_of(0, abi::QUALITY_ULTRA_PERFORMANCE));
 	assert_eq!((c.preset, c.render_w, c.out_h, c.flags), (abi::PRESET_L, 853, 1440, abi::FLAG_MV_LOW_RES | abi::FLAG_AUTO_EXPOSURE));
 	assert_eq!(label_of('M' as u32), "DLSS 4.5");
 	assert_eq!(label_of('L' as u32), "DLSS 4.5");

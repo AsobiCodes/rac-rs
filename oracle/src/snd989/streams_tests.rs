@@ -682,6 +682,83 @@ fn queued_loop_part_is_appended_and_the_voice_never_ends() {
     assert!(v.spu[0x18].cur.endx, "the loop end was passed at least once");
 }
 
+/// #74: a full payload cache keeps what a stream not keyed yet still needs: the loop part's cid 44 between the intro's cid 44
+/// and its key-on must not drop the intro (the whole track ran silent); payloads no slot needs are dropped.
+#[test]
+fn a_full_payload_cache_keeps_the_payloads_of_streams_waiting_for_their_key_on() {
+    let (mut v, mut s) = setup();
+    for l in 1..=5 {
+        s.keep_payload(l, raw_payload(4), [0, 0]); // old speech lines, no slot uses them
+    }
+    s.keep_payload(INTRO, raw_payload(BLOCKS), [INTRO, 0]);
+    let a = s.play(0, &mut v, &args(INTRO, 0, 1, 0, 0x20));
+    s.keep_payload(LOOP, raw_payload(BLOCKS), [LOOP, 0]); // the cache is full: the loop's cid 44 trims it
+    assert_eq!(s.play(0, &mut v, &args(LOOP, 0, 1, a, 0x24)), 1);
+    let mut kept: Vec<u32> = s.payload.keys().copied().collect();
+    kept.sort();
+    assert_eq!(kept, vec![INTRO, LOOP], "unused payloads dropped, the waiting intro kept");
+    for t in 0..4 {
+        step_spu(&mut v, &mut s, t);
+    }
+    let d = v.stream_of(0x18).expect("stream data on the chan voice").read().unwrap().clone();
+    assert_eq!(d.len(), 2 * BLOCKS as usize * 16, "intro + loop both in the voice's data");
+}
+
+/// #74 / B1: a stereo cid 44 at a full cache keeps both of its payloads (the left one has no slot yet when the right is stored).
+#[test]
+fn a_stereo_call_at_a_full_cache_keeps_left_and_right() {
+    let (mut v, mut s) = setup();
+    for l in 1..=5 {
+        s.keep_payload(l, raw_payload(4), [0, 0]);
+    }
+    let both = [INTRO, LOOP];
+    s.keep_payload(INTRO, raw_payload(BLOCKS), both);
+    s.keep_payload(LOOP, raw_payload(BLOCKS), both); // full: trims, the left payload has no slot yet
+    assert!(s.payload.contains_key(&INTRO) && s.payload.contains_key(&LOOP), "both channels kept");
+    let a = s.play(0, &mut v, &args(INTRO, LOOP, 1, 0, 0x20));
+    for t in 0..4 {
+        step_spu(&mut v, &mut s, t);
+    }
+    assert!(s.stream(a).unwrap().bufs.iter().all(|b| b.is_some()), "left and right voices both got data");
+}
+
+/// B1: a queued stereo loop part keeps both channels' payloads while the intro waits for its key-on.
+#[test]
+fn a_queued_stereo_loop_part_keeps_left_and_right() {
+    let (mut v, mut s) = setup();
+    for l in 1..=4 {
+        s.keep_payload(l, raw_payload(4), [0, 0]);
+    }
+    s.keep_payload(INTRO, raw_payload(BLOCKS), [INTRO, 0]);
+    let a = s.play(0, &mut v, &args(INTRO, 0, 1, 0, 0x20));
+    let part = [LOOP, 300];
+    s.keep_payload(LOOP, raw_payload(BLOCKS), part);
+    s.keep_payload(300, raw_payload(BLOCKS), part); // full: trims
+    for l in [INTRO, LOOP, 300] {
+        assert!(s.payload.contains_key(&l), "payload {l} kept");
+    }
+    assert_eq!(s.play(0, &mut v, &args(LOOP, 300, 1, a, 0x24)), 1);
+}
+
+/// S3: only a stream not keyed yet pins its payloads; a keyed slot without bufs (a savestate adopt, a missing payload) does not.
+#[test]
+fn a_keyed_slot_without_bufs_does_not_pin_its_payloads() {
+    let (mut v, mut s) = setup();
+    s.payload.insert(INTRO, raw_payload(BLOCKS));
+    s.play(0, &mut v, &args(INTRO, 0, 1, 0, 0x20));
+    for t in 0..4 {
+        step_spu(&mut v, &mut s, t);
+    }
+    for slot in s.slots.iter_mut().flatten() {
+        assert!(slot.keyed);
+        slot.bufs = [None, None]; // as after a savestate restore
+    }
+    for l in 1..=6 {
+        s.keep_payload(l, raw_payload(4), [0, 0]);
+    }
+    assert!(!s.payload.contains_key(&INTRO), "a keyed stream's payload is trimmed like any other");
+}
+
 #[test]
 fn adopted_music_stream_keys_on_from_the_start() {
     let (mut v, mut s) = setup();

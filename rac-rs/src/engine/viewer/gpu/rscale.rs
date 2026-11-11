@@ -52,7 +52,7 @@ pub fn render_size(win: (u32, u32), pct: u32, max: u32) -> (u32, u32) {
 pub(super) fn start_size(device: &wgpu::Device, config: &mut wgpu::SurfaceConfiguration) -> (u32, u32) {
 	let win = (config.width, config.height);
 	// [PC] Aspect ratio (aspect_pass.rs): the sizes are planned from the box inside the window, as `rscale_plan` does.
-	let boxed = crate::viewer::aspect_box::fit(win, crate::viewer::aspect_box::current()).size();
+	let boxed = crate::viewer::aspect_box::picture(win, crate::viewer::aspect_box::current(), crate::viewer::resolution::frame_size(win)).0; // [PC] + Resolution
 	(config.width, config.height) = planned_size(boxed, device.limits().max_texture_dimension_2d);
 	win
 }
@@ -107,6 +107,8 @@ pub(in crate::viewer) struct RScale {
 	pipe: Option<Pipe>,
 	/// [PC] Aspect ratio: the window size, the box and its picture (aspect_pass.rs); `win` above is the box.
 	pub(super) abox: super::aspect_pass::ABox,
+	/// [PC] Brightness / Contrast: the adjust pass before the HUD (grade_pass.rs).
+	pub(super) grade: super::grade_pass::Grade,
 }
 
 impl RScale {
@@ -160,7 +162,7 @@ fn make_target(device: &wgpu::Device, pipe: &Pipe, format: wgpu::TextureFormat, 
 		sample_count: 1,
 		dimension: wgpu::TextureDimension::D2,
 		format,
-		usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+		usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | crate::viewer::scene_msaa::copy_usage(), // lane noaa: the HUD / Classic resolve copy lands here at 1 sample
 		view_formats: &[],
 	});
 	let view = tex.create_view(&Default::default());
@@ -233,8 +235,9 @@ impl Gpu {
 	}
 
 	/// The swapchain at the window size (the render size lives in `config`).
-	pub(super) fn reconfigure_surface(&self) {
-		super::setup::configure_surface(&self.surface, &self.device, &window_config(&self.config, self.real_size()));
+	pub(super) fn reconfigure_surface(&mut self) {
+		let c = window_config(&self.config, self.real_size());
+		self.screen.configure(&self.device, &c);
 	}
 
 	/// Copies the offscreen picture onto `dst`, the window image or, with an Aspect ratio box, the box picture (nothing at 100 %).
@@ -244,7 +247,7 @@ impl Gpu {
 			label: Some("render scale"),
 			color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: dst, depth_slice: None, resolve_target: None, ops: wgpu::Operations { load: crate::viewer::post::overwrite(), store: wgpu::StoreOp::Store } })],
 			depth_stencil_attachment: None,
-			timestamp_writes: None,
+			timestamp_writes: crate::viewer::passtime::rw("render scale"),
 			occlusion_query_set: None,
 			multiview_mask: None,
 		});

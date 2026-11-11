@@ -69,9 +69,38 @@ fn keep_at(v: [f32; 3], rad: f32, tan_x: f32, aspect: f32, lag: ViewLag) -> bool
 	wide(aspect) && SideOnly { vx: v[0], vy: v[1], vz: v[2], w: rad, tan_v: tan_x * crate::viewer::PROJ_Y_RATIO }.inside_lag(aspect, lag)
 }
 
+/// [PC] #79: the far limit (m) a port's sphere test uses for a RAM-built floor (Hoven's pools and ice floor, Gaspar's lava; retail
+/// 256 m). Draw distance Medium / High draws the terrain around them out to the far draw's cap (viewer/fardraw.rs), so a floor
+/// cut at retail's 256 m left a hole of clear colour in the far ground (wide windows show the most of it). The limit follows the
+/// far draw as the ties do: `scale` times retail's, up to `cap`; Low (and RAC_FAR_DRAW=0) keeps retail's.
+pub(crate) fn far(retail: f32) -> f32 {
+	far_at(retail, crate::viewer::fardraw::on(crate::gfx::graphics().draw_q(), true))
+}
+
+/// `far` under a given far draw level.
+fn far_at(retail: f32, l: Option<crate::viewer::fardraw::Level>) -> f32 {
+	l.map_or(retail, |l| (retail * l.scale()).min(l.cap()).max(retail))
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// #79: Low keeps retail's 256 m; Medium and High follow the far draw's cap.
+	#[test]
+	fn far_follows_the_draw_distance() {
+		use crate::viewer::fardraw::Level;
+		assert_eq!(far_at(256.0, None), 256.0);
+		assert_eq!(far_at(256.0, Some(Level::Medium)), Level::Medium.cap());
+		assert_eq!(far_at(256.0, Some(Level::High)), 2000.0);
+		assert_eq!(far_at(100.0, Some(Level::Medium)), 400.0);
+		// a far sphere at 300 m: cut by retail's test, drawn under Medium
+		let blk = block();
+		let s = [0.0, 0.0, 300.0, 4.0];
+		let v = super::super::queue_q1::sphere_test(&blk, 256.0, s, |_, _, _| false);
+		let w = super::super::queue_q1::sphere_test(&blk, far_at(256.0, Some(Level::Medium)), s, |_, _, _| false);
+		assert!(v < 0 && w >= 0, "{v} {w}");
+	}
 
 	const TX: f32 = 0.63;
 	const WIDE: f32 = 16.0 / 9.0;

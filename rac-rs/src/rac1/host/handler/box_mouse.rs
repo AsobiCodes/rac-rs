@@ -7,6 +7,8 @@
 //! there (a Sound Options bar drag), which gets the position clamped into the box; a LEFT press on a bar while a menu is up is dropped
 //! (the right button's Back and the middle button go on, the release goes on). Mouse look reads raw motion and is not touched.
 //! Without a box (Auto, or a window within 1 % of the shape) every event goes on unchanged.
+//! [PC] Resolution in fullscreen (engine viewer/resolution.rs): the box picture can be smaller than its rectangle (drawn at the
+//! chosen size, scaled to the screen); positions are then scaled into the picture's pixels (`Gpu::box_map`).
 
 use super::*;
 use rac_engine::viewer::aspect_box::{self, Rect};
@@ -23,8 +25,11 @@ struct Last {
 	device_id: DeviceId,
 	x: f64,
 	y: f64,
-	rect: Option<Rect>,
+	rect: Option<BoxMap>,
 }
+
+/// The box's rectangle in window pixels and its picture's size (`Gpu::box_map`).
+type BoxMap = (Rect, (u32, u32));
 
 thread_local! {
 	/// MAIN only (the window events): `box_event` writes it, `box_follow` reads it and keeps its box.
@@ -43,10 +48,19 @@ fn drops_press(button: MouseButton, pressed: bool, bar: bool, menu: bool) -> boo
 }
 
 /// A window pixel position as a `CursorMoved` in the box `rect`'s pixels (`ON_BAR` set for it).
-fn moved(device_id: DeviceId, rect: Rect, x: f64, y: f64) -> WindowEvent {
+fn moved(device_id: DeviceId, (rect, pic): BoxMap, x: f64, y: f64) -> WindowEvent {
 	let (x, y) = aspect_box::to_box(rect, x, y);
 	ON_BAR.store(!aspect_box::inside(rect, x, y), Ordering::Relaxed);
+	let (x, y) = to_pic(rect, pic, x, y);
 	WindowEvent::CursorMoved { device_id, position: winit::dpi::PhysicalPosition::new(x, y) }
+}
+
+/// A box position in rectangle pixels as picture pixels (the same at an Aspect ratio box alone; scaled at a chosen Resolution).
+fn to_pic(rect: Rect, pic: (u32, u32), x: f64, y: f64) -> (f64, f64) {
+	if (rect.w, rect.h) == pic {
+		return (x, y);
+	}
+	(x * pic.0 as f64 / rect.w.max(1) as f64, y * pic.1 as f64 / rect.h.max(1) as f64)
 }
 
 /// A box position on a bar clamped into the `w` x `h` box (0..w-1, 0..h-1).
@@ -56,8 +70,8 @@ fn clamp_into(w: u32, h: u32, x: f64, y: f64) -> (f64, f64) {
 
 impl App {
 	/// The box the frame is drawn in, in window pixels (None without a box).
-	fn box_now(&self) -> Option<Rect> {
-		self.gpu.as_ref().map(|g| (g.box_rect(), g.real_size())).filter(|(r, real)| !r.is_full(*real)).map(|(r, _)| r)
+	fn box_now(&self) -> Option<BoxMap> {
+		self.gpu.as_ref().and_then(|g| g.box_map())
 	}
 
 	/// The window event with its cursor position in box pixels; None = a left press on a bar while a menu is up (nothing happens).
@@ -153,11 +167,19 @@ mod tests {
 			WindowEvent::CursorMoved { position, .. } => (position.x, position.y),
 			_ => panic!("a cursor move"),
 		};
-		let b43 = aspect_box::fit((1280, 720), aspect_box::Ratio::R4x3); // 160, 0, 960 x 720
+		let r43 = aspect_box::fit((1280, 720), aspect_box::Ratio::R4x3); // 160, 0, 960 x 720
+		let b43 = (r43, (r43.w, r43.h));
 		assert_eq!(pos(moved(dev, b43, 1100.0, 360.0)), (940.0, 360.0), "the Aspect row's arrow at window x 1100 = box x 940");
 		assert!(!on_bar());
 		assert_eq!(pos(moved(dev, b43, 1200.0, 360.0)), (1040.0, 360.0));
 		assert!(on_bar(), "the right bar");
 		ON_BAR.store(false, Ordering::Relaxed);
+	}
+
+	/// A chosen Resolution smaller than the box: rectangle pixels scaled into the picture's pixels.
+	#[test]
+	fn a_smaller_picture_scales_the_position() {
+		assert_eq!(to_pic(Rect { x: 0, y: 0, w: 2560, h: 1440 }, (1280, 720), 1000.0, 500.0), (500.0, 250.0));
+		assert_eq!(to_pic(Rect { x: 0, y: 0, w: 960, h: 720 }, (960, 720), 12.5, 7.0), (12.5, 7.0), "same size: unchanged");
 	}
 }

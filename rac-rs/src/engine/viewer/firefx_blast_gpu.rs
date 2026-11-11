@@ -62,7 +62,7 @@ impl GroundRes {
 			}),
 			primitive: Default::default(),
 			depth_stencil: Some(wgpu::DepthStencilState { format: env.depth_format, depth_write_enabled: Some(false), depth_compare: Some(wgpu::CompareFunction::Always), stencil: Default::default(), bias: Default::default() }),
-			multisample: wgpu::MultisampleState { count: MSAA, ..Default::default() },
+			multisample: wgpu::MultisampleState { count: msaa(), ..Default::default() },
 			multiview_mask: None,
 			cache: None,
 		});

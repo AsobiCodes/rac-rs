@@ -35,7 +35,7 @@ struct Slot {
 }
 
 /// The ring of command lists, the fence and wgpu's queue.
-pub(super) struct Lists {
+pub(in crate::viewer) struct Lists {
 	queue: ID3D12CommandQueue,
 	fence: ID3D12Fence,
 	value: u64,
@@ -49,7 +49,7 @@ unsafe impl Send for Lists {}
 
 impl Lists {
 	/// The lists on `device` (the wgpu device's ID3D12Device*) for wgpu's D3D12 queue of `queue`.
-	pub(super) fn new(device: *mut c_void, queue: &wgpu::Queue) -> Result<Lists, String> {
+	pub(in crate::viewer) fn new(device: *mut c_void, queue: &wgpu::Queue) -> Result<Lists, String> {
 		let e = |what: &'static str| move |err: windows::core::Error| format!("{what}: {err}");
 		let device = unsafe { ID3D12Device::from_raw_borrowed(&device) }.ok_or("no D3D12 device")?.clone();
 		let queue = unsafe { queue.as_hal::<wgpu::hal::api::Dx12>() }.ok_or("no D3D12 queue")?.as_raw().clone();
@@ -66,7 +66,7 @@ impl Lists {
 
 	/// On the submitting thread, between the frame's two submits: waits for the next slot, `record`s into its list (the open
 	/// ID3D12GraphicsCommandList*) and executes it on the queue, then signals the fence; `keep` stays referenced until it ran.
-	pub(super) fn run(&mut self, record: impl FnOnce(*mut c_void) -> Result<(), String>, keep: Vec<ID3D12Resource>) -> Result<(), String> {
+	pub(in crate::viewer) fn run(&mut self, record: impl FnOnce(*mut c_void) -> Result<(), String>, keep: Vec<ID3D12Resource>) -> Result<(), String> {
 		let e = |what: &'static str| move |err: windows::core::Error| format!("{what}: {err}");
 		let i = self.next;
 		self.next = (i + 1) % self.slots.len();

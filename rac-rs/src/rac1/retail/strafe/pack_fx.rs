@@ -9,14 +9,14 @@ use crate::fmath::Fm;
 use std::sync::Mutex;
 
 /// The Thruster-Pack (back object `*0x1404d0`, class at +0xa6; 607 is the Heli-Pack).
-const THRUSTER_PACK: u16 = 608;
+pub(super) const THRUSTER_PACK: u16 = 608;
 
 /// The pack's exhaust mobys (class 167, update Orxon FUN_002a5380, hidden). In state 3 (firing) its spawner FUN_002a4e38 puts,
 /// every field, type-0x15 flames at its origin F (+0x10) and halfway back to its last smoke point, and type-0x17 smoke at
 /// S = F + its rows (+0xc0) x (0, 0, -0.3) and up to 3 points back toward the last S; S is kept in pvar +0x10, the pack in
 /// pvar +8 [C Orxon OV:128746-128932, 128959-129092].
-const EXHAUST: u16 = 167;
-const FIRING: u8 = 3;
+pub(super) const EXHAUST: u16 = 167;
+pub(super) const FIRING: u8 = 3;
 const FLAME: u8 = 0x15;
 const SMOKE: u8 = 0x17;
 
@@ -65,10 +65,10 @@ fn seg_dist(p: [f32; 3], a: [f32; 3], b: [f32; 3]) -> f32 {
 
 /// The spawn segments of this field's firing exhaust mobys of `pack` (last S to F, last S to S), with `smoke` updated.
 fn spawn_segments(m: &ee_oracle::Machine, pack: u32, smoke: &mut Vec<(u32, [f32; 3])>) -> Vec<([f32; 3], [f32; 3])> {
-	let (s, e) = crate::retail::ram_globals::table(m.rd8(crate::retail::ram_globals::LEVEL) as u32);
-	let (mut a, e) = (m.rd32(s) & 0x01ff_ffff, m.rd32(e) & 0x01ff_ffff);
+	// Lane rfire worker 9 (review L2): the sane span, last slot included (the end word is the START of the last slot).
+	let span = crate::retail::ram_globals::machine_span(m, m.rd8(crate::retail::ram_globals::LEVEL) as u32);
 	let (mut segs, mut now) = (Vec::new(), Vec::new());
-	while a < e && a != 0 {
+	for a in span.into_iter().flat_map(|(s, e)| (s..=e).step_by(0x100)) {
 		let pv = m.rd32(a + 0x78) & 0x01ff_ffff;
 		if m.rd16(a + 0xa6) == EXHAUST && m.rd8(a + 0x20) == FIRING && pv != 0 && m.rd32(pv + 8) & 0x01ff_ffff == pack {
 			let (f, sm) = (m.rdv3(a + 0x10), m.rdv3(pv + 0x10));
@@ -76,7 +76,6 @@ fn spawn_segments(m: &ee_oracle::Machine, pack: u32, smoke: &mut Vec<(u32, [f32;
 			segs.extend([(last, f), (last, sm)]);
 			now.push((a, sm));
 		}
-		a += 0x100;
 	}
 	*smoke = now;
 	segs

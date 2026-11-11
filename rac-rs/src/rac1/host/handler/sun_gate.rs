@@ -48,10 +48,7 @@ impl SunGate {
 	/// tick's blend (`smooth::SNAP_DIST`), touches a cascade box (`Cascade::touches`: what the maps clip to, so a moby outside every box
 	/// is not in any map). Without boxes: within the reach of the cascades of any light.
 	pub(super) fn takes(&self, p: &Prop, class_sphere: Option<[f32; 4]>, margin: f32) -> bool {
-		let rho = class_sphere.map_or(f32::INFINITY, |s| (s[0].hypot(s[1]).hypot(s[2]) + s[3].abs()) * p.scale.abs().max(1.0) + 5.0);
-		if !rho.is_finite() || !p.pos.iter().all(|v| v.is_finite()) {
-			return true;
-		}
+		let Some(rho) = rho(p, class_sphere) else { return true };
 		let rho = rho + smooth::SNAP_DIST + margin;
 		match &self.boxes {
 			Some(boxes) => boxes[..self.q.cascades].iter().any(|c| c.touches(p.pos, rho)),
@@ -61,6 +58,26 @@ impl SunGate {
 			}
 		}
 	}
+}
+
+/// The sphere radius `takes` widens a moby by (its class sphere at its scale, + 5 m); None = unknown (no class sphere, not finite):
+/// always taken.
+fn rho(p: &Prop, class_sphere: Option<[f32; 4]>) -> Option<f32> {
+	let rho = class_sphere.map_or(f32::INFINITY, |s| (s[0].hypot(s[1]).hypot(s[2]) + s[3].abs()) * p.scale.abs().max(1.0) + 5.0);
+	(rho.is_finite() && p.pos.iter().all(|v| v.is_finite())).then_some(rho)
+}
+
+/// [PC] tb4 fix N7: whether a camera-culled moby lies within the reach of a point-light shadow map (`lights` = last frame's,
+/// `SunShadow::light_spheres`: centre, reach; the maps follow their lights smoothly and fade in, so a frame's lag shows nothing),
+/// `margin` as `SunGate::takes`. Such a moby is posed, so its cube-face shadow has its pose, not the static model's; independent of
+/// the sun gate (sunless levels keep the light maps).
+pub(super) fn light_takes(lights: &[([f32; 3], f32)], p: &Prop, class_sphere: Option<[f32; 4]>, margin: f32) -> bool {
+	if lights.is_empty() {
+		return false;
+	}
+	let Some(rho) = rho(p, class_sphere) else { return true };
+	let rho = rho + smooth::SNAP_DIST + margin;
+	lights.iter().any(|(c, r)| (0..3).map(|k| (p.pos[k] - c[k]) * (p.pos[k] - c[k])).sum::<f32>().sqrt() <= r + rho)
 }
 
 #[cfg(test)]
@@ -118,5 +135,15 @@ use rac_engine::viewer::sunshadow;
 		let r = gate(false);
 		assert!(r.takes(&moby_at([30.0, 0.0, 0.0]), sphere, 0.0));
 		assert!(!r.takes(&moby_at([0.0, 9000.0, 0.0]), sphere, 0.0));
+	}
+
+	/// tb4 N7: a moby in a light map's reach is taken, one far off is not, none without maps.
+	#[test]
+	fn light_maps_take_the_mobys_in_their_reach() {
+		let sphere = Some([0.0, 0.0, 0.0, 1.0]);
+		let l = [([100.0, 0.0, 0.0], 20.0)];
+		assert!(light_takes(&l, &moby_at([110.0, 0.0, 0.0]), sphere, 0.0));
+		assert!(!light_takes(&l, &moby_at([200.0, 0.0, 0.0]), sphere, 0.0));
+		assert!(!light_takes(&[], &moby_at([100.0, 0.0, 0.0]), sphere, 0.0));
 	}
 }

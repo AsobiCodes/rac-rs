@@ -228,20 +228,22 @@ fn d2(a: [f32; 3], b: &[f32; 4]) -> f32 {
 fn merged(base: &FxLights, lights: &[Shot], gain: f32, eye: [f32; 3], cap: usize) -> FxLights {
 	let g = gain.max(1e-3);
 	let far = |p: &[f32; 4]| 1.0 + d2(eye, p).sqrt() / 20.0;
-	let mut all: Vec<(f32, [[f32; 4]; 2])> = lights.iter().map(|l| (l.rank * g, [[l.pos[0], l.pos[1], l.pos[2], l.reach], [l.rgb[0], l.rgb[1], l.rgb[2], g]])).collect();
-	for b in &base.l[..base.n] {
+	let mut all: Vec<(f32, [[f32; 4]; 2], bool, bool)> = lights.iter().map(|l| (l.rank * g, [[l.pos[0], l.pos[1], l.pos[2], l.reach], [l.rgb[0], l.rgb[1], l.rgb[2], g]], true, false)).collect();
+	for (i, b) in base.l[..base.n].iter().enumerate() {
 		let own = lights.iter().filter(|l| d2(l.pos, &b[0]) < OWN_R * OWN_R).fold(0.0f32, |m, l| m.max(l.lv));
 		let k = 1.0 - own;
 		if k <= 1e-3 {
 			continue;
 		}
 		let c = [b[1][0] * k, b[1][1] * k, b[1][2] * k, b[1][3]];
-		all.push((c[0].max(c[1]).max(c[2]) / far(&b[0]), [b[0], c]));
+		all.push((c[0].max(c[1]).max(c[2]) / far(&b[0]), [b[0], c], false, base.fire & (1u8 << i) != 0));
 	}
 	all.sort_by(|a, b| b.0.total_cmp(&a.0));
 	let mut out = FxLights::default();
-	for (_, l) in all.into_iter().take(cap.min(FX_LIGHTS)) {
+	for (_, l, shot, fire) in all.into_iter().take(cap.min(FX_LIGHTS)) {
 		out.l[out.n] = l;
+		out.shot |= u8::from(shot) << out.n;
+		out.fire |= u8::from(fire) << out.n; // [PC] lane dlit2 (flitlist.rs `smoke`)
 		out.n += 1;
 	}
 	out

@@ -155,7 +155,7 @@ mod instance_tests {
 	/// REN-CULL-SHRUB-BB-MIP tests (1)-(5) (also the tfrag pass of REN-TEX-RESIDENCY: same Q = 1 / (32 vz)).
 	#[test]
 	fn mip_level_switches_at_fixed_depths() {
-		assert!(super::super::SHADER.contains("log2(32.0 / i.pos.w) + i.kmx.x") && super::super::SHADER.contains("floor(lod + 0.5), i.kmx.y"));
+		assert!(super::super::SHADER.contains(&format!("{} + i.kmx.x", super::super::texfilter::VK_LOD)) && super::super::SHADER.contains("floor(lod + 0.5), i.kmx.y"));
 		let k = -10.625;
 		assert_eq!(mip_level(69.7, k, 3), 0);
 		assert_eq!(mip_level(69.8, k, 3), 1);
@@ -304,5 +304,35 @@ mod grow_tests {
 		let old = GrowOld { cf: &cf, tex_slots: &tex_slots, classes: &classes, order: &[0, 1], draws: &draws, runs: &runs };
 		assert!(grow_plan(&old, 2, &[1], &[6..9], &[1, 0, 2]).is_none());
 		assert!(grow_plan(&old, 2, &[1], &[6..9], &[0, 2, 1]).is_some());
+	}
+}
+
+#[cfg(test)]
+mod fire_normal_tests {
+	use super::*;
+	use crate::mesh::{Lit, LitKind};
+
+	/// Fire light v2 (lane dlit3 worker 4): a terrain vertex carries its retail per-position normal in the light xyz with the tfrag
+	/// tag kept in w; the face-sum normal attribute (sun, metal) is unchanged, and a tie keeps its centre there.
+	#[test]
+	fn terrain_vertices_carry_the_retail_normal_for_the_fire_light() {
+		let mut m = Mesh::new(String::new());
+		m.positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+		m.uvs = vec![[0.0; 2]; 3];
+		m.colours = vec![[128.0, 128.0, 128.0, 128.0]; 3];
+		m.faces = vec![(0, [0, 2, 1])];
+		let n = vec![[0.0, 0.0, 1.0], [0.6, 0.0, 0.8], [0.0, -0.6, 0.8]];
+		m.lit = Some(Lit { kind: LitKind::Tfrag, sphere: [0.0; 4], origin: [0.0; 3], cap: 255.0, normals: n.clone(), raw: m.colours.clone() });
+		let (mut v, mut lo, mut hi) = (Vec::new(), [f32::MAX; 3], [f32::MIN; 3]);
+		push_mesh_vertices(&m, 0, None, &mut v, &mut lo, &mut hi);
+		for k in 0..3 {
+			assert_eq!(v[k].light, [n[k][0], n[k][1], n[k][2], -1.0], "vertex {k}");
+			assert_eq!(v[k].normal, [0.0, 0.0, -1.0], "face sum kept (down: this face winds the other way)");
+		}
+		m.lit.as_mut().unwrap().kind = LitKind::Tie;
+		m.lit.as_mut().unwrap().sphere = [5.0, 6.0, 7.0, 1.0];
+		v.clear();
+		push_mesh_vertices(&m, 0, None, &mut v, &mut lo, &mut hi);
+		assert!(v.iter().all(|x| x.light == [5.0, 6.0, 7.0, -3.0]));
 	}
 }

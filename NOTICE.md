@@ -155,14 +155,25 @@ These two files are not covered by the GPL. They are licensed to you under the N
 among others, they may not be reverse engineered, decompiled, disassembled or modified, may not be distributed on their own, and are
 licensed for use with NVIDIA graphics cards only. DLSS needs an NVIDIA RTX graphics card.
 
+### Frame generation (since v0.5.1)
+
+- `amd_fidelityfx_framegeneration_vk.dll` and `amd_fidelityfx_framegeneration_dx12.dll` are the unmodified signed binaries of the AMD
+  FidelityFX SDK v2.4.0 frame generation (`Kits/FidelityFX/signedbin`), under the same MIT licence as the FSR files above
+  (`bundled/licenses/AMD_FidelityFX_LICENSE.md`).
+- `nvngx_dlssg.dll` is the NVIDIA DLSS Frame Generation runtime, redistributed unmodified. Like `nvngx_dlss.dll` it is not covered by
+  the GPL: it is licensed to you under the NVIDIA RTX SDKs licence (`bundled/licenses/NVIDIA_DLSS_SDK_LICENSE.txt`), with the same terms.
+- `sl.interposer.dll`, `sl.common.dll`, `sl.dlss_g.dll`, `sl.reflex.dll` and `sl.pcl.dll` are the unmodified production binaries of
+  NVIDIA Streamline SDK v2.14.16 (https://github.com/NVIDIA-RTX/Streamline), under the MIT licence; its licence file ships as
+  `bundled/licenses/NVIDIA_Streamline_LICENSE.txt` (Copyright (c) 2023 NVIDIA CORPORATION).
+
 NVIDIA, the NVIDIA logo, GeForce, RTX and DLSS are trademarks and/or registered trademarks of NVIDIA Corporation in the U.S. and other
 countries. rac-rs is not affiliated with, endorsed by or sponsored by NVIDIA.
 
 ### Additional permission under GNU GPL version 3 section 7
 
-If you modify rac-rs, or any covered work, by linking or combining it with the NVIDIA DLSS runtime (`nvngx_dlss.dll`) or the bridge
-library `rac_ngx.dll` (or a modified version of those libraries), containing parts covered by the terms of the NVIDIA RTX SDKs licence,
-the licensors of rac-rs grant you additional permission to convey the resulting work. This permission covers only those two libraries:
+If you modify rac-rs, or any covered work, by linking or combining it with the NVIDIA DLSS runtime (`nvngx_dlss.dll`), the NVIDIA DLSS
+Frame Generation runtime (`nvngx_dlssg.dll`) or the bridge library `rac_ngx.dll` (or a modified version of those libraries), containing parts covered by the terms of the NVIDIA RTX SDKs licence,
+the licensors of rac-rs grant you additional permission to convey the resulting work. This permission covers only those three libraries:
 they are not part of the Corresponding Source of rac-rs, and everything else in rac-rs stays under GPL-3.0-or-later.
 
 ## Microsoft DirectX Shader Compiler (dxcompiler.dll)

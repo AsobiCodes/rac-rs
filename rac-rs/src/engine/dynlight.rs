@@ -219,13 +219,22 @@ impl Tracker {
 			if out.len() >= RELIGHT_CAP {
 				break;
 			}
-			if visible(i) && (o.dirty || o.nibbles != 0xffff) {
+			// [PC] lane rcpu: the cheap holds-a-light test first, the view sphere test only for those (`visible` is pure, so the
+			// list is the same); RAC_RELIGHT_OLD=1 tests the view first, as before.
+			let take = if relight_old() { visible(i) && (o.dirty || o.nibbles != 0xffff) } else { (o.dirty || o.nibbles != 0xffff) && visible(i) };
+			if take {
 				o.dirty = false;
 				out.push(i);
 			}
 		}
 		out
 	}
+}
+
+/// [PC] lane rcpu: RAC_RELIGHT_OLD=1, the relight list's old test order (view first).
+fn relight_old() -> bool {
+	static OLD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+	*OLD.get_or_init(|| std::env::var("RAC_RELIGHT_OLD").is_ok_and(|v| v == "1"))
 }
 
 /// The merged third light of a tie or shrub instance (LightTies / LightShrubs): colour, wrap and the travel direction.
@@ -411,14 +420,14 @@ impl LitWorld {
 		self.tracker.step(table);
 		let mut out = Vec::new();
 		for kind in [LitKind::Tie, LitKind::Shrub, LitKind::Tfrag] {
-			let ids = self.by_kind[kind_index(kind)].clone();
-			let objects = &self.objects;
+			// [PC] lane rcpu: borrowed, not cloned per frame (the fields are disjoint from `tracker`).
+			let (ids, objects) = (&self.by_kind[kind_index(kind)], &self.objects);
 			let visible = |at: usize| {
 				let s = objects[ids[at]].lit.sphere;
 				view.map_or(true, |v| v.sphere([s[0], s[1], s[2]], s[3]) != -1)
 			};
 			for at in self.tracker.relight_list(kind, visible) {
-				let o = &self.objects[ids[at]];
+				let o = &self.objects[self.by_kind[kind_index(kind)][at]];
 				out.push(Relit { first: o.first, colours: self.shade(kind, at, table), kind, at });
 			}
 		}

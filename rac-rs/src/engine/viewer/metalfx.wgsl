@@ -33,6 +33,12 @@
 // Metal On / Off pipeline sets (metalpipe.rs): the Off set is built with this false, so Metal Off and Lighting Classic run the
 // level shader without the metal code at all (the same picture as with it: `metal_look` returns at its first line either way).
 override MK_ON: bool = true;
+// Exact cuts (lane rgpu, 2026-11-05): skip work whose weight is provably exactly 0 (a mix at t = 0 or a product with 0 returns its
+// other side unchanged), so the picture is byte-identical. RAC_METAL_CUT_OLD=1 builds the On set with this false (metalpipe.rs).
+override MK_CUT: bool = true;
+// The SSR walk stops once every hit further on would have contact weight 0 (`metal_ssr`): past the contact far distance plus this
+// margin (world units; covers the f32 error of the two estimates of the reflection distance, far below it).
+const MK_CUT_MARGIN: f32 = 0.05;
 
 const MK_MIPS: f32 = 4.0;
 // The most a reflection may lift a metal face over its own lit colour (a bright sky patch or lamp in a polished plate).
@@ -224,10 +230,18 @@ fn metal_ssr(p: vec3<f32>, r: vec3<f32>, rough: f32) -> vec4<f32> {
 	let ia = 1.0 / a.z;
 	let ib = 1.0 / b.z;
 	var lvl = 0;
+	// MK_CUT: a hit at reflection distance >= the contact far end has contact weight exactly 0 (fade 0, so the caller's mix at 0 keeps
+	// its colour): walk only while the distance at s (the same formula as a hit's `t * reach`; monotone in s, and a hit lies at or past
+	// s) is within far + MK_CUT_MARGIN. Only where that estimate is well conditioned: the depths differ by under 1e-4 (distance = tr s)
+	// or by at least 1 % (the f32 error of 1 / mix - a.z stays far under the margin); between, no cut.
+	let far = max(u.metal[13].y, u.metal[13].x + 1e-3) + MK_CUT_MARGIN;
+	let dz = abs(b.z - a.z);
+	let cut = MK_CUT && (dz <= 1e-4 || dz >= 0.01 * max(a.z, b.z));
 	// Past the reflecting pixel's own texel.
 	var s = metal_ssr_exit(p0, inv, side, p0, 0) + eps;
 	for (var k = 0; k < 128; k++) {
 		if (f32(k) >= iters || s >= 1.0) { break; }
+		if (cut && select(tr * s, tr * (1.0 / mix(ia, ib, s) - a.z) / (b.z - a.z), dz > 1e-4) > far) { break; }
 		let q = p0 + d * s;
 		if (any(q < vec2<f32>(0.0)) || any(q >= dim)) { break; }
 		let se = min(metal_ssr_exit(p0, inv, side, q, lvl), 1.0);
@@ -299,9 +313,13 @@ fn metal_planar(p: vec3<f32>, rough: f32) -> vec4<f32> {
 	let c = u.view_proj * vec4<f32>(p, 1.0);
 	let uv = vec2<f32>(c.x / c.w * 0.5 + 0.5, 0.5 - c.y / c.w * 0.5);
 	let top = f32(textureNumLevels(metal_pl) - 1u);
-	let l0 = clamp(rough * u.metal[12].w, 0.0, top);
+	// u.metal[13].w: the Metal reflection detail's mip pick (metal_detail.rs `lod_bias`: log2(divisor / 2), the target's texel in
+	// reflection source texels; 0 at Full). Its whole levels are the mips the target lacks (`planar_size`), so l0 reaches Full's top
+	// and the pick, in Full's levels (lod + bias), stays within [bias, Full's top]: the same screen-space blur, the 4-tap offset too.
+	let fb = floor(u.metal[13].w);
+	let l0 = clamp(rough * u.metal[12].w, 0.0, top + fb);
 	let cw = textureSampleLevel(metal_pl, metal_samp, uv, 0.0).a;
-	let lod = clamp(l0 + (1.0 - cw) * max(u.metal[13].y - u.metal[13].x, 0.0) * u.metal[13].z, 0.0, top);
+	let lod = clamp(l0 + (1.0 - cw) * max(u.metal[13].y - u.metal[13].x, 0.0) * u.metal[13].z - u.metal[13].w, 0.0, top - (u.metal[13].w - fb));
 	let o = exp2(lod) * 0.5 / vec2<f32>(textureDimensions(metal_pl));
 	var s = textureSampleLevel(metal_pl, metal_samp, uv + vec2<f32>(o.x, o.y), lod);
 	s += textureSampleLevel(metal_pl, metal_samp, uv + vec2<f32>(-o.x, o.y), lod);
@@ -338,6 +356,8 @@ fn metal_vanish(r: vec3<f32>) -> vec4<f32> {
 	if (edge <= 0.0) { return vec4<f32>(0.0); }
 	let dim = vec2<f32>(textureDimensions(metal_ssr_d));
 	let w = smoothstep(0.0, 0.08, edge) * smoothstep(3.0, 12.0, metal_ssr_depth(uv, dim));
+	// MK_CUT: weight 0 = every caller mixes it in at 0 (its colour is never seen).
+	if (MK_CUT && w <= 0.0) { return vec4<f32>(0.0); }
 	return vec4<f32>(metal_scene(uv, MK_VANISH_LOD), w);
 }
 
@@ -393,6 +413,10 @@ fn skyvis_cone(uv: vec2<f32>, rad: f32) -> f32 {
 fn metal_sky_vis(p: vec3<f32>, r: vec3<f32>, rough: f32) -> f32 {
 	let occl = clamp(u.metal[11].y, 0.0, 1.0);
 	if (occl <= 0.0 || u.keep_tail.x > 0.0) { return 1.0; }
+	// MK_CUT: `skyvis_open` is sun.x times a finite share, so a fully blocked map test (sun.x 0: a roof) closes the sky whatever the
+	// screen says (1 - occl (1 - 0)): the four screen cones are not read.
+	let sun = skyvis_sun(p, r);
+	if (MK_CUT && sun.x <= 0.0) { return 1.0 - occl; }
 	var scr = vec2<f32>(1.0, 0.0);
 	if (u.metal[2].z >= 0.5) {
 		// Over the glossy lobe (`metal_lobe_axes`): the screen point where each direction runs out moves with it, so the edge of a far
@@ -403,14 +427,16 @@ fn metal_sky_vis(p: vec3<f32>, r: vec3<f32>, rough: f32) -> f32 {
 		scr = skyvis_screen(vp, p, normalize(r + t[0]), rad) + skyvis_screen(vp, p, normalize(r - t[0]), rad);
 		scr = (scr + skyvis_screen(vp, p, normalize(r + t[1]), rad) + skyvis_screen(vp, p, normalize(r - t[1]), rad)) * 0.25;
 	}
-	return 1.0 - occl * (1.0 - skyvis_open(skyvis_sun(p, r), scr));
+	return 1.0 - occl * (1.0 - skyvis_open(sun, scr));
 }
 
 // What the reflected ray r from p sees where the screen walk met nothing: the sky (blurred by roughness and the sky-blur knob) where
 // it is open, the lit scene around p where a roof or walls block it (`occ`), and what the camera saw that way when it saw something
 // far (`metal_vanish`). Indoor metal never mirrors the sky or a planet through the walls.
 fn metal_miss(r: vec3<f32>, rough: f32, vis: f32, occ: vec3<f32>) -> vec3<f32> {
-	let sky = skyvis_mix(occ, metal_world(r, rough, u.metal[11].x), vis);
+	// MK_CUT: a closed sky (vis 0) mixes the sky in at 0, which leaves `occ` exactly: the sky cone is not read.
+	var sky = occ;
+	if (!MK_CUT || vis > 0.0) { sky = skyvis_mix(occ, metal_world(r, rough, u.metal[11].x), vis); }
 	let fv = metal_vanish(r);
 	return mix(sky, fv.rgb, fv.a);
 }
@@ -420,7 +446,9 @@ fn metal_miss(r: vec3<f32>, rough: f32, vis: f32, occ: vec3<f32>) -> vec3<f32> {
 // the reflection relative to `around` (a share `k.z` of the reflection's own colour on smooth metal), as far as the smoothness and
 // `k.x` let it, then Fresnel toward the surroundings themselves at grazing angles. Glossy, not a mirror (`g` = u.metal[10]): the
 // reflection's strength runs from `g.x` looking down to `g.y` at grazing angles (Schlick), and it takes the metal's own colour (share
-// `g.z`; the reflected colour's own hue keeps the rest of `k.z`). Painted part: `base` with a thin dielectric reflection (F0 `k.y`).
+// `g.z`; the reflected colour's own hue keeps the rest of `k.z`). Painted part: `base` with a thin dielectric coat (F0 `k.y`) that
+// shows `env`'s colour at the face's own brightness times `rl`, relative like the metal part (user 2026-11-08, Novalis' copper
+// floor "still kinda too glossy": the coat mixed `env` itself in, so a dark shaded floor took a lavender wash of the bright sky).
 // Rough metal (roughness 1) is `base` exactly. CPU twin: metalfx.rs `tests::shade`.
 fn metal_shade(base: vec3<f32>, env: vec3<f32>, around: vec3<f32>, ndv: f32, rough: f32, metalness: f32, k: vec4<f32>, g: vec4<f32>) -> vec3<f32> {
 	let s = 1.0 - clamp(rough, 0.0, 1.0);
@@ -435,7 +463,7 @@ fn metal_shade(base: vec3<f32>, env: vec3<f32>, around: vec3<f32>, ndv: f32, rou
 	let own = min(mix(vec3<f32>(1.0), clamp(base / max(metal_lum(base), 1e-3), vec3<f32>(0.0), vec3<f32>(2.0)), tint), vec3<f32>(1.0));
 	let ew = metal_env_ws(ndv, rough, k, g);
 	let metal = mix(rel, env * own, ew.x);
-	let plain = mix(base, env, ew.y);
+	let plain = mix(base, metal_lum(base) * rl * env / max(le, 1e-4), ew.y);
 	return mix(plain, metal, clamp(metalness, 0.0, 1.0));
 }
 
@@ -555,7 +583,9 @@ fn metal_look(i: VOut, rgb: vec3<f32>) -> vec3<f32> {
 	let nv = metal_vanish(n);
 	let oa = mix(occ, nv.rgb, nv.a);
 	let lift = mix(max(1.0, MK_INDOOR_LIFT * metal_lum(miss) / max(metal_lum(oa), 1e-4)), 1.0, ha);
-	let around = mix(oa * lift, metal_world(n, 1.0, 0.0), vis);
+	// MK_CUT: a closed sky (vis 0) leaves the lifted surroundings exactly (mix at 0): the sky along n is not read.
+	var around = oa * lift;
+	if (!MK_CUT || vis > 0.0) { around = mix(oa * lift, metal_world(n, 1.0, 0.0), vis); }
 	// Texture break-up: a texel darker than the lit scene around it reflects less (share u.metal[10].w), so the pattern reads through.
 	var k = u.metal[0];
 	if (loc.a > 0.5) { k.x *= mix(1.0, clamp(metal_lum(base) / max(metal_lum(loc.rgb), 1e-3), 0.0, 1.0), clamp(u.metal[10].w, 0.0, 1.0)); }

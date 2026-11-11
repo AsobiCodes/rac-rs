@@ -342,6 +342,23 @@ impl Streams {
         }
     }
 
+    /// Stage 11, cid 44: keep the payload of `lba` (read from the disc) for the key-on. A full cache (6 files) first drops the
+    /// payloads no stream slot still needs: a slot not keyed yet looks its own lbas and its queued parts up at the key-on
+    /// (`make_bufs`), so those stay. (Clearing the whole cache dropped the music intro when the loop part's cid 44 came
+    /// between the intro's cid 44 and its delayed key-on: the stream ran silent for the whole track, #74.) `keep` = both lbas
+    /// of the call in progress (left, right): its other channel's payload has no slot yet and must survive the trim.
+    pub fn keep_payload(&mut self, lba: u32, data: Arc<Vec<u8>>, keep: [u32; 2]) {
+        if self.payload.len() >= 6 {
+            let mut need: Vec<u32> = keep.to_vec();
+            for s in self.slots.iter().flatten().filter(|s| !s.keyed) {
+                need.extend(s.lba);
+                need.extend(s.queue.iter().flat_map(|q| [q.lba, q.lba_r]));
+            }
+            self.payload.retain(|l, _| need.contains(l));
+        }
+        self.payload.insert(lba, data);
+    }
+
     /// cid 42 with the oracle's EE call (4, 0xf000, 0, 1).
     pub fn init(&mut self, count: usize) {
         self.init_cfg(count, DEFAULT_RING_BYTES);

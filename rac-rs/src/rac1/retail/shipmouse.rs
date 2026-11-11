@@ -134,6 +134,8 @@ pub struct State {
 	tv: [f32; 2],
 	tacc: [f32; 2],
 	tact: [bool; 2],
+	/// The Mouse up/down row differs from what the game's own Y option gives (pcmouseinv.rs): the turret's mouse Y sign flips.
+	tflip: bool,
 }
 
 fn sens() -> f32 {
@@ -182,8 +184,15 @@ impl State {
 		self.v == [0.0; 2] && self.tv == [0.0; 2] && self.tact == [false; 2]
 	}
 
+	/// The Mouse up/down row differs from the game's Y option: the next `step_turret`s flip the mouse's Y sign.
+	pub fn set_turret_flip(&mut self, flip: bool) {
+		self.tflip = flip;
+	}
+
 	/// Turret sections: the mouse counts of the field -> the stick bytes `[rx, ry, lx, ly]`. `None` clears the state.
 	/// Mouse right = stick right, mouse up = stick down (the turret applies the game's Y option itself, so the mouse inverts with it).
+	/// Batalia and Hoven (rate) and Gaspar (acceleration) all apply the game's Y option to the stick themselves,
+	/// so the mouse follows it (Like camera); the Mouse up/down row flips the mouse's sign where it differs.
 	pub fn step_turret(&mut self, t: Option<Turret>, look: [i16; 2], sticks: [u8; 4]) -> [u8; 4] {
 		let Some(t) = t else {
 			self.tv = [0.0; 2];
@@ -207,7 +216,7 @@ impl State {
 			}
 			// x: mouse right = stick right. y: mouse up = stick DOWN (see the module doc: with the game's default Y option a stick
 			// UP looks down in all three turrets, so the mouse needs the opposite stick; the turret's own Y option then inverts it).
-			let sgn = if i == 0 { 1.0 } else { -1.0 };
+			let sgn = if i == 0 { 1.0 } else if self.tflip { 1.0 } else { -1.0 };
 			self.tv[i] = (self.tv[i] * T_DECAY + sgn * look[i] as f32 * k / full[i]).clamp(-1.0, 1.0);
 			// The state keeps its tail (so a slow steady mouse builds up past the threshold); only the output has the threshold.
 			if self.tv[i].abs() < 0.002 {
@@ -262,19 +271,14 @@ impl State {
 	}
 }
 
-/// The left mouse button as pad input: `(circle, extra buttons)`. Elsewhere it is Circle (fire the weapon); in a ship fight it is
-/// Cross (0x40), the ship's fire button, and Circle stays off.
-pub fn left_button(ship_fight: bool, lmb: bool) -> (bool, u16) {
-	if ship_fight {
-		(false, if lmb { 0x40 } else { 0 })
-	} else {
-		(lmb, 0)
-	}
+/// The game's Y option of the field: true when inverted.
+pub fn game_y_inverted(m: &Machine) -> bool {
+	m.rd8(OPT_UD) == 0
 }
 
-/// The game's Y option of the field: true when inverted.
+/// The mouse's vertical axis (ship flight): the game's option as the Mouse up/down row turns it.
 pub fn y_inverted(m: &Machine) -> bool {
-	m.rd8(OPT_UD) == 0
+	super::pcmouseinv::ud_inverted(m.rd8(OPT_UD) == 0)
 }
 
 #[cfg(test)]
@@ -372,14 +376,6 @@ mod tests {
 		assert!(v[0].abs() < 1e-4 && ang[0] > 0.1, "stopped: v {} ang {}", v[0], ang[0]);
 		assert!(ang[1].abs() < 0.01, "pitch untouched: {}", ang[1]);
 		assert!(s.at_rest());
-	}
-
-	#[test]
-	fn left_button_fires_with_cross_in_a_ship_fight_only() {
-		assert_eq!(left_button(false, true), (true, 0), "on foot: Circle");
-		assert_eq!(left_button(true, true), (false, 0x40), "ship: Cross");
-		assert_eq!(left_button(true, false), (false, 0));
-		assert_eq!(left_button(false, false), (false, 0));
 	}
 
 	#[test]

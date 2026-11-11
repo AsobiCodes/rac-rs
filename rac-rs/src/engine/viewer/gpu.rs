@@ -31,7 +31,7 @@
 use super::*;
 use rayon::prelude::*;
 
-mod setup;
+mod setup; pub(crate) use setup::configure_surface; // [PC] fgen/present.rs: wgpu's surface configured as always
 pub mod renderer;
 mod dlss_vk; // [PC] DLSS: the window's Vulkan instance / device with NGX's extensions (upscale/dlss.rs)
 mod adapter_report;
@@ -47,6 +47,7 @@ pub(in crate::viewer) mod moby_fire;
 mod props_set;
 mod pack_feed;
 pub(in crate::viewer) mod ov_depth;
+pub mod menu_art_anim;
 pub(in crate::viewer) mod tail_order;
 pub(in crate::viewer) mod pose_reuse;
 pub mod prop_clip;
@@ -58,6 +59,7 @@ mod metal;
 mod lighting;
 mod culling;
 mod tfrag_memo;
+pub(in crate::viewer) mod mirror_cull; // [PC] lane pwat: tfrags only a planar mirror shows (Culling On)
 mod particle_fx;
 mod sky_water;
 mod hud_art;
@@ -66,6 +68,7 @@ pub(in crate::viewer) mod ovwrite;
 pub(in crate::viewer) mod reshade;
 pub(in crate::viewer) mod rscale;
 mod aspect_pass;
+mod grade_pass;
 mod frame_sizes;
 mod ui_pass;
 mod warp_actors;

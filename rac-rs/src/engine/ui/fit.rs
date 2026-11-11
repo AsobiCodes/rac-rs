@@ -71,6 +71,18 @@ pub fn each_frame(menu: &'static UiMenu, make: &dyn Fn() -> Box<dyn TextMeasure 
 	each_screen(menu, make, |lang, tab, focus, _, prims| f(lang, tab, focus, prims));
 }
 
+/// Applies the fixes of the rules that hide row `i` (the root of its chain first), as far as the engine offers a value for them.
+fn reveal(m: &mut super::model::Model, i: usize) {
+	for _ in 0..8 {
+		let Some(rule) = m.rule(i).filter(|_| m.blocked(i)) else { return };
+		let before = m.vals.clone();
+		m.enhance(rule);
+		if m.vals == before {
+			return; // nothing to switch to on this PC
+		}
+	}
+}
+
 /// `each_frame` with the screen's layout too.
 fn each_screen(menu: &'static UiMenu, make: &dyn Fn() -> Box<dyn TextMeasure + Send>, mut f: impl FnMut(usize, usize, usize, &Layout, &[Prim])) {
 	for lang in 0..LANGS {
@@ -80,9 +92,18 @@ fn each_screen(menu: &'static UiMenu, make: &dyn Fn() -> Box<dyn TextMeasure + S
 			for tab in 0..menu.tabs.len() {
 				ui.model.set_tab(tab);
 				for focus in ui.model.cur_rows() {
-					ui.model.focus = focus;
-					let (l, prims) = ui.frame();
-					f(lang, tab, focus, &l, &prims);
+					// A row hidden at the defaults (Upscale quality while the Upscaler is Off) is checked as it is shown: its
+					// banner fixes applied for this frame only.
+					let (vals, touched) = (ui.model.vals.clone(), ui.model.touched.clone());
+					reveal(&mut ui.model, focus);
+					if ui.model.shown(focus) {
+						ui.model.focus = focus;
+						let (l, prims) = ui.frame();
+						f(lang, tab, focus, &l, &prims);
+					}
+					(ui.model.vals, ui.model.touched) = (vals, touched);
+					ui.model.take_changes();
+					ui.model.take_sounds();
 				}
 			}
 		}

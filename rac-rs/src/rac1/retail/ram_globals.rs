@@ -19,7 +19,17 @@ pub fn table(level: u32) -> (u32, u32) {
 /// decomp/notes/novalis_environment.md), None when the table words are not a sane span (up to 4096 slots, inside RAM).
 pub(crate) fn moby_span(mem: &mut ee_oracle::mem::Mem, level: u32) -> Option<(u32, u32)> {
 	let (s, e) = table(level);
-	let (s, e) = (mem.rd32(s) & 0x01ff_ffff, mem.rd32(e) & 0x01ff_ffff);
+	sane_span(mem.rd32(s) & 0x01ff_ffff, mem.rd32(e) & 0x01ff_ffff)
+}
+
+/// `moby_span` read through the machine (the draw-side readers: pack_fx.rs, pack_light.rs). Walk it with `s..=e` step 0x100.
+pub(crate) fn machine_span(m: &ee_oracle::Machine, level: u32) -> Option<(u32, u32)> {
+	let (s, e) = table(level);
+	sane_span(m.rd32(s) & 0x01ff_ffff, m.rd32(e) & 0x01ff_ffff)
+}
+
+/// The table words `(s, e)` (masked RAM offsets) as a span, None when not sane (up to 4096 slots, inside RAM).
+pub(crate) fn sane_span(s: u32, e: u32) -> Option<(u32, u32)> {
 	(s != 0 && e >= s && e - s <= 0x100 * 4096 && e <= 0x01ff_ff00).then_some((s, e))
 }
 

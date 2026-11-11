@@ -7,7 +7,7 @@
 //! (body, stripes and markings, the dark brows: saturation >= 0.5, where the leather of the gloves, boots and belt stays below
 //! 0.42) plus the pale yellow tufts; no green cloth, no black or grey hardware, no white, no pink pads or nose. The brows' darkest
 //! texels look like leather, so a rectangle adds them; rectangles take out the eye, two fur-coloured plates (the chest emblem
-//! and the buckle), the lips and the nose. Mask over the texture: scratch_perf_fur/runs/pics2/mask_final.png. Texel rectangles are [x0, y0, x1, y1).
+//! and the back harness's hexagon), the lips and the nose. Mask over the texture: scratch_perf_fur/runs/pics2/mask_final.png. Texel rectangles are [x0, y0, x1, y1).
 
 use crate::furspec::{FurMask, FurPart, FurRow, FurSpec, FurZone};
 
@@ -16,9 +16,12 @@ pub const BODY_TEXTURE: u64 = 0x71a0_47c5_3db9_925f;
 
 /// The brows (top centre of the texture).
 static ADD: [[u16; 4]; 1] = [[80, 4, 114, 24]];
-/// The eye, the chest emblem plate (with the green triangle), the buckle plate above the trousers, a band along the mouth line
-/// (the lips' shells would cover the teeth) and a margin around the nose.
-static CUT: [[u16; 4]; 5] = [[156, 107, 186, 138], [0, 9, 15, 43], [28, 109, 50, 129], [76, 81, 116, 90], [101, 67, 116, 79]];
+/// The eye, the chest emblem plate (with the green triangle), a band along the mouth line (the lips' shells would cover the teeth), a
+/// margin around the nose and the khaki hexagon plate of the back harness (texels x 218..242, y 146..166: it has a fur colour, so
+/// without the rectangle it grew fur, user 2026-11-06). NOT a cut any more: x 28..50 y 109..129, once called the buckle: it is the
+/// skin of the upper chest above the strap (UV map in a Kerwan front shot, scratch_perf_fur3/pp/cv_front.png), cutting it left the
+/// chest bare. The real buckle above the trousers is grey hardware and the colour rule drops it.
+static CUT: [[u16; 4]; 5] = [[156, 107, 186, 138], [0, 9, 15, 43], [76, 81, 116, 90], [101, 67, 116, 79], [216, 144, 244, 168]];
 
 /// The face (user 2026-10-31: "the face looks off"; the look of Rift Apart's Ratchet). The texture holds the left half of the face in
 /// its top left corner, mirrored onto the right half (face centre line at x 116): brow x 82..112 y 11..24, eye socket x 84..108
@@ -41,12 +44,18 @@ static PARTS: [FurPart; 1] = [FurPart {
 	name: "body",
 	len: [0.010, 0.022],
 	comb: [0.004, 0.010],
-	density: 4.0,
-	thick: [0.9, 1.0],
+	density: 7.0,
+	thick: [1.08, 1.2],
 	halo: [1.8, 2.6],
 	tip: [1.14, 1.08, 0.98],
 	root: 0.05,
 	sheen: [0.40, 0.55],
+	occ: 0.5,
+	spec: 0.6,
+	spec_exp: 48.0,
+	lift: 0.4,
+	sharp: 0.45,
+	strand: 0.3,
 }];
 
 static SPEC: FurSpec = FurSpec { rows: &ROWS, parts: &PARTS };
@@ -115,6 +124,19 @@ mod tests {
 		assert!((at(96, 14)[1] as f32) < 0.5 * one, "brow");
 		assert_eq!(at(200, 200), [255, 128, 128, 255], "body");
 		assert_eq!(at(10, 4), [255, 128, 128, 255], "outside every zone");
+	}
+
+	/// The upper chest (x 28..50, y 109..129, skin) keeps its fur; the chest emblem plate and the back harness's hexagon plate do not.
+	#[test]
+	fn chest_skin_is_fur_and_the_plates_are_not() {
+		let m = ROWS[0].mask;
+		let in_cut = |x: u16, y: u16| m.cut.iter().any(|r| x >= r[0] && x < r[2] && y >= r[1] && y < r[3]);
+		for (x, y) in [(30, 112), (40, 120), (48, 127), (35, 110)] {
+			assert!(!in_cut(x, y), "chest skin {x},{y}");
+		}
+		for (x, y) in [(5, 20), (10, 40), (232, 150), (240, 160), (225, 150)] {
+			assert!(in_cut(x, y), "plate {x},{y}");
+		}
 	}
 
 	/// Erosion takes one texel off the edge of an island; `add` rectangles become fur, `cut` rectangles none.

@@ -5,6 +5,7 @@ use crate::pack::Pack;
 use crate::retail;
 
 pub static RAC1: Pack = Pack {
+	kbm: &crate::kbm_actions::TABLE,
 	graphics: retail::pcext::menu_graphics,
 	debug_mode,
 	running: retail::active,
@@ -45,7 +46,13 @@ pub static RAC1: Pack = Pack {
 	achievements: Some(&crate::trophies::PACK),
 	ui: Some(&crate::modern_menu::PACK),
 	ui_sound: rac_engine::ui::sound::request,
+	diag_facts: crate::diag_facts::get,
+	scene_msaa_default: SCENE_MSAA_DEFAULT,
 };
+
+/// The scene MSAA mode (engine scene_msaa.rs): Off with DLSS/FSR (user 2026-11-08 after test build 13: "Yes, make it default",
+/// then "MSAA automatic": no menu row; DLSS / FSR smooth the edges themselves, +5..10 % fps at DLAA). Without a running upscaler 4x.
+pub const SCENE_MSAA_DEFAULT: u8 = 1;
 
 /// fx table keys with a clamped variant: the clamped textures of the queue-B and queue-Q2 callbacks.
 fn fx_clamped(k: usize) -> bool {

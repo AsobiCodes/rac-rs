@@ -126,7 +126,7 @@ impl SkyMap {
 /// One `side` x `side` MSAA target of the sky map (`N` for the real ones, 1 for the stand-in).
 fn make_target(device: &wgpu::Device, label: &str, format: wgpu::TextureFormat, side: u32, usage: wgpu::TextureUsages) -> wgpu::TextureView {
 	device
-		.create_texture(&wgpu::TextureDescriptor { label: Some(label), size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 }, mip_level_count: 1, sample_count: MSAA, dimension: wgpu::TextureDimension::D2, format, usage, view_formats: &[] })
+		.create_texture(&wgpu::TextureDescriptor { label: Some(label), size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 }, mip_level_count: 1, sample_count: msaa(), dimension: wgpu::TextureDimension::D2, format, usage, view_formats: &[] })
 		.create_view(&Default::default())
 }
 
