@@ -6,6 +6,8 @@ pub(super) mod glyphtex;
 /// Decodes the HUD sprites (bolt icon 0x754f, counter bar 0x7580, nanotech orb 0x7536) and the
 /// default font; returns the textures in slot order. Missing pieces fall back to plain shapes.
 pub(super) fn hud_art(l: &Level, disc: &mut iso::Disc) -> (Vec<Texture>, HudArt) {
+	// Refresh menu changes before naming/decoding any HUD or font texture.
+	crate::texpack::refresh();
 	let (mut tex, mut a) = (Vec::new(), HudArt::default());
 	// Pack names of the textures pushed below, by index in `tex` (only the title level with a texture pack: texpack/front_hd.rs).
 	let mut names: Vec<(usize, crate::texpack::name::TexName)> = Vec::new();
@@ -167,6 +169,8 @@ fn load_fonts(l: &Level, disc: &mut iso::Disc, tex: &mut Vec<Texture>, a: &mut H
 	glyphtex::begin();
 	match crate::toc::font_glyph_tables(disc).and_then(|g| art::level_fonts(l, &g)) {
 		Ok(mut fonts) if !fonts.is_empty() => {
+			// Native text uses the same HD font pack as the GS capture. Load only with level art.
+			for (i, f) in fonts.iter_mut().enumerate() { if let Some(name) = crate::texpack::front_hd::fx_name(l, i + 1) { crate::texpack::front_hd::apply(std::slice::from_mut(&mut f.tex), &[(0, name)]); } }
 			let f = fonts.remove(0);
 			crate::retail::help_ctl_font::set_table(f.glyphs.iter().map(|g| (g.u as u8, g.v as u8, g.dy as i8, g.adv as u8)).collect());
 			a.font = Some((1 + tex.len(), f.glyphs));

@@ -108,7 +108,7 @@ impl App {
 		self.messages.retain(|m| m.1 > 0.0);
 		if self.game.is_none() && self.front.is_none() {
 			if let Some(g) = &mut self.gpu {
-				hud(&mut g.hud, g.config.width as f32, g.config.height as f32, None, &self.messages, None, &self.art, self.settings.subtitles);
+				hud(&mut g.hud, g.config.width as f32, g.config.height as f32, None, &self.messages, None, &self.art, self.settings.subtitles || crate::translation_probe::locale_registry::always_subtitles());
 			}
 		}
 		let speed = if self.game.is_some() || self.front.is_some() { 0.0 } else if self.keys.contains(&KeyCode::ShiftLeft) { 120.0 } else { 30.0 } * dt;

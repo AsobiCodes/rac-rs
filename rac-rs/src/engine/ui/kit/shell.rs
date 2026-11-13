@@ -58,7 +58,7 @@ fn right_block(sh: &Shell, m: &dyn TextMeasure) -> (Rect, f32) {
 }
 
 fn tabs_width(s: &PageScreen, m: &dyn TextMeasure, px: f32) -> f32 {
-	s.menu.iter().map(|b| run_width(m, FontRole::Condensed, px, &upper(&b.text), TAB_TRACK) + 2.0 * TAB_PAD).sum()
+	s.menu.iter().map(|b| run_width(m, FontRole::Condensed, px, &upper(crate::localization::ui_text(&b.text)), TAB_TRACK) + 2.0 * TAB_PAD).sum()
 }
 
 /// The tabs left to right from x 48, at `TAB_PX` or smaller when they would run into the site block; and the size used.
@@ -71,7 +71,7 @@ pub fn tab_boxes(s: &PageScreen, sh: &Shell, m: &dyn TextMeasure) -> (Vec<MenuBo
 		.menu
 		.iter()
 		.map(|b| {
-			let t = upper(&b.text);
+			let t = upper(crate::localization::ui_text(&b.text));
 			let w = run_width(m, FontRole::Condensed, px, &t, TAB_TRACK) + 2.0 * TAB_PAD;
 			let rect = Rect::new(x, TAB_Y, w, TAB_H);
 			x += w;

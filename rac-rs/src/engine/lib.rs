@@ -5,6 +5,7 @@
 //! Stage E3 (2026-10-26): its own crate, `rac-engine` (manifest rac-rs/crates/engine/Cargo.toml); it depends on `rac-formats`
 //! only, so the compiler holds the boundary (no path into `rac1` compiles).
 
+pub mod localization;
 pub mod achievements;
 pub mod audio;
 pub mod audio_out;

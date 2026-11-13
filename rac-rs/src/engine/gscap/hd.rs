@@ -46,9 +46,18 @@ pub const HD_MIN_PX_PER_ROW: f32 = 2.0;
 /// The sharp HUD for a window `window_h` pixels high (`on`: the option and the extension allow it). Off below `HD_MIN_PX_PER_ROW`
 /// window pixels per GS row; above `HD_MAX_H` the picture is drawn there and scaled up.
 pub fn set_hd_target(window_h: u32, on: bool) {
+    set_hd_target_with_min(window_h, on, HD_MIN_PX_PER_ROW);
+}
+
+/// Localized title cards also benefit at smaller window sizes.
+pub fn set_hd_caption_target(window_h: u32, on: bool) {
+    set_hd_target_with_min(window_h, on, 1.0);
+}
+
+fn set_hd_target_with_min(window_h: u32, on: bool, min_pixels_per_row: f32) {
     let seen = HD_SEEN.load(std::sync::atomic::Ordering::Relaxed);
     let rows = if (64..=512).contains(&seen) { seen } else { hd_rows() };
-    let t = if on && window_h as f32 >= rows as f32 * HD_MIN_PX_PER_ROW {
+    let t = if on && window_h as f32 >= rows as f32 * min_pixels_per_row {
         let h = window_h.min(HD_MAX_H);
         (h * 2 / 3) as u64 | ((h * 256 / rows) as u64) << 16 | (rows as u64) << 32
     } else {

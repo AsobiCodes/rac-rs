@@ -189,6 +189,8 @@ fn name_of<'a>(f: &'a Facts, i: usize) -> &'a str {
 
 /// "Bolts", or "Bolt" for exactly one (per language).
 fn bolts_word(f: &Facts, n: u32) -> &'static str {
+    if let Some(form)=rac_engine::localization::count_form("bolts",n){return form}
+
 	if n == 1 { word(&t::BOLT, f.lang) } else { word(&BOLTS, f.lang) }
 }
 

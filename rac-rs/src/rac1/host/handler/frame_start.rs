@@ -227,9 +227,10 @@ impl App {
 					}
 				}
 				if let Some(p) = &mut self.movie {
-					if let (Some(f), Some(g)) = (p.poll(), &mut self.gpu) {
-						g.movie.upload(&g.device, &g.queue, &f);
-						super::shot_movie::frame_shown();
+					if let Some(g) = &mut self.gpu {
+						if p.present(&mut g.movie, &g.device, &g.queue) { super::shot_movie::frame_shown(); }
+					} else {
+						p.poll();
 					}
 					skip_press |= p.finished;
 				}
@@ -241,6 +242,7 @@ impl App {
 					let skip = r.movie_pressed(|k| keys.contains(&k));
 					if skip || self.movie.as_ref().is_some_and(|p| p.finished) {
 						self.movie = None;
+						if let Some(g) = &mut self.gpu { g.movie.clear_subtitle(); }
 						// Retail keeps the movie's last picture up until the main loop presents again (Retail::holds,
 						// no-present word 0x15f5b8): the presenter stays on until then (cleared after `r.sync`).
 						MOVIE_HOLD.store(true, std::sync::atomic::Ordering::Relaxed);

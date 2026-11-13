@@ -110,22 +110,37 @@ pub fn text_width(text: &str, size: f32) -> f32 {
 	text.chars().count() as f32 * size * GLYPH_W as f32 / GLYPH_H as f32
 }
 
+/// Optional pack-defined marks compose with the existing ASCII overlay font.
+fn overlay_letter(ch: char) -> Option<(u8,[u8;2])> {
+    let upper=ch.to_uppercase().next()?;
+    crate::localization::overlay_letter(upper).or_else(||upper.is_ascii().then_some((upper as u8,[0;2])))
+}
+
 /// Quads for one line of text with its top-left at (x, y); a dark drop shadow keeps it readable.
 pub fn text(out: &mut Vec<Quad>, s: &str, x: f32, y: f32, size: f32, colour: [f32; 4]) {
 	let (aw, ah) = ((COLUMNS * GLYPH_W) as f32, (COUNT.div_ceil(COLUMNS) * GLYPH_H) as f32);
 	let cw = size * GLYPH_W as f32 / GLYPH_H as f32;
 	let shadow = [0.0, 0.0, 0.0, colour[3] * 0.7];
 	for (dx, c) in [(size / 8.0, shadow), (0.0, colour)] {
-		for (i, ch) in s.bytes().enumerate() {
-			let ch = ch.to_ascii_uppercase();
+		for (i, ch) in s.chars().enumerate() {
+			let Some((ch, mark)) = overlay_letter(ch) else { continue };
 			if !(FIRST..FIRST + COUNT as u8).contains(&ch) || ch == b' ' {
 				continue;
+			}
+			let gx = x + i as f32 * cw + dx;
+			let px = size / GLYPH_H as f32;
+			for (row, bits) in mark.into_iter().enumerate() {
+				for col in 0..5 {
+					if bits & (0x10 >> col) != 0 {
+						rect(out, [gx + col as f32 * px, y + dx + (row as f32 - 2.0) * px, px, px], c);
+					}
+				}
 			}
 			let g = (ch - FIRST) as usize;
 			let (u, v) = (((g % COLUMNS) * GLYPH_W) as f32, ((g / COLUMNS) * GLYPH_H) as f32);
 			out.push(Quad {
 				tex: FONT,
-				rect: [x + i as f32 * cw + dx, y + dx, cw, size],
+				rect: [gx, y + dx, cw, size],
 				uv: [u / aw, v / ah, (u + GLYPH_W as f32) / aw, (v + GLYPH_H as f32) / ah],
 				colour: c,
 				angle: 0.0,

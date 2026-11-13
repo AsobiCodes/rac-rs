@@ -230,7 +230,7 @@ fn header(b: &mut Built, f: &Facts) {
 	text(out, 48.0, 80.0, FontRole::Condensed, 34.0, TEXT, Align::Left, 640.0, 0.04, &upper(&label(f, T_TITLE, &TITLE)));
 	let (found, n) = (f.list.rows.iter().filter(|r| r.enabled).count(), f.list.rows.len());
 	if found < n {
-		let s = word(&FOUND, f.lang).replacen("{}", &found.to_string(), 1).replacen("{}", &n.to_string(), 1);
+		let s = rac_engine::localization::ui_text(word(&FOUND, f.lang)).replacen("{}", &found.to_string(), 1).replacen("{}", &n.to_string(), 1);
 		text(out, 1232.0, 92.0, FontRole::Regular, 15.0, TEXT_MUTED, Align::Right, 360.0, 0.0, &s);
 	}
 }
@@ -407,7 +407,7 @@ fn facts_rows(b: &mut Built, f: &Facts, r: &Row, y: f32) {
 	let (Some(p), true) = (r.planet, r.enabled) else { return };
 	let Some(flag) = f.planets.flag(p) else { return };
 	let (x, w) = (DETAIL.x + 22.0, DETAIL.w - 44.0);
-	let gold = word(&OF, f.lang).replacen("{}", &f.planets.gold_found(p).to_string(), 1).replacen("{}", &gold_total(p).to_string(), 1);
+	let gold = rac_engine::localization::ui_text(word(&OF, f.lang)).replacen("{}", &f.planets.gold_found(p).to_string(), 1).replacen("{}", &gold_total(p).to_string(), 1);
 	let status = word(if flag.visited { &VISITED } else { &NOT_VISITED }, f.lang);
 	for (k, (label, value)) in [(word(&GOLD, f.lang), gold.as_str()), (word(&STATUS, f.lang), status)].into_iter().enumerate() {
 		let cy = y + 30.0 * k as f32;

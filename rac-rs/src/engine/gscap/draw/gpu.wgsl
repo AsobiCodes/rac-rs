@@ -2517,11 +2517,11 @@ var<private> hd_wp: u32;
 // sampled bilinearly at the texel position uv (texels = the target's GS pixels), the four taps kept inside the texel rectangle `rc` the
 // prim spans (in sharp pixels) and the plane. rgb and alpha are interpolated as stored: the target's own pixel values, as the 512 path
 // reads them. A scratch composited at a whole-GS-pixel offset lands within a fraction of a sharp pixel of its own grid (weights near 0 / 1).
-fn hd_tex_twin(uv: vec2<f32>, rc: vec4<i32>, kx: f32, ky: f32) -> vec4<f32> {
+fn hd_tex_twin(uv: vec2<f32>, rc: vec4<i32>, kx: f32, ky: f32, stride: u32) -> vec4<f32> {
     let k = vec2<f32>(kx, ky);
     let lo = max(ceil(vec2<f32>(f32(rc.x), f32(rc.y)) * k - vec2<f32>(0.5)), vec2<f32>(0.0));
     let hi0 = ceil(vec2<f32>(f32(rc.z + 1), f32(rc.w + 1)) * k - vec2<f32>(0.5)) - vec2<f32>(1.0);
-    let hi = max(min(hi0, vec2<f32>(f32(hd_wp) - 1.0, f32(SPS / hd_wp) - 1.0)), lo);
+    let hi = max(min(hi0, vec2<f32>(f32(stride) - 1.0, f32(SPS / stride) - 1.0)), lo);
     let p = uv * k - vec2<f32>(0.5);
     let fl = floor(p);
     let f = p - fl;
@@ -2529,8 +2529,8 @@ fn hd_tex_twin(uv: vec2<f32>, rc: vec4<i32>, kx: f32, ky: f32) -> vec4<f32> {
     let x1 = u32(clamp(fl.x + 1.0, lo.x, hi.x));
     let y0 = u32(clamp(fl.y, lo.y, hi.y));
     let y1 = u32(clamp(fl.y + 1.0, lo.y, hi.y));
-    let a = mix(hd_ld(4u, y0 * hd_wp + x0), hd_ld(4u, y0 * hd_wp + x1), f.x);
-    let b = mix(hd_ld(4u, y1 * hd_wp + x0), hd_ld(4u, y1 * hd_wp + x1), f.x);
+    let a = mix(hd_ld(4u, y0 * stride + x0), hd_ld(4u, y0 * stride + x1), f.x);
+    let b = mix(hd_ld(4u, y1 * stride + x0), hd_ld(4u, y1 * stride + x1), f.x);
     return mix(a, b, f.y);
 }
 
@@ -2660,6 +2660,7 @@ fn k_hd(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) li: 
     let start = tiles[h + 2u];
     let n = tiles[h + 3u];
     var pl = 99u;
+    var plane_idx = idx;
     var acc = vec4<f32>(0.0, 0.0, 0.0, 1.0);
     for (var i = 0u; i < n; i++) {
         let pb = tiles[start + i] * STRIDE;
@@ -2667,8 +2668,12 @@ fn k_hd(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) li: 
         let np = prims[pb + R_PLANE];
         let at = prims[pb + R_AT];
         let tex = HDT && (at & 0x10u) != 0u;
-        let twin = prims[pb + 79u] != 0u;
-        var on = act && !(e.x < hf(sc) || e.x >= hf(sc + 1u) || e.y < hf(sc + 2u) || e.y >= hf(sc + 3u)) && !(np == 4u && idx >= SPS);
+        let twin_flags = prims[pb + 79u];
+        let twin = (twin_flags & 1u) != 0u;
+        let narrow_stride = (wp + 1u) / 2u;
+        let compact = np == 4u && (twin_flags & 2u) != 0u;
+        let dst_idx = select(idx, yy * narrow_stride + xx, compact);
+        var on = act && !(e.x < hf(sc) || e.x >= hf(sc + 1u) || e.y < hf(sc + 2u) || e.y >= hf(sc + 3u)) && !(np == 4u && (dst_idx >= SPS || (compact && xx >= narrow_stride)));
         var o: HV;
         if (on) {
             o = hd_geom(pb, e);
@@ -2692,7 +2697,7 @@ fn k_hd(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) li: 
             let uy = hd_uv(pb, hd_geom(pb, e + vec2<f32>(0.0, 1.0 / ky)));
             fp = max(max(abs(ux - uv), abs(uy - uv)), vec2<f32>(HD_FPMIN));
             if (twin) {
-                t = hd_tex_twin(uv, rc, kx, ky);
+                t = hd_tex_twin(uv, rc, kx, ky, select(wp, narrow_stride, (twin_flags & 4u) != 0u));
             } else if ((prims[pb + R_REPL] & 0xfffu) != 0u) {
                 t = hd_repl(pb, uv, rc, usea);
             } else if (max(fp.x, fp.y) < 1.0) {
@@ -2772,12 +2777,13 @@ fn k_hd(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) li: 
         if (on) {
             let s = hd_shade(pb, o, t);
             if (s.ok) {
-                if (np != pl) {
+                if (np != pl || dst_idx != plane_idx) {
                     if (pl != 99u) {
-                        hd_st(pl, idx, acc);
+                        hd_st(pl, plane_idx, acc);
                     }
-                    acc = hd_ld(np, idx);
+                    acc = hd_ld(np, dst_idx);
                     pl = np;
+                    plane_idx = dst_idx;
                 }
                 let c = s.c;
                 if (np == 4u) {
@@ -2835,6 +2841,6 @@ fn k_hd(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) li: 
         }
     }
     if (pl != 99u) {
-        hd_st(pl, idx, acc);
+        hd_st(pl, plane_idx, acc);
     }
 }

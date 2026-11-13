@@ -20,7 +20,7 @@ impl Gs {
     pub(super) fn patch_font(&mut self, p: &mut Pend) -> Option<Vec<u128>> {
         let (rw, rh) = ((p.rr & 0xfff) as u32, ((p.rr >> 32) & 0xfff) as u32);
         let dpsm = ((p.bb >> 56) & 0x3f) as u32;
-        if dpsm != 0x13 || rw != 256 || rh != 128 || p.data.len() < 256 * 128 / 16 {
+        if dpsm != 0x13 || !matches!((rw, rh), (256, 128) | (512, 64)) || p.data.len() < 256 * 128 / 16 {
             return None;
         }
         let hook = crate::pack::get().font_patch?;

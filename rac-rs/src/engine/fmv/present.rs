@@ -8,12 +8,13 @@ use super::mpeg2::Frame;
 use wgpu::util::DeviceExt;
 
 const SHADER: &str = "
-struct U { rect: vec4<f32>, tint: vec4<f32> };
+struct U { rect: vec4<f32>, tint: vec4<f32>, sub: vec4<f32> };
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var ty: texture_2d<f32>;
 @group(0) @binding(2) var tcb: texture_2d<f32>;
 @group(0) @binding(3) var tcr: texture_2d<f32>;
 @group(0) @binding(4) var smp: sampler;
+@group(0) @binding(5) var tsub: texture_2d<f32>;
 struct V { @builtin(position) p: vec4<f32>, @location(0) uv: vec2<f32> };
 @vertex fn vs(@builtin(vertex_index) i: u32) -> V {
 	let c = vec2<f32>(f32(i & 1u), f32((i >> 1u) & 1u));
@@ -27,15 +28,17 @@ struct V { @builtin(position) p: vec4<f32>, @location(0) uv: vec2<f32> };
 	let cb = textureSample(tcb, smp, v.uv).r - 128.0 / 255.0;
 	let cr = textureSample(tcr, smp, v.uv).r - 128.0 / 255.0;
 	let rgb = vec3<f32>(y + 1.596027 * cr, y - 0.391762 * cb - 0.812968 * cr, y + 2.017232 * cb);
-	return vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)) * u.tint.a + u.tint.rgb, 1.0);
+	let sub = textureSample(tsub, smp, v.uv) * u.sub.x;
+	let out_rgb = mix(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(0.0), sub.a) + sub.rgb;
+	return vec4<f32>(out_rgb * u.tint.a + u.tint.rgb, 1.0);
 }
 ";
 
 /// The plain shader's uniform end and return, replaced in the graded copy.
-const U_PLAIN: &str = "tint: vec4<f32> };";
-const U_GRADED: &str = "tint: vec4<f32>, k: vec4<f32> };";
-const RETURN_PLAIN: &str = "return vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)) * u.tint.a + u.tint.rgb, 1.0);";
-const RETURN_GRADED: &str = "return vec4<f32>(grade_curve(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)) * u.tint.a + u.tint.rgb, u.k), 1.0);";
+const U_PLAIN: &str = "sub: vec4<f32> };";
+const U_GRADED: &str = "sub: vec4<f32>, k: vec4<f32> };";
+const RETURN_PLAIN: &str = "return vec4<f32>(out_rgb * u.tint.a + u.tint.rgb, 1.0);";
+const RETURN_GRADED: &str = "return vec4<f32>(grade_curve(out_rgb * u.tint.a + u.tint.rgb, u.k), 1.0);";
 
 /// [PC] The movie shader with the Brightness / Contrast curve (viewer/picture_adjust.rs) on its output; `k` follows `tint`.
 fn graded_shader() -> String {
@@ -97,6 +100,8 @@ pub struct Presenter {
 	sampler: wgpu::Sampler,
 	ubuf: wgpu::Buffer,
 	planes: Option<Planes>,
+	subtitle: wgpu::Texture,
+	subtitle_key: Option<(u32, usize)>,
 	/// Display aspect of the current frame; None = no movie shown (draw is a no-op).
 	pub aspect: f32,
 	pub active: bool,
@@ -127,14 +132,25 @@ impl Presenter {
 				tex_entry(1),
 				tex_entry(2),
 				tex_entry(3),
+				tex_entry(5),
 				wgpu::BindGroupLayoutEntry { binding: 4, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
 			],
 		});
 		let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("movie"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
 		let pipeline = make_pipeline(device, "movie", SHADER.into(), &pl, format);
 		let sampler = device.create_sampler(&wgpu::SamplerDescriptor { mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, ..Default::default() });
-		let ubuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("movie rect"), contents: &[0u8; 48], usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST });
-		Presenter { pipeline, layout, pl, format, grade: None, p_grade: None, grade_refused: false, sampler, ubuf, planes: None, aspect: 4.0 / 3.0, active: false, black: false, tint: [0.0, 0.0, 0.0, 1.0] }
+		let ubuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("movie rect"), contents: &[0u8; 64], usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST });
+		let subtitle = device.create_texture(&wgpu::TextureDescriptor {
+			label: Some("movie subtitle"),
+			size: wgpu::Extent3d { width: super::subtitle::WIDTH, height: super::subtitle::HEIGHT, depth_or_array_layers: 1 },
+			mip_level_count: 1,
+			sample_count: 1,
+			dimension: wgpu::TextureDimension::D2,
+			format: wgpu::TextureFormat::Rgba8Unorm,
+			usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+			view_formats: &[],
+		});
+		Presenter { pipeline, layout, pl, format, grade: None, p_grade: None, grade_refused: false, sampler, ubuf, planes: None, subtitle, subtitle_key: None, aspect: 4.0 / 3.0, active: false, black: false, tint: [0.0, 0.0, 0.0, 1.0] }
 	}
 
 	/// Uploads a decoded frame and shows it from the next `draw` on. A decoded frame is a playing movie's picture, never a
@@ -159,6 +175,7 @@ impl Presenter {
 			let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
 			let tex = [mk(w, h), mk(cw, ch), mk(cw, ch)];
 			let v: Vec<_> = tex.iter().map(|t| t.create_view(&Default::default())).collect();
+			let sub_view = self.subtitle.create_view(&Default::default());
 			let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
 				label: Some("movie"),
 				layout: &self.layout,
@@ -168,6 +185,7 @@ impl Presenter {
 					wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&v[1]) },
 					wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&v[2]) },
 					wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+					wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&sub_view) },
 				],
 			});
 			self.planes = Some(Planes { size: (w, h), tex, bind });
@@ -186,9 +204,38 @@ impl Presenter {
 		self.active = true;
 	}
 
+	pub(super) fn show_subtitle(&mut self, queue: &impl QueueWrites, track: &super::subtitle::Track, ms: u64) {
+		let Some(cue) = track.cue(ms) else {
+			self.clear_subtitle();
+			return;
+		};
+		let key = (track.lba, cue);
+		if self.subtitle_key == Some(key) {
+			return;
+		}
+		self.clear_subtitle();
+		let Some(rgba) = track.rgba(cue) else { return };
+		let (w, h) = (super::subtitle::WIDTH, super::subtitle::HEIGHT);
+		queue.write_texture(
+			self.subtitle.as_image_copy(),
+			&rgba,
+			wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
+			wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+		);
+		self.subtitle_key = Some(key);
+		if std::env::var_os("RAC_FMV_SUBTITLE_TRACE").is_some() {
+			eprintln!("fmv subtitle: lba {} cue {cue} at {ms} ms", track.lba);
+		}
+	}
+
+	pub fn clear_subtitle(&mut self) {
+		self.subtitle_key = None;
+	}
+
 	/// Stops showing the movie.
 	pub fn clear(&mut self) {
 		self.active = false;
+		self.clear_subtitle();
 		self.tint = [0.0, 0.0, 0.0, 1.0];
 	}
 
@@ -228,10 +275,11 @@ impl Presenter {
 		}
 		let (x, y) = ((sw - pw) / 2.0, (sh - ph) / 2.0);
 		let rect = [x / sw * 2.0 - 1.0, 1.0 - y / sh * 2.0, (x + pw) / sw * 2.0 - 1.0, 1.0 - (y + ph) / sh * 2.0];
-		queue.write_buffer(&self.ubuf, 0, bytemuck::cast_slice(&[rect, self.tint]));
+		let sub = [u8::from(self.subtitle_key.is_some()) as f32, 0.0, 0.0, 0.0];
+		queue.write_buffer(&self.ubuf, 0, bytemuck::cast_slice(&[rect, self.tint, sub]));
 		let pipeline = match (self.grade, &self.p_grade) {
 			(Some(k), Some(p)) => {
-				queue.write_buffer(&self.ubuf, 32, bytemuck::cast_slice(&k));
+				queue.write_buffer(&self.ubuf, 48, bytemuck::cast_slice(&k));
 				p
 			}
 			_ => &self.pipeline,

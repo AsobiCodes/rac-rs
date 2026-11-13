@@ -90,14 +90,14 @@ fn panel(out: &mut Vec<Quad>, w: f32, h: f32, entry: (&AchPack, usize), a: f32, 
 	badge(out, p, i, true, [x + 8.0 * k, y + 8.0 * k, 64.0 * k], a);
 	let tx = x + 84.0 * k;
 	let avail = pw - 94.0 * k;
-	overlay::text(out, "ACHIEVEMENT UNLOCKED", tx, y + 12.0 * k, 12.0 * k, [c[0], c[1], c[2], a]);
+	overlay::text(out, crate::localization::ui_text("ACHIEVEMENT UNLOCKED"), tx, y + 12.0 * k, 12.0 * k, [c[0], c[1], c[2], a]);
 	// A long name wraps to two lines at a space instead of shrinking to unreadable (fix round B16).
-	let (lines, size) = name_lines(d.name, avail, 20.0 * k, 14.0 * k, 15.0 * k);
+	let (lines, size) = name_lines(crate::localization::ui_text(d.name), avail, 20.0 * k, 14.0 * k, 15.0 * k);
 	let (top, label_y) = if lines.len() > 1 { (26.0, 62.0) } else { (30.0, 56.0) };
 	for (n, l) in lines.iter().enumerate() {
 		overlay::text(out, l, tx, y + top * k + n as f32 * size * 1.05, size, [1.0, 1.0, 1.0, a]);
 	}
-	let line = d.grade.label();
+	let line = crate::localization::ui_text(d.grade.label());
 	overlay::text(out, line, tx, y + label_y * k, 11.0 * k, [0.75, 0.78, 0.85, a]);
 }
 

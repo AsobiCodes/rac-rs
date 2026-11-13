@@ -4,6 +4,7 @@
 use super::badge::badge;
 use super::toast::{self, fit, scale};
 use super::{store::unix_to_iso, Def};
+use crate::localization::ui_text;
 use crate::overlay::{self, Quad};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU8, AtomicUsize, Ordering};
 use winit::keyboard::KeyCode;
@@ -191,8 +192,8 @@ pub(super) fn draw_in(out: &mut Vec<Quad>, w: f32, h: f32, paused: bool) {
 /// The hint line under the paused picture. F6 is named only while it opens the list; once cheated it says so.
 pub(super) fn hint_text(got: usize, all: usize, owns_f6: bool, cheated: bool) -> String {
 	let key = if owns_f6 { "" } else { "F6  " };
-	let tail = if cheated { "  OFF: DEBUG MODE" } else { "" };
-	format!("{key}ACHIEVEMENTS  {got}/{all}{tail}")
+	let tail = if cheated { format!("  {}", ui_text("OFF: DEBUG MODE")) } else { String::new() };
+	format!("{key}{}  {got}/{all}{tail}", ui_text("ACHIEVEMENTS"))
 }
 
 fn hint(out: &mut Vec<Quad>, w: f32, h: f32) {
@@ -205,17 +206,16 @@ fn hint(out: &mut Vec<Quad>, w: f32, h: f32) {
 	overlay::text(out, &s, w * 0.5 - tw * 0.5, h - size - 21.0 * k, size, [1.0, 1.0, 1.0, 0.9]);
 }
 
-/// The one line of the list once the session cheated (the overlay font is ASCII; the game's own five-language text is the Options
-/// row's description, pcext/achrow.rs).
+/// The line shown when achievements are disabled by debug mode.
 pub(super) const CHEAT_LINE: &str = "ACHIEVEMENTS ARE OFF FOR THIS SESSION: DEBUG MODE WAS ON";
 
 fn status(d: &Def, e: &super::Entry) -> String {
 	if e.unlocked {
-		if e.at > 0 { unix_to_iso(e.at)[..10].to_string() } else { "UNLOCKED".to_string() }
+		if e.at > 0 { unix_to_iso(e.at)[..10].to_string() } else { ui_text("UNLOCKED").to_string() }
 	} else if d.max > 0 {
 		format!("{} / {}", e.progress, d.max)
 	} else {
-		"LOCKED".to_string()
+		ui_text("LOCKED").to_string()
 	}
 }
 
@@ -229,7 +229,7 @@ fn list(out: &mut Vec<Quad>, w: f32, h: f32) {
 	overlay::rect(out, [px, py, pw, ph], [0.04, 0.05, 0.08, 0.95]);
 	let (got, all) = hb.store.counts();
 	let pct = if all > 0 { got * 100 / all } else { 0 };
-	overlay::text(out, &format!("ACHIEVEMENTS   {got} / {all}   {pct}%"), px + 24.0 * k, py + 18.0 * k, 28.0 * k, [1.0, 1.0, 1.0, 1.0]);
+	overlay::text(out, &format!("{}   {got} / {all}   {pct}%", ui_text("ACHIEVEMENTS")), px + 24.0 * k, py + 18.0 * k, 28.0 * k, [1.0, 1.0, 1.0, 1.0]);
 	let (top, row) = (py + 76.0 * k, 66.0 * k);
 	let page = (((ph - 76.0 * k - 44.0 * k) / row) as usize).max(1);
 	PAGE.store(page, Ordering::Relaxed);
@@ -244,16 +244,18 @@ fn list(out: &mut Vec<Quad>, w: f32, h: f32) {
 		let tx = px + 84.0 * k;
 		let avail = pw - 84.0 * k - 230.0 * k;
 		let (name, desc) = if masked { ("HIDDEN TROPHY", "KEEP PLAYING TO FIND OUT") } else { (d.name, d.desc) };
+		let (name, desc) = (ui_text(name), ui_text(desc));
 		overlay::text(out, name, tx, y + 8.0 * k, fit(name, avail, 22.0 * k), [1.0, 1.0, 1.0, dim]);
 		overlay::text(out, desc, tx, y + 34.0 * k, fit(desc, avail, 15.0 * k), [0.8, 0.84, 0.92, dim]);
 		let st = status(d, e);
 		let sz = 17.0 * k;
 		let c = d.grade.colour();
 		overlay::text(out, &st, px + pw - 24.0 * k - overlay::text_width(&st, sz), y + 10.0 * k, sz, [c[0], c[1], c[2], dim.max(0.7)]);
-		overlay::text(out, d.grade.label(), px + pw - 24.0 * k - overlay::text_width(d.grade.label(), 12.0 * k), y + 36.0 * k, 12.0 * k, [0.7, 0.72, 0.8, dim]);
+		overlay::text(out, ui_text(d.grade.label()), px + pw - 24.0 * k - overlay::text_width(ui_text(d.grade.label()), 12.0 * k), y + 36.0 * k, 12.0 * k, [0.7, 0.72, 0.8, dim]);
 	}
-	overlay::text(out, "UP/DOWN SCROLL   L1/R1 PAGE   F6/ESC/CIRCLE/TRIANGLE CLOSE", px + 24.0 * k, py + ph - 30.0 * k, 15.0 * k, [0.75, 0.78, 0.85, 1.0]);
+	overlay::text(out, ui_text("UP/DOWN SCROLL   L1/R1 PAGE   F6/ESC/CIRCLE/TRIANGLE CLOSE"), px + 24.0 * k, py + ph - 30.0 * k, 15.0 * k, [0.75, 0.78, 0.85, 1.0]);
 	if super::cheated() {
-		overlay::text(out, CHEAT_LINE, px + 24.0 * k, py + 52.0 * k, fit(CHEAT_LINE, pw - 48.0 * k, 16.0 * k), [1.0, 0.7, 0.3, 1.0]);
+		let line = ui_text(CHEAT_LINE);
+		overlay::text(out, line, px + 24.0 * k, py + 52.0 * k, fit(line, pw - 48.0 * k, 16.0 * k), [1.0, 0.7, 0.3, 1.0]);
 	}
 }

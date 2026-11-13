@@ -62,6 +62,10 @@ fn text_field(j: &Json, key: &str) -> String {
 /// Reads a mod.json. `kind` other than "textures" and `game` other than "rac1" are reported as Err("not ..."); other problems are
 /// real errors. Missing optional fields are empty.
 pub fn parse_mod_json(text: &str, id: &str, dir: &Path) -> Result<TexMod, String> {
+    if dir.join("localization.json").is_file() && crate::localization::active_pack().is_none_or(|p|p.root!=dir){
+        return Err("not the active localization provider".into());
+    }
+
 	let j = json::parse(text)?;
 	if !matches!(j, Json::Obj(_)) {
 		return Err("mod.json is not an object".into());
@@ -73,7 +77,7 @@ pub fn parse_mod_json(text: &str, id: &str, dir: &Path) -> Result<TexMod, String
 		}
 	}
 	if let Some(kind) = j.get("kind").and_then(Json::as_str) {
-		if kind != "textures" {
+		if kind != "textures" && !(kind == "script" && dir.join("localization.json").is_file()) {
 			return Err(format!("not a textures mod (kind \"{kind}\")"));
 		}
 	}
@@ -145,6 +149,8 @@ pub fn load_active(root: &Path) -> Active {
 			Err(e) => out.notes.push(format!("mod \"{id}\" skipped: {e}")),
 		}
 	}
+	// An active language provider owns its font slots even with a separate HD font pack enabled.
+	out.mods.sort_by_key(|m| !m.textures.parent().is_some_and(|p| p.join("localization.json").is_file()));
 	out
 }
 

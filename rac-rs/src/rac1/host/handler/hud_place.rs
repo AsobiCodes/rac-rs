@@ -27,6 +27,16 @@ pub(super) fn overlay_quads(g: &mut Gpu, r: &crate::retail::Retail, k: f32) -> V
 	let (ovw, ovh) = g.retail_ov.as_ref().map_or((0, 0), |o| (o.2, o.3));
 	let win = g.win_size(); // the window, not the render size (rscale.rs): the Render scale row shows window x scale
 	crate::retail::pcdisp::note_window_size(win.0, win.1);
+	// The PAL help panels and their glyphs share one 512x448 overlay. Display it with square
+	// pixels instead of widening the entire picture to 4:3 as for the original PS2 HUD.
+	if let Some(aspect) = r.classic_help_aspect() {
+		let width = (sh * aspect).min(sw);
+		let height = width / aspect;
+		return vec![Quad {
+			tex: RETAIL_OV_TEX, rect: [(sw - width) * 0.5, (sh - height) * 0.5, width, height],
+			uv: [0.0, 0.0, 1.0, 1.0], colour: [1.0; 4], angle: 0.0, corners: None,
+		}];
+	}
 	let guard = g.retail_ov_guard.guard();
 	// The tank's band moves only on pictures that hold the tank there with nothing else across its edges (the capture measures it:
 	// gscap/edge_cut/guard.rs `Guard::side`; review R8-1: a tall HelpDesk box, a marker, no tank at all keep their 4:3 place).

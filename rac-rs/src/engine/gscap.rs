@@ -14,7 +14,7 @@ mod draw;
 mod font;
 pub use font::FontPatch;
 mod hd;
-pub use hd::{hd_expect_rows, set_hd_target, HD_MAX_H, HD_MIN_PX_PER_ROW};
+pub use hd::{hd_expect_rows, set_hd_caption_target, set_hd_target, HD_MAX_H, HD_MIN_PX_PER_ROW};
 pub(crate) use hd::{hd_dims, hd_note_rows, hd_target};
 pub mod edge_cut;
 mod rc2;

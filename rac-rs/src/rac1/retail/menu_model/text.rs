@@ -140,6 +140,7 @@ const ACCENTS: [char; 49] = [
 /// The character a printable font byte shows; None for the control bytes (they are not characters). Bytes above the table pass
 /// through as the same Latin-1 char (text the port added itself, such as the PC options' rows, is real Unicode).
 pub fn font_char(b: u8) -> Option<char> {
+	if let Some(c) = crate::translation_probe::localized_char(b) { return Some(c); }
 	match b {
 		0x20..=0x7e => Some(b as char),
 		0x80..=0xb0 => Some(ACCENTS[(b - 0x80) as usize]),

@@ -7,6 +7,7 @@ pub mod pss;
 pub mod mpeg2;
 pub mod player;
 pub mod present;
+mod subtitle;
 pub mod synclog;
 
 /// An FMV movie (a PSS file on the disc): where a game's movie table says it is (R&C1: `scene::movie`).

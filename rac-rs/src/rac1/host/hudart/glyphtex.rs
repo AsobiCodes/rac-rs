@@ -31,7 +31,8 @@ pub(super) fn dress(slot: usize, t: Texture) -> Texture {
 /// `orig` with the cells of `want` (a copy of it for retail's own).
 fn restyled(orig: &Texture, want: &(u8, [u8; NP])) -> Texture {
 	let mut live = Texture { w: orig.w, h: orig.h, rgba: orig.rgba.clone() };
-	if !gl::is_retail(want) {
+	crate::translation_probe::patch_texture_rgba(live.w, live.h, &mut live.rgba);
+	if (orig.w, orig.h) == (256, 128) && !gl::is_retail(want) {
 		gl::blit(orig, &mut live, want.0, &want.1);
 	}
 	live

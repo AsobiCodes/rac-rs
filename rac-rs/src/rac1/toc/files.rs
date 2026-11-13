@@ -176,6 +176,9 @@ pub fn font_glyph_tables(disc: &mut Disc) -> R<Vec<Vec<Glyph>>> {
 			}
 		}
 		let t = table.ok_or("font table outside the executable image")?;
+		let mut localized = t.to_vec();
+		crate::translation_probe::patch_font_table(&mut localized);
+		let t = localized.as_slice();
 		out.push(
 			t.chunks_exact(4)
 				.map(|c| Glyph { u: c[0] as u16, v: c[1] as u16, dy: c[2] as i8 as i16, adv: c[3] as i16 })

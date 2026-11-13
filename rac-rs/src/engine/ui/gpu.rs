@@ -73,7 +73,8 @@ pub fn refused() -> bool {
 
 impl UiGpu {
 	/// The draw list of the next frame (design units, from `Ui::frame()`); drawn by the next `draw` only.
-	pub fn set_scene(&mut self, prims: Vec<Prim>) {
+	pub fn set_scene(&mut self, mut prims: Vec<Prim>) {
+		for prim in &mut prims { if let Prim::Text(run) = prim { run.text = crate::localization::ui_text(&run.text).to_owned(); } }
 		self.scene = Some(prims);
 	}
 

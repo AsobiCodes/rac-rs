@@ -199,8 +199,8 @@ pub(crate) struct Gpu {
     /// main buffer) whose prims are drawn again, sharp, into plane `TWIN`. `offs`: the page numbers (fbp) of the CT32 512-wide targets
     /// drawn into lately; `twin`: the one an overlay prim textured from (learnt there); `twin_ok`: plane `TWIN` holds the target's
     /// picture (a full opaque fill started it, only prims the sharp pass can draw followed); `twin_rows`: its rows; `twin_span`: its blocks.
-    offs: Vec<u32>,
-    twin: Option<u32>,
+    offs: Vec<(u32, u32)>,
+    twin: Option<(u32, u32)>,
     twin_ok: bool,
     twin_rows: u32,
     twin_span: (u32, u32),
@@ -741,8 +741,8 @@ impl Gpu {
     /// The sharp HUD planes' twin of an `ov` step (`hd_ok`: which planes hold a valid sharp picture; a plane the sharp pass did not
     /// follow from a clear stays invalid, and a publish of it carries no sharp picture).
     fn hd_ov(&mut self, op: u32, src: u32, dst: u32) {
-        if op == OV_FILL && dst == CUR {
-            // A new frame: the scale changes only here.
+        if op == OV_FILL && (dst == CUR || dst == HELD) {
+            // A cleared plane starts a new picture. Full-mode title cards clear HELD.
             let t = hd_target();
             if t != self.hd {
                 self.hd = t;
@@ -790,25 +790,27 @@ impl Gpu {
     fn twin_prim(&mut self, st: &St, kind: u32, bb: [i32; 4], clamp: bool) -> bool {
         let fr = st.frame;
         let (fbp, fbw, psm) = ((fr & 0x1ff) as u32, ((fr >> 16) & 0x3f) as u32, ((fr >> 24) & 0x3f) as u32);
-        if psm == 0 && fbw == 8 && !self.offs.contains(&fbp) {
+        let target = (fbp, fbw);
+        if fbw == 4 && !crate::localization::active_pack().is_some_and(|p|p.flag("sharp_small_ui")){return false;}
+        if psm == 0 && matches!(fbw, 4 | 8) && !self.offs.contains(&target) {
             if self.offs.len() >= 4 {
                 self.offs.remove(0);
             }
-            self.offs.push(fbp);
+            self.offs.push(target);
         }
-        if self.twin != Some(fbp) {
+        if self.twin != Some(target) {
             return false;
         }
         if self.hd.0 == 0 || self.hd_rb.is_none() {
             self.twin_ok = false;
             return false;
         }
-        let ok = psm == 0 && fbw == 8 && (fr >> 32) as u32 == 0 && st.zb.is_none() && clamp;
+        let ok = psm == 0 && matches!(fbw, 4 | 8) && (fr >> 32) as u32 == 0 && st.zb.is_none() && clamp;
         if !ok {
             self.twin_ok = false;
             let why = if psm != 0 {
                 "twin off: psm"
-            } else if fbw != 8 {
+            } else if !matches!(fbw, 4 | 8) {
                 "twin off: width"
             } else if (fr >> 32) as u32 != 0 {
                 "twin off: frame mask"
@@ -821,15 +823,27 @@ impl Gpu {
             return false;
         }
         // The clear sprite: untextured, opaque, an alpha test that passes, the target's whole scissor (full width, from the top) covered.
+        let width = fbw * 64;
         let h = (st.sc[3] + 1).max(0) as u32;
+        // Help reuses this scratch at several heights. Its clear ends before the
+        // last texture row, which the panel does not sample.
+        let h = if fbw == 4 { h.min(bb[3] as u32).min(self.hd.2) } else { h };
         let (wp, _) = hd_dims(self.hd.0, self.hd.1, self.hd.2);
-        let fits = h > 0 && h <= 256 && ((h * self.hd.1).div_ceil(256) as u64 + 1) * wp as u64 <= SPS;
+        let fits = if fbw == 4 {
+            h > 0 && (h * self.hd.1).div_ceil(256) as u64 * wp.div_ceil(2) as u64 <= SPS
+        } else {
+            h > 0 && h <= 256 && ((h * self.hd.1).div_ceil(256) as u64 + 1) * wp as u64 <= SPS
+        };
         let passes = st.test & 1 == 0 || (st.test >> 1) & 7 == 1;
-        if kind == 2 && st.at & 0x50 == 0 && passes && fits && st.sc[0] == 0 && st.sc[1] == 511 && st.sc[2] == 0 && bb[0] <= 0 && bb[1] >= 512 && bb[2] <= 0 && bb[3] >= h as i32 {
+        if kind == 2 && st.at & 0x50 == 0 && passes && fits && st.sc[0] == 0 && st.sc[1] == width as i32 - 1 && st.sc[2] == 0 && bb[0] <= 0 && bb[1] >= width as i32 && bb[2] <= 0 && bb[3] >= h as i32 {
             self.twin_ok = true;
             *self.st.entry("twin clears").or_default() += 1;
             self.twin_rows = h;
-            self.twin_span = self.span((0, fbp * 32, 8, 0, 0, 512, h));
+            self.twin_span = self.span((0, fbp * 32, fbw, 0, 0, width, h));
+        }
+        // Draws below the mirrored rows do not change the narrow sharp copy.
+        if fbw == 4 && bb[2] >= self.twin_rows as i32 {
+            return false;
         }
         if self.twin_ok {
             *self.st.entry("twin prims").or_default() += 1;
@@ -1445,16 +1459,18 @@ impl Gs {
             let t = st.tex0;
             let (tbp, tbw, tpsm) = ((t & 0x3fff) as u32, ((t >> 14) & 0x3f) as u32, ((t >> 20) & 0x3f) as u32);
             let (tw, th) = (1u32 << ((t >> 26) & 0xf).min(10), 1u32 << ((t >> 30) & 0xf).min(10));
-            if tpsm == 0 && tbw == 8 && tbp % 32 == 0 && gp.hd.0 != 0 && gp.hd_rb.is_some() {
-                let fb = tbp / 32;
-                if gp.twin != Some(fb) && gp.offs.contains(&fb) {
-                    gp.twin = Some(fb);
+            if tpsm == 0 && matches!(tbw, 4 | 8) && tw == tbw * 64 && tbp % 32 == 0 && gp.hd.0 != 0 && gp.hd_rb.is_some() {
+                let target = (tbp / 32, tbw);
+                if gp.twin != Some(target) && gp.offs.contains(&target) {
+                    gp.twin = Some(target);
                     gp.twin_ok = false;
                 }
-                if gp.twin == Some(fb) && gp.twin_ok && tw == 512 && th <= gp.twin_rows {
-                    r[79] = 1;
+                let rows_fit = th <= gp.twin_rows
+                    || (tbw == 4 && st.at & 0x100 != 0 && vs.iter().all(|v| u32::from(v.v) < gp.twin_rows * 16));
+                if gp.twin == Some(target) && gp.twin_ok && rows_fit {
+                    r[79] = if tbw == 4 { 5 } else { 1 };
                     *gp.st.entry("twin composites").or_default() += 1;
-                } else if gp.twin == Some(fb) {
+                } else if gp.twin == Some(target) {
                     *gp.st.entry("twin composites without a twin").or_default() += 1;
                 }
             }
@@ -1469,7 +1485,8 @@ impl Gs {
                     3 => (f(0).min(f(2)).min(f(4)), f(0).max(f(2)).max(f(4)), f(1).min(f(3)).min(f(5)), f(1).max(f(3)).max(f(5))),
                     _ => (f(0).min(f(2)) - 1.0, f(0).max(f(2)) + 2.0, f(1).min(f(3)) - 1.0, f(1).max(f(3)) + 2.0),
                 };
-                let sc = [st.sc[0].max(0) as f32, (st.sc[1] + 1).min(512) as f32, st.sc[2].max(0) as f32, (st.sc[3] + 1).min(512) as f32];
+                let rows = if twin && gp.twin.is_some_and(|(_, width)| width == 4) { gp.twin_rows as i32 } else { 512 };
+                let sc = [st.sc[0].max(0) as f32, (st.sc[1] + 1).min(512) as f32, st.sc[2].max(0) as f32, (st.sc[3] + 1).min(rows) as f32];
                 let (a0, a1, b0, b1) = (lx.max(sc[0]), hx.min(sc[1]), ly.max(sc[2]), hy.min(sc[3]));
                 if a0 < a1 && b0 < b1 {
                     let (kx, ky) = (gp.hd.0 as f32 / 256.0, gp.hd.1 as f32 / 256.0);
@@ -1483,6 +1500,9 @@ impl Gs {
                     }
                     if twin {
                         r[2] = TWIN;
+                        if gp.twin.is_some_and(|(_, width)| width == 4) {
+                            r[79] |= 2;
+                        }
                     }
                 }
             }

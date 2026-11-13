@@ -6,6 +6,10 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 
 pub const SECTOR_SIZE: u64 = 0x800;
+type ReadFilter = fn(u64, &mut [u8]);
+static READ_FILTER: std::sync::OnceLock<ReadFilter> = std::sync::OnceLock::new();
+pub fn set_read_filter(filter: ReadFilter) { let _ = READ_FILTER.set(filter); }
+fn filter_read(offset: u64, bytes: &mut [u8]) { if let Some(f) = READ_FILTER.get() { f(offset, bytes); } }
 
 pub struct Disc {
 	file: File,
@@ -24,6 +28,7 @@ impl Disc {
 		let mut buf = vec![0u8; (count * SECTOR_SIZE) as usize];
 		self.file.seek(SeekFrom::Start(sector * SECTOR_SIZE))?;
 		self.file.read_exact(&mut buf)?;
+		filter_read(sector * SECTOR_SIZE, &mut buf);
 		Ok(buf)
 	}
 
@@ -32,6 +37,7 @@ impl Disc {
 		let mut buf = vec![0u8; len];
 		self.file.seek(SeekFrom::Start(sector * SECTOR_SIZE))?;
 		self.file.read_exact(&mut buf)?;
+		filter_read(sector * SECTOR_SIZE, &mut buf);
 		Ok(buf)
 	}
 }

@@ -1936,6 +1936,13 @@ fn globe(out: &mut Vec<Quad>, layers: [usize; 3], inset: i32, planet: usize, g: 
 	}
 }
 
+pub(crate) fn localized_accent(out: &mut Vec<Quad>, font: &(usize, Vec<hud::Glyph>), ch: char, x: f32, y: f32, kx: f32, ky: f32, colour: [f32;4]) {
+	let Some(i) = crate::translation_probe::accent_index(ch as u32) else { return };
+	let Some(g) = font.1.get(i) else { return };
+	let (u,v) = (g.u as f32,g.v as f32);
+	out.push(Quad { tex: font.0, rect: [x+(g.adv as u8 as i8 as f32)*kx,y+g.dy as f32*ky,16.0*kx,16.0*ky], uv: [u/256.0,v/128.0,(u+16.0)/256.0,(v+16.0)/128.0],colour,angle:0.0,corners:None });
+}
+
 pub(crate) fn fit_text(out: &mut Vec<Quad>,font: &(usize, Vec<hud::Glyph>), s: &str, r: [f32; 4], k: f32, ox: f32, colour: [f32; 4]) {
 	let glyph = |c: char| font.1.get(c as usize).copied().filter(|g| g.adv != 0);
 	let width: f32 = s.chars().filter_map(glyph).map(|g| g.adv as f32).sum();
@@ -1951,6 +1958,7 @@ pub(crate) fn fit_text(out: &mut Vec<Quad>,font: &(usize, Vec<hud::Glyph>), s: &
 		for ch in s.chars() {
 			let Some(g) = glyph(ch) else { continue };
 			if ch != ' ' {
+				localized_accent(out, font, ch, ox + (x + d * scale) * k, (y0 + d * scale) * k, scale * k, scale * k, c);
 				let (u, v) = (g.u as f32, g.v as f32);
 				out.push(Quad {
 					tex: font.0,

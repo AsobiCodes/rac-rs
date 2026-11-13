@@ -275,6 +275,7 @@ pub(super) fn art_text(out: &mut Vec<Quad>, font: &(usize, Vec<art::Glyph>), s: 
 	for c in s.chars() {
 		let Some(g) = font.1.get(c as usize).copied().filter(|g| g.adv != 0) else { continue };
 		if c != ' ' {
+			crate::frontend::localized_accent(out, font, c, cx, y, k, k, colour);
 			let (u, v) = (g.u as f32, g.v as f32);
 			out.push(Quad { tex: font.0, rect: [cx, y + g.dy as f32 * k, 16.0 * k, 16.0 * k], uv: [u / 256.0, v / 128.0, (u + 16.0) / 256.0, (v + 16.0) / 128.0], colour, angle: 0.0, corners: None });
 		}

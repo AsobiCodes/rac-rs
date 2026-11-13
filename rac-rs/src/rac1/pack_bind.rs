@@ -69,15 +69,11 @@ fn fx_glass(k: usize) -> bool {
 fn font_patch(data: &mut [u128], want_orig: bool) -> Option<Vec<u128>> {
 	use retail::glyphs as gl;
 	let want = gl::wanted();
-	if gl::is_retail(&want) {
-		return None;
-	}
-	let patch = gl::patch()?;
-	let which = patch.find(data)?;
-	let cells = gl::cells_for(&patch, which, &want);
-	let orig = want_orig.then(|| data.to_vec());
-	gl::patch_qwords(data, &cells);
-	orig
+	let cells = if gl::is_retail(&want) { None } else { gl::patch().and_then(|p| p.find(data).map(|i| gl::cells_for(&p, i, &want))) };
+	let original = crate::translation_probe::patch_texture_words(data, want_orig)
+        .or_else(|| (want_orig && cells.is_some()).then(|| data.to_vec()));
+	if let Some(cells) = cells.as_ref() { gl::patch_qwords(data, cells); }
+	original
 }
 
 /// Debug mode: Pause -> Options -> Controls -> Debug, or RAC_DEV_TOOLS=1 / RAC_DEBUG_KEYS=1 (`devtools::NOTICE` lists the keys).

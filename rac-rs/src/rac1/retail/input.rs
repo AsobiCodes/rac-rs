@@ -341,10 +341,17 @@ impl Retail {
 		self.mm.track(x, y);
 	}
 
+	/// The classic PAL Help Log and Moves screens use a square-pixel overlay.
+	pub(crate) fn classic_help_aspect(&self) -> Option<f32> {
+		(rac_engine::localization::hd_cards() && self.gs && self.paused() && self.front_ram().is_none() && !super::disc::usa()
+			&& self.level_menu().is_some_and(|m| matches!(m.menu.id, 0x15 | 0x17)))
+			.then_some(512.0 / 448.0)
+	}
+
 	/// The cursor (fractions of the client area) in the overlay's pixels (`mouse_menu::SCREEN`).
 	fn ps2_point(&self, fx: f32, fy: f32) -> (f32, f32) {
 		let full = self.gsfull_view().map(|f| if f.wide { crate::gsfull::wide::ASPECT } else { 4.0 / 3.0 });
-		mouse_menu::to_ps2(fx, fy, self.aspect, full)
+		mouse_menu::to_ps2(fx, fy, self.aspect, full.or_else(|| self.classic_help_aspect()))
 	}
 
 	/// The cursor over the game's 4:3 picture, 0..1 across and down (outside it below 0 / above 1): the mods' `omni.pointer`.

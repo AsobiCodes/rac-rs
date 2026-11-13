@@ -341,8 +341,8 @@ pub fn enabled_for(has_packs: bool, env: Option<&str>) -> bool {
 
 /// Whether the capture should look names up: a textures mod is enabled and `RAC_TEXPACK_HUD` is not `0`. Read once.
 pub fn enabled() -> bool {
-	static ON: OnceLock<bool> = OnceLock::new();
-	*ON.get_or_init(|| enabled_for(packs().is_some(), std::env::var("RAC_TEXPACK_HUD").ok().as_deref()))
+	static ENV_ALLOWED: OnceLock<bool> = OnceLock::new();
+	*ENV_ALLOWED.get_or_init(|| std::env::var("RAC_TEXPACK_HUD").ok().as_deref() != Some("0")) && super::active_packs_enabled()
 }
 
 static REG: OnceLock<Registry> = OnceLock::new();

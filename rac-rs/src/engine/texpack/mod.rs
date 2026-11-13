@@ -77,6 +77,13 @@ pub struct Packs {
 /// level load (`refresh`) sees the changed text and builds the packs again, so a texture pack switched on or off in the menu applies
 /// at the next planet.
 static PACKS: Slot = Mutex::new(None);
+// 0 = not read yet, 1 = no active packs, 2 = active. The draw path only loads an atomic.
+static PACKS_PRESENT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+pub fn active_packs_enabled() -> bool {
+    match PACKS_PRESENT.load(std::sync::atomic::Ordering::Acquire) {
+        0 => packs().is_some(), 2 => true, _ => false,
+    }
+}
 
 /// Scans `root` (the mods folder) and indexes the enabled textures mods; None when there are none.
 pub fn load_packs(root: &std::path::Path) -> Option<Packs> {
@@ -117,7 +124,9 @@ pub fn packs() -> Option<Arc<Packs>> {
 		return p.clone();
 	}
 	let b = build();
-	PACKS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert(b).1.clone()
+	let p = PACKS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert(b).1.clone();
+	PACKS_PRESENT.store(if p.is_some() { 2 } else { 1 }, std::sync::atomic::Ordering::Release);
+	p
 }
 
 /// When `active.txt` under `root` is not the text the packs in `slot` were built from, builds them again (the scan runs outside the
@@ -134,8 +143,10 @@ fn refresh_slot(slot: &Slot, root: Option<&std::path::Path>) -> bool {
 }
 
 /// Level load: the packs are built again when the Mods page (or the launcher) changed `active.txt` since they were read.
-fn refresh() {
+pub fn refresh() {
 	refresh_slot(&PACKS, mods::mods_root().as_deref());
+	let state = PACKS.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or(0, |(_, p)| if p.is_some() { 2 } else { 1 });
+	PACKS_PRESENT.store(state, std::sync::atomic::Ordering::Release);
 }
 
 /// Hook at level load (`viewer/app.rs load_level_from`): with a textures mod active, computes the PCSX2 names of the level's

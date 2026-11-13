@@ -1,6 +1,9 @@
 //! High-level kernel: syscalls return at once (no threads, no IOP).
 
 use crate::cpu::Cpu;
+type DiscReadFilter = fn(u64, &mut [u8]);
+static DISC_READ_FILTER: std::sync::OnceLock<DiscReadFilter> = std::sync::OnceLock::new();
+pub fn set_disc_read_filter(filter: DiscReadFilter) { let _ = DISC_READ_FILTER.set(filter); }
 
 const VBCOUNT: u32 = 0x15ed48;
 /// IOP server struct of the level data cache module (sid 0x11).
@@ -158,6 +161,7 @@ impl Cpu {
             f.seek(SeekFrom::Start(lba as u64 * 2048)).is_ok() && f.read_exact(&mut data).is_ok()
         });
         if ok {
+            if let Some(filter) = DISC_READ_FILTER.get() { filter(lba as u64 * 2048, &mut data); }
             for (k, b) in data.iter().enumerate() {
                 self.mem.wr8(buf.wrapping_add(k as u32), *b);
             }

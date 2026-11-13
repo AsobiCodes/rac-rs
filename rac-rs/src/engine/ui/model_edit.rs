@@ -193,7 +193,7 @@ impl Model {
 	pub fn fix_text(&self, rule: &NeedsRule) -> String {
 		let Some(v) = self.fix_value(rule) else { return String::new() };
 		let name = self.row_index(rule.row).map(|i| self.text_of(i, v)).unwrap_or_default();
-		pick(&rule.button, self.lang).replace("{}", &name)
+		crate::localization::ui_text(pick(&rule.button, self.lang)).replace("{}", crate::localization::ui_text(&name))
 	}
 
 	/// The text of value `v` of row `i`.
