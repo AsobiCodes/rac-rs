@@ -112,8 +112,10 @@ pub fn text_width(text: &str, size: f32) -> f32 {
 
 /// Optional pack-defined marks compose with the existing ASCII overlay font.
 fn overlay_letter(ch: char) -> Option<(u8,[u8;2])> {
-    let upper=ch.to_uppercase().next()?;
-    crate::localization::overlay_letter(upper).or_else(||upper.is_ascii().then_some((upper as u8,[0;2])))
+    if ch.is_ascii() {return Some((ch.to_ascii_uppercase() as u8,[0;2]))}
+    // Unicode uppercasing may expand to ASCII (e.g. sharp s). Only an explicit
+    // pack glyph may introduce that substitution; stock ASCII behavior stays exact.
+    crate::localization::overlay_letter(ch.to_uppercase().next()?)
 }
 
 /// Quads for one line of text with its top-left at (x, y); a dark drop shadow keeps it readable.
@@ -156,4 +158,13 @@ pub fn rect(out: &mut Vec<Quad>, r: [f32; 4], colour: [f32; 4]) {
 	let g = (127 - FIRST) as usize;
 	let (u, v) = (((g % COLUMNS) * GLYPH_W) as f32 + 1.0, ((g / COLUMNS) * GLYPH_H) as f32 + 1.0);
 	out.push(Quad { tex: FONT, rect: r, uv: [u / aw, v / ah, (u + 3.0) / aw, (v + 5.0) / ah], colour, angle: 0.0, corners: None });
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn unicode_case_expansion_does_not_invent_a_stock_ascii_glyph() {
+        assert_eq!(super::overlay_letter('a'),Some((b'A',[0;2])));
+        assert!(super::overlay_letter('ß').is_none());
+    }
 }
