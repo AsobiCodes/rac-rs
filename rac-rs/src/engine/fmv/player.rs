@@ -113,6 +113,7 @@ impl Shared {
 }
 
 pub struct Player {
+	subtitle: Option<super::subtitle::Track>,
 	shared: Arc<Shared>,
 	audio: Option<Arc<StreamSource>>,
 	worker: Option<std::thread::JoinHandle<()>>,
@@ -271,7 +272,22 @@ impl Player {
 		let (lba, bytes, fps) = (movie.lba, movie.bytes, movie.fps);
 		let track = track_for_language(lang);
 		let worker = std::thread::spawn(move || run(iso, lba, bytes, track, fps, s2, a2));
-		Player { shared, audio: stream, worker: Some(worker), started: false, wall: None, first_pts: None, current: None, finished: false, moved: None, starved: false, lat: None, log: SyncLog::open(&format!("lba {} bytes {} fps {}", movie.lba, movie.bytes, movie.fps)), knobs: Knobs::from_env(), t0: Instant::now() }
+		Player { subtitle: super::subtitle::Track::open(lba), shared, audio: stream, worker: Some(worker), started: false, wall: None, first_pts: None, current: None, finished: false, moved: None, starved: false, lat: None, log: SyncLog::open(&format!("lba {} bytes {} fps {}", movie.lba, movie.bytes, movie.fps)), knobs: Knobs::from_env(), t0: Instant::now() }
+	}
+
+	/// Poll audio/video and present the subtitle on the same movie clock.
+	pub fn present(&mut self, presenter: &mut super::present::Presenter, device: &wgpu::Device, queue: &impl super::present::QueueWrites) -> bool {
+		let frame = self.poll();
+		let shown = frame.is_some();
+		if let Some(frame) = frame {
+			presenter.upload(device, queue, &frame);
+		}
+		if let (true, false, Some(first), Some(track)) = (self.started, self.finished, self.first_pts, &self.subtitle) {
+			presenter.show_subtitle(queue, track, self.clock().saturating_sub(first) / 90);
+		} else {
+			presenter.clear_subtitle();
+		}
+		shown
 	}
 
 	/// Clock in 90 kHz ticks of the stream's PTS timeline: what is HEARD at the speaker (the device clock less the output latency) while
@@ -475,7 +491,7 @@ mod tests {
 		stream.set_playing(true);
 		let frame = Frame { width: 2, height: 2, y: vec![0; 4], cb: vec![0], cr: vec![0], pts: Some(90_000_000), picture_structure: 3, top_field_first: true, progressive: true, repeat_first_field: false, aspect_ratio_information: 2, frame_rate_code: 3, temporal_reference: 0, coding_type: 1 };
 		let shared = Arc::new(Shared::new(VecDeque::from(vec![frame; queued]), Some(0)));
-		let p = Player { shared, audio: Some(stream), worker: None, started: true, wall: None, first_pts: None, current: None, finished: false, moved: None, starved: false, lat: None, log: None, knobs: Knobs::off(), t0: Instant::now() };
+		let p = Player { subtitle: None, shared, audio: Some(stream), worker: None, started: true, wall: None, first_pts: None, current: None, finished: false, moved: None, starved: false, lat: None, log: None, knobs: Knobs::off(), t0: Instant::now() };
 		(p, mix)
 	}
 

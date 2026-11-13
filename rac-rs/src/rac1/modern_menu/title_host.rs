@@ -151,6 +151,7 @@ fn local_focus(st: &State, page: Page) -> Option<(usize, u64)> {
 
 fn current(st: &State, now: u64) -> usize {
 	let page = st.built.as_ref().map(|b| b.page);
+	if page == Some(Page::Language) { if let Some((i, _)) = local_focus(st, Page::Language) { return i; } }
 	if page == Some(Page::Root) && title_quit::focus() {
 		return title_quit::ROW; // the host's own Quit entry keeps the focus while retail's cursor rests on Options
 	}
@@ -171,6 +172,7 @@ pub fn display_sel(page: Page, sel: usize) -> usize {
 	let g = lock();
 	match g.as_ref() {
 		Some(_) if page == Page::Root && title_quit::focus() => title_quit::ROW,
+		Some(st) if page == Page::Language && local_focus(st, page).is_some() => local_focus(st, page).unwrap().0,
 		Some(st) => shown(local_focus(st, page), retail_sel(st, Some(page), sel, now_ms()), now_ms()),
 		None => sel,
 	}
@@ -179,6 +181,7 @@ pub fn display_sel(page: Page, sel: usize) -> usize {
 /// Can flat row `i` be chosen (it has a target and the game lets that row be selected)?
 fn live(st: &State, i: usize) -> bool {
 	match (st.built.as_ref().and_then(|b| b.target(i)), &st.snap) {
+		(Some((crate::translation_probe::locale_registry::ITEM, _)), _) => true,
 		(Some((NATIVE_ITEM, _)), _) => true, // the host's Quit entry is always there to choose
 		(Some((item, row)), Some(m)) => resolve(m, Intent::Select { item, row, confirm: false }).is_some(),
 		_ => false,
@@ -190,9 +193,15 @@ fn live(st: &State, i: usize) -> bool {
 /// The host's own Quit entry (`NATIVE_ITEM`) is no retail item: choosing it sends NOTHING to the game, it takes the focus and a
 /// confirm asks the question (`title_quit`); choosing a retail row gives the focus back.
 fn select(st: &mut State, i: usize, confirm: bool, now: u64) {
+	if i >= 5 { eprintln!("locale: select row {i}, confirm {confirm}"); }
 	let Some((page, target)) = st.built.as_ref().map(|b| (b.page, b.target(i))) else { return };
 	if title_quit::ask() {
 		return; // the question is up: nothing behind it can be chosen
+	}
+	if page == Page::Language {
+		st.local = Some((page, i, now));
+		if confirm { if i < 5 { crate::translation_probe::locale_registry::choose_builtin(i); } else { crate::translation_probe::locale_registry::choose_pack(i - 5); } }
+		return;
 	}
 	if let Some((NATIVE_ITEM, _)) = target {
 		st.local = Some((page, i, now));
@@ -232,6 +241,7 @@ fn back(st: &State) {
 /// The Quit question is up and a pad bit comes in: Circle = Yes, Triangle = No, everything else (Cross too) does nothing. True = the
 /// question took the press (it is the host's own box, so the game gets no pulse; it is answered by the bit, not by the Action).
 fn quit_answer(bit: u16) -> bool {
+	if crate::translation_probe::locale_registry::answer_notice(bit) { return true; }
 	if !title_quit::ask() {
 		return false;
 	}
@@ -244,6 +254,7 @@ fn quit_answer(bit: u16) -> bool {
 }
 
 fn act(st: &mut State, a: Action, now: u64) {
+	if crate::translation_probe::locale_registry::has_notice() { let bit = match a { Action::Confirm | Action::Peek => 0x40, Action::Back => 0x10, _ => 0 }; crate::translation_probe::locale_registry::answer_notice(bit); return; }
 	if title_quit::ask() {
 		// The Quit question: Enter = Yes, Esc (and a right click) = No; the pad's Circle / Triangle come by `pad_press`.
 		match a {

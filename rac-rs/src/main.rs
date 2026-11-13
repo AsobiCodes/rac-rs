@@ -203,6 +203,11 @@ fn launch_args() -> Result<Vec<String>, String> {
 }
 
 pub fn main() -> ExitCode {
+    // Installer capability probe: no disc, updater, mods, GPU or player writes.
+    if std::env::args().nth(1).as_deref()==Some("localization-api") {
+        println!("{{\"localization\":{}}}",rac_engine::localization::API_VERSION);
+        return ExitCode::SUCCESS;
+    }
 	loadlog::init();
 	// The R&C1 pack's part of the engine's mod host (rac1/omni_bind.rs), before anything that may ask for it (the HUD art's icon table).
 	omni::game::set(&omni_bind::RAC1);

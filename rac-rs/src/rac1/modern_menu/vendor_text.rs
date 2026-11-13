@@ -37,7 +37,7 @@ pub const REFILLS_MORE: T5 = ["+{} more", "+{} autres", "+{} weitere", "+{} m\u{
 
 /// The word in language `lang` (0..4, clamped).
 pub fn word(t: &T5, lang: usize) -> &'static str {
-	t[lang.min(4)]
+	rac_engine::localization::ui_text(t[lang.min(4)])
 }
 
 /// The word with its `{}` replaced by `x`.
@@ -45,13 +45,14 @@ pub fn fill(t: &T5, lang: usize, x: &str) -> String {
 	word(t, lang).replace("{}", x)
 }
 
-/// A number with thousands commas (retail's "%d,%03d", and on for the bolts past a million).
+/// Group thousands using the active shop locale.
 pub fn commas(n: u32) -> String {
+	let separator = rac_engine::localization::thousands_separator();
 	let s = n.to_string();
 	let mut out = String::new();
 	for (i, c) in s.chars().enumerate() {
 		if i > 0 && (s.len() - i) % 3 == 0 {
-			out.push(',');
+			out.push_str(separator);
 		}
 		out.push(c);
 	}

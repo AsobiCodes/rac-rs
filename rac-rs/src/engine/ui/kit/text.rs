@@ -33,7 +33,7 @@ pub fn upper(s: &str) -> String {
 /// `\n` breaks. An empty text gives no lines.
 pub fn wrap(m: &dyn TextMeasure, role: FontRole, px: f32, text: &str, max_w: f32) -> Vec<String> {
 	let mut lines = Vec::new();
-	for para in text.split('\n') {
+	for para in crate::localization::ui_text(text).split('\n') {
 		let mut cur = String::new();
 		for word in para.split_whitespace() {
 			// The word goes on the line in place (no new String per word); a line that got too wide gives it back.

@@ -202,6 +202,7 @@ static PACK: OnceLock<&'static Pack> = OnceLock::new();
 /// The pack hands over its part (once per process; the first wins).
 pub fn set(p: &'static Pack) {
 	let _ = PACK.set(p);
+	crate::localization::install();
 }
 
 /// The pack's part, or `NONE`.

@@ -12,6 +12,9 @@ impl Worker {
 		let booting = self.booting;
 		let mut field = self.field;
 		let front = self.front;
+		let translation_context = (m.level() as u64) | ((front as u64) << 32) | ((booting as u64) << 33);
+		crate::translation_probe::locale_registry::frame_preferences(&mut m.cpu.mem.ram, field, translation_context);
+		crate::translation_probe::patch_ram(&mut m.cpu.mem.ram, field, translation_context);
 		let ll_last = self.ll_last;
 		let mut ll_idle = self.ll_idle;
 		fmv_bridge::hold_field();

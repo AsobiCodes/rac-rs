@@ -650,3 +650,7 @@ The mod interface version (`api` in the manifest) and the loader's own C interfa
 ## Credits
 
 The mod format and the base of the `omni` table are OpenRAC's, from its MIT-licensed SDK, so mods work across projects; OmniLoader itself is this project's own code, written from that SDK (no code of OpenRAC's game port is used). The SDK licence is in `NOTICE.md` of the release. OmniLoader is MIT OR Apache-2.0.
+
+## External localization packs
+
+Community language packs can supply retail resource overlays, modern UI translations, bitmap-font data and movie subtitles without shipping a modified executable. See [the localization API guide](LOCALIZATION.md) for the versioned data contract, an asset-free example, preparation requirements and current limits.

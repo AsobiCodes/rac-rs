@@ -97,7 +97,7 @@ impl App {
 		if let (Some(game), Some(w)) = (&mut self.game, &self.world) {
 			if let Some(g) = &mut self.gpu {
 				let p = &game.player;
-				hud(&mut g.hud, g.config.width as f32, g.config.height as f32, Some(st), &self.messages, self.flow.as_ref(), &self.art, self.settings.subtitles);
+				hud(&mut g.hud, g.config.width as f32, g.config.height as f32, Some(st), &self.messages, self.flow.as_ref(), &self.art, self.settings.subtitles || crate::translation_probe::locale_registry::always_subtitles());
 				// NOV-28 (water.md): last frame's fog swap goes live, the camera zone fog updates, then the
 				// next swap is chosen (underwater fog 0..32 m, intensity 255 -> 48); the tint precedes the fade.
 				g.fog_live = self.fog_next;

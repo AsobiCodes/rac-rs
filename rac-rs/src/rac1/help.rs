@@ -302,6 +302,7 @@ pub fn text_line_xy(out: &mut Vec<Quad>, font: &(usize, Vec<Glyph>), s: &str, x:
 	for c in s.chars() {
 		let Some(g) = glyph(font, c) else { continue };
 		if c != ' ' {
+			crate::frontend::localized_accent(out, font, c, cx, y, kx, ky, colour);
 			let (u, v) = (g.u as f32, g.v as f32);
 			out.push(Quad { tex: font.0, rect: [cx, y + g.dy as f32 * ky, 16.0 * kx, 16.0 * ky], uv: [u / 256.0, v / 128.0, (u + 16.0) / 256.0, (v + 16.0) / 128.0], colour, angle: 0.0, corners: None });
 		}

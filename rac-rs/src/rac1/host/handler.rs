@@ -336,3 +336,8 @@ impl App {
 		}
 	}
 }
+
+// Share the movie screenshot counter with the title/intro path, which has no Game host.
+pub(super) fn front_movie_started(){shot_movie::started()}
+pub(super) fn front_movie_frame(){shot_movie::frame_shown()}
+pub(super) fn front_movie_ended(skipped:bool){shot_movie::ended(skipped)}

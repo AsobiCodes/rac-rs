@@ -88,11 +88,19 @@ fn modern_page(g: &mut crate::viewer::Gpu, fe: &FrontEnd, fr: &FrontRam, m: &Men
 	let t = |id: u32| crate::modern_menu::btn_text::text(&Strings(&fe.text), id, style); // buttons kept as chips (`btn_text`)
 	// The rows and the header are font bytes (`frontend::Text`): decoded like the page's other texts, or an accent byte shows as a
 	// box (the German Sound page's volume rows).
-	let rows: Vec<(String, bool)> = fe.menu.items(&fe.text).into_iter().map(|(s, on)| (decode(&s).plain(), on)).collect();
+	let mut rows: Vec<(String, bool)> = fe.menu.items(&fe.text).into_iter().map(|(s, on)| (decode(&s).plain(), on)).collect();
+	let mut locale_targets = title::flatten(m);
+	if page == frontend::Page::Language { locale_targets.truncate(5); }
+	if page == frontend::Page::Language {
+		for (i, _) in crate::translation_probe::locale_registry::packs().iter().enumerate() {
+			if let Some(name) = crate::translation_probe::locale_registry::display_name(i) { rows.push((name, true)); locale_targets.push((crate::translation_probe::locale_registry::ITEM, i as u32)); }
+		}
+	}
 	let slots = slot_views(fr);
 	let dialog = dialog_facts(page, &fr.dialog, &t);
 	let boxed = dialog.is_some() && page != frontend::Page::Overwrite;
 	let dialog = quit_question(page, dialog, &t);
+	let dialog = if crate::translation_probe::locale_registry::has_notice() { Some(title::DialogFacts { lines: vec![crate::translation_probe::locale_registry::notice_text()], buttons: vec![(CROSS, "OK".into())] }) } else { dialog };
 	let mut root = vec![t(0x4f2a), t(0x4f28), t(0x4ee7)];
 	root.extend(Some(t(ID_QUITD)).filter(|s| !s.is_empty())); // the host's own fourth entry, when its label is known
 	let facts = title::Facts {
@@ -104,7 +112,7 @@ fn modern_page(g: &mut crate::viewer::Gpu, fe: &FrontEnd, fr: &FrontRam, m: &Men
 		empty: t(0x5217),
 		no_save: t(0x5232),
 		sel: title_host::display_sel(page, sel),
-		targets: title::flatten(m),
+		targets: locale_targets,
 		dialog,
 		sound: Some([fe.menu.settings.sfx, fe.menu.settings.music]),
 		lang: fe.menu.lang,

@@ -8,7 +8,7 @@ use crate::ui::theme::*;
 /// Appends a text run.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn text(out: &mut Vec<Prim>, x: f32, y: f32, role: FontRole, px: f32, colour: Rgba, align: Align, max_w: f32, track: f32, t: &str) {
-	out.push(Prim::Text(TextRun { x, y, role, px, colour, align, max_w, track, text: t.to_string() }));
+	out.push(Prim::Text(TextRun { x, y, role, px, colour, align, max_w, track, text: crate::localization::ui_text(t).to_string() }));
 }
 
 pub(super) fn rrect(out: &mut Vec<Prim>, rect: Rect, radius: f32, fill: Rgba) {

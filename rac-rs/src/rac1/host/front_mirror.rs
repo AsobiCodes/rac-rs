@@ -123,6 +123,7 @@ impl App {
 				}
 				// A new movie ends a held last picture's hold (as handler.rs's MOVIE_HOLD does; its first frame resets the tint).
 				self.fm_movie_hold = false;
+				super::handler::front_movie_started();
 				self.movie = Some(fmv::player::Player::start(&self.iso_path, &m, lang, self.audio.as_mut()));
 			}
 			if let Some(g) = &self.gpu {
@@ -151,8 +152,10 @@ impl App {
 			}
 		}
 		if let Some(p) = &mut self.movie {
-			if let (Some(f), Some(g)) = (p.poll(), &mut self.gpu) {
-				g.movie.upload(&g.device, &g.queue, &f);
+			if let Some(g) = &mut self.gpu {
+				if p.present(&mut g.movie, &g.device, &g.queue){super::handler::front_movie_frame();}
+			} else {
+				p.poll();
 			}
 		}
 		if self.movie.is_some() && crate::retail::fmv_bridge::waiting() {
@@ -165,7 +168,9 @@ impl App {
 				// [PC] The Skip intro row (retail/pcintro.rs): the boot logo movie, which nothing skips in retail, ends at once.
 				let intro_cut = r.movie_is_logo() && crate::retail::pcintro::skip();
 				if skip || self.movie.as_ref().is_some_and(|p| p.finished) || super::test_clock::clock_on() || intro_cut {
+					super::handler::front_movie_ended(skip || intro_cut);
 					self.movie = None;
+					if let Some(g) = &mut self.gpu { g.movie.clear_subtitle(); }
 					if let Some(a) = &mut self.audio {
 						a.pause_all(false);
 					}
@@ -300,9 +305,10 @@ impl App {
 		if let Some(g) = &mut self.gpu {
 			g.hud.clear(); hudart::glyphtex::refresh(g);
 			g.hud_split = None;
-			// A front-end frame draws no sharp overlay: the sharp HUD target of the last level would make a New Game caption
-			// (mode 6, the capture's picture) wait for a plane that is never drawn.
-			crate::retail::set_hud_target(0);
+			// Prepare the sharp display plane before mode 6 clears it. Keep the original
+			// retail geometry and fades while sampling the localized texture pack.
+			let hd_cards = rac_engine::localization::hd_cards() && crate::texpack::hudrepl::enabled();
+			rac_engine::gscap::set_hd_caption_target(g.hud_height(), hd_cards);
 			// [PC] Sharp title / main menu (hudsharp.rs): the art quads take the edge-aware sampler on a tall enough window; the
 			// noise and scanline sprites of the panel frames keep the nearest look.
 			let flat = fe.art.as_ref().and_then(|a| a.frame).map_or([usize::MAX; 2], |f| [f[1].0, f[2].0]);

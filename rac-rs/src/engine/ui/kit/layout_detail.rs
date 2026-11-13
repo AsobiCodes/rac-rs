@@ -178,9 +178,11 @@ fn now_default(d: &Detail, m: &dyn TextMeasure, cy: f32) -> (Option<Pair>, Optio
 	let space = m.width(FontRole::Regular, SMALL_PX, " ");
 	let mut pair = |p: &Option<(String, String)>| {
 		p.as_ref().map(|(l, v)| {
+			let l = crate::localization::ui_text(l);
+			let v = crate::localization::ui_text(v);
 			let lw = m.width(FontRole::Regular, SMALL_PX, l);
 			let vw = m.width(FontRole::SemiBold, SMALL_PX, v);
-			let out = Pair { label: Line { text: l.clone(), x, y: cy }, value: Line { text: v.clone(), x: x + lw + space, y: cy } };
+			let out = Pair { label: Line { text: l.to_owned(), x, y: cy }, value: Line { text: v.to_owned(), x: x + lw + space, y: cy } };
 			x += lw + space + vw + 20.0;
 			out
 		})

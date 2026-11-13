@@ -94,7 +94,7 @@ fn detail(m: &Model) -> Option<Detail> {
 	let tab = &m.menu.tabs[r.tab];
 	let boxed = m.rule(i).filter(|_| m.blocked(i)).map(|rule| {
 		let cur = m.value_of(rule.row).map(|v| m.text_of(m.row_index(rule.row).unwrap_or(0), v)).unwrap_or_default();
-		BoxData { text: t(&rule.detail).replace("{}", &cur), button: m.fix_text(rule) }
+		BoxData { text: crate::localization::ui_text(pick(&rule.detail, m.lang)).replace("{}", crate::localization::ui_text(&cur)), button: crate::localization::ui_text(&m.fix_text(rule)).to_owned() }
 	});
 	let meter = (r.row.cost.level() > 0).then(|| {
 		let level = r.row.cost.level();

@@ -110,22 +110,39 @@ pub fn text_width(text: &str, size: f32) -> f32 {
 	text.chars().count() as f32 * size * GLYPH_W as f32 / GLYPH_H as f32
 }
 
+/// Optional pack-defined marks compose with the existing ASCII overlay font.
+fn overlay_letter(ch: char) -> Option<(u8,[u8;2])> {
+    if ch.is_ascii() {return Some((ch.to_ascii_uppercase() as u8,[0;2]))}
+    // Unicode uppercasing may expand to ASCII (e.g. sharp s). Only an explicit
+    // pack glyph may introduce that substitution; stock ASCII behavior stays exact.
+    crate::localization::overlay_letter(ch.to_uppercase().next()?)
+}
+
 /// Quads for one line of text with its top-left at (x, y); a dark drop shadow keeps it readable.
 pub fn text(out: &mut Vec<Quad>, s: &str, x: f32, y: f32, size: f32, colour: [f32; 4]) {
 	let (aw, ah) = ((COLUMNS * GLYPH_W) as f32, (COUNT.div_ceil(COLUMNS) * GLYPH_H) as f32);
 	let cw = size * GLYPH_W as f32 / GLYPH_H as f32;
 	let shadow = [0.0, 0.0, 0.0, colour[3] * 0.7];
 	for (dx, c) in [(size / 8.0, shadow), (0.0, colour)] {
-		for (i, ch) in s.bytes().enumerate() {
-			let ch = ch.to_ascii_uppercase();
+		for (i, ch) in s.chars().enumerate() {
+			let Some((ch, mark)) = overlay_letter(ch) else { continue };
 			if !(FIRST..FIRST + COUNT as u8).contains(&ch) || ch == b' ' {
 				continue;
+			}
+			let gx = x + i as f32 * cw + dx;
+			let px = size / GLYPH_H as f32;
+			for (row, bits) in mark.into_iter().enumerate() {
+				for col in 0..5 {
+					if bits & (0x10 >> col) != 0 {
+						rect(out, [gx + col as f32 * px, y + dx + (row as f32 - 2.0) * px, px, px], c);
+					}
+				}
 			}
 			let g = (ch - FIRST) as usize;
 			let (u, v) = (((g % COLUMNS) * GLYPH_W) as f32, ((g / COLUMNS) * GLYPH_H) as f32);
 			out.push(Quad {
 				tex: FONT,
-				rect: [x + i as f32 * cw + dx, y + dx, cw, size],
+				rect: [gx, y + dx, cw, size],
 				uv: [u / aw, v / ah, (u + GLYPH_W as f32) / aw, (v + GLYPH_H as f32) / ah],
 				colour: c,
 				angle: 0.0,
@@ -141,4 +158,13 @@ pub fn rect(out: &mut Vec<Quad>, r: [f32; 4], colour: [f32; 4]) {
 	let g = (127 - FIRST) as usize;
 	let (u, v) = (((g % COLUMNS) * GLYPH_W) as f32 + 1.0, ((g / COLUMNS) * GLYPH_H) as f32 + 1.0);
 	out.push(Quad { tex: FONT, rect: r, uv: [u / aw, v / ah, (u + 3.0) / aw, (v + 5.0) / ah], colour, angle: 0.0, corners: None });
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn unicode_case_expansion_does_not_invent_a_stock_ascii_glyph() {
+        assert_eq!(super::overlay_letter('a'),Some((b'A',[0;2])));
+        assert!(super::overlay_letter('ß').is_none());
+    }
 }
